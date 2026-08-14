@@ -68,13 +68,29 @@ jobs:
           if (-not $tlmgr) { Write-Error "解压后未找到 tlmgr"; exit 1 }
           $bin = $tlmgr.DirectoryName
           Add-Content $env:GITHUB_PATH $bin
-          & $tlmgr.FullName install amsmath amssymb amsthm geometry tcolorbox graphics
+          # amssymb.sty 属于 amsfonts，amsthm.sty 属于 amscls；这里必须使用
+          # TeX Live 的发行包名，而不是 .sty 文件名。
+          & $tlmgr.FullName install amsmath amsfonts amscls geometry tcolorbox graphics
+          if ($LASTEXITCODE -ne 0) { Write-Error "TinyTeX 依赖安装失败"; exit 1 }
+          $kpsewhich = Join-Path $bin 'kpsewhich.exe'
+          $xelatex = Join-Path $bin 'xelatex.exe'
+          if (-not (Test-Path $kpsewhich) -or -not (Test-Path $xelatex)) {
+            Write-Error "TinyTeX 缺少 kpsewhich 或 xelatex"; exit 1
+          }
+          foreach ($file in @('amsmath.sty', 'amssymb.sty', 'amsthm.sty', 'tcolorbox.sty')) {
+            $resolved = & $kpsewhich $file
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($resolved)) {
+              Write-Error "TinyTeX 依赖缺失: $file"; exit 1
+            }
+            Write-Host "TinyTeX 依赖就绪: $file -> $resolved"
+          }
       - name: Benchmark（含前后编译对比）
         shell: pwsh
         run: |
-          python tools/benchmark.py --compile | Out-Null
-          if ($LASTEXITCODE -ne 0) { Write-Error "Benchmark（编译）未通过"; exit 1 }
+          python tools/benchmark.py --compile
+          $benchmarkExit = $LASTEXITCODE
           Get-Content benchmark/report.md
+          if ($benchmarkExit -ne 0) { Write-Error "Benchmark（编译）未通过"; exit 1 }
 
   build:
     name: 构建安装包（仅 tag / 手动触发）

@@ -38,6 +38,16 @@ def test_python_package_includes_bundled_frontends():
     assert '"static-react/assets/*"' in content
 
 
+def test_ci_installs_texlive_distribution_packages():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, ".github", "workflows", "build.yml"), encoding="utf-8") as f:
+        workflow = f.read()
+    assert "install amsmath amsfonts amscls geometry tcolorbox graphics" in workflow
+    assert "install amsmath amssymb amsthm" not in workflow
+    assert "kpsewhich.exe" in workflow
+    assert "amsthm.sty" in workflow and "amssymb.sty" in workflow
+
+
 def test_release_metadata_matches_app_version():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     version = latexstruct.__version__
