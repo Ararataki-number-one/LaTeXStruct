@@ -55,7 +55,7 @@ jobs:
         run: |
           python packaging/generate_icon.py
           $v = $env:APP_VERSION
-          (Get-Content packaging/version_info.txt -Raw) -replace '\d+\.\d+\.\d+', $v | Set-Content packaging/version_info.txt -Encoding UTF8
+          (Get-Content packaging/version_info.txt -Raw -Encoding UTF8) -replace '\d+\.\d+\.\d+', $v | Set-Content packaging/version_info.txt -Encoding UTF8
       - name: PyInstaller 构建单文件 exe
         run: python -m PyInstaller packaging/LaTeXStruct.spec --noconfirm --distpath dist --workpath build
       - name: 代码签名 exe（配置了证书 secrets 时）
