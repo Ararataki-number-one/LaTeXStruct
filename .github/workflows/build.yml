@@ -33,9 +33,20 @@ jobs:
           Write-Host "全部测试通过"
       - name: 安装 TinyTeX（Compile CI）
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          $rel = Invoke-RestMethod -Headers @{ 'User-Agent' = 'latexstruct-ci' } `
-            https://api.github.com/repos/rstudio/tinytex-releases/releases/latest
+          # 用 GITHUB_TOKEN 认证 GitHub API（匿名调用在共享 runner IP 上频繁触发限流，
+          # 曾导致误报 CI 失败）；带 3 次退避重试。
+          $rel = $null
+          for ($i = 0; $i -lt 3 -and -not $rel; $i++) {
+            try {
+              $rel = Invoke-RestMethod -Headers @{ 'User-Agent' = 'latexstruct-ci'; `
+                'Authorization' = "Bearer $env:GITHUB_TOKEN" } `
+                https://api.github.com/repos/rstudio/tinytex-releases/releases/latest
+            } catch { Start-Sleep -Seconds (5 * ($i + 1)) }
+          }
+          if (-not $rel) { Write-Error "TinyTeX 版本查询失败（API 限流）"; exit 1 }
           $asset = $rel.assets | Where-Object { $_.name -like 'TinyTeX-0-windows-v*.exe' } | Select-Object -First 1
           if (-not $asset) { Write-Error "未找到 TinyTeX Windows 资产"; exit 1 }
           $exe = Join-Path $env:RUNNER_TEMP 'tinytex.exe'
