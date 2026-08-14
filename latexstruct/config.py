@@ -23,11 +23,24 @@ class AppConfig:
     review_model: str = "deepseek-reasoner"
     review_api_key: str = ""
     review_enabled: bool = True
+    ocr_base_url: str = "https://api.deepseek.com"
+    ocr_model: str = ""
+    ocr_api_key: str = ""
 
     def to_ai_config(self) -> AIConfig:
-        decide = RoleConfig(self.decide_base_url, self.decide_model, self.decide_api_key)
-        review = RoleConfig(self.review_base_url, self.review_model, self.review_api_key)
+        # 同供应商场景下 Key 互相回退（多数用户只配一把 DeepSeek Key）
+        decide_key = self.decide_api_key or self.review_api_key
+        review_key = self.review_api_key or self.decide_api_key
+        decide = RoleConfig(self.decide_base_url, self.decide_model, decide_key)
+        review = RoleConfig(self.review_base_url, self.review_model, review_key)
         return AIConfig(decide=decide, review=review, review_enabled=self.review_enabled)
+
+    def to_ocr_config(self) -> "OcrConfig":
+        from .ocr import OcrConfig
+
+        key = self.ocr_api_key or self.decide_api_key
+        model = self.ocr_model or "deepseek-chat"
+        return OcrConfig(role=RoleConfig(self.ocr_base_url or self.decide_base_url, model, key))
 
     def masked(self) -> Dict:
         d = asdict(self)
@@ -53,10 +66,13 @@ def load_config() -> AppConfig:
             pass
     cfg.decide_api_key = _env_or("LATEXSTRUCT_DECIDE_KEY", cfg.decide_api_key)
     cfg.review_api_key = _env_or("LATEXSTRUCT_REVIEW_KEY", cfg.review_api_key)
+    cfg.ocr_api_key = _env_or("LATEXSTRUCT_OCR_KEY", cfg.ocr_api_key)
     if os.environ.get("LATEXSTRUCT_DECIDE_MODEL"):
         cfg.decide_model = os.environ["LATEXSTRUCT_DECIDE_MODEL"]
     if os.environ.get("LATEXSTRUCT_REVIEW_MODEL"):
         cfg.review_model = os.environ["LATEXSTRUCT_REVIEW_MODEL"]
+    if os.environ.get("LATEXSTRUCT_OCR_MODEL"):
+        cfg.ocr_model = os.environ["LATEXSTRUCT_OCR_MODEL"]
     return cfg
 
 

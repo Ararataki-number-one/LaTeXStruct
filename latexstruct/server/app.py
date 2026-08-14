@@ -5,10 +5,15 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
+import tempfile
+import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -21,6 +26,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 _store: Optional[ProjectStore] = None
 _config: Optional[AppConfig] = None
+_ocr_jobs: Dict[str, dict] = {}
 
 
 def get_store() -> ProjectStore:
@@ -52,6 +58,9 @@ class ConfigRequest(BaseModel):
     review_model: Optional[str] = None
     review_api_key: Optional[str] = None
     review_enabled: Optional[bool] = None
+    ocr_base_url: Optional[str] = None
+    ocr_model: Optional[str] = None
+    ocr_api_key: Optional[str] = None
 
 
 def create_app() -> FastAPI:
@@ -251,6 +260,88 @@ def create_app() -> FastAPI:
         save_config(cfg)
         _config = cfg
         return cfg.masked()
+
+    # ---- OCR ----
+
+    @app.post("/api/ocr/jobs")
+    async def ocr_start(
+        file: UploadFile,
+        pages: str = "",
+        dpi: int = 150,
+        base_url: str = "",
+        model: str = "",
+        api_key: str = "",
+    ):
+        suffix = Path(file.filename or "scan.pdf").suffix.lower()
+        if suffix not in (".pdf", ".png", ".jpg", ".jpeg"):
+            raise HTTPException(400, "仅支持 PDF/PNG/JPG")
+        tmpdir = tempfile.mkdtemp(prefix="ls-ocr-")
+        target = os.path.join(tmpdir, f"scan{suffix}")
+        with open(target, "wb") as f:
+            f.write(await file.read())
+        jid = uuid.uuid4().hex[:10]
+        job = {"id": jid, "status": "running", "progress": 0.0, "total": 0, "done": 0,
+               "page": 0, "tex": "", "error": "", "usage": {}, "created": time.time()}
+        _ocr_jobs[jid] = job
+
+        def worker():
+            from ..core.ai import LLMClient, RoleConfig
+            from ..ocr import OcrConfig, transcribe_images, transcribe_pdf
+
+            cfg = get_config()
+            role = RoleConfig(
+                base_url or cfg.ocr_base_url or cfg.decide_base_url,
+                model or cfg.ocr_model or "deepseek-chat",
+                api_key or cfg.ocr_api_key or cfg.decide_api_key,
+            )
+            client = LLMClient(role)
+
+            def progress(i, total, page):
+                job["done"] = i
+                job["total"] = total
+                job["page"] = page or 0
+                job["progress"] = round(i / total, 3) if total else 0.0
+
+            try:
+                ocfg = OcrConfig(role=role, pages=pages, dpi=dpi)
+                if suffix == ".pdf":
+                    result = transcribe_pdf(target, client, ocfg, progress=progress)
+                else:
+                    result = transcribe_images([target], client, ocfg)
+                job["tex"] = result.tex
+                job["errors"] = result.errors
+                job["usage"] = result.usage
+                job["status"] = "done"
+            except Exception as e:  # noqa: BLE001
+                job["status"] = "error"
+                job["error"] = str(e)
+            finally:
+                job["progress"] = 1.0
+
+        threading.Thread(target=worker, daemon=True).start()
+        return {"id": jid}
+
+    @app.get("/api/ocr/jobs/{jid}")
+    def ocr_status(jid: str):
+        job = _ocr_jobs.get(jid)
+        if job is None:
+            raise HTTPException(404, "任务不存在")
+        return {k: v for k, v in job.items() if k != "tex"}
+
+    @app.get("/api/ocr/jobs/{jid}/result")
+    def ocr_result(jid: str):
+        job = _ocr_jobs.get(jid)
+        if job is None or job.get("status") != "done":
+            raise HTTPException(404, "任务未完成")
+        return PlainTextResponse(job["tex"])
+
+    @app.post("/api/ocr/jobs/{jid}/import")
+    def ocr_import(jid: str, name: str = "OCR 转写项目"):
+        job = _ocr_jobs.get(jid)
+        if job is None or job.get("status") != "done":
+            raise HTTPException(400, "任务未完成")
+        pid = get_store().create(job["tex"], name, "rule", "elegantbook")
+        return {"id": pid}
 
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
     return app

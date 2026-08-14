@@ -10,6 +10,13 @@ LaTeX 数学书结构化整理本地客户端（Windows 优先，安装版 + 主
 - **便携版**：Releases 中的 `LaTeXStruct.exe` 单文件免安装；
 - **主动更新**：启动时自动检查 Releases 最新版，有新版即显示更新横幅，一键下载安装器静默升级；
   更新源默认 `Ararataki-number-one/LaTeXStruct`（可用环境变量 `LATEXSTRUCT_UPDATE_REPO` 覆盖）。
+- **OCR 转写**：OCR 页签上传 PDF/图片 → 视觉模型逐页转写为 ElegantBook LaTeX（模型可选，
+  设置页 OCR 模型；支持页码范围与 DPI）→ 一键导入项目继续结构化整理；
+- **代码签名**：CI 已内置签名步骤——把证书放进 GitHub Secrets（`WINDOWS_CERT_BASE64` +
+  `WINDOWS_CERT_PASSWORD`）后每次发布自动签名 exe 与安装器；本地可用 `scripts/sign_local.ps1`
+  生成自签证书签名（仅本机信任）。**消除 SmartScreen 警告需购买 EV/OV 代码签名证书**
+  （如 DigiCert/Sectigo），拿到 pfx 后按上述方式配置即可；
+- 安装器界面默认**简体中文**（`packaging/installer.iss` 使用官方 ChineseSimplified 语言包）；
 - 依赖 DeepSeek（或任意 OpenAI 兼容端点）API Key 才启用 AI 模式；无 Key 自动降级规则模式。
 
 ## 发布新版本（全自动）

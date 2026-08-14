@@ -48,4 +48,5 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     icon="icon.ico",
+    version="version_info.txt",
 )

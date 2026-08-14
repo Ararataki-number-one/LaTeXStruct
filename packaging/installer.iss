@@ -22,7 +22,9 @@ UninstallDisplayIcon={app}\LaTeXStruct.exe
 SetupIconFile=..\packaging\icon.ico
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Default.isl"
+; 简体中文为默认安装界面语言（官方翻译文件随 Inno Setup 提供）
+Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务："

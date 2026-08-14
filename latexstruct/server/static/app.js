@@ -159,6 +159,69 @@ $("btn-report").addEventListener("click", async () => {
   URL.revokeObjectURL(a.href);
 });
 
+/* ---------- OCR ---------- */
+let ocrJobId = null;
+let ocrTimer = null;
+
+$("btn-ocr-start").addEventListener("click", async () => {
+  const f = $("ocr-file").files[0];
+  if (!f) return alert("请选择 PDF 或图片文件");
+  const fd = new FormData();
+  fd.append("file", f);
+  fd.append("pages", $("ocr-pages").value);
+  fd.append("dpi", $("ocr-dpi").value);
+  fd.append("model", $("ocr-model").value);
+  $("btn-ocr-start").disabled = true;
+  $("ocr-status").textContent = "上传中……";
+  try {
+    const r = await fetch("/api/ocr/jobs", { method: "POST", body: fd });
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    ocrJobId = (await r.json()).id;
+    $("ocr-status").textContent = "任务已启动，转写中……";
+    pollOcr();
+  } catch (e) {
+    $("ocr-status").textContent = "失败：" + e.message;
+    $("btn-ocr-start").disabled = false;
+  }
+});
+
+async function pollOcr() {
+  if (!ocrJobId) return;
+  try {
+    const j = await (await api("/api/ocr/jobs/" + ocrJobId)).json();
+    if (j.status === "running") {
+      $("ocr-status").textContent =
+        `转写中：第 ${j.page || 0}/${j.total} 页（${Math.round((j.progress || 0) * 100)}%）`;
+      ocrTimer = setTimeout(pollOcr, 2000);
+    } else if (j.status === "done") {
+      $("ocr-status").textContent =
+        `完成：${j.total} 页，错误 ${(j.errors || []).length}，tokens ${(j.usage || {}).total_tokens || 0}`;
+      $("btn-ocr-start").disabled = false;
+      const tex = await (await api(`/api/ocr/jobs/${ocrJobId}/result`)).text();
+      $("ocr-preview").textContent = tex.slice(0, 3000);
+      $("btn-ocr-import").disabled = false;
+    } else {
+      $("ocr-status").textContent = "失败：" + (j.error || "未知错误");
+      $("btn-ocr-start").disabled = false;
+    }
+  } catch (e) {
+    ocrTimer = setTimeout(pollOcr, 3000);
+  }
+}
+
+$("btn-ocr-import").addEventListener("click", async () => {
+  if (!ocrJobId) return;
+  const r = await api(`/api/ocr/jobs/${ocrJobId}/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  const { id } = await r.json();
+  currentPid = id;
+  await openProject(id);
+  document.querySelector('nav button[data-tab="review"]').click();
+});
+
 /* ---------- 设置 ---------- */
 async function loadConfig() {
   const cfg = await (await api("/api/config")).json();
@@ -171,6 +234,10 @@ async function loadConfig() {
   $("s-review-key").value = "";
   $("s-review-key").placeholder = cfg.review_api_key ? "已配置（留空保持不变）" : "API Key（仅存本机）";
   $("s-review-enabled").checked = !!cfg.review_enabled;
+  $("s-ocr-url").value = cfg.ocr_base_url || "";
+  $("s-ocr-model").value = cfg.ocr_model || "";
+  $("s-ocr-key").value = "";
+  $("s-ocr-key").placeholder = cfg.ocr_api_key ? "已配置（留空保持不变）" : "API Key（仅存本机，留空用决策 Key）";
 }
 
 $("btn-save-config").addEventListener("click", async () => {
@@ -180,9 +247,12 @@ $("btn-save-config").addEventListener("click", async () => {
     review_base_url: $("s-review-url").value,
     review_model: $("s-review-model").value,
     review_enabled: $("s-review-enabled").checked,
+    ocr_base_url: $("s-ocr-url").value,
+    ocr_model: $("s-ocr-model").value,
   };
   if ($("s-decide-key").value) body.decide_api_key = $("s-decide-key").value;
   if ($("s-review-key").value) body.review_api_key = $("s-review-key").value;
+  if ($("s-ocr-key").value) body.ocr_api_key = $("s-ocr-key").value;
   await api("/api/config", { method: "PUT", body: JSON.stringify(body) });
   $("config-status").textContent = "已保存";
   setTimeout(() => ($("config-status").textContent = ""), 2000);

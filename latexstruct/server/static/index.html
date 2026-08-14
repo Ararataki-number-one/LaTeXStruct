@@ -13,6 +13,7 @@
   <nav>
     <button data-tab="projects" class="active">项目</button>
     <button data-tab="review">处理与审阅</button>
+    <button data-tab="ocr">OCR 转写</button>
     <button data-tab="settings">AI 设置</button>
   </nav>
 </header>
@@ -79,6 +80,31 @@
     </div>
   </section>
 
+  <!-- OCR 页 -->
+  <section id="tab-ocr" class="tab">
+    <div class="card">
+      <h2>OCR 转写（PDF / 图片 → ElegantBook LaTeX）</h2>
+      <div class="row">
+        <input type="file" id="ocr-file" accept=".pdf,.png,.jpg,.jpeg" />
+        <input id="ocr-pages" placeholder="页码范围，如 1-5（留空=全部）" style="width:220px" />
+        <select id="ocr-dpi">
+          <option value="150" selected>150 DPI</option>
+          <option value="200">200 DPI</option>
+          <option value="300">300 DPI</option>
+        </select>
+      </div>
+      <div class="row">
+        <input id="ocr-model" placeholder="视觉模型（留空用设置里的 OCR 模型）" style="width:340px" />
+        <button id="btn-ocr-start" class="primary">开始转写</button>
+      </div>
+      <div id="ocr-status" class="status"></div>
+      <div class="row">
+        <button id="btn-ocr-import" disabled>导入为项目并整理</button>
+      </div>
+      <pre id="ocr-preview" class="report" style="max-height:260px">转写结果预览……</pre>
+    </div>
+  </section>
+
   <!-- 设置页 -->
   <section id="tab-settings" class="tab">
     <div class="card">
@@ -87,6 +113,14 @@
         <input id="s-decide-url" placeholder="base_url" />
         <input id="s-decide-model" placeholder="model，如 deepseek-chat" />
         <input id="s-decide-key" type="password" placeholder="API Key（仅存本机）" />
+      </div>
+    </div>
+    <div class="card">
+      <h2>OCR 视觉模型（可选任意视觉模型）</h2>
+      <div class="row">
+        <input id="s-ocr-url" placeholder="base_url" />
+        <input id="s-ocr-model" placeholder="model（支持图片输入）" />
+        <input id="s-ocr-key" type="password" placeholder="API Key（仅存本机，留空用决策 Key）" />
       </div>
     </div>
     <div class="card">

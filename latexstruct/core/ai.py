@@ -109,6 +109,50 @@ class LLMClient:
             raise LLMError(f"响应不是 JSON: {content[:120]!r}")
         return json.loads(text[start : end + 1])
 
+    def chat_vision(self, system: str, user_text: str, image_data_uri: str) -> str:
+        """视觉模型调用（OCR 转写）：返回模型文本。"""
+        if not self.cfg.api_key:
+            raise LLMError("未配置 API Key")
+        url = self.cfg.base_url.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": self.cfg.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text},
+                        {"type": "image_url", "image_url": {"url": image_data_uri}},
+                    ],
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 8000,
+        }
+        data = json.dumps(payload).encode("utf-8")
+        last_err = None
+        for attempt in range(2):
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.cfg.api_key}",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.cfg.timeout) as resp:
+                    raw = json.loads(resp.read().decode("utf-8"))
+                content = raw["choices"][0]["message"]["content"]
+                self.last_usage = raw.get("usage", {}) or {}
+                return content or ""
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if attempt == 0:
+                    time.sleep(2)
+        raise LLMError(f"视觉模型调用失败: {last_err}")
+
 
 # ---------------------------------------------------------------------------
 # 决策
