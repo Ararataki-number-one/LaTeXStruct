@@ -80,6 +80,12 @@ jobs:
           python packaging/generate_icon.py
           $v = $env:APP_VERSION
           (Get-Content packaging/version_info.txt -Raw -Encoding UTF8) -replace '\d+\.\d+\.\d+', $v | Set-Content packaging/version_info.txt -Encoding UTF8
+      - name: 构建 React 前端（Monaco 工作台）
+        run: |
+          cd frontend
+          npm install --no-audit --no-fund
+          npm run build
+          cd ..
       - name: PyInstaller 构建单文件 exe
         run: python -m PyInstaller packaging/LaTeXStruct.spec --noconfirm --distpath dist --workpath build
       - name: 代码签名 exe（配置了证书 secrets 时）

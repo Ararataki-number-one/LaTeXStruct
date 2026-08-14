@@ -25,12 +25,13 @@ class ProjectStore:
 
     # ---- 基础 CRUD ----
 
-    def create(self, text: str, name: str = "", mode: str = "rule", template: str = "") -> str:
+    def create(self, text: str, name: str = "", mode: str = "rule", template: str = "",
+               pack: str = "") -> str:
         pid = uuid.uuid4().hex[:12]
         d = self._dir(pid)
         os.makedirs(d, exist_ok=True)
         name = SAFE_NAME_RE.sub("_", name).strip() or "未命名项目"
-        meta = {"id": pid, "name": name, "mode": mode, "template": template,
+        meta = {"id": pid, "name": name, "mode": mode, "template": template, "pack": pack,
                 "created": time.strftime("%Y-%m-%d %H:%M:%S")}
         self._write_json(d, "meta.json", meta)
         self._write_text(d, "source.tex", text)

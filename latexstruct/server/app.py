@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -48,6 +48,15 @@ class CreateRequest(BaseModel):
     name: str = ""
     mode: str = "rule"
     template: str = ""
+    pack: str = ""
+
+
+class FolderRequest(BaseModel):
+    files: dict  # {相对路径: 内容}
+    name: str = ""
+    mode: str = "rule"
+    template: str = ""
+    pack: str = ""
 
 
 class ConfigRequest(BaseModel):
@@ -71,6 +80,12 @@ def create_app() -> FastAPI:
         from .. import __version__
 
         return {"ok": True, "version": __version__}
+
+    @app.get("/api/rulesets")
+    def rulesets():
+        from ..core.ruleset import list_builtin_packs
+
+        return {"packs": list_builtin_packs(), "default": "bilingual"}
 
     @app.get("/api/update/check")
     def update_check():
@@ -107,8 +122,98 @@ def create_app() -> FastAPI:
     def create_project(req: CreateRequest):
         if not req.text.strip():
             raise HTTPException(400, "内容为空")
-        pid = get_store().create(req.text, req.name, req.mode, req.template)
+        pid = get_store().create(req.text, req.name, req.mode, req.template, req.pack)
         return {"id": pid}
+
+    @app.post("/api/projects/folder")
+    def import_folder(req: FolderRequest):
+        """文件夹导入：写入临时目录 → 多文件项目处理 → 返回项目与依赖图。"""
+        from ..core.project import discover_main, process_project
+
+        if not req.files:
+            raise HTTPException(400, "未收到文件")
+        tmpdir = tempfile.mkdtemp(prefix="ls-folder-")
+        for rel, content in req.files.items():
+            p = Path(tmpdir) / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8", newline="")
+        main_rel = discover_main(Path(tmpdir))
+        if main_rel is None:
+            raise HTTPException(400, "文件夹中未找到 .tex 主文件")
+        cfg = get_config()
+        mode = req.mode or "rule"
+        res = process_project(Path(tmpdir), mode=mode, template=req.template or None,
+                              ai_config=cfg.to_ai_config() if mode == "ai" else None,
+                              pack=req.pack or None)
+        pr = res.pipeline
+        # 项目源 = 展开文本（供 diff/决策审阅），元数据保留图与逐文件结果
+        pid = get_store().create(res.flattened, req.name, mode, req.template or "", req.pack or "")
+        meta = json.loads((Path(get_store()._dir(pid)) / "meta.json").read_text(encoding="utf-8"))
+        meta["kind"] = "folder"
+        meta["graph"] = {
+            "main_rel": res.graph.main_rel,
+            "files": res.graph.files,
+            "missing": res.graph.missing,
+            "cycles": res.graph.cycles,
+        }
+        Path(get_store()._dir(pid), "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+        )
+        decisions = [{
+            "candidate_id": d.candidate_id, "action": d.action, "env": d.env,
+            "body_span": list(d.body_span) if d.body_span else None,
+            "optional_arg": d.optional_arg, "reason": d.reason,
+            "confidence": d.confidence, "source": d.source,
+        } for d in pr.decisions]
+        get_store().set_result(
+            pid, pr.export_text, pr.report_md, decisions, {
+                "verification": pr.verification,
+                "ambiguous": pr.ambiguous,
+                "applied": [],
+                "rejected": [],
+                "ai_notes": pr.ai_notes,
+                "review": {k: v for k, v in pr.review.items() if k != "decisions"},
+                "items": pr.decision_items,
+                "per_file": res.per_file,
+            }
+        )
+        return {"id": pid, "graph": meta["graph"],
+                "ok": pr.ok, "applied": len(pr.applied), "ambiguous": len(pr.ambiguous)}
+
+    @app.get("/api/projects/{pid}/graph")
+    def project_graph(pid: str):
+        _ensure(pid)
+        meta = json.loads((Path(get_store()._dir(pid)) / "meta.json").read_text(encoding="utf-8"))
+        return {"kind": meta.get("kind", "single"), "graph": meta.get("graph")}
+
+    @app.get("/api/projects/{pid}/export-folder")
+    def export_folder(pid: str):
+        _ensure(pid)
+        info_path = Path(get_store()._dir(pid)) / "verification.json"
+        if not info_path.exists():
+            raise HTTPException(404, "尚未处理")
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        per_file = info.get("per_file")
+        if not per_file:
+            raise HTTPException(400, "该项目不是文件夹导入")
+        import io
+        import zipfile
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            meta = json.loads((Path(get_store()._dir(pid)) / "meta.json").read_text(encoding="utf-8"))
+            main_rel = meta["graph"]["main_rel"]
+            zf.writestr(main_rel, per_file.get("", ""))
+            for rel, content in per_file.items():
+                if rel:
+                    zf.writestr(rel, content)
+            zf.writestr("LATEXSTRUCT-REPORT.md", get_store().read_report(pid) or "")
+        buf.seek(0)
+        return Response(
+            content=buf.read(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{pid}-structured.zip"'},
+        )
 
     @app.post("/api/projects/upload")
     async def upload_project(file: bytes = None, name: str = "", mode: str = "rule"):
@@ -164,8 +269,9 @@ def create_app() -> FastAPI:
         cfg = get_config()
         mode = p["mode"]
         template = (p.get("template") or "") or None
+        pack = (p.get("pack") or "") or None
         res = run_pipeline(text, mode=mode, ai_config=cfg.to_ai_config() if mode == "ai" else None,
-                           template=template, exclude=exclude or None)
+                           template=template, pack=pack, exclude=exclude or None)
         decisions = [
             {
                 "candidate_id": d.candidate_id,
@@ -368,7 +474,12 @@ def create_app() -> FastAPI:
         pid = get_store().create(job["tex"], name, "rule", "elegantbook")
         return {"id": pid}
 
-    app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+    react_dir = STATIC_DIR.parent / "static-react"
+    if react_dir.exists():
+        app.mount("/legacy", StaticFiles(directory=str(STATIC_DIR), html=True), name="legacy")
+        app.mount("/", StaticFiles(directory=str(react_dir), html=True), name="react")
+    else:
+        app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
     return app
 
 

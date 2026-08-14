@@ -3,6 +3,11 @@
 本项目采用「tag 即发布」的自动化流程：`git tag vX.Y.Z && git push` 触发 CI
 （ruff → 全量测试 → PyInstaller → Inno Setup → 安装器冒烟测试 → 签名 → GitHub Release）。
 
+## v0.7.0（2025-08）
+- React+Vite+Monaco 前端重建（本地打包 Monaco，离线可用；旧 UI 移至 /legacy）；
+- 后端能力全暴露：文件夹导入（依赖图展示）、规则包选择、结构化文件夹 zip 导出、
+  三角色模型设置；CI 自动构建前端并打进安装器。
+
 ## v0.6.2（2025-08）
 - Benchmark 扩充：14 金标集 / 200 标签（真实书稿 10 组开发 + 2 组 hold-out），
   汇总 P/R/F1 + 正文零改动率/引用保持率/编译成功率；行号锚定标签；

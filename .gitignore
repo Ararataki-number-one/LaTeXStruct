@@ -5,6 +5,8 @@ build/
 __pycache__/
 *.pyc
 .pytest_cache/
+frontend/node_modules/
+latexstruct/server/static-react/
 
 # 本地数据与调试
 .tmp/

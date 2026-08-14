@@ -107,6 +107,30 @@ def test_decisions_and_reject():
         assert "（方法）" in result
 
 
+def test_rulesets_and_folder_import():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        r = c.get("/api/rulesets").json()
+        assert "bilingual" in r["packs"] and "academic-paper" in r["packs"]
+        # 文件夹导入：main + chapters 两文件
+        files = {
+            "main.tex": "\\documentclass{book}\n\\begin{document}\n\\input{chapters/ch01}\n\\end{document}\n",
+            "chapters/ch01.tex": "\\section{One}\n\nTheorem 1. A statement.\n\nProof. By definition.\n",
+        }
+        r = c.post("/api/projects/folder", json={"files": files, "name": "book", "mode": "rule"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["graph"]["main_rel"] == "main.tex"
+        assert "chapters/ch01.tex" in d["graph"]["files"]
+        pid = d["id"]
+        # 依赖图端点
+        g = c.get(f"/api/projects/{pid}/graph").json()
+        assert g["kind"] == "folder" and g["graph"]["main_rel"] == "main.tex"
+        # zip 导出
+        z = c.get(f"/api/projects/{pid}/export-folder")
+        assert z.status_code == 200 and "zip" in z.headers["content-type"]
+
+
 def main():
     import traceback
 

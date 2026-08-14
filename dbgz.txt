@@ -1,0 +1,3 @@
+﻿folder: 200 {'id': 'edcdcafa89f4', 'graph': {'main_rel': 'main.tex', 'files': ['chapters/ch01.tex'], 'missing': [], 'cycles': []}, 'ok': True, 'applied': 3, 'ambiguous': 0}
+zip: 404 application/json
+body head: b'{"detail":"Not Found"}'

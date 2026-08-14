@@ -1,9 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller 打包配置：单文件 exe（GUI 模式，无控制台）。"""
 
+import os
+
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 datas = [("../latexstruct/server/static", "latexstruct/server/static")]
+if os.path.exists("../latexstruct/server/static-react"):
+    datas.append(("../latexstruct/server/static-react", "latexstruct/server/static-react"))
 binaries = []
 hiddenimports = [
     "uvicorn.logging",

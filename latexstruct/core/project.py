@@ -164,6 +164,7 @@ def process_project(
     review_client=None,
     template: str = None,
     compile_check: bool = False,
+    pack=None,
 ) -> ProjectResult:
     """多文件项目处理：发现 → 展开 → 单文件流水线 → 拆分。"""
     from .pipeline import run_pipeline
@@ -176,7 +177,7 @@ def process_project(
     pr = run_pipeline(
         flat, mode=mode, rule_config=rule_config, ai_config=ai_config,
         ai_client=ai_client, review_client=review_client, template=template,
-        compile_check=compile_check,
+        compile_check=compile_check, pack=pack,
     )
     per_file = split_project(pr.result)
     return ProjectResult(graph=g, flattened=flat, pipeline=pr, per_file=per_file)
