@@ -10,10 +10,18 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 import threading
 
 
 def main():
+    # PyInstaller windowed 模式下 stdout/stderr 为 None：uvicorn/print 首次写流会崩溃，重定向到 devnull
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
+
     ap = argparse.ArgumentParser(prog="latexstruct")
     ap.add_argument("--server", action="store_true", help="只启动本地服务（浏览器访问）")
     ap.add_argument("--port", type=int, default=0, help="端口（0=自动/默认）")

@@ -3,7 +3,7 @@
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
-datas = [("latexstruct/server/static", "latexstruct/server/static")]
+datas = [("../latexstruct/server/static", "latexstruct/server/static")]
 binaries = []
 hiddenimports = [
     "uvicorn.logging",
@@ -19,8 +19,8 @@ hiddenimports = [
 ] + collect_submodules("webview")
 
 a = Analysis(
-    ["packaging/run.py"],
-    pathex=["."],
+    ["run.py"],
+    pathex=[".."],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -47,5 +47,5 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
-    icon="packaging/icon.ico",
+    icon="icon.ico",
 )

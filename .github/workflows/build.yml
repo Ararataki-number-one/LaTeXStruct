@@ -1,0 +1,76 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 测试（Windows / Python 3.13）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt
+      - name: 运行全部测试套件
+        shell: pwsh
+        run: |
+          $fail = 0
+          foreach ($t in @('test_parser','test_scanner','test_patch','test_pipeline','test_ai','test_template','test_store','test_server','test_updater')) {
+            python "tests/$t.py"
+            if ($LASTEXITCODE -ne 0) { $fail++ }
+          }
+          if ($fail -ne 0) { Write-Error "测试失败：$fail 个套件"; exit 1 }
+          Write-Host "全部测试通过"
+
+  build:
+    name: 构建安装包（仅 tag / 手动触发）
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 版本一致性校验（tag 与 __version__）
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          python -c "import latexstruct; assert latexstruct.__version__=='$v', f'版本不匹配: {latexstruct.__version__} vs $v'"
+          echo "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt pyinstaller
+      - name: 生成图标
+        run: python packaging/generate_icon.py
+      - name: PyInstaller 构建单文件 exe
+        run: python -m PyInstaller packaging/LaTeXStruct.spec --noconfirm --distpath dist --workpath build
+      - name: 安装 Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: 构建安装器
+        shell: pwsh
+        run: |
+          iscc "/DAppVersion=$env:APP_VERSION" packaging/installer.iss
+          Get-ChildItem dist
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: LaTeXStruct-${{ github.ref_name }}
+          path: |
+            dist/LaTeXStruct.exe
+            dist/LaTeXStruct-setup-*.exe
+      - name: 发布 GitHub Release（tag 时）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/LaTeXStruct.exe
+            dist/LaTeXStruct-setup-*.exe
+          generate_release_notes: true
