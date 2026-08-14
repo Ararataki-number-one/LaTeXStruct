@@ -1,0 +1,23 @@
+[project]
+name = "latexstruct"
+version = "0.1.0"
+description = "LaTeX 数学书结构化整理本地客户端"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+server = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "sqlalchemy",
+    "openai",
+    "pywebview",
+]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["latexstruct*"]

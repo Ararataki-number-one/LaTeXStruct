@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LaTeXStruct</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header>
+  <h1>LaTeXStruct</h1>
+  <span class="sub">LaTeX 数学书结构化整理 · 本地运行 · 只改结构不改内容 · <span id="app-version">v?</span></span>
+  <nav>
+    <button data-tab="projects" class="active">项目</button>
+    <button data-tab="review">处理与审阅</button>
+    <button data-tab="settings">AI 设置</button>
+  </nav>
+</header>
+<div id="update-banner" class="update-banner" style="display:none">
+  <span id="update-text">发现新版本</span>
+  <button id="btn-update-now">立即更新</button>
+  <button id="btn-update-dismiss">稍后</button>
+</div>
+
+<main>
+  <!-- 项目页 -->
+  <section id="tab-projects" class="tab active">
+    <div class="card">
+      <h2>新建项目</h2>
+      <div class="row">
+        <input id="p-name" placeholder="项目名称（可选）" />
+        <select id="p-mode">
+          <option value="rule">规则模式（无需 AI Key）</option>
+          <option value="ai" selected>AI 模式（决策 + 复查）</option>
+        </select>
+        <label><input type="checkbox" id="p-template" /> ElegantBook 模板转换（换文档类 + 删旧目录加 \tableofcontents + 章结构）</label>
+      </div>
+      <div class="row">
+        <input type="file" id="p-file" accept=".tex,.txt" />
+      </div>
+      <textarea id="p-text" placeholder="粘贴 .tex 全文，或选择文件后自动填充……"></textarea>
+      <div class="row">
+        <button id="btn-create" class="primary">创建项目</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>项目列表</h2>
+      <table id="project-table">
+        <thead><tr><th>名称</th><th>模式</th><th>创建时间</th><th>状态</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 处理与审阅页 -->
+  <section id="tab-review" class="tab">
+    <div class="card">
+      <div class="row">
+        <span id="review-title" class="bold">未选择项目</span>
+        <button id="btn-process" class="primary">运行结构化整理</button>
+        <button id="btn-download">下载 result.tex</button>
+        <button id="btn-report">下载汇报 .md</button>
+      </div>
+      <div id="process-status" class="status"></div>
+    </div>
+    <div class="card">
+      <h2>汇报</h2>
+      <pre id="report-view" class="report">尚未处理。</pre>
+    </div>
+    <div class="card">
+      <h2>前后对照（diff）</h2>
+      <div class="diff-wrap">
+        <div class="diff-head"><span>原文</span><span>整理后</span></div>
+        <div id="diff-view" class="diff-body"></div>
+      </div>
+      <div id="diff-legend">
+        <span class="lg ins">新增行</span><span class="lg del">删除行</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 设置页 -->
+  <section id="tab-settings" class="tab">
+    <div class="card">
+      <h2>决策模型（默认 DeepSeek）</h2>
+      <div class="row">
+        <input id="s-decide-url" placeholder="base_url" />
+        <input id="s-decide-model" placeholder="model，如 deepseek-chat" />
+        <input id="s-decide-key" type="password" placeholder="API Key（仅存本机）" />
+      </div>
+    </div>
+    <div class="card">
+      <h2>复查模型（默认最强模型，可改）</h2>
+      <div class="row">
+        <input id="s-review-url" placeholder="base_url" />
+        <input id="s-review-model" placeholder="model，如 deepseek-reasoner" />
+        <input id="s-review-key" type="password" placeholder="API Key（仅存本机）" />
+        <label><input type="checkbox" id="s-review-enabled" checked /> 启用 AI 复查</label>
+      </div>
+      <div class="row">
+        <button id="btn-save-config" class="primary">保存设置</button>
+        <span id="config-status" class="status"></span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

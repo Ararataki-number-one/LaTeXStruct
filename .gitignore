@@ -1,0 +1,21 @@
+# 构建产物
+dist/
+build/
+*.spec.bak
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 本地数据与调试
+.tmp/
+debug_tpl.txt
+spot.txt
+
+# 书稿语料不入库（用户私有材料）
+corpus/
+
+# 打包日志
+*.log
+*.aux
+*.out
+*.toc

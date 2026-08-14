@@ -1,0 +1,134 @@
+/* LaTeXStruct 本地界面样式 */
+:root {
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --line: #e2e5ea;
+  --text: #1f2430;
+  --muted: #6b7280;
+  --accent: #2563eb;
+  --ins-bg: #e6ffed;
+  --del-bg: #ffebe9;
+  --ins-line: #34d058;
+  --del-line: #ff6161;
+}
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #fef3c7;
+  border-bottom: 1px solid #f59e0b;
+  color: #92400e;
+  padding: 8px 24px;
+  font-size: 14px;
+}
+.update-banner button {
+  border-color: #f59e0b;
+  color: #92400e;
+  background: #fffbeb;
+}
+.update-banner #btn-update-now { background: #f59e0b; color: #fff; border-color: #f59e0b; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 24px;
+  background: #111827;
+  color: #fff;
+}
+header h1 { font-size: 20px; margin: 0; letter-spacing: 1px; }
+header .sub { color: #9ca3af; font-size: 13px; }
+nav { margin-left: auto; display: flex; gap: 8px; }
+nav button {
+  background: transparent;
+  color: #d1d5db;
+  border: 1px solid #374151;
+  padding: 6px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+nav button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+main { max-width: 1200px; margin: 24px auto; padding: 0 16px; }
+.tab { display: none; }
+.tab.active { display: block; }
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 16px;
+}
+.card h2 { font-size: 16px; margin: 0 0 12px; }
+.row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+input, select, textarea {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+input:focus, select:focus, textarea:focus { outline: 2px solid #bfdbfe; }
+#p-text { width: 100%; height: 220px; font-family: Consolas, monospace; font-size: 13px; }
+button {
+  font: inherit;
+  padding: 8px 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; }
+.bold { font-weight: 700; }
+.status { color: var(--muted); font-size: 13px; min-height: 18px; }
+.report {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  overflow: auto;
+  max-height: 320px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.diff-wrap { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.diff-head {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  background: #f3f4f6;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.diff-head span { padding: 6px 12px; border-right: 1px solid var(--line); }
+.diff-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  font-family: Consolas, monospace;
+  font-size: 12.5px;
+  border-bottom: 1px solid #f0f1f4;
+}
+.diff-row .side { padding: 2px 12px; white-space: pre-wrap; word-break: break-all; min-height: 18px; }
+.diff-row .old-side { border-right: 1px solid var(--line); background: #fff; }
+.diff-row .new-side { background: #fff; }
+.diff-row .num { display: inline-block; min-width: 3em; color: #9ca3af; user-select: none; }
+.diff-row.ins .old-side { background: #fbfbfc; }
+.diff-row.ins .new-side { background: var(--ins-bg); }
+.diff-row.del .old-side { background: var(--del-bg); }
+.diff-row.del .new-side { background: #fbfbfc; }
+.diff-body { max-height: 560px; overflow: auto; }
+#diff-legend { margin-top: 8px; font-size: 13px; display: flex; gap: 16px; }
+.lg { padding: 2px 10px; border-radius: 4px; }
+.lg.ins { background: var(--ins-bg); border: 1px solid var(--ins-line); }
+.lg.del { background: var(--del-bg); border: 1px solid var(--del-line); }
