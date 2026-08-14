@@ -36,12 +36,12 @@ jobs:
         run: |
           $rel = Invoke-RestMethod -Headers @{ 'User-Agent' = 'latexstruct-ci' } `
             https://api.github.com/repos/rstudio/tinytex-releases/releases/latest
-          $asset = $rel.assets | Where-Object { $_.name -like 'TinyTeX-1-v*.zip' } | Select-Object -First 1
-          if (-not $asset) { Write-Error "未找到 TinyTeX 资产"; exit 1 }
-          $zip = Join-Path $env:RUNNER_TEMP 'tinytex.zip'
-          Invoke-WebRequest $asset.browser_download_url -OutFile $zip
+          $asset = $rel.assets | Where-Object { $_.name -like 'TinyTeX-0-windows-v*.exe' } | Select-Object -First 1
+          if (-not $asset) { Write-Error "未找到 TinyTeX Windows 资产"; exit 1 }
+          $exe = Join-Path $env:RUNNER_TEMP 'tinytex.exe'
+          Invoke-WebRequest $asset.browser_download_url -OutFile $exe
           $root = Join-Path $env:RUNNER_TEMP 'tinytex'
-          Expand-Archive $zip -DestinationPath $root -Force
+          & $exe -o"$root" -y
           $tlmgr = Get-ChildItem -Path $root -Recurse -Filter tlmgr.bat | Select-Object -First 1
           if (-not $tlmgr) { Write-Error "解压后未找到 tlmgr"; exit 1 }
           $bin = $tlmgr.DirectoryName
