@@ -106,6 +106,34 @@ def test_transcribe_all_fail_with_friendly_hint():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_stage_a_prompt_has_no_structure_demands():
+    # 两阶段解耦：Stage A 提示词不得要求视觉模型做结构判断
+    from latexstruct.ocr import OCR_SYSTEM_PROMPT
+
+    assert "使用对应环境" not in OCR_SYSTEM_PROMPT
+    assert "\\begin{theorem}" not in OCR_SYSTEM_PROMPT
+    assert "\\begin{proof}" not in OCR_SYSTEM_PROMPT
+    assert "不做任何结构判断" in OCR_SYSTEM_PROMPT
+
+
+def test_ocr_pipeline_two_stages():
+    paths, d = _write_dummy_images(["a"])
+    try:
+        client = FakeVisionClient(pages={1: "```latex\nTheorem 1. X.\n\nProof. Y.\n```"})
+        from latexstruct.ocr import OcrConfig, transcribe_images
+
+        ocr = transcribe_images(paths, client, OcrConfig())
+        assert "\\begin{theorem}" not in ocr.tex  # Stage A 不加环境
+        from latexstruct.core.pipeline import run_pipeline
+
+        pr = run_pipeline(ocr.tex, mode="rule")
+        assert pr.ok
+        assert "\\begin{theorem}[1]" in pr.result  # Stage B 结构化
+        assert "\\begin{proof}" in pr.result
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main():
     import traceback
 

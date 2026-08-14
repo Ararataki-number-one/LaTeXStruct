@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""OCR 转写模块（M2）：PDF/图片 → 视觉模型逐页转写 LaTeX → 合并为 ElegantBook 书稿。
+"""OCR 转写模块（M2，两阶段解耦）：PDF/图片 → 视觉模型逐页**忠实转写** LaTeX
+（Stage A，不做任何结构判断）→ 合并为 ElegantBook 书稿 → 交给结构化流水线
+（Stage B：扫描→决策→补丁→校验，与"AI 只决策、Patch 负责改"核心理念统一）。
 
 流程（对应设计文档 §12）：
   渲染页面 → 逐页视觉转写（模型可选，OpenAI 兼容视觉端点）→ 逐页校验/重试 →
-  合并（统一 ElegantBook 导言区 + % Page N 标记）→ 输出 .tex，可继续送入结构化流水线。
+  合并（统一 ElegantBook 导言区 + % Page N 标记）→ 输出 .tex → run_pipeline。
 """
 
 from __future__ import annotations
@@ -15,15 +17,15 @@ from typing import Dict, List
 
 from .core.ai import LLMClient, LLMError, RoleConfig
 
-OCR_SYSTEM_PROMPT = """你是「数学文档 OCR→LaTeX 转写专家」。把给定书页图像完整、忠实地转写为 LaTeX 正文片段。
+OCR_SYSTEM_PROMPT = """你是「数学文档页面转写专家」。把给定书页图像**忠实**转写为 LaTeX 正文片段——
+你的唯一任务是"看清楚"，**不做任何结构判断**（结构整理由后续引擎完成）。
 
 硬性要求：
 1. 只输出 LaTeX 正文片段（不含 \\documentclass/\\begin{document}/导言区），用 ```latex 代码块包裹；
-2. 完整保留页面所有内容与顺序：标题层级（\\chapter*{...}/\\section*{...} 等）、定理类内容
-   使用对应环境（theorem/lemma/proposition/corollary/definition/example/remark，标题自带编号时
-   保留编号文本并置于环境可选参数，如 \\begin{theorem}[1.7.2]）、证明用 \\begin{proof}...\\end{proof}；
-3. 公式：行内用 \\(...\\)，展示用 \\[...\\] 或 equation/align；交换图用 tikz-cd；
-   算法用 algorithm+algpseudocode；
+2. 完整保留页面内容与顺序；标题行（如 "Theorem 2.7. ..."、"Proof. ..."、"1.1 Graphs"）
+   按原样作为独立文本行转写——**不要**为它们添加 theorem/lemma/proof/definition 等任何环境，
+   也不要把标题与正文合并改写；
+3. 数学公式：行内用 \\(...\\)，展示用 \\[...\\] 或 $$...$$（仅转写公式本身，不改变其内容）；
 4. 不增不减：不要臆造内容；无法辨认的符号用 \\textcolor{red}{[?]} 占位并加行内注释 % unsure；
 5. 正确转义特殊字符 # $ % & _ { } ~ ^ \\；中英混排保持数学符号规范
    （\\mathbb{R}、\\mathcal{B}、\\operatorname{conv} 等；常见 OCR 误识修正：
@@ -196,6 +198,19 @@ def merge_book(chunks: List[str]) -> str:
     parts.append("")
     parts.append("\\end{document}")
     return "\n".join(parts)
+
+
+def ocr_pipeline(pdf_path: str, client: LLMClient, cfg: OcrConfig = None,
+                 mode: str = "rule", pipeline_kwargs=None) -> Dict:
+    """两阶段：A 视觉忠实转写（不做结构判断）→ B 结构化流水线（扫描→决策→补丁→校验）。
+
+    返回 {"ocr": OcrResult, "pipeline": PipelineResult}。
+    """
+    from .core.pipeline import run_pipeline
+
+    ocr = transcribe_pdf(pdf_path, client, cfg)
+    pr = run_pipeline(ocr.tex, mode=mode, **(pipeline_kwargs or {}))
+    return {"ocr": ocr, "pipeline": pr}
 
 
 def _pdf_page_count(pdf_path: str) -> int:

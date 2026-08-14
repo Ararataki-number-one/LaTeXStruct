@@ -3,6 +3,10 @@
 本项目采用「tag 即发布」的自动化流程：`git tag vX.Y.Z && git push` 触发 CI
 （ruff → 全量测试 → PyInstaller → Inno Setup → 安装器冒烟测试 → 签名 → GitHub Release）。
 
+## v0.5.6（2025-08）
+- OCR 两阶段解耦：Stage A 视觉忠实转写（禁止结构判断），Stage B 复用结构化流水线；
+  ocr_pipeline() 一步到位，两阶段语义测试锁定。
+
 ## v0.5.5（2025-08）
 - Benchmark 金标评测：四组金标集（合成/中文/真实切片/陷阱），
   分类型 P/R/F1 + 内容指标 + Markdown 报告；CI 门禁；当前成绩全 100%、零误报。
