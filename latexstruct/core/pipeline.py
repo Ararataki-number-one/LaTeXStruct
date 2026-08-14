@@ -136,7 +136,12 @@ def resolve_overlaps(
     return kept, dropped
 
 
-def _apply_decisions(doc, decisions: List[Decision], ctx: PatchContext, ambiguous: List[dict]):
+def _apply_decisions(doc, decisions: List[Decision], ctx: PatchContext, ambiguous: List[dict],
+                     candidates_by_id: dict = None):
+    if candidates_by_id:
+        from .legalize import legalize_decisions
+
+        legalize_decisions(doc, decisions, candidates_by_id)  # AI span 段落边界合法化
     lines = doc.text.split("\n")
     planned: List[Tuple[Decision, List]] = []
     rejected: List[AppliedPatch] = []
@@ -217,7 +222,10 @@ def run_pipeline(
         if d.action == "convert-to-exercise-env" and not d.env:
             d.env = ctx.exercise_env
 
-    out, applied, rejected, dropped = _apply_decisions(doc, decisions, ctx, ambiguous)
+    candidates_by_id = {c.id: c for c in scan_res.candidates}
+    out, applied, rejected, dropped = _apply_decisions(
+        doc, decisions, ctx, ambiguous, candidates_by_id=candidates_by_id
+    )
     for d, reason in dropped:
         ambiguous.append({"candidate_id": d.candidate_id, "line": _interval(d)[0] or 1, "reason": reason})
     for s in scan_res.skipped:
@@ -238,7 +246,7 @@ def run_pipeline(
                 doc,
                 ctx,
                 decisions,
-                lambda ds: _apply_decisions(doc, ds, ctx, ambiguous),
+                lambda ds: _apply_decisions(doc, ds, ctx, ambiguous, candidates_by_id=candidates_by_id),
                 ambiguous,
                 cfg,
                 mode,

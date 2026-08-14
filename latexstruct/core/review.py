@@ -107,10 +107,12 @@ def run_review(
 
     system = build_review_system(build_meta(doc, ctx, mode))
     for _ in range(max(1, ai_config.review_max_rounds)):
-        if not applied:
+        # 成本优化：规则模式决策（双语合并/习题转换/导言区等）是确定性编辑，不送复查
+        to_review = [ap for ap in applied if ap.decision.source != "rule"]
+        if not to_review:
             break
         result_lines = out
-        user = build_review_user(result_lines, build_summaries(applied), ambiguous,
+        user = build_review_user(result_lines, build_summaries(to_review), ambiguous,
                                  ai_config.context_lines)
         obj, usage = client.chat_json(system, user)
         usage_total["model"] = getattr(client, "cfg", None) and client.cfg.model or ""
