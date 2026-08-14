@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """FastAPI 服务接口测试（需要 fastapi + httpx；未安装时自动跳过）。"""
 
+import json
 import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -81,6 +83,28 @@ def test_config_masked():
         assert masked["review_enabled"] is False
         r = c.put("/api/config", json={"decide_api_key": "", "review_enabled": True})
         assert r.status_code == 200
+
+
+def test_decisions_and_reject():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        r = c.post("/api/projects", json={"text": SAMPLE, "name": "demo2", "mode": "rule"})
+        pid = r.json()["id"]
+        c.post(f"/api/projects/{pid}/process")
+        d = c.get(f"/api/projects/{pid}/decisions").json()
+        items = d["items"]
+        assert items, "决策清单为空"
+        theorem = next(i for i in items if i["env"] == "theorem" and i["status"] == "applied")
+        assert "line" in theorem and "section" in theorem
+        # 拒绝定理包裹 → 重新整理后该环境消失、内容不变校验仍通过
+        r = c.post(f"/api/projects/{pid}/decisions/{theorem['candidate_id']}/reject")
+        assert r.status_code == 200
+        result = c.get(f"/api/projects/{pid}/result").text
+        assert "\\begin{theorem}" not in result
+        info = json.loads(Path(tmp, "projects", pid, "verification.json").read_text(encoding="utf-8"))
+        assert info["verification"]["content_invariant"] is True
+        # 双语合并等其他修改保留
+        assert "（方法）" in result
 
 
 def main():

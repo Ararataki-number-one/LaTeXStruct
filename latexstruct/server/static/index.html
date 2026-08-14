@@ -65,6 +65,25 @@
       <div id="process-status" class="status"></div>
     </div>
     <div class="card">
+      <h2>决策审阅</h2>
+      <div class="row">
+        <button data-filter="all" class="filter-btn primary">全部</button>
+        <button data-filter="proof" class="filter-btn">只看 Proof 边界</button>
+        <button data-filter="ambiguous" class="filter-btn">只看歧义项</button>
+        <button data-filter="high" class="filter-btn">高置信（≥0.9）</button>
+      </div>
+      <div class="review-wrap">
+        <ul id="decision-list" class="decision-list"></ul>
+        <div id="decision-detail" class="decision-detail">
+          <div class="bold" id="dd-title">点击左侧条目查看详情</div>
+          <div id="dd-meta" class="status"></div>
+          <div class="row" id="dd-actions" style="display:none">
+            <button id="dd-reject">拒绝此修改（恢复原文）</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
       <h2>汇报</h2>
       <pre id="report-view" class="report">尚未处理。</pre>
     </div>

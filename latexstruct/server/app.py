@@ -158,16 +158,14 @@ def create_app() -> FastAPI:
         return FileResponse(target, filename=f"{pid}-structured.tex",
                             media_type="application/x-tex")
 
-    @app.post("/api/projects/{pid}/process")
-    def process(pid: str):
-        _ensure(pid)
+    def _run_project(pid: str, exclude: set):
         p = get_store().get(pid)
         text = get_store().read_source(pid)
         cfg = get_config()
         mode = p["mode"]
         template = (p.get("template") or "") or None
         res = run_pipeline(text, mode=mode, ai_config=cfg.to_ai_config() if mode == "ai" else None,
-                           template=template)
+                           template=template, exclude=exclude or None)
         decisions = [
             {
                 "candidate_id": d.candidate_id,
@@ -199,6 +197,7 @@ def create_app() -> FastAPI:
                 "rejected": [{"candidate_id": ap.decision.candidate_id, "error": ap.error} for ap in res.rejected],
                 "ai_notes": res.ai_notes,
                 "review": {k: v for k, v in res.review.items() if k != "decisions"},
+                "items": res.decision_items,
             }
         )
         return {
@@ -208,6 +207,32 @@ def create_app() -> FastAPI:
             "ambiguous": len(res.ambiguous),
             "degraded": res.verification.get("ai_degraded", False),
         }
+
+    @app.post("/api/projects/{pid}/process")
+    def process(pid: str):
+        _ensure(pid)
+        return _run_project(pid, set())
+
+    @app.get("/api/projects/{pid}/decisions")
+    def decisions(pid: str):
+        _ensure(pid)
+        info_path = Path(get_store()._dir(pid)) / "verification.json"
+        if not info_path.exists():
+            return {"items": [], "excludes": get_store().get(pid).get("excludes", [])}
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        return {"items": info.get("items", []), "excludes": get_store().get(pid).get("excludes", [])}
+
+    @app.post("/api/projects/{pid}/decisions/{cid}/reject")
+    def reject_decision(pid: str, cid: str):
+        _ensure(pid)
+        meta = json.loads(Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8"))
+        excludes = set(meta.get("excludes", []))
+        excludes.add(cid)
+        meta["excludes"] = sorted(excludes)
+        Path(get_store()._dir(pid), "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+        )
+        return _run_project(pid, excludes)
 
     @app.get("/api/projects/{pid}/diff")
     def diff(pid: str):

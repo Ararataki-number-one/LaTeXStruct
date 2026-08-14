@@ -3,6 +3,11 @@
 本项目采用「tag 即发布」的自动化流程：`git tag vX.Y.Z && git push` 触发 CI
 （ruff → 全量测试 → PyInstaller → Inno Setup → 安装器冒烟测试 → 签名 → GitHub Release）。
 
+## v0.6.0（2025-08）
+- 审阅式 UI：决策清单（章节/环境/行号/置信度/原因/状态）+ 过滤器 +
+  单项拒绝重跑（exclude 重处理 + 全量重新校验）+ diff 行号定位；
+- 评审重构收官：P0→P2 八轮全部落地（见 设计文档.md 评审重构总报告）。
+
 ## v0.5.6（2025-08）
 - OCR 两阶段解耦：Stage A 视觉忠实转写（禁止结构判断），Stage B 复用结构化流水线；
   ocr_pipeline() 一步到位，两阶段语义测试锁定。

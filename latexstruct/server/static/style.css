@@ -11,6 +11,38 @@
   --ins-line: #34d058;
   --del-line: #ff6161;
 }
+.review-wrap { display: grid; grid-template-columns: 320px 1fr; gap: 12px; }
+.decision-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 480px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.decision-list li {
+  padding: 8px 10px;
+  border-bottom: 1px solid #f0f1f4;
+  cursor: pointer;
+  font-size: 13px;
+}
+.decision-list li:hover { background: #f3f6ff; }
+.decision-list li.active { background: #e0e9ff; }
+.decision-list .d-kind {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: #eef2ff;
+  color: #3730a3;
+  margin-right: 6px;
+}
+.decision-list .d-section { color: var(--muted); font-size: 12px; display: block; }
+.decision-list .d-status-ambiguous { background: #fff7ed; }
+.decision-list .d-status-rejected { opacity: 0.55; }
+.decision-detail { padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; }
+button.danger { background: #dc2626; color: #fff; border-color: #dc2626; }
 .update-banner {
   display: flex;
   align-items: center;

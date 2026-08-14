@@ -52,6 +52,7 @@ class PipelineResult:
     mode: str
     ai_notes: List[dict] = field(default_factory=list)
     review: Dict = field(default_factory=dict)
+    decision_items: List[dict] = field(default_factory=list)  # 审阅式 UI 决策清单
     error: str = ""
 
 
@@ -166,6 +167,7 @@ def run_pipeline(
     template: str = None,
     compile_check: bool = False,
     pack=None,
+    exclude: set = None,
 ) -> PipelineResult:
     template_notes: List[dict] = []
     template_applied = False
@@ -223,6 +225,8 @@ def run_pipeline(
     for d in decisions:
         if d.action == "convert-to-exercise-env" and not d.env:
             d.env = ctx.exercise_env
+    if exclude:
+        decisions = [d for d in decisions if d.candidate_id not in exclude]  # 单项拒绝（审阅）
 
     candidates_by_id = {c.id: c for c in scan_res.candidates}
     out, applied, rejected, dropped = _apply_decisions(
@@ -298,6 +302,46 @@ def run_pipeline(
         template_notes=template_notes, template_applied=template_applied,
     )
 
+    # 审阅式 UI 决策清单：候选元信息 + 状态
+    cand_by_id = {c.id: c for c in scan_res.candidates}
+    applied_ids = {ap.decision.candidate_id for ap in applied}
+    rejected_ids = {ap.decision.candidate_id for ap in rejected}
+    ambiguous_ids = {a.get("candidate_id") for a in ambiguous}
+    decision_items = []
+    for d in decisions:
+        c = cand_by_id.get(d.candidate_id)
+        line = d.body_span[0] if d.body_span else 1
+        if c is not None:
+            line = c.span.start_line
+        item = {
+            "candidate_id": d.candidate_id,
+            "kind": c.kind if c is not None else d.action,
+            "env": d.env,
+            "line": line,
+            "title": (c.title_text[:80] if c is not None else "") or d.reason,
+            "section": " / ".join(c.payload.get("section_path", ())) if c is not None else "",
+            "confidence": round(d.confidence, 3),
+            "source": d.source,
+            "reason": d.reason,
+        }
+        if d.candidate_id in applied_ids:
+            item["status"] = "applied"
+        elif d.candidate_id in rejected_ids:
+            item["status"] = "rejected"
+        elif d.candidate_id in ambiguous_ids:
+            item["status"] = "ambiguous"
+        else:
+            item["status"] = "none"
+        decision_items.append(item)
+    for a in ambiguous:
+        if not any(i["candidate_id"] == a.get("candidate_id") for i in decision_items):
+            decision_items.append({
+                "candidate_id": a.get("candidate_id", ""), "kind": "ambiguous",
+                "env": "", "line": a.get("line", 1), "title": a.get("reason", "")[:80],
+                "section": "", "confidence": 0.0, "source": "rule",
+                "reason": a.get("reason", ""), "status": "ambiguous",
+            })
+
     return PipelineResult(
         ok=ok,
         original=doc.text,
@@ -313,4 +357,5 @@ def run_pipeline(
         mode=mode,
         ai_notes=ai_notes,
         review=review_info,
+        decision_items=decision_items,
     )

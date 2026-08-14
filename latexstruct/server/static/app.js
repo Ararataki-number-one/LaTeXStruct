@@ -95,10 +95,106 @@ async function openProject(pid) {
     $("report-view").textContent = await rep.text();
     const d = await api("/api/projects/" + pid + "/diff");
     renderDiff(await d.json());
+    await loadDecisions();
   } catch (_) {
     $("report-view").textContent = "尚未处理。点击「运行结构化整理」。";
     $("diff-view").innerHTML = "";
+    $("decision-list").innerHTML = "";
   }
+}
+
+/* ---------- 决策审阅 ---------- */
+let decisionsCache = [];
+let currentFilter = "all";
+
+async function loadDecisions() {
+  if (!currentPid) return;
+  try {
+    const d = await (await api(`/api/projects/${currentPid}/decisions`)).json();
+    decisionsCache = d.items || [];
+    renderDecisionList();
+  } catch (_) {
+    decisionsCache = [];
+  }
+}
+
+function renderDecisionList() {
+  const el = $("decision-list");
+  el.innerHTML = "";
+  for (const item of decisionsCache) {
+    if (currentFilter === "proof" && item.env !== "proof" && item.kind !== "proof") continue;
+    if (currentFilter === "ambiguous" && item.status !== "ambiguous") continue;
+    if (currentFilter === "high" && item.confidence < 0.9) continue;
+    const li = document.createElement("li");
+    li.className = "d-status-" + item.status;
+    li.dataset.cid = item.candidate_id;
+    const kind = item.kind === "theorem-like" ? item.env : item.kind;
+    li.innerHTML =
+      `<span class="d-kind">${esc(kind || "?")}</span>` +
+      `<span class="d-title">${esc(item.title)}</span>` +
+      `<span class="d-section">${esc(item.section || "§ " + item.line)} · L${item.line} · ` +
+      `${Math.round((item.confidence || 0) * 100)}% · ${esc(item.status)}</span>`;
+    li.addEventListener("click", () => showDecision(item, li));
+    el.appendChild(li);
+  }
+}
+
+function showDecision(item, li) {
+  document.querySelectorAll("#decision-list li").forEach((x) => x.classList.remove("active"));
+  li.classList.add("active");
+  $("dd-title").textContent = `[${item.kind === "theorem-like" ? item.env : item.kind}] ${item.title}`;
+  $("dd-meta").textContent =
+    `${item.section || "§ " + item.line} · 第 ${item.line} 行 · ` +
+    `置信度 ${Math.round((item.confidence || 0) * 100)}% · 来源 ${item.source} · 状态 ${item.status}\n原因：${item.reason || "—"}`;
+  $("dd-actions").style.display = item.status === "applied" ? "flex" : "none";
+  $("dd-reject").dataset.cid = item.candidate_id;
+  // 跳转 diff 对应行
+  const row = document.querySelector(`.diff-row[data-old="${item.line}"]`);
+  if (row) row.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+document.querySelectorAll(".filter-btn").forEach((b) =>
+  b.addEventListener("click", () => {
+    document.querySelectorAll(".filter-btn").forEach((x) => x.classList.remove("primary"));
+    b.classList.add("primary");
+    currentFilter = b.dataset.filter;
+    renderDecisionList();
+  })
+);
+
+$("dd-reject").addEventListener("click", async () => {
+  const cid = $("dd-reject").dataset.cid;
+  if (!currentPid || !cid) return;
+  if (!confirm(`拒绝修改 ${cid}？该处将恢复原文，其余修改不受影响。`)) return;
+  $("process-status").textContent = "重新整理中……";
+  try {
+    await api(`/api/projects/${currentPid}/decisions/${cid}/reject`, { method: "POST" });
+    await openProject(currentPid);
+    $("process-status").textContent = "已拒绝该修改并重新校验";
+  } catch (e) {
+    $("process-status").textContent = "拒绝失败：" + e.message;
+  }
+});
+
+function renderDiff(data) {
+  const el = $("diff-view");
+  el.innerHTML = "";
+  for (const row of data.rows) {
+    const div = document.createElement("div");
+    div.className = "diff-row " + row.type;
+    if (row.old != null) div.dataset.old = row.old;
+    if (row.new != null) div.dataset.new = row.new;
+    const oldSide = row.type === "ins" ? "" : `<span class="num">${row.old ?? ""}</span>${esc(row.text)}`;
+    const newSide = row.type === "del" ? "" : `<span class="num">${row.new ?? ""}</span>${esc(row.text)}`;
+    div.innerHTML = `<div class="side old-side">${oldSide}</div><div class="side new-side">${newSide}</div>`;
+    el.appendChild(div);
+  }
+  const applied = (data.applied || []).length;
+  const amb = (data.ambiguous || []).length;
+  $("diff-legend").innerHTML =
+    `<span class="lg ins">新增行</span><span class="lg del">删除行</span>` +
+    `<span class="status">补丁 ${applied} 项 · 歧义 ${amb} 项 · 内容不变校验：` +
+    `${data.verification && data.verification.content_invariant ? "通过" : "失败（已回退）"}</span>`;
 }
 
 /* ---------- 处理 ---------- */
@@ -119,25 +215,6 @@ $("btn-process").addEventListener("click", async () => {
     $("btn-process").disabled = false;
   }
 });
-
-function renderDiff(data) {
-  const el = $("diff-view");
-  el.innerHTML = "";
-  for (const row of data.rows) {
-    const div = document.createElement("div");
-    div.className = "diff-row " + row.type;
-    const oldSide = row.type === "ins" ? "" : `<span class="num">${row.old ?? ""}</span>${esc(row.text)}`;
-    const newSide = row.type === "del" ? "" : `<span class="num">${row.new ?? ""}</span>${esc(row.text)}`;
-    div.innerHTML = `<div class="side old-side">${oldSide}</div><div class="side new-side">${newSide}</div>`;
-    el.appendChild(div);
-  }
-  const applied = (data.applied || []).length;
-  const amb = (data.ambiguous || []).length;
-  $("diff-legend").innerHTML =
-    `<span class="lg ins">新增行</span><span class="lg del">删除行</span>` +
-    `<span class="status">补丁 ${applied} 项 · 歧义 ${amb} 项 · 内容不变校验：` +
-    `${data.verification && data.verification.content_invariant ? "通过" : "失败（已回退）"}</span>`;
-}
 
 /* ---------- 导出 ---------- */
 $("btn-download").addEventListener("click", async () => {
