@@ -38,7 +38,8 @@ class AppConfig:
     def to_ocr_config(self) -> "OcrConfig":
         from .ocr import OcrConfig
 
-        key = self.ocr_api_key or self.decide_api_key
+        # Key 回退链：OCR → 决策 → 复查（同一供应商一把 Key 的场景）
+        key = self.ocr_api_key or self.decide_api_key or self.review_api_key
         model = self.ocr_model or "deepseek-chat"
         return OcrConfig(role=RoleConfig(self.ocr_base_url or self.decide_base_url, model, key))
 

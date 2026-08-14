@@ -94,7 +94,7 @@
         </select>
       </div>
       <div class="row">
-        <input id="ocr-model" placeholder="视觉模型（留空用设置里的 OCR 模型）" style="width:340px" />
+        <input id="ocr-model" placeholder="视觉模型（留空用设置里的 OCR 模型；DeepSeek chat 模型不支持图片，请用视觉模型）" style="width:520px" />
         <button id="btn-ocr-start" class="primary">开始转写</button>
       </div>
       <div id="ocr-status" class="status"></div>
@@ -119,7 +119,7 @@
       <h2>OCR 视觉模型（可选任意视觉模型）</h2>
       <div class="row">
         <input id="s-ocr-url" placeholder="base_url" />
-        <input id="s-ocr-model" placeholder="model（支持图片输入）" />
+        <input id="s-ocr-model" placeholder="model（需支持图片输入，如 qwen-vl / glm-4v / gpt-4o）" />
         <input id="s-ocr-key" type="password" placeholder="API Key（仅存本机，留空用决策 Key）" />
       </div>
     </div>

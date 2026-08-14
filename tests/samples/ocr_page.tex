@@ -1,0 +1,37 @@
+\documentclass[11pt]{book}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage[paperwidth=170mm,paperheight=240mm,margin=18mm]{geometry}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}{Lemma}[section]
+\newtheorem{definition}{Definition}[section]
+\begin{document}
+
+\section{The Probabilistic Method}
+
+\begin{definition}
+A graph \(G=(V,E)\) is \emph{sparse} if \(|E| \le 3|V|-6\).
+\end{definition}
+
+\begin{theorem}[Tur\'an]
+Every graph on \(n\) vertices with more than \(\frac{n^2}{4}\) edges contains a triangle.
+\end{theorem}
+
+\begin{proof}
+Let \(G\) be triangle-free with \(n\) vertices and maximum number of edges.
+For every edge \(uv\), the neighborhoods satisfy \(N(u)\cap N(v)=\varnothing\),
+hence \(d(u)+d(v)\le n\). Summing over all edges gives
+\[
+\sum_{uv\in E}\bigl(d(u)+d(v)\bigr)=\sum_{v\in V} d(v)^2 \le n|E|.
+\]
+By Cauchy--Schwarz, \(\sum_v d(v)^2 \ge (2|E|)^2/n\), so \((2|E|)^2 \le n^2|E|\),
+which yields \(|E|\le n^2/4\). \qed
+\end{proof}
+
+\begin{lemma}
+If a graph has \(n\) vertices and \(e\) edges, then its average degree is \(2e/n\).
+\end{lemma}
+
+The celebrated Erd\H{o}s--R\'enyi bound shows that the random graph
+\(G(n,p)\) with \(p=\frac{\log n}{n}\) is almost surely connected.
+
+\end{document}

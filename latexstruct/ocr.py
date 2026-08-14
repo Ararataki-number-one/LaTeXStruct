@@ -119,7 +119,15 @@ def _clean_page_output(raw: str) -> str:
 
 def transcribe_page(client: LLMClient, png_bytes: bytes, page_no: int) -> str:
     user = f"请转写第 {page_no} 页。只输出 LaTeX 代码块。"
-    raw = client.chat_vision(OCR_SYSTEM_PROMPT, user, encode_image(png_bytes))
+    try:
+        raw = client.chat_vision(OCR_SYSTEM_PROMPT, user, encode_image(png_bytes))
+    except LLMError as e:
+        msg = str(e)
+        if "400" in msg or "image" in msg.lower() or "multimodal" in msg.lower():
+            raise LLMError(
+                f"{msg}｜当前模型可能不支持图片输入，请在 AI 设置页换用支持视觉的模型（如 qwen-vl、glm-4v、gpt-4o 等）"
+            )
+        raise
     text = _clean_page_output(raw)
     if not text:
         raise LLMError(f"第 {page_no} 页转写为空")

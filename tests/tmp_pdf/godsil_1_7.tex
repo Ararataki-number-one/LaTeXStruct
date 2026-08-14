@@ -1,0 +1,179 @@
+\documentclass[10pt]{article}
+\usepackage[verbose, a4paper, hmargin=2.5cm, vmargin=2.5cm]{geometry}
+
+\usepackage{fontspec}
+\usepackage{ctex}
+\usepackage{paratype}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{esint}
+\usepackage{stmaryrd}
+
+\usepackage[mathbf=sym]{unicode-math}
+\setmainfont{STIX Two Text}
+\setmathfont{STIX Two Math}
+
+\setsansfont{Arial}
+\setmonofont{Courier New}
+
+\usepackage{makecell}
+\usepackage{wasysym}
+\usepackage{pifont}
+\usepackage[export]{adjustbox}
+\usepackage{graphicx}
+\usepackage{mdframed}
+\usepackage{booktabs,array,multirow}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan,}
+\urlstyle{same}
+\usepackage[most]{tcolorbox}
+\definecolor{mygray}{RGB}{240,240,240}
+\tcbset{
+  colback=mygray,
+  boxrule=0pt,
+}
+\graphicspath{ {./images/} }
+\newcommand{\HRule}{\begin{center}\rule{0.9\linewidth}{0.2mm}\end{center}}
+\newcommand{\customfootnote}[1]{
+  \let\thefootnote\relax\footnotetext{#1}
+}
+\newcommand{\lt}{\mathrel{<}}
+\newcommand{\gt}{\mathrel{>}}
+\newcommand*\circled[1]{\tikz[baseline=(char.base)]{\node[shape=circle,draw,inner sep=1.5pt] (char) {\small #1};}}
+\setcounter{MaxMatrixCols}{256}
+\begin{document}
+\section*{1.7 Line Graphs}
+
+\begin{tcolorbox}\relax
+\section*{1.7 线图}
+\end{tcolorbox}
+
+The line graph of a graph \(X\) is the graph \(L\left( X\right)\) with the edges of \(X\) as its vertices, and where two edges of \(X\) are adjacent in \(L\left( X\right)\) if and only if they are incident in \(X\) . An example is given in Figure 1.9 with the graph in grey and the line graph below it in black.
+
+\begin{tcolorbox}\relax
+图 \(X\) 的线图是图 \(L\left( X\right)\) ，其顶点是 \(X\) 的边，且当且仅当两条 \(X\) 的边在 \(X\) 中相交时它们在 \(L\left( X\right)\) 中相邻。图 1.9 给出一个例子，灰色为原图，下面黑色为其线图。
+\end{tcolorbox}
+
+The star \({K}_{1,n}\) , which consists of a single vertex with \(n\) neighbours, has the complete graph \({K}_{n}\) as its line graph. The path \({P}_{n}\) is the graph with vertex set \(\{ 1,\ldots ,n\}\) where \(i\) is adjacent to \(i + 1\) for \(1 \leq  i \leq  n - 1\) . It has line graph equal to the shorter path \({P}_{n - 1}\) . The cycle \({C}_{n}\) is isomorphic to its own line graph.
+
+\begin{tcolorbox}\relax
+星形图 \({K}_{1,n}\) ，由一个顶点与 \(n\) 个邻点组成，其线图是完全图 \({K}_{n}\) 。路径 \({P}_{n}\) 是顶点集为 \(\{ 1,\ldots ,n\}\) 的图，其中对于 \(1 \leq  i \leq  n - 1\) ， \(i\) 与 \(i + 1\) 相邻。它的线图是较短的路径 \({P}_{n - 1}\) 。循环 \({C}_{n}\) 与其自身的线图同构。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.4\textwidth]{images/28_525_206_477_573_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 1.9. A graph and its line graph
+
+\begin{tcolorbox}\relax
+图 1.9。一幅图及其线图
+\end{tcolorbox}
+
+Lemma 1.7.1 If \(X\) is regular with valency \(k\) , then \(L\left( X\right)\) is regular with valency \({2k} - 2\) .
+
+\begin{tcolorbox}\relax
+引理 1.7.1 若 \(X\) 为度数为 \(k\) 的正则图，则 \(L\left( X\right)\) 为度数为 \({2k} - 2\) 的正则图。
+\end{tcolorbox}
+
+Each vertex in \(X\) determines a clique in \(L\left( X\right)\) : If \(x\) is a vertex in \(X\) with valency \(k\) , then the \(k\) edges containing \(x\) form a \(k\) -clique in \(L\left( X\right)\) . Thus if \(X\) has \(n\) vertices, there is a set of \(n\) cliques in \(L\left( X\right)\) with each vertex of \(L\left( X\right)\) contained in at most two of these cliques. Each edge of \(L\left( X\right)\) lies in exactly one of these cliques. The following result provides a useful converse:
+
+\begin{tcolorbox}\relax
+\(X\) 中的每个顶点在 \(L\left( X\right)\) 中确定一个团:若 \(x\) 是 \(X\) 中度数为 \(k\) 的顶点，则包含 \(x\) 的那 \(k\) 条边在 \(L\left( X\right)\) 中构成一个 \(k\) -团。因此若 \(X\) 有 \(n\) 个顶点，则在 \(L\left( X\right)\) 中存在一组 \(n\) 个团，且 \(L\left( X\right)\) 的每个顶点至多属于其中两个团。 \(L\left( X\right)\) 的每条边恰好属于这些团中的一个。下述结果给出了一个有用的逆定理:
+\end{tcolorbox}
+
+Theorem 1.7.2 A nonempty graph is a line graph if and only if its edge set can be partitioned into a set of cliques with the property that any vertex lies in at most two cliques.
+
+\begin{tcolorbox}\relax
+定理 1.7.2 非空图当且仅当其边集可划分为若干团，且任一顶点至多属于两团，这时该图是线图。
+\end{tcolorbox}
+
+If \(X\) has no triangles (that is, cliques of size three), then any vertex of \(L\left( X\right)\) with at least two neighbours in one of these cliques must be contained in that clique. Hence the cliques determined by the vertices of \(X\) are all maximal.
+
+\begin{tcolorbox}\relax
+若 \(X\) 无三角(即无三元团)，则 \(L\left( X\right)\) 中在某一团中至少有两邻点的任何顶点必然属于该团。因此由 \(X\) 的顶点确定的团均为极大团。
+\end{tcolorbox}
+
+It is both obvious and easy to prove that if \(X \cong  Y\) , then \(L\left( X\right)  \cong  L\left( Y\right)\) . However, the converse is false: \({K}_{3}\) and \({K}_{1,3}\) have the same line graph, namely \({K}_{3}\) . Whitney proved that this is the only pair of connected counterexamples. We content ourselves with proving the following weaker result.
+
+\begin{tcolorbox}\relax
+显然且易证若 \(X \cong  Y\) ，则 \(L\left( X\right)  \cong  L\left( Y\right)\) 。然而逆命题不成立: \({K}_{3}\) 与 \({K}_{1,3}\) 有相同的线图，即 \({K}_{3}\) 。惠特尼证明这是唯一的一对连通反例。我们满足于证明以下较弱的结果。
+\end{tcolorbox}
+
+Lemma 1.7.3 Suppose that \(X\) and \(Y\) are graphs with minimum valency four. Then \(X \cong  Y\) if and only if \(L\left( X\right)  \cong  L\left( Y\right)\) .
+
+\begin{tcolorbox}\relax
+引理 1.7.3 设 \(X\) 与 \(Y\) 为最小度为四的图。则 \(X \cong  Y\) 当且仅当 \(L\left( X\right)  \cong  L\left( Y\right)\) 。
+\end{tcolorbox}
+
+Proof. Let \(C\) be a clique in \(L\left( X\right)\) containing exactly \(c\) vertices. If \(c > 3\) , then the vertices of \(C\) correspond to a set of \(c\) edges in \(X\) , meeting at a common vertex. Consequently, there is a bijection between the vertices of \(X\) and the maximal cliques of \(L\left( X\right)\) that takes adjacent vertices to pairs of cliques with a vertex in common. The remaining details are left as an exercise.
+
+\begin{tcolorbox}\relax
+证明。令 \(C\) 为 \(L\left( X\right)\) 中恰含 \(c\) 个顶点的一个团。若 \(c > 3\) ，则 \(C\) 的顶点对应于 \(X\) 中在同一顶点相交的 \(c\) 条边。因此存在一个在相邻顶点对应有公共顶点的团对之间建立一一对应的映射，将 \(X\) 的顶点与 \(L\left( X\right)\) 的极大团一一对应。其余细节留作练习。
+\end{tcolorbox}
+
+There is another interesting characterization of line graphs:
+
+\begin{tcolorbox}\relax
+还有另一种关于线图的有趣刻画:
+\end{tcolorbox}
+
+Theorem 1.7.4 A graph \(X\) is a line graph if and only if each induced subgraph of \(X\) on at most six vertices is a line graph.
+
+\begin{tcolorbox}\relax
+定理 1.7.4 图 \(X\) 当且仅当其任一最多含六个顶点的诱导子图都是线图。
+\end{tcolorbox}
+
+Consider the set of graphs \(X\) such that
+
+\begin{tcolorbox}\relax
+考虑满足下列条件的图集 \(X\) :
+\end{tcolorbox}
+
+(a) \(X\) is not a line graph, and
+
+\begin{tcolorbox}\relax
+(a) \(X\) 不是线图，且
+\end{tcolorbox}
+
+(b) every proper induced subgraph of \(X\) is a line graph.
+
+\begin{tcolorbox}\relax
+(b) \(X\) 的每个真诱导子图都是线图。
+\end{tcolorbox}
+
+The previous theorem implies that this set is finite, and in fact there are exactly nine graphs in this set. (The notes at the end of the chapter indicate where you can find the graphs themselves.)
+
+\begin{tcolorbox}\relax
+前一个定理表明该集合是有限的，实际上该集合恰有九个图。(本章末的注释指出了这些图的出处。)
+\end{tcolorbox}
+
+We call a bipartite graph semiregular if it has a proper 2-colouring such that all vertices with the same colour have the same valency. The cheapest examples are the complete bipartite graphs \({K}_{m,n}\) which consist of an independent set of \(m\) vertices completely joined to an independent set of \(n\) vertices.
+
+\begin{tcolorbox}\relax
+我们称二分图为半正则的，如果它有一个正规的二着色，使得同一颜色的所有顶点具有相同的度。最简单的例子是完全二分图 \({K}_{m,n}\) ，它由一个含有 \(m\) 个顶点的独立集与一个含有 \(n\) 个顶点的独立集完全相连构成。
+\end{tcolorbox}
+
+Lemma 1.7.5 If the line graph of a connected graph \(X\) is regular, then \(X\) is regular or bipartite and semiregular.
+
+\begin{tcolorbox}\relax
+引理 1.7.5 若连通图 \(X\) 的线图是正则的，则 \(X\) 要么是正则的，要么是二分且半正则的。
+\end{tcolorbox}
+
+Proof. Suppose that \(L\left( X\right)\) is regular with valency \(k\) . If \(u\) and \(v\) are adjacent vertices in \(X\) , then their valencies sum to \(k + 2\) . Consequently, all neighbours of a vertex \(u\) have the same valency, and so if two vertices of \(X\) share a common neighbour, then they have the same valency. Since \(X\) is connected, this implies that there are at most two different valencies.
+
+\begin{tcolorbox}\relax
+证明。设 \(L\left( X\right)\) 为度为 \(k\) 的正则图。如果 \(u\) 与 \(v\) 在 \(X\) 中相邻，则它们的度之和为 \(k + 2\) 。因此，顶点 \(u\) 的所有邻居具有相同的度，故若 \(X\) 中两顶点有共同邻居，则它们具有相同的度。由于 \(X\) 是连通的，这意味着最多有两种不同的度。
+\end{tcolorbox}
+
+If two adjacent vertices have the same valency, then an easy induction argument shows that \(X\) is regular. If \(X\) contains a cycle of odd length, then it must have two adjacent vertices of the same valency, and so if it is not regular, then it has no cycles of odd length. We leave it as an exercise to show that a graph is bipartite if and only if it contains no cycles of odd length.
+
+\begin{tcolorbox}\relax
+若两相邻顶点度相同，则通过简单的归纳可知 \(X\) 是正则的。若 \(X\) 包含奇长圈，则它必有两相邻顶点度相同，因此若它非正则，则不含任何奇长圈。作为练习，证明当且仅当图不含奇长圈时，该图是二分图。
+\end{tcolorbox}
+
+\end{document}

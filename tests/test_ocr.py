@@ -91,6 +91,21 @@ def test_transcribe_images_all_fail():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_transcribe_all_fail_with_friendly_hint():
+    # 不支持图片的模型（400）应得到友好提示
+    class BadVision(FakeVisionClient):
+        def chat_vision(self, system, user, data_uri):
+            raise LLMError("视觉模型调用失败: HTTP Error 400: Bad Request")
+
+    paths, d = _write_dummy_images(["a"])
+    try:
+        result = transcribe_images(paths, BadVision(), OcrConfig())
+        assert len(result.errors) == 1
+        assert "不支持图片输入" in result.errors[0]["reason"]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main():
     import traceback
 

@@ -133,6 +133,19 @@ def test_known_issues_reported():
     assert "{2}^{\\left( \\begin{matrix} n \\\\ 2 \\end{matrix}\\right) }" in res.result
 
 
+def test_real_godsil_section_1_7():
+    # 真实书稿 1.7 节切片（含引理/定理/证明/图注/翻译框）规则模式回归
+    text = read_sample("godsil_1_7.tex")
+    res = run_pipeline(text, mode="rule")
+    assert res.ok, res.report_md
+    out = res.result
+    assert "\\begin{lemma}[1.7.1]" in out
+    assert "\\begin{theorem}[1.7.2]" in out
+    assert "\\begin{proof}" in out
+    assert res.verification["content_invariant"] is True
+    assert res.verification["env_balance"]["ok"] is True
+
+
 def main():
     import traceback
 

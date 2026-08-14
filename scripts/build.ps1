@@ -7,7 +7,7 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 Write-Host "[1/3] PyInstaller 构建单文件 exe ..."
-python -m PyInstaller packaging/LaTeXStruct.spec --noconfirm --distpath dist --workpath build 2>&1 | Select-Object -Last 3
+python -m PyInstaller packaging/LaTeXStruct.spec --noconfirm --clean --distpath dist --workpath build 2>&1 | Select-Object -Last 3
 if (-not (Test-Path "dist/LaTeXStruct.exe")) { throw "PyInstaller 构建失败" }
 Write-Host "  -> dist/LaTeXStruct.exe"
 
