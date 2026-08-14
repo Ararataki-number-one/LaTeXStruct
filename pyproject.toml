@@ -1,8 +1,11 @@
 [project]
 name = "latexstruct"
-version = "0.1.0"
+dynamic = ["version"]
 description = "LaTeX 数学书结构化整理本地客户端"
 requires-python = ">=3.10"
+
+[tool.setuptools.dynamic]
+version = {attr = "latexstruct._version.__version__"}
 
 [project.optional-dependencies]
 server = [

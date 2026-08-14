@@ -1,4 +1,4 @@
-# UTF-8
+﻿# UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
     filevers=(0, 2, 1, 0),
@@ -16,12 +16,12 @@ VSVersionInfo(
         u'080404B0',
         [
           StringStruct(u'CompanyName', u'LaTeXStruct'),
-          StringStruct(u'FileDescription', u'LaTeX 数学书结构化整理客户端'),
-          StringStruct(u'FileVersion', u'0.2.1'),
+          StringStruct(u'FileDescription', u'LaTeX 鏁板涔︾粨鏋勫寲鏁寸悊瀹㈡埛绔?),
+          StringStruct(u'FileVersion', u'0.5.0'),
           StringStruct(u'InternalName', u'LaTeXStruct'),
           StringStruct(u'OriginalFilename', u'LaTeXStruct.exe'),
           StringStruct(u'ProductName', u'LaTeXStruct'),
-          StringStruct(u'ProductVersion', u'0.2.1'),
+          StringStruct(u'ProductVersion', u'0.5.0'),
           StringStruct(u'LegalCopyright', u'Copyright (c) 2025 LaTeXStruct'),
         ]
       )
@@ -29,3 +29,4 @@ VSVersionInfo(
     VarFileInfo([VarStruct(u'Translation', [2052, 1200])])
   ]
 )
+

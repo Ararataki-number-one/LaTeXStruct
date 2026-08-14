@@ -23,7 +23,7 @@ jobs:
         shell: pwsh
         run: |
           $fail = 0
-          foreach ($t in @('test_parser','test_scanner','test_patch','test_pipeline','test_ai','test_template','test_store','test_server','test_updater','test_ocr','test_legalize')) {
+          foreach ($t in @('test_parser','test_scanner','test_patch','test_pipeline','test_ai','test_template','test_store','test_server','test_updater','test_ocr','test_legalize','test_version')) {
             python "tests/$t.py"
             if ($LASTEXITCODE -ne 0) { $fail++ }
           }
@@ -55,7 +55,7 @@ jobs:
         run: |
           python packaging/generate_icon.py
           $v = $env:APP_VERSION
-          (Get-Content packaging/version_info.txt -Raw) -replace '0\.2\.1', $v | Set-Content packaging/version_info.txt -Encoding UTF8
+          (Get-Content packaging/version_info.txt -Raw) -replace '\d+\.\d+\.\d+', $v | Set-Content packaging/version_info.txt -Encoding UTF8
       - name: PyInstaller 构建单文件 exe
         run: python -m PyInstaller packaging/LaTeXStruct.spec --noconfirm --distpath dist --workpath build
       - name: 代码签名 exe（配置了证书 secrets 时）
@@ -79,6 +79,29 @@ jobs:
         run: |
           iscc "/DAppVersion=$env:APP_VERSION" packaging/installer.iss
           Get-ChildItem dist
+      - name: 安装器冒烟测试（静默安装 → 运行健康检查 → 静默卸载）
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem dist/LaTeXStruct-setup-*.exe | Select-Object -First 1
+          if (-not $setup) { Write-Error "未找到安装器"; exit 1 }
+          $dir = Join-Path $env:LOCALAPPDATA "Programs\LaTeXStruct-Smoke"
+          Start-Process -FilePath $setup.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$dir" -Wait
+          if (-not (Test-Path "$dir\LaTeXStruct.exe")) { Write-Error "安装后未找到 exe"; exit 1 }
+          $proc = Start-Process -FilePath "$dir\LaTeXStruct.exe" -ArgumentList "--server","--port","8099" -PassThru
+          $ok = $false
+          foreach ($i in 1..30) {
+            Start-Sleep -Seconds 2
+            try {
+              $h = Invoke-RestMethod "http://127.0.0.1:8099/api/health" -TimeoutSec 3
+              if ($h.ok) { $ok = $true; Write-Host "安装版运行正常: v$($h.version)"; break }
+            } catch {}
+          }
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { Write-Error "安装版健康检查失败"; exit 1 }
+          Start-Process -FilePath "$dir\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
+          Start-Sleep -Seconds 3
+          if (Test-Path "$dir\LaTeXStruct.exe") { Write-Error "静默卸载后残留文件"; exit 1 }
+          Write-Host "安装器冒烟测试通过（安装→运行→卸载）"
       - name: 代码签名安装器（配置了证书 secrets 时）
         env:
           WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
