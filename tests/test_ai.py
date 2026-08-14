@@ -191,6 +191,32 @@ def test_review_missed_extra_adds_wrap():
     assert out.verification["content_invariant"] is True
 
 
+def test_review_missed_extra_from_ai_none():
+    # 决策判 none 的候选进入复查清单，复查可 missed-extra 反悔补包
+    text = read_sample("basic_book.tex")
+    doc = parse_latex(text)
+    res = scan(doc)
+    # 让决策对所有 theorem-like 判 none，仅保留规则部分
+    decide_resp = {"decisions": [
+        {"candidate_id": c.id, "action": "none", "reason": "暂不确定"}
+        for c in res.candidates if c.kind in ("theorem-like", "proof", "scope-fix")
+    ]}
+    target = [c for c in res.candidates if c.kind == "theorem-like"][0]
+    fake_decide = FakeClient(decide_resp)
+    fake_review = FakeClient({"findings": [
+        {"candidate_id": target.id, "verdict": "missed-extra",
+         "fix": {"action": "wrap", "env": target.env_hint,
+                 "body_span": {"start_line": target.span.start_line,
+                               "end_line": target.span.end_line}},
+         "reason": "漏包"},
+    ]})
+    cfg = AIConfig(decide=RoleConfig(api_key="t"), review=RoleConfig(api_key="t"), review_enabled=True)
+    out = run_pipeline(text, mode="ai", ai_config=cfg, ai_client=fake_decide, review_client=fake_review)
+    assert out.ok, out.report_md
+    assert f"\\begin{{{target.env_hint}}}" in out.result
+    assert out.verification["content_invariant"] is True
+
+
 def test_prompt_builders():
     text = read_sample("basic_book.tex")
     doc = parse_latex(text)

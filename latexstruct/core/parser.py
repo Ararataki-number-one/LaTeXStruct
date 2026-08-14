@@ -209,7 +209,7 @@ def mask_protected(text: str, ranges: List[Tuple]) -> str:
 def mask_inline_verb(text: str) -> str:
     """把 ``\\verb|...|`` 的内容替换为空格。"""
     out = list(text)
-    i, n = 0, len(text)
+    i = 0
     while True:
         m = INLINE_VERB_RE.search(text, i)
         if not m:

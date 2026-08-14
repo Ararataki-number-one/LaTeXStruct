@@ -107,9 +107,10 @@ def run_review(
 
     system = build_review_system(build_meta(doc, ctx, mode))
     for _ in range(max(1, ai_config.review_max_rounds)):
-        # 成本优化：规则模式决策（双语合并/习题转换/导言区等）是确定性编辑，不送复查
+        # 成本优化：规则模式决策（双语合并/习题转换/导言区等）是确定性编辑，不送复查；
+        # 但存在歧义/漏报清单时仍需复核（missed-extra 反悔）
         to_review = [ap for ap in applied if ap.decision.source != "rule"]
-        if not to_review:
+        if not to_review and not ambiguous:
             break
         result_lines = out
         user = build_review_user(result_lines, build_summaries(to_review), ambiguous,

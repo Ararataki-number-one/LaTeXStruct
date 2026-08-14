@@ -14,7 +14,6 @@ from latexstruct.core.patch import (  # noqa: E402
     apply_patches,
     build_ops,
     content_invariant,
-    validate_ops,
 )
 
 

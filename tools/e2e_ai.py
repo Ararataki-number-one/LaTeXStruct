@@ -5,7 +5,6 @@
 用法：python tools/e2e_ai.py [样例文件...]
 """
 
-import os
 import sys
 from pathlib import Path
 

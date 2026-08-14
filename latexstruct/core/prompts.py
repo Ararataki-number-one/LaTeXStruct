@@ -31,7 +31,9 @@ A. 定理类裸标题（行/段首：Definition/Theorem/Lemma/Proposition/Coroll
    - 确为正式条目标题 → action=wrap，env 取对应环境；标题自带编号（如 Theorem 2.3.4）
      时编号保留进 optional_arg 或环境首行，不得丢失；
    - 无编号条目（Remark./Example.）→ 直接包裹，不伪造编号；
-   - 正文可能跨多段：body_span 应覆盖该条目的全部正文段落与紧接的显示公式。
+   - 正文可能跨多段：body_span 应覆盖该条目的全部正文段落与紧接的显示公式；
+   - body_span 的起点必须是标题所在行，终点是该条目正文最后一个段落的末行，
+     **不包含**其后的中文翻译框、图注、其他条目或后续叙述段。
 B. 证明起始语（Proof./Proof/证明/证明：/Proof [Outline]/Proof [Theorem x.y.z]/
    Sketch of the proof.）：
    - 确为证明开始 → action=wrap, env=proof；附加说明（Outline 等）保留为 optional_arg；
@@ -49,7 +51,10 @@ C. 已有环境范围错误（scope-fix 候选）：
 【硬性排除：以下任何情况必须 action=none】
 - 候选位于任何 theorem 类/proof 环境内部；
 - 位于注释、verbatim、参考文献、索引、图/表/算法题注内；
-- tcolorbox/mdframed 中作为英文环境中文翻译的辅助标题；
+- **tcolorbox/mdframed 内的中文标题行**（如盒内的"定理 1.7.2 ……"）是英文条目的中文翻译，
+  绝不包裹盒子及其内容；
+- **"(a) ..." "(b) ..." 等字母编号条目**是例题/证明内部的列表项，不是定理标题；
+- 图注行（"Figure 1.9. A graph ..."、"图 1.9。……"）不是定理；
 - 章节标题本身；目录/页眉页脚/版权页；附录索引项；
 - 引用性文字（"by Lemma 3.1"、"Theorem 1.2 has an application..."）；
 - 证明内部的 "Claim 1"/局部断言（除非上下文明确，否则不动）。
@@ -59,7 +64,10 @@ C. 已有环境范围错误（scope-fix 候选）：
 
 【输出】
 只输出一个 JSON 对象，schema 如系统注入所示；所有行号必须在候选的上下文行号范围内；
-无法判定的候选输出 action=none 且 reason 注明"歧义"。"""
+无法判定的候选输出 action=none 且 reason 注明"歧义"。
+"""
+
+PROMPT_VERSION = "3.1"
 
 DECIDE_SCHEMA = """输出格式（严格 JSON，不要输出任何其他内容）：
 {

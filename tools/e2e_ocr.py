@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from latexstruct.config import load_config  # noqa: E402
 from latexstruct.core.ai import LLMClient, LLMError  # noqa: E402
-from latexstruct.ocr import OcrConfig, transcribe_pdf  # noqa: E402
+from latexstruct.ocr import transcribe_pdf  # noqa: E402
 
 
 def main():

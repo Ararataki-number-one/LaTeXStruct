@@ -11,7 +11,7 @@ from __future__ import annotations
 import base64
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 from .core.ai import LLMClient, LLMError, RoleConfig
 

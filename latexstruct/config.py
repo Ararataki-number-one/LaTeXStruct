@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
-from typing import Dict, Optional
+from dataclasses import asdict, dataclass
+from typing import Dict
 
 from .core.ai import AIConfig, RoleConfig
+from .ocr import OcrConfig
 from .store import default_data_dir
 
 CONFIG_PATH = os.path.join(default_data_dir(), "config.json")
@@ -35,9 +36,7 @@ class AppConfig:
         review = RoleConfig(self.review_base_url, self.review_model, review_key)
         return AIConfig(decide=decide, review=review, review_enabled=self.review_enabled)
 
-    def to_ocr_config(self) -> "OcrConfig":
-        from .ocr import OcrConfig
-
+    def to_ocr_config(self) -> OcrConfig:
         # Key 回退链：OCR → 决策 → 复查（同一供应商一把 Key 的场景）
         key = self.ocr_api_key or self.decide_api_key or self.review_api_key
         model = self.ocr_model or "deepseek-chat"

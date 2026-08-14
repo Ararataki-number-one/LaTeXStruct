@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 from .parser import Block, Document
 from .scanner import (

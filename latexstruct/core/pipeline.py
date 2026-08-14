@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .ai import AIConfig, AI_KINDS, LLMClient, LLMError, decide_candidates
 from .parser import line_starts, offset_to_line, parse_latex
@@ -240,6 +240,12 @@ def run_pipeline(
     ):
         cfg = ai_config or AIConfig()
         rclient = review_client or LLMClient(cfg.review)
+        # 漏报抽查：AI 判定"无需处理"的候选一并交复查复核（可 missed-extra 反悔）
+        review_ambiguous = list(ambiguous) + [
+            {"candidate_id": n.get("candidate_id", ""), "line": n.get("line", 1),
+             "reason": "AI 判定无需处理，请复核是否漏包：" + str(n.get("reason", ""))[:80]}
+            for n in ai_notes
+        ]
         try:
             review_info = run_review(
                 rclient,
@@ -247,7 +253,7 @@ def run_pipeline(
                 ctx,
                 decisions,
                 lambda ds: _apply_decisions(doc, ds, ctx, ambiguous, candidates_by_id=candidates_by_id),
-                ambiguous,
+                review_ambiguous,
                 cfg,
                 mode,
             )
