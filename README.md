@@ -1,7 +1,26 @@
 # LaTeXStruct
 
-LaTeX 数学书结构化整理本地客户端（Windows 优先，免安装单 exe 分享）。
-完整设计文档见仓库根目录 `设计文档.md`（v0.3 定稿）。
+LaTeX 数学书结构化整理本地客户端（Windows 优先，安装版 + 主动更新）。
+仓库：<https://github.com/Ararataki-number-one/LaTeXStruct>
+完整设计文档见仓库根目录 `设计文档.md`（v0.3 定稿，位于开发工作区，随版本发布）。
+
+## 安装与更新
+
+- **安装版**：GitHub Releases 下载 `LaTeXStruct-setup-*.exe` 双击安装（每用户、无需管理员）；
+- **便携版**：Releases 中的 `LaTeXStruct.exe` 单文件免安装；
+- **主动更新**：启动时自动检查 Releases 最新版，有新版即显示更新横幅，一键下载安装器静默升级；
+  更新源默认 `Ararataki-number-one/LaTeXStruct`（可用环境变量 `LATEXSTRUCT_UPDATE_REPO` 覆盖）。
+- 依赖 DeepSeek（或任意 OpenAI 兼容端点）API Key 才启用 AI 模式；无 Key 自动降级规则模式。
+
+## 发布新版本（全自动）
+
+```powershell
+# 1) 改版本号 latexstruct/__init__.py 的 __version__
+# 2) 提交并打 tag 推送 → CI 自动：测试 → 构建 exe → 构建安装器 → 发布 Release
+git add -A; git commit -m "v0.2.1 ..."; git push
+git tag v0.2.1; git push origin v0.2.1
+# 3) 已安装客户端下次启动自动提示更新
+```
 
 ## 当前状态（M1 MVP 完成）
 
@@ -39,31 +58,36 @@ LaTeX 数学书结构化整理本地客户端（Windows 优先，免安装单 ex
 
 ```
 latexstruct/
+├── .github/workflows/build.yml   # CI：测试 → 构建 exe → 安装器 → Release（全自动）
 ├── latexstruct/
-│   ├── __init__.py
-│   ├── __main__.py         # 启动器
-│   ├── config.py           # 应用配置（三角色模型/复查开关）
-│   ├── store.py            # 项目存储（本地磁盘）
-│   ├── core/               # 核心流水线（纯标准库，可独立测试）
-│   │   ├── parser.py       # LaTeX 轻量结构解析器
-│   │   ├── scanner.py      # 规则扫描引擎
-│   │   ├── patch.py        # 补丁模型 + 内容不变校验
-│   │   ├── verify.py       # 环境/花括号配平
-│   │   ├── rules.py        # 规则模式决策（无 Key 降级）
-│   │   ├── ai.py           # AI 决策引擎（OpenAI 兼容客户端）
-│   │   ├── review.py       # AI 复查引擎
-│   │   ├── prompts.py      # 母提示词 v3 + Schema + 上下文组装
-│   │   ├── report.py       # 极简汇报
-│   │   └── pipeline.py     # 流水线编排
+│   ├── __init__.py               # 版本号 + 更新源
+│   ├── __main__.py               # 启动器（windowed 兼容修复）
+│   ├── updater.py                # 主动更新（GitHub Releases）
+│   ├── config.py                 # 应用配置（三角色模型/复查开关）
+│   ├── store.py                  # 项目存储（本地磁盘）
+│   ├── core/                     # 核心流水线（纯标准库，可独立测试）
+│   │   ├── parser.py             # LaTeX 轻量结构解析器
+│   │   ├── scanner.py            # 规则扫描引擎
+│   │   ├── patch.py              # 补丁模型 + 内容不变校验
+│   │   ├── verify.py             # 环境/花括号配平 + 已知问题报告
+│   │   ├── rules.py              # 规则模式决策（无 Key 降级）
+│   │   ├── ai.py                 # AI 决策引擎（OpenAI 兼容客户端）
+│   │   ├── review.py             # AI 复查引擎
+│   │   ├── prompts.py            # 母提示词 v3 + Schema + 上下文组装
+│   │   ├── template.py           # ElegantBook 模板转换
+│   │   ├── report.py             # 极简汇报
+│   │   └── pipeline.py           # 流水线编排
 │   └── server/
-│       ├── app.py          # FastAPI 本地服务
-│       └── static/         # 界面（无构建步骤）
-│           ├── index.html
-│           ├── app.js
-│           └── style.css
-├── tests/
-│   ├── samples/            # 合成测试语料（basic_book.tex / cn_fragment.tex）
-│   └── test_*.py           # 7 个测试套件
+│       ├── app.py                # FastAPI 本地服务（含更新接口）
+│       └── static/               # 界面（无构建步骤）
+├── packaging/
+│   ├── LaTeXStruct.spec          # PyInstaller 单文件 exe
+│   ├── installer.iss             # Inno Setup 安装器
+│   ├── generate_icon.py          # 图标生成（纯标准库）
+│   └── run.py                    # 打包入口
+├── scripts/build.ps1             # 本地构建脚本
+├── tests/                        # 9 个测试套件 + 合成/真实摘录语料
+├── tools/                        # 真实书稿摸底/抽查脚本
 ├── requirements.txt
 └── pyproject.toml
 ```
