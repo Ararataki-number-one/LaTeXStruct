@@ -1,0 +1,15 @@
+{
+  "name": "godsil-1.7",
+  "sample": "../../tests/samples/godsil_1_7.tex",
+  "pack": "bilingual",
+  "mode": "rule",
+  "labels": [
+    {"needle": "Lemma 1.7.1 If", "kind": "theorem-like", "env": "lemma"},
+    {"needle": "Theorem 1.7.2 A nonempty", "kind": "theorem-like", "env": "theorem"},
+    {"needle": "Lemma 1.7.3 Suppose", "kind": "theorem-like", "env": "lemma"},
+    {"needle": "Proof. Let \\(C\\) be a clique", "kind": "proof"},
+    {"needle": "Theorem 1.7.4 A graph", "kind": "theorem-like", "env": "theorem"},
+    {"needle": "Lemma 1.7.5 If the line graph", "kind": "theorem-like", "env": "lemma"},
+    {"needle": "Proof. Suppose that \\(L\\left", "kind": "proof"}
+  ]
+}

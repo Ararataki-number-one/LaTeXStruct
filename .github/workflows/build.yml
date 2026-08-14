@@ -23,11 +23,13 @@ jobs:
         shell: pwsh
         run: |
           $fail = 0
-          foreach ($t in @('test_parser','test_scanner','test_patch','test_pipeline','test_ai','test_template','test_store','test_server','test_updater','test_ocr','test_legalize','test_version','test_invariants','test_texparse','test_project','test_ruleset')) {
+          foreach ($t in @('test_parser','test_scanner','test_patch','test_pipeline','test_ai','test_template','test_store','test_server','test_updater','test_ocr','test_legalize','test_version','test_invariants','test_texparse','test_project','test_ruleset','test_benchmark')) {
             python "tests/$t.py"
             if ($LASTEXITCODE -ne 0) { $fail++ }
           }
           if ($fail -ne 0) { Write-Error "测试失败：$fail 个套件"; exit 1 }
+          python tools/benchmark.py | Out-Null
+          if ($LASTEXITCODE -ne 0) { Write-Error "Benchmark 未通过"; exit 1 }
           Write-Host "全部测试通过"
 
   build:

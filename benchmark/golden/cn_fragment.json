@@ -1,0 +1,17 @@
+{
+  "name": "cn-fragment",
+  "sample": "../../tests/samples/cn_fragment.tex",
+  "pack": "bilingual",
+  "mode": "rule",
+  "labels": [
+    {"needle": "定义 1.1.", "kind": "theorem-like", "env": "definition"},
+    {"needle": "定理 2.1", "kind": "theorem-like", "env": "theorem"},
+    {"needle": "证明：略", "kind": "proof"},
+    {"needle": "注 3.", "kind": "theorem-like", "env": "remark"},
+    {"needle": "例 5.", "kind": "theorem-like", "env": "example"},
+    {"needle": "命题 2.2", "kind": "theorem-like", "env": "proposition"},
+    {"needle": "推论 2.3", "kind": "theorem-like", "env": "corollary"},
+    {"needle": "引理 1.", "kind": "theorem-like", "env": "lemma"},
+    {"needle": "证明如下", "kind": "proof"}
+  ]
+}

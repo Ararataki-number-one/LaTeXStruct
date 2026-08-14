@@ -1,0 +1,13 @@
+{
+  "name": "basic-book",
+  "sample": "../../tests/samples/basic_book.tex",
+  "pack": "bilingual",
+  "mode": "rule",
+  "labels": [
+    {"needle": "Definition 1.1.1", "kind": "theorem-like", "env": "definition"},
+    {"needle": "Theorem 2.3.4", "kind": "theorem-like", "env": "theorem"},
+    {"needle": "Remark. This is", "kind": "theorem-like", "env": "remark"},
+    {"needle": "Proof. Fix a sequence", "kind": "proof"},
+    {"needle": "Real exercises", "kind": "exercise-section"}
+  ]
+}

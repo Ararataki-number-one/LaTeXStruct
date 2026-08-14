@@ -3,6 +3,10 @@
 本项目采用「tag 即发布」的自动化流程：`git tag vX.Y.Z && git push` 触发 CI
 （ruff → 全量测试 → PyInstaller → Inno Setup → 安装器冒烟测试 → 签名 → GitHub Release）。
 
+## v0.5.5（2025-08）
+- Benchmark 金标评测：四组金标集（合成/中文/真实切片/陷阱），
+  分类型 P/R/F1 + 内容指标 + Markdown 报告；CI 门禁；当前成绩全 100%、零误报。
+
 ## v0.5.4（2025-08）
 - Rule Pack 配置化：内置 bilingual/english/chinese/academic-paper 规则包 +
   用户自定义 JSON（标题关键词映射/证明起始与续段词/习题关键词/双语开关），

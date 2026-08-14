@@ -1,0 +1,7 @@
+{
+  "name": "negatives",
+  "sample": "../../tests/samples/cn_fragment_negatives.tex",
+  "pack": "bilingual",
+  "mode": "rule",
+  "labels": []
+}
