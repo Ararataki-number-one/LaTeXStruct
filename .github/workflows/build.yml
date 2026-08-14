@@ -34,12 +34,19 @@ jobs:
       - name: 安装 TinyTeX（Compile CI）
         shell: pwsh
         run: |
-          $dir = Join-Path $env:RUNNER_TEMP "tinytex"
-          Invoke-WebRequest https://yihui.org/tinytex/install-bin-windows.ps1 -OutFile tinytex.ps1
-          & .\tinytex.ps1 -Path $dir -AddToPath
-          $bin = Join-Path $dir "bin\win32"
+          $rel = Invoke-RestMethod -Headers @{ 'User-Agent' = 'latexstruct-ci' } `
+            https://api.github.com/repos/rstudio/tinytex-releases/releases/latest
+          $asset = $rel.assets | Where-Object { $_.name -like 'TinyTeX-1-v*.zip' } | Select-Object -First 1
+          if (-not $asset) { Write-Error "未找到 TinyTeX 资产"; exit 1 }
+          $zip = Join-Path $env:RUNNER_TEMP 'tinytex.zip'
+          Invoke-WebRequest $asset.browser_download_url -OutFile $zip
+          $root = Join-Path $env:RUNNER_TEMP 'tinytex'
+          Expand-Archive $zip -DestinationPath $root -Force
+          $tlmgr = Get-ChildItem -Path $root -Recurse -Filter tlmgr.bat | Select-Object -First 1
+          if (-not $tlmgr) { Write-Error "解压后未找到 tlmgr"; exit 1 }
+          $bin = $tlmgr.DirectoryName
           Add-Content $env:GITHUB_PATH $bin
-          & (Join-Path $bin "tlmgr.bat") install amsmath amssymb amsthm geometry tcolorbox graphics
+          & $tlmgr.FullName install amsmath amssymb amsthm geometry tcolorbox graphics
       - name: Benchmark（含前后编译对比）
         shell: pwsh
         run: |
