@@ -3,6 +3,7 @@ import { api } from "./api";
 import Projects from "./Projects";
 import Workspace from "./Workspace";
 import Settings from "./Settings";
+import Ocr from "./Ocr";
 
 export default function App() {
   const [tab, setTab] = useState("projects");
@@ -34,6 +35,7 @@ export default function App() {
         <nav>
           <button className={tab === "projects" ? "active" : ""} onClick={() => setTab("projects")}>项目</button>
           <button className={tab === "workspace" ? "active" : ""} onClick={() => setTab("workspace")}>工作台</button>
+          <button className={tab === "ocr" ? "active" : ""} onClick={() => setTab("ocr")}>OCR 转写</button>
           <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>AI 设置</button>
         </nav>
       </header>
@@ -57,6 +59,7 @@ export default function App() {
       <main className="content">
         {tab === "projects" && <Projects onOpen={openProject} />}
         {tab === "workspace" && <Workspace pid={currentPid} />}
+        {tab === "ocr" && <Ocr onImport={openProject} />}
         {tab === "settings" && <Settings />}
       </main>
     </div>

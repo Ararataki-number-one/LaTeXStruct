@@ -59,6 +59,10 @@ class FolderRequest(BaseModel):
     pack: str = ""
 
 
+class BatchRejectRequest(BaseModel):
+    cids: list = []
+
+
 class ConfigRequest(BaseModel):
     decide_base_url: Optional[str] = None
     decide_model: Optional[str] = None
@@ -340,6 +344,29 @@ def create_app() -> FastAPI:
         )
         return _run_project(pid, excludes)
 
+    @app.post("/api/projects/{pid}/decisions/reject-batch")
+    def reject_batch(pid: str, req: BatchRejectRequest):
+        """批量拒绝（Accept-All-Similar 的逆操作：拒绝同类其余修改）。"""
+        _ensure(pid)
+        meta = json.loads(Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8"))
+        excludes = set(meta.get("excludes", [])) | set(req.cids)
+        meta["excludes"] = sorted(excludes)
+        Path(get_store()._dir(pid), "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+        )
+        return _run_project(pid, excludes)
+
+    @app.post("/api/projects/{pid}/decisions/reset")
+    def reset_decisions(pid: str):
+        """撤销全部拒绝：清空 excludes 并重跑。"""
+        _ensure(pid)
+        meta = json.loads(Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8"))
+        meta["excludes"] = []
+        Path(get_store()._dir(pid), "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+        )
+        return _run_project(pid, set())
+
     @app.get("/api/projects/{pid}/diff")
     def diff(pid: str):
         _ensure(pid)
@@ -412,12 +439,52 @@ def create_app() -> FastAPI:
             f.write(await file.read())
         jid = uuid.uuid4().hex[:10]
         job = {"id": jid, "status": "running", "progress": 0.0, "total": 0, "done": 0,
-               "page": 0, "tex": "", "error": "", "usage": {}, "created": time.time()}
+               "page": 0, "tex": "", "error": "", "usage": {}, "created": time.time(),
+               "pages": {}, "dir": tmpdir, "errors": []}
         _ocr_jobs[jid] = job
+
+        def _transcribe_one(job, client, page_no: int, png_path: str):
+            """转写单页并更新 job.pages；返回是否成功。"""
+            from ..ocr import transcribe_page
+
+            page = job["pages"].setdefault(
+                page_no, {"status": "running", "tex": "", "error": "", "png": png_path, "low_conf": False}
+            )
+            try:
+                png = open(png_path, "rb").read()
+                tex = transcribe_page(client, png, page_no)
+                page["tex"] = tex
+                page["status"] = "done"
+                page["error"] = ""
+                page["low_conf"] = ("[?]" in tex) or ("% unsure" in tex) or (len(tex.strip()) < 40)
+                return True
+            except Exception as e:  # noqa: BLE001
+                page["status"] = "error"
+                page["error"] = str(e)
+                page["low_conf"] = True
+                return False
+
+        def _merge_job(job):
+            from ..ocr import merge_book
+
+            chunks = []
+            job["errors"] = []
+            for n in sorted(job["pages"]):
+                p = job["pages"][n]
+                if p["status"] == "done":
+                    chunks.append(p["tex"])
+                else:
+                    job["errors"].append({"page": n, "reason": p["error"] or p["status"]})
+            job["tex"] = merge_book(chunks)
+            job["status"] = "done"
+            job["progress"] = 1.0
+
+        job["_transcribe_one"] = _transcribe_one
+        job["_merge_job"] = _merge_job
 
         def worker():
             from ..core.ai import LLMClient, RoleConfig
-            from ..ocr import OcrConfig, transcribe_images, transcribe_pdf
+            from ..ocr import parse_page_range, render_pdf_pages
 
             cfg = get_config()
             role = RoleConfig(
@@ -426,28 +493,36 @@ def create_app() -> FastAPI:
                 api_key or cfg.ocr_api_key or cfg.decide_api_key,
             )
             client = LLMClient(role)
-
-            def progress(i, total, page):
-                job["done"] = i
-                job["total"] = total
-                job["page"] = page or 0
-                job["progress"] = round(i / total, 3) if total else 0.0
-
+            job["client"] = client
             try:
-                ocfg = OcrConfig(role=role, pages=pages, dpi=dpi)
                 if suffix == ".pdf":
-                    result = transcribe_pdf(target, client, ocfg, progress=progress)
+                    from ..ocr import _pdf_page_count
+
+                    total = _pdf_page_count(target)
+                    page_nos = parse_page_range(pages, total)
+                    rendered = render_pdf_pages(target, page_nos, dpi)
                 else:
-                    result = transcribe_images([target], client, ocfg)
-                job["tex"] = result.tex
-                job["errors"] = result.errors
-                job["usage"] = result.usage
-                job["status"] = "done"
+                    page_nos = [1]
+                    rendered = [(1, open(target, "rb").read())]
+                job["total"] = len(page_nos)
+                for i, (page_no, png) in enumerate(rendered):
+                    png_path = os.path.join(tmpdir, f"page-{page_no}.png")
+                    with open(png_path, "wb") as f:
+                        f.write(png)
+                    job["pages"].setdefault(
+                        page_no, {"status": "pending", "tex": "", "error": "", "png": png_path, "low_conf": False}
+                    )
+                    job["done"] = i
+                    job["page"] = page_no
+                    job["progress"] = round(i / max(1, len(page_nos)), 3)
+                    _transcribe_one(job, client, page_no, png_path)
+                    for k, v in (client.last_usage or {}).items():
+                        if isinstance(v, (int, float)):
+                            job["usage"][k] = job["usage"].get(k, 0) + v
+                _merge_job(job)
             except Exception as e:  # noqa: BLE001
                 job["status"] = "error"
                 job["error"] = str(e)
-            finally:
-                job["progress"] = 1.0
 
         threading.Thread(target=worker, daemon=True).start()
         return {"id": jid}
@@ -457,7 +532,43 @@ def create_app() -> FastAPI:
         job = _ocr_jobs.get(jid)
         if job is None:
             raise HTTPException(404, "任务不存在")
-        return {k: v for k, v in job.items() if k != "tex"}
+        pages_summary = {
+            str(n): {"status": p["status"], "low_conf": p["low_conf"], "error": p["error"][:120]}
+            for n, p in job.get("pages", {}).items()
+        }
+        return {k: v for k, v in job.items() if k not in ("tex", "pages", "client", "dir", "_transcribe_one", "_merge_job")} | {
+            "pages": pages_summary
+        }
+
+    @app.get("/api/ocr/jobs/{jid}/pages/{n}")
+    def ocr_page_png(jid: str, n: int):
+        job = _ocr_jobs.get(jid)
+        page = (job or {}).get("pages", {}).get(n)
+        if not page or not os.path.exists(page.get("png", "")):
+            raise HTTPException(404, "页面不存在")
+        return FileResponse(page["png"], media_type="image/png")
+
+    @app.get("/api/ocr/jobs/{jid}/pages/{n}/tex")
+    def ocr_page_tex(jid: str, n: int):
+        job = _ocr_jobs.get(jid)
+        page = (job or {}).get("pages", {}).get(n)
+        if not page:
+            raise HTTPException(404, "页面不存在")
+        return PlainTextResponse(page.get("tex", ""))
+
+    @app.post("/api/ocr/jobs/{jid}/pages/{n}/retry")
+    def ocr_page_retry(jid: str, n: int):
+        """单页重试：重新转写该页并重合并。"""
+        job = _ocr_jobs.get(jid)
+        page = (job or {}).get("pages", {}).get(n)
+        if not job or not page:
+            raise HTTPException(404, "页面不存在")
+        client = job.get("client")
+        if client is None:
+            raise HTTPException(400, "任务尚未初始化")
+        ok = job["_transcribe_one"](job, client, n, page["png"])
+        job["_merge_job"](job)
+        return {"ok": ok, "page": n}
 
     @app.get("/api/ocr/jobs/{jid}/result")
     def ocr_result(jid: str):
@@ -476,6 +587,12 @@ def create_app() -> FastAPI:
 
     react_dir = STATIC_DIR.parent / "static-react"
     if react_dir.exists():
+        from fastapi.responses import RedirectResponse
+
+        @app.get("/legacy", include_in_schema=False)
+        def _legacy_root():
+            return RedirectResponse("/legacy/")
+
         app.mount("/legacy", StaticFiles(directory=str(STATIC_DIR), html=True), name="legacy")
         app.mount("/", StaticFiles(directory=str(react_dir), html=True), name="react")
     else:

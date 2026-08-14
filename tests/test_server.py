@@ -131,6 +131,78 @@ def test_rulesets_and_folder_import():
         assert z.status_code == 200 and "zip" in z.headers["content-type"]
 
 
+def test_batch_reject_and_reset():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        r = c.post("/api/projects", json={"text": SAMPLE, "name": "demo3", "mode": "rule"})
+        pid = r.json()["id"]
+        c.post(f"/api/projects/{pid}/process")
+        items = c.get(f"/api/projects/{pid}/decisions").json()["items"]
+        applied = [i for i in items if i["status"] == "applied"]
+        assert len(applied) >= 2
+        # 批量拒绝前两个
+        cids = [i["candidate_id"] for i in applied[:2]]
+        c.post(f"/api/projects/{pid}/decisions/reject-batch", json={"cids": cids})
+        d = c.get(f"/api/projects/{pid}/decisions").json()
+        assert d["excludes"] == sorted(cids)
+        # 重置 → 全部恢复
+        c.post(f"/api/projects/{pid}/decisions/reset")
+        d2 = c.get(f"/api/projects/{pid}/decisions").json()
+        assert d2["excludes"] == []
+        assert len([i for i in d2["items"] if i["status"] == "applied"]) >= 2
+
+
+def test_ocr_job_error_path_without_key():
+    with WorkspaceTmp() as tmp:
+        srv._store = srv.ProjectStore(root=os.path.join(tmp, "projects"))
+        srv._config = None
+        c = TestClient(srv.create_app())
+        png = b"\x89PNG\r\n\x1a\n" + b"0" * 16
+        r = c.post("/api/ocr/jobs", files={"file": ("a.png", png, "image/png")})
+        assert r.status_code == 200
+        jid = r.json()["id"]
+        # 无 Key：逐页转写失败但任务优雅完成（errors 非空、页面状态 error，无网络调用）
+        for _ in range(50):
+            j = c.get(f"/api/ocr/jobs/{jid}").json()
+            if j["status"] != "running":
+                break
+            import time as _t
+
+            _t.sleep(0.2)
+        assert j["status"] == "done"
+        assert j["errors"], j
+        assert j["pages"] and list(j["pages"].values())[0]["status"] == "error"
+
+
+def test_ocr_per_page_endpoints():
+    with WorkspaceTmp() as tmp:
+        srv._store = srv.ProjectStore(root=os.path.join(tmp, "projects"))
+        srv._config = None
+        c = TestClient(srv.create_app())
+        png = b"\x89PNG\r\n\x1a\n" + b"0" * 16
+        r = c.post("/api/ocr/jobs", files={"file": ("a.png", png, "image/png")})
+        jid = r.json()["id"]
+        for _ in range(50):
+            j = c.get(f"/api/ocr/jobs/{jid}").json()
+            if j["status"] != "running":
+                break
+            import time as _t
+
+            _t.sleep(0.2)
+        # 页面 PNG / tex 端点
+        r = c.get(f"/api/ocr/jobs/{jid}/pages/1")
+        assert r.status_code == 200 and r.headers["content-type"].startswith("image/png")
+        r = c.get(f"/api/ocr/jobs/{jid}/pages/1/tex")
+        assert r.status_code == 200
+        r = c.get(f"/api/ocr/jobs/{jid}/pages/999/tex")
+        assert r.status_code == 404
+        # 单页重试：无 Key 时仍优雅失败（ok=False、200 返回）
+        r = c.post(f"/api/ocr/jobs/{jid}/pages/1/retry")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is False and body["page"] == 1
+
+
 def main():
     import traceback
 
