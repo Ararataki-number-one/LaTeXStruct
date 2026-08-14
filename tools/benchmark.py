@@ -14,6 +14,10 @@ from latexstruct.benchmark import BENCHMARK_DIR, render_markdown, run_all  # noq
 
 
 def main():
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
     args = sys.argv[1:]
     compile_check = "--compile" in args
     reports = run_all(compile_check=compile_check)
