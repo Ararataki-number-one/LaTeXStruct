@@ -1,0 +1,91 @@
+{
+ "name": "godsil_10",
+ "sample": "../../tests/samples/godsil_10.tex",
+ "pack": "bilingual",
+ "mode": "rule",
+ "labels": [
+  {
+   "needle": "Lemma 10.1.1 Let \\(X\\) be an \\(\\left( {n,k,a,c}\\right)\\) str",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 118
+  },
+  {
+   "needle": "Proof. Suppose that \\(X\\) is not connected and let \\({X}_{1}",
+   "kind": "proof",
+   "line": 140
+  },
+  {
+   "needle": "Lemma 10.2.1 A connected regular graph with exactly three di",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 312
+  },
+  {
+   "needle": "Proof. Suppose that \\(X\\) is connected and regular with eige",
+   "kind": "proof",
+   "line": 318
+  },
+  {
+   "needle": "Lemma 10.3.1 Let \\(X\\) be strongly regular with parameters \\",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 362
+  },
+  {
+   "needle": "Proof. The proof of this lemma is left as an exercise.",
+   "kind": "proof",
+   "line": 372
+  },
+  {
+   "needle": "Lemma 10.3.2 Let \\(X\\) be strongly regular with parameters \\",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 378
+  },
+  {
+   "needle": "Proof. If \\({m}_{\\theta } = {m}_{\\tau }\\) , then they both e",
+   "kind": "proof",
+   "line": 384
+  },
+  {
+   "needle": "Lemma 10.3.3 Let \\(X\\) be strongly regular with parameters \\",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 412
+  },
+  {
+   "needle": "Lemma 10.3.4 Let \\(X\\) be a strongly regular graph with \\(p\\",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 442
+  },
+  {
+   "needle": "Proof. By Lemma 10.3.1 we have",
+   "kind": "proof",
+   "line": 448
+  },
+  {
+   "needle": "Lemma 10.3.5 Let \\(X\\) be a primitive strongly regular graph",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 464
+  },
+  {
+   "needle": "Proof. Since \\({m}_{\\theta } = n - 1 - {m}_{\\tau }\\) , we se",
+   "kind": "proof",
+   "line": 474
+  },
+  {
+   "needle": "Corollary 10.3.6 Let \\(X\\) be a primitive strongly regular g",
+   "kind": "theorem-like",
+   "env": "corollary",
+   "line": 518
+  },
+  {
+   "needle": "Proof. By taking the complement if necessary, we may assume ",
+   "kind": "proof",
+   "line": 528
+  }
+ ]
+}

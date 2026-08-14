@@ -23,6 +23,7 @@ from .core.scanner import scan
 MEASURED_KINDS = ("theorem-like", "proof", "exercise-section")
 BENCHMARK_DIR = Path(__file__).resolve().parent.parent / "benchmark"
 GOLDEN_DIR = BENCHMARK_DIR / "golden"
+HOLDOUT_DIR = BENCHMARK_DIR / "golden-holdout"
 
 
 def locate_line(tex: str, needle: str) -> Optional[int]:
@@ -53,7 +54,8 @@ def evaluate_golden(golden_path, compile_check: bool = False) -> Dict:
     data = load_golden(golden_path)
     tex = data["_tex"]
     pack = data.get("pack") or "bilingual"
-    do_compile = bool(data.get("compile", False)) or compile_check
+    # 编译对比只对"声明可编译"的金标生效（最小依赖集），--compile 开启该机制
+    do_compile = bool(data.get("compile", False)) and compile_check
     doc = parse_latex(tex)
     res = scan(doc, pack=pack)
 
@@ -65,14 +67,19 @@ def evaluate_golden(golden_path, compile_check: bool = False) -> Dict:
         elif c.kind in ("proof", "exercise-section"):
             cand_keys.add((c.kind, c.span.start_line))
 
-    # 金标键集合
+    # 金标键集合（行号锚定优先；无行号时用 needle 定位）
     gold_keys = set()
     label_errors = []
     for lb in data.get("labels", []):
-        line = locate_line(tex, lb["needle"])
-        if line is None:
-            label_errors.append(f"needle 未定位: {lb['needle']}")
-            continue
+        if lb.get("line"):
+            line = int(lb["line"])
+            if lb.get("needle") and lb["needle"] not in tex.split("\n")[line - 1]:
+                label_errors.append(f"行号 {line} 与 needle 不符: {lb['needle'][:40]}")
+        else:
+            line = locate_line(tex, lb["needle"])
+            if line is None:
+                label_errors.append(f"needle 未定位: {lb['needle']}")
+                continue
         kind = lb["kind"]
         if kind == "theorem-like":
             gold_keys.add(("theorem-like:" + lb["env"], line))
@@ -125,12 +132,32 @@ def evaluate_golden(golden_path, compile_check: bool = False) -> Dict:
     }
 
 
-def run_all(compile_check: bool = False) -> List[Dict]:
-    return [evaluate_golden(p, compile_check=compile_check) for p in sorted(GOLDEN_DIR.glob("*.json"))]
+def run_all(compile_check: bool = False, include_holdout: bool = False) -> List[Dict]:
+    reports = [evaluate_golden(p, compile_check=compile_check) for p in sorted(GOLDEN_DIR.glob("*.json"))]
+    if include_holdout:
+        reports += [evaluate_golden(p, compile_check=compile_check)
+                    for p in sorted(HOLDOUT_DIR.glob("*.json"))]
+    return reports
 
 
 def render_markdown(reports: List[Dict]) -> str:
     L = ["# LaTeXStruct Benchmark", ""]
+    # 汇总指标（用户评审要求：不止一个 Accuracy）
+    total_labels = sum(r["labels_total"] for r in reports)
+    total_tp = sum(r["macro"]["tp"] for r in reports)
+    total_fp = sum(r["macro"]["fp"] for r in reports)
+    total_fn = sum(r["macro"]["fn"] for r in reports)
+    m = _metrics(total_tp, total_fp, total_fn)
+    zero_change = sum(1 for r in reports if r["content"]["content_invariant"]) / max(1, len(reports))
+    ref_keep = sum(1 for r in reports if r["content"]["invariants_ok"]) / max(1, len(reports))
+    compiled = [r for r in reports if r["content"].get("compile")]
+    compile_ok = sum(1 for r in compiled if r["content"]["compile"].get("ok")) / max(1, len(compiled)) if compiled else None
+    L.append(f"- 金标集数：{len(reports)} · 标签总数：{total_labels} · TP {total_tp} / FP {total_fp} / FN {total_fn}")
+    L.append(f"- 总 Precision {m['precision']:.2%} · Recall {m['recall']:.2%} · F1 {m['f1']:.2%}")
+    L.append(f"- 正文零改动率：{zero_change:.0%} · 引用保持率：{ref_keep:.0%} · "
+             f"编译成功率：{compile_ok:.0%}（{len(compiled)} 组参与编译）" if compile_ok is not None else
+             f"- 正文零改动率：{zero_change:.0%} · 引用保持率：{ref_keep:.0%} · 编译成功率：—")
+    L.append("")
     L.append("| 金标集 | 类型 | TP | FP | FN | Precision | Recall | F1 |")
     L.append("|---|---|---|---|---|---|---|---|")
     for r in reports:

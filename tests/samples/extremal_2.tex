@@ -1,0 +1,596 @@
+\documentclass[10pt]{article}
+\usepackage[verbose, a4paper, hmargin=2.5cm, vmargin=2.5cm]{geometry}
+
+\usepackage{fontspec}
+\usepackage{ctex}
+\usepackage{paratype}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{esint}
+\usepackage{stmaryrd}
+
+\usepackage[mathbf=sym]{unicode-math}
+\setmainfont{STIX Two Text}
+\setmathfont{STIX Two Math}
+
+\setsansfont{Arial}
+\setmonofont{Courier New}
+
+\usepackage{makecell}
+\usepackage{wasysym}
+\usepackage{pifont}
+\usepackage[export]{adjustbox}
+\usepackage{graphicx}
+\usepackage{mdframed}
+\usepackage{booktabs,array,multirow}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan,}
+\urlstyle{same}
+\usepackage[most]{tcolorbox}
+\definecolor{mygray}{RGB}{240,240,240}
+\tcbset{
+  colback=mygray,
+  boxrule=0pt,
+}
+\graphicspath{ {./images/} }
+\newcommand{\HRule}{\begin{center}\rule{0.9\linewidth}{0.2mm}\end{center}}
+\newcommand{\customfootnote}[1]{
+  \let\thefootnote\relax\footnotetext{#1}
+}
+\newcommand{\lt}{\mathrel{<}}
+\newcommand{\gt}{\mathrel{>}}
+\newcommand*\circled[1]{\tikz[baseline=(char.base)]{\node[shape=circle,draw,inner sep=1.5pt] (char) {\small #1};}}
+\setcounter{MaxMatrixCols}{256}
+\begin{document}
+\section*{2. Advanced Counting}
+
+\begin{tcolorbox}\relax
+\section*{2. 高级计数}
+\end{tcolorbox}
+
+When properly applied, the (double) counting argument can lead to more subtle results than those discussed in the previous chapter.
+
+\begin{tcolorbox}\relax
+当正确应用时，(双重)计数论证可以得出比上一章讨论的结果更微妙的结果。
+\end{tcolorbox}
+
+\section*{2.1 Bounds on intersection size}
+
+\begin{tcolorbox}\relax
+\section*{2.1 交集大小的界}
+\end{tcolorbox}
+
+How many \(r\) -element subsets of an \(n\) -element set can we choose under the restriction that no two of them share more than \(k\) elements? Intuitively, the smaller \(k\) is, the fewer sets we can choose. This intuition can be made precise as follows. (We address the optimality of this bound in Exercise 2.5.)
+
+\begin{tcolorbox}\relax
+在一个 \(n\) 元集里，若限制其中任意两个 \(r\) 元子集的交集元素个数不超过 \(k\) ，那么我们能选出多少个这样的子集呢？直观地说， \(k\) 越小，能选出的子集就越少。这种直观感受可以精确表述如下。(我们在练习2.5中讨论这个界的最优性。)
+\end{tcolorbox}
+
+Lemma 2.1 (Corrádi 1969). Let \({A}_{1},\ldots ,{A}_{N}\) be r-element sets and \(X\) be their union. If \(\left| {{A}_{i} \cap  {A}_{j}}\right|  \leq  k\) for all \(i \neq  j\) , then
+
+\begin{tcolorbox}\relax
+引理2.1(科拉迪，1969年)。设 \({A}_{1},\ldots ,{A}_{N}\) 是r元集， \(X\) 是它们的并集。若对所有 \(i \neq  j\) 都有 \(\left| {{A}_{i} \cap  {A}_{j}}\right|  \leq  k\) ，那么
+\end{tcolorbox}
+
+\[
+\left| X\right|  \geq  \frac{{r}^{2}N}{r + \left( {N - 1}\right) k} \tag{2.1}
+\]
+
+Proof. Just count. By (1.11), we have for each \(i = 1,\ldots ,N\) ,
+
+\begin{tcolorbox}\relax
+证明。直接计数。由(1.11)，对每个 \(i = 1,\ldots ,N\) ，我们有
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{x \in  {A}_{i}}}d\left( x\right)  = \mathop{\sum }\limits_{{j = 1}}^{N}\left| {{A}_{i} \cap  {A}_{j}}\right|  = \left| {A}_{i}\right|  + \mathop{\sum }\limits_{{j \neq  i}}\left| {{A}_{i} \cap  {A}_{j}}\right|  \leq  r + \left( {N - 1}\right) k. \tag{2.2}
+\]
+
+Summing over all sets \({A}_{i}\) and using Jensen’s inequality (1.15) we get
+
+\begin{tcolorbox}\relax
+对所有 \({A}_{i}\) 求和并使用詹森不等式(1.15)，我们得到
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = 1}}^{N}\mathop{\sum }\limits_{{x \in  {A}_{i}}}d\left( x\right)  = \mathop{\sum }\limits_{{x \in  X}}d{\left( x\right) }^{2} \geq  \frac{1}{n}{\left( \mathop{\sum }\limits_{{x \in  X}}d\left( x\right) \right) }^{2} = \frac{1}{n}{\left( \mathop{\sum }\limits_{{i = 1}}^{n}\left| {A}_{i}\right| \right) }^{2} = \frac{{\left( Nr\right) }^{2}}{n}.
+\]
+
+Using (2.2) we obtain \({\left( Nr\right) }^{2} \leq  N \cdot  \left| X\right| \left( {r + \left( {N - 1}\right) k}\right)\) , which gives the desired lower bound on \(\left| X\right|\) .
+
+\begin{tcolorbox}\relax
+利用(2.2)我们得到 \({\left( Nr\right) }^{2} \leq  N \cdot  \left| X\right| \left( {r + \left( {N - 1}\right) k}\right)\) ，这就给出了 \(\left| X\right|\) 所需的下界。
+\end{tcolorbox}
+
+Given a family of sets \({A}_{1},\ldots ,{A}_{N}\) , their average size is
+
+\begin{tcolorbox}\relax
+给定一族集合 \({A}_{1},\ldots ,{A}_{N}\) ，它们的平均大小是
+\end{tcolorbox}
+
+\[
+\frac{1}{N}\mathop{\sum }\limits_{{i = 1}}^{N}\left| {A}_{i}\right|
+\]
+
+The following lemma says that, if the average size of sets is large, then some two of them must share many elements.
+
+\begin{tcolorbox}\relax
+下面的引理表明，如果集合的平均大小很大，那么其中必有两个集合的交集元素很多。
+\end{tcolorbox}
+
+Lemma 2.2. Let \(X\) be a set of \(n\) elements, and let \({A}_{1},\ldots ,{A}_{N}\) be subsets of \(X\) of average size at least \(n/w\) . If \(N \geq  2{w}^{2}\) , then there exist \(i \neq  j\) such that
+
+\begin{tcolorbox}\relax
+引理2.2。设 \(X\) 是一个 \(n\) 元集， \({A}_{1},\ldots ,{A}_{N}\) 是 \(X\) 的子集，平均大小至少为 \(n/w\) 。若 \(N \geq  2{w}^{2}\) ，则存在 \(i \neq  j\) 使得
+\end{tcolorbox}
+
+\[
+\left| {{A}_{i} \cap  {A}_{j}}\right|  \geq  \frac{n}{2{w}^{2}}. \tag{2.3}
+\]
+
+Proof. Again, let us just count. On the one hand, using Jensen's inequality (1.15) and equality (1.10), we obtain that
+
+\begin{tcolorbox}\relax
+证明。同样，我们直接计数。一方面，使用詹森不等式(1.15)和等式(1.10)，我们得到
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{x \in  X}}d{\left( x\right) }^{2} \geq  \frac{1}{n}{\left( \mathop{\sum }\limits_{{x \in  X}}d\left( x\right) \right) }^{2} = \frac{1}{n}{\left( \mathop{\sum }\limits_{{i = 1}}^{N}\left| {A}_{i}\right| \right) }^{2} \geq  \frac{n{N}^{2}}{{w}^{2}}.
+\]
+
+On the other hand, assuming that (2.3) is false and using (1.11) and (1.12) we would obtain
+
+\begin{tcolorbox}\relax
+另一方面，假设(2.3)不成立，利用(1.11)和(1.12)我们会得到
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{x \in  X}}d{\left( x\right) }^{2} = \mathop{\sum }\limits_{{i = 1}}^{N}\mathop{\sum }\limits_{{j = 1}}^{N}\left| {{A}_{i} \cap  {A}_{j}}\right|  = \mathop{\sum }\limits_{i}\left| {A}_{i}\right|  + \mathop{\sum }\limits_{{i \neq  j}}\left| {{A}_{i} \cap  {A}_{j}}\right|
+\]
+
+\[
+< {nN} + \frac{{nN}\left( {N - 1}\right) }{2{w}^{2}} = \frac{n{N}^{2}}{2{w}^{2}}\left( {1 + \frac{2{w}^{2}}{N} - \frac{1}{N}}\right)  \leq  \frac{n{N}^{2}}{{w}^{2}},
+\]
+
+a contradiction.
+
+\begin{tcolorbox}\relax
+矛盾。
+\end{tcolorbox}
+
+Lemma 2.2 is a very special (but still illustrative) case of the following more general result.
+
+\begin{tcolorbox}\relax
+引理2.2是下面这个更一般结果的一个非常特殊(但仍具说明性)的情形。
+\end{tcolorbox}
+
+Lemma 2.3 (Erdős 1964b). Let \(X\) be a set of \(n\) elements \({x}_{1},\ldots ,{x}_{n}\) , and let \({A}_{1},\ldots ,{A}_{N}\) be \(N\) subsets of \(X\) of average size at least \(n/w\) . If \(N \geq  {2k}{w}^{k}\) , then there exist \({A}_{{i}_{1}},\ldots ,{A}_{{i}_{k}}\) such that \(\left| {{A}_{{i}_{1}} \cap  \cdots  \cap  {A}_{{i}_{k}}}\right|  \geq  n/\left( {2{w}^{k}}\right)\) .
+
+\begin{tcolorbox}\relax
+引理2.3(埃尔德什，1964年b)。设 \(X\) 是一个 \(n\) 元集 \({x}_{1},\ldots ,{x}_{n}\) ， \({A}_{1},\ldots ,{A}_{N}\) 是 \(X\) 的 \(N\) 个子集，平均大小至少为 \(n/w\) 。若 \(N \geq  {2k}{w}^{k}\) ，则存在 \({A}_{{i}_{1}},\ldots ,{A}_{{i}_{k}}\) 使得 \(\left| {{A}_{{i}_{1}} \cap  \cdots  \cap  {A}_{{i}_{k}}}\right|  \geq  n/\left( {2{w}^{k}}\right)\) 。
+\end{tcolorbox}
+
+The proof is a generalization of the one above and we leave it as an exercise (see Exercises 2.8 and 2.9).
+
+\begin{tcolorbox}\relax
+证明是上述证明的推广，我们留作练习(见练习2.8和2.9)。
+\end{tcolorbox}
+
+\section*{2.2 Graphs with no 4-cycles}
+
+\begin{tcolorbox}\relax
+\section*{2.2 不含4 - 圈的图}
+\end{tcolorbox}
+
+Let \(H\) be a fixed graph. A graph is \(H\) -free if it does not contain \(H\) as a subgraph. (Recall that a subgraph is obtained by deleting edges and vertices.) A typical question in graph theory is the following one:
+
+\begin{tcolorbox}\relax
+设 \(H\) 为一个固定的图。如果一个图不包含 \(H\) 作为子图，那么它就是不含 \(H\) 的图。(回想一下，子图是通过删除边和顶点得到的。)图论中的一个典型问题如下:
+\end{tcolorbox}
+
+How many edges can a H-free graph with \(n\) vertices have?
+
+\begin{tcolorbox}\relax
+一个具有 \(n\) 个顶点的无H图最多能有多少条边？
+\end{tcolorbox}
+
+That is, one is interested in the maximum number \(\operatorname{ex}\left( {n,H}\right)\) of edges in a \(H\) -free graph on \(n\) vertices. The graph \(H\) itself is then called a "forbidden subgraph."
+
+\begin{tcolorbox}\relax
+也就是说，人们感兴趣的是具有 \(n\) 个顶点的不含 \(H\) 的图中边的最大数量 \(\operatorname{ex}\left( {n,H}\right)\) 。图 \(H\) 本身就被称为“禁止子图”。
+\end{tcolorbox}
+
+Let us consider the case when forbidden subgraphs are cycles. Recall that a cycle \({C}_{k}\) of length \(k\) (or a \(k\) -cycle) is a sequence \({v}_{0},{v}_{1},\ldots ,{v}_{k}\) such that \({v}_{k} = {v}_{0}\) and each subsequent pair \({v}_{i}\) and \({v}_{i + 1}\) is joined by an edge.
+
+\begin{tcolorbox}\relax
+让我们考虑禁止子图是圈的情况。回想一下，长度为 \(k\) 的圈 \({C}_{k}\) (或 \(k\) - 圈)是一个序列 \({v}_{0},{v}_{1},\ldots ,{v}_{k}\) ，使得 \({v}_{k} = {v}_{0}\) ，并且后续的每一对 \({v}_{i}\) 和 \({v}_{i + 1}\) 都由一条边相连。
+\end{tcolorbox}
+
+If \(H = {C}_{3}\) , a triangle, then \(\operatorname{ex}\left( {n,{C}_{3}}\right)  \geq  {n}^{2}/4\) for every even \(n \geq  2\) : a complete bipartite \(r \times  r\) graph \({K}_{r,r}\) with \(r = n/2\) has no triangles but has \({r}^{2} = {n}^{2}/4\) edges. We will show later that this is already optimal: any \(n\) -vertex graph with more than \({n}^{2}/4\) edges must contain a triangle (see Theorem 4.7). Interestingly, \(\operatorname{ex}\left( {n,{C}_{4}}\right)\) is much smaller, smaller than \({n}^{3/2}\) .
+
+\begin{tcolorbox}\relax
+如果 \(H = {C}_{3}\) 是一个三角形，那么对于每个偶数 \(n \geq  2\) ， \(\operatorname{ex}\left( {n,{C}_{3}}\right)  \geq  {n}^{2}/4\) :一个具有 \(r = n/2\) 的完全二分图 \(r \times  r\)  \({K}_{r,r}\) 没有三角形，但有 \({r}^{2} = {n}^{2}/4\) 条边。我们稍后将证明这已经是最优的:任何具有超过 \({n}^{2}/4\) 条边的 \(n\) - 顶点图必定包含一个三角形(见定理4.7)。有趣的是， \(\operatorname{ex}\left( {n,{C}_{4}}\right)\) 要小得多，比 \({n}^{3/2}\) 小。
+\end{tcolorbox}
+
+Theorem 2.4 (Reiman 1958). If \(G = \left( {V,E}\right)\) on \(n\) vertices has no 4-cycles, then
+
+\begin{tcolorbox}\relax
+定理2.4(赖曼，1958年)。如果在 \(n\) 个顶点上的 \(G = \left( {V,E}\right)\) 没有4 - 圈，那么
+\end{tcolorbox}
+
+\[
+\left| E\right|  \leq  \frac{n}{4}\left( {1 + \sqrt{{4n} - 3}}\right) .
+\]
+
+Proof. Let \(G = \left( {V,E}\right)\) be a \({C}_{4}\) -free graph with vertex-set \(V = \{ 1,\ldots ,n\}\) , and \({d}_{1},{d}_{2},\ldots ,{d}_{n}\) be the degrees of its vertices. We now count in two ways the number of elements in the following set \(S\) . The set \(S\) consists of all (ordered) pairs \(\left( {u,\{ v,w\} }\right)\) such that \(v \neq  w\) and \(u\) is adjacent to both \(v\) and \(w\) in \(G\) . That is, we count all occurrences of "cherries"
+
+\begin{tcolorbox}\relax
+证明。设 \(G = \left( {V,E}\right)\) 是一个顶点集为 \(V = \{ 1,\ldots ,n\}\) 的不含 \({C}_{4}\) 的图， \({d}_{1},{d}_{2},\ldots ,{d}_{n}\) 是其顶点的度数。我们现在用两种方法计算以下集合 \(S\) 中的元素数量。集合 \(S\) 由所有(有序)对 \(\left( {u,\{ v,w\} }\right)\) 组成，使得 \(v \neq  w\) 且在 \(G\) 中 \(u\) 与 \(v\) 和 \(w\) 都相邻。也就是说，我们计算 \(G = \left( {V,E}\right)\) 中所有“樱桃”的出现次数。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.2\textwidth]{images/44_670_1135_198_129_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+in \(G\) . For each vertex \(u\) , we have \(\left( \begin{matrix} {d}_{u} \\  2 \end{matrix}\right)\) possibilities to choose a 2-element subset of its \({d}_{u}\) neighbors. Thus, summing over \(u\) , we find \(\left| S\right|  = \mathop{\sum }\limits_{{u = 1}}^{n}\left( \begin{matrix} {d}_{u} \\  2 \end{matrix}\right)\) . On the other hand, the \({C}_{4}\) -freeness of \(G\) implies that no pair of vertices \(v \neq  w\) can have more than one common neighbor. Thus, summing over all pairs we obtain that \(\left| S\right|  \leq  \left( \begin{array}{l} n \\  2 \end{array}\right)\) . Altogether this gives
+
+\begin{tcolorbox}\relax
+对于每个顶点 \(u\) ，我们有 \(\left( \begin{matrix} {d}_{u} \\  2 \end{matrix}\right)\) 种方法从其 \({d}_{u}\) 个邻居中选择一个2 - 元素子集。因此，对 \(u\) 求和，我们得到 \(\left| S\right|  = \mathop{\sum }\limits_{{u = 1}}^{n}\left( \begin{matrix} {d}_{u} \\  2 \end{matrix}\right)\) 。另一方面， \(G\) 的不含 \({C}_{4}\) 性质意味着没有一对顶点 \(v \neq  w\) 能有多个共同邻居。因此，对所有对求和，我们得到 \(\left| S\right|  \leq  \left( \begin{array}{l} n \\  2 \end{array}\right)\) 。总共得到
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = 1}}^{n}\left( \begin{matrix} {d}_{i} \\  2 \end{matrix}\right)  \leq  \left( \begin{array}{l} n \\  2 \end{array}\right)
+\]
+
+or
+
+\[
+\mathop{\sum }\limits_{{i = 1}}^{n}{d}_{i}^{2} \leq  n\left( {n - 1}\right)  + \mathop{\sum }\limits_{{i = 1}}^{n}{d}_{i} \tag{2.4}
+\]
+
+Now, we use the Cauchy-Schwarz inequality
+
+\begin{tcolorbox}\relax
+现在，我们使用柯西 - 施瓦茨不等式
+\end{tcolorbox}
+
+\[
+{\left( \mathop{\sum }\limits_{{i = 1}}^{n}{x}_{i}{y}_{i}\right) }^{2} \leq  \left( {\mathop{\sum }\limits_{{i = 1}}^{n}{x}_{i}^{2}}\right) \left( {\mathop{\sum }\limits_{{i = 1}}^{n}{y}_{i}^{2}}\right)
+\]
+
+with \({x}_{i} = {d}_{i}\) and \({y}_{i} = 1\) , and obtain
+
+\begin{tcolorbox}\relax
+令 \({x}_{i} = {d}_{i}\) 和 \({y}_{i} = 1\) ，并得到
+\end{tcolorbox}
+
+\[
+{\left( \mathop{\sum }\limits_{{i = 1}}^{n}{d}_{i}\right) }^{2} \leq  n\mathop{\sum }\limits_{{i = 1}}^{n}{d}_{i}^{2}
+\]
+
+and hence by (2.4)
+
+\begin{tcolorbox}\relax
+因此，由(2.4)式可得
+\end{tcolorbox}
+
+\[
+{\left( \mathop{\sum }\limits_{{i = 1}}^{n}{d}_{i}\right) }^{2} \leq  {n}^{2}\left( {n - 1}\right)  + n\mathop{\sum }\limits_{{i = 1}}^{n}{d}_{i}.
+\]
+
+Euler’s theorem gives \(\mathop{\sum }\limits_{{i = 1}}^{n}{d}_{i} = 2\left| E\right|\) . Invoking this fact, we obtain
+
+\begin{tcolorbox}\relax
+欧拉定理给出 \(\mathop{\sum }\limits_{{i = 1}}^{n}{d}_{i} = 2\left| E\right|\) 。利用这个事实，我们得到
+\end{tcolorbox}
+
+\[
+4{\left| E\right| }^{2} \leq  {n}^{2}\left( {n - 1}\right)  + {2n}\left| E\right|
+\]
+
+or
+
+\[
+{\left| E\right| }^{2} - \frac{n}{2}\left| E\right|  - \frac{{n}^{2}\left( {n - 1}\right) }{4} \leq  0.
+\]
+
+Solving the corresponding quadratic equation yields the desired upper bound on \(\left| E\right|\) .
+
+\begin{tcolorbox}\relax
+解相应的二次方程可得到关于 \(\left| E\right|\) 的所需上界。
+\end{tcolorbox}
+
+Example 2.5 (Construction of dense \({C}_{4}\) -free graphs). The following construction shows that the bound of Theorem 2.4 is optimal up to a constant factor.
+
+\begin{tcolorbox}\relax
+例2.5(稠密无 \({C}_{4}\) 图的构造)。以下构造表明定理2.4的界在常数因子范围内是最优的。
+\end{tcolorbox}
+
+Let \(p\) be a prime number and take \(V = \left( {{\mathbb{Z}}_{p}\smallsetminus \{ 0\} }\right)  \times  {\mathbb{Z}}_{p}\) , that is, vertices are pairs \(\left( {a,b}\right)\) of elements of a finite field with \(a \neq  0\) . We define a graph \(G\) on these vertices, where \(\left( {a,b}\right)\) and \(\left( {c,d}\right)\) are joined by an edge iff \({ac} = b + d\) (all operations modulo \(p\) ). For each vertex \(\left( {a,b}\right)\) , there are \(p - 1\) solutions of the equation \({ax} = b + y\) : pick any \(x \in  {\mathbb{Z}}_{p} \smallsetminus  \{ 0\}\) , and \(y\) is uniquely determined. Thus, \(G\) is a \(\left( {p - 1}\right)\) -regular graph on \(n = p\left( {p - 1}\right)\) vertices (some edges are loops). The number of edges in it is \(n\left( {p - 1}\right) /2 = \Omega \left( {n}^{3/2}\right)\) .
+
+\begin{tcolorbox}\relax
+设 \(p\) 为素数，取 \(V = \left( {{\mathbb{Z}}_{p}\smallsetminus \{ 0\} }\right)  \times  {\mathbb{Z}}_{p}\) ，即顶点为有限域中元素的对 \(\left( {a,b}\right)\) ，其中 \(a \neq  0\) 。我们在这些顶点上定义一个图 \(G\) ，其中 \(\left( {a,b}\right)\) 和 \(\left( {c,d}\right)\) 通过一条边相连当且仅当 \({ac} = b + d\) (所有运算均模 \(p\) )。对于每个顶点 \(\left( {a,b}\right)\) ，方程 \({ax} = b + y\) 有 \(p - 1\) 个解:任选 \(x \in  {\mathbb{Z}}_{p} \smallsetminus  \{ 0\}\) ，则 \(y\) 唯一确定。因此， \(G\) 是一个在 \(n = p\left( {p - 1}\right)\) 个顶点上的 \(\left( {p - 1}\right)\) 正则图(有些边是自环)。它的边数为 \(n\left( {p - 1}\right) /2 = \Omega \left( {n}^{3/2}\right)\) 。
+\end{tcolorbox}
+
+To verify that the graph is \({C}_{4}\) -free, take any two its vertices \(\left( {a,b}\right)\) and \(\left( {c,d}\right)\) . The unique solution \(\left( {x,y}\right)\) of the system
+
+\begin{tcolorbox}\relax
+为验证该图是无 \({C}_{4}\) 的，取它的任意两个顶点 \(\left( {a,b}\right)\) 和 \(\left( {c,d}\right)\) 。该方程组的唯一解 \(\left( {x,y}\right)\)
+\end{tcolorbox}
+
+\[
+\left\{  \begin{array}{lll} {ax} = b + y & \text{ is given by } & x = \left( {b - d}\right) {\left( a - c\right) }^{-1} \\  {cx} = d + y & \text{ is given by } & {2y} = x\left( {a + c}\right)  - b - d \end{array}\right.
+\]
+
+which is only defined when \(a \neq  c\) , and has \(x \neq  0\) only when \(b \neq  d\) . Hence, if \(a \neq  c\) and \(b \neq  d\) , then the vertices \(\left( {a,b}\right)\) and \(\left( {c,d}\right)\) have precisely one common neighbor, and have no common neighbors at all, if \(a = c\) or \(b = d\) .
+
+\begin{tcolorbox}\relax
+仅在 \(a \neq  c\) 时定义，且仅在 \(b \neq  d\) 时有 \(x \neq  0\) 。因此，如果 \(a \neq  c\) 且 \(b \neq  d\) ，则顶点 \(\left( {a,b}\right)\) 和 \(\left( {c,d}\right)\) 恰好有一个共同邻居，而如果 \(a = c\) 或 \(b = d\) ，则根本没有共同邻居。
+\end{tcolorbox}
+
+\section*{2.3 Graphs with no induced 4-cycles}
+
+\begin{tcolorbox}\relax
+\section*{2.3 不含导出4-圈的图}
+\end{tcolorbox}
+
+Recall that an induced subgraph is obtained by deleting vertices together with all the edges incident to them (see Fig. 2.1).
+
+\begin{tcolorbox}\relax
+回想一下，导出子图是通过删除顶点以及与这些顶点相关联的所有边得到的(见图2.1)。
+\end{tcolorbox}
+
+Theorem 2.4 says that a graph cannot have many edges, unless it contains \({C}_{4}\) as a (not necessarily induced) subgraph. But what about graphs that do not contain \({C}_{4}\) as an induced subgraph? Let us call such graphs weakly \({C}_{4}\) -free.
+
+\begin{tcolorbox}\relax
+定理2.4表明，一个图不可能有很多边，除非它包含 \({C}_{4}\) 作为(不一定是导出的)子图。但是对于不包含 \({C}_{4}\) 作为导出子图的图呢？我们称这样的图为弱 \({C}_{4}\) -自由图。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.7\textwidth]{images/46_353_175_841_170_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Fig. 2.1 Graph \(G\) contains several copies of \({C}_{4}\) as a subgraph, but none of them as an induced subgraph.
+
+\begin{tcolorbox}\relax
+图2.1 图 \(G\) 包含几个 \({C}_{4}\) 的副本作为子图，但没有一个是导出子图。
+\end{tcolorbox}
+
+Note that such graphs can already have many more edges. In particular, the complete graph \({K}_{n}\) is weakly \({C}_{4}\) -free: in any 4-cycle there are edges in \({K}_{n}\) between non-neighboring vertices of \({C}_{4}\) . Interestingly, any(!) dense enough weakly \({C}_{4}\) -free graph must contain large complete subgraphs.
+
+\begin{tcolorbox}\relax
+注意，这样的图已经可以有更多的边。特别地，完全图 \({K}_{n}\) 是弱 \({C}_{4}\) -自由的:在任何4-圈中， \({K}_{n}\) 中都有 \({C}_{4}\) 非相邻顶点之间的边。有趣的是，任何(！)足够稠密的弱 \({C}_{4}\) -自由图都必须包含大的完全子图。
+\end{tcolorbox}
+
+Let \(\omega \left( G\right)\) denote the maximum number of vertices in a complete subgraph of \(G\) . In particular, \(\omega \left( G\right)  \leq  3\) for every \({C}_{4}\) -free graph. In contrast, for weakly \({C}_{4}\) -free graphs we have the following result, due to Gyárfás, Hubenko and Solymosi (2002).
+
+\begin{tcolorbox}\relax
+设 \(\omega \left( G\right)\) 表示 \(G\) 的完全子图中的最大顶点数。特别地，对于每个 \({C}_{4}\) -自由图， \(\omega \left( G\right)  \leq  3\) 。相比之下，对于弱 \({C}_{4}\) -自由图，我们有以下由Gyárfás、Hubenko和Solymosi(2002)给出的结果。
+\end{tcolorbox}
+
+Theorem 2.6. If an \(n\) -vertex graph \(G = \left( {V,E}\right)\) is weakly \({C}_{4}\) -free, then
+
+\begin{tcolorbox}\relax
+定理2.6。如果一个 \(n\) -顶点图 \(G = \left( {V,E}\right)\) 是弱 \({C}_{4}\) -自由的，那么
+\end{tcolorbox}
+
+\[
+\omega \left( G\right)  \geq  {0.4}\frac{{\left| E\right| }^{2}}{{n}^{3}}.
+\]
+
+The proof of Theorem 2.6 is based on a simple fact, relating the average degree with the minimum degree, as well as on two facts concerning independent sets in weakly \({C}_{4}\) -free graphs.
+
+\begin{tcolorbox}\relax
+定理2.6的证明基于一个将平均度与最小度联系起来的简单事实，以及关于弱 \({C}_{4}\) -自由图中独立集的两个事实。
+\end{tcolorbox}
+
+For a graph \(G = \left( {V,E}\right)\) , let \(e\left( G\right)  = \left| E\right|\) denote the number of its edges, \({d}_{\min }\left( G\right)\) the smallest degree of its vertices, and \({d}_{\text{ ave }}\left( G\right)  = {2e}\left( G\right) /\left| V\right|\) the average degree. Note that, by Euler’s theorem, \({d}_{\text{ ave }}\left( G\right)\) is indeed the sum of all degrees divided by the total number of vertices.
+
+\begin{tcolorbox}\relax
+对于一个图 \(G = \left( {V,E}\right)\) ，设 \(e\left( G\right)  = \left| E\right|\) 表示它的边数， \({d}_{\min }\left( G\right)\) 表示它顶点的最小度， \({d}_{\text{ ave }}\left( G\right)  = {2e}\left( G\right) /\left| V\right|\) 表示平均度。注意，根据欧拉定理， \({d}_{\text{ ave }}\left( G\right)\) 确实是所有度的总和除以顶点总数。
+\end{tcolorbox}
+
+Proposition 2.7. Every graph \(G\) has an induced subgraph \(H\) with
+
+\begin{tcolorbox}\relax
+命题2.7。每个图 \(G\) 都有一个导出子图 \(H\) ，其
+\end{tcolorbox}
+
+\[
+{d}_{\text{ ave }}\left( H\right)  \geq  {d}_{\text{ ave }}\left( G\right) \;\text{ and }\;{d}_{\min }\left( H\right)  \geq  \frac{1}{2}{d}_{\text{ ave }}\left( G\right) .
+\]
+
+Proof. We remove vertices one-by-one. To avoid the danger of ending up with the empty graph, let us remove a vertex \(v \in  V\) if this does not decrease the average degree \({d}_{\text{ ave }}\left( G\right)\) . Thus, we should have
+
+\begin{tcolorbox}\relax
+证明。我们逐个删除顶点。为了避免最终得到空图的风险，如果删除一个顶点 \(v \in  V\) 不会降低平均度 \({d}_{\text{ ave }}\left( G\right)\) ，我们就删除它。因此，我们应该有
+\end{tcolorbox}
+
+\[
+{d}_{\text{ ave }}\left( {G - v}\right)  = \frac{2\left( {e\left( G\right)  - d\left( v\right) }\right) }{\left| V\right|  - 1} \geq  {d}_{\text{ ave }}\left( G\right)  = \frac{{2e}\left( G\right) }{\left| V\right| }
+\]
+
+which is equivalent to \(d\left( v\right)  \leq  {d}_{\text{ ave }}\left( G\right) /2\) . So, when we stick, each vertex in the resulting graph \(H\) has minimum degree at least \({d}_{\text{ ave }}\left( G\right) /2\) .
+
+\begin{tcolorbox}\relax
+这等价于 \(d\left( v\right)  \leq  {d}_{\text{ ave }}\left( G\right) /2\) 。所以，当我们停止时，所得图 \(H\) 中的每个顶点的最小度至少为 \({d}_{\text{ ave }}\left( G\right) /2\) 。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.8\textwidth]{images/47_323_178_885_376_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Fig. 2.2 (a) If \(u\) and \(v\) were non-adjacent, we would have an induced 4-cycle \(\left\{  {{x}_{i},{x}_{j},u,v}\right\}\) . (b) If \(y\) and \(z\) were non-adjacent, then \(\left( {S \smallsetminus  \left\{  {x}_{i}\right\}  }\right)  \cup  \{ y,z\}\) would be a larger independent set.
+
+\begin{tcolorbox}\relax
+图2.2 (a)如果 \(u\) 和 \(v\) 不相邻，我们就会有一个导出4-圈 \(\left\{  {{x}_{i},{x}_{j},u,v}\right\}\) 。(b)如果 \(y\) 和 \(z\) 不相邻，那么 \(\left( {S \smallsetminus  \left\{  {x}_{i}\right\}  }\right)  \cup  \{ y,z\}\) 将是一个更大的独立集。
+\end{tcolorbox}
+
+Recall that a set of vertices in a graph is independent if no two of its vertices are adjacent. Let \(\alpha \left( G\right)\) denote the largest number of vertices in such a set.
+
+\begin{tcolorbox}\relax
+回想一下，图中一组顶点如果其中任意两个顶点都不相邻，那么这组顶点就是独立的。设 \(\alpha \left( G\right)\) 表示这样一组顶点中的最大顶点数。
+\end{tcolorbox}
+
+Proposition 2.8. For every weakly \({C}_{4}\) -free graph \(G\) on \(n\) vertices, we have
+
+\begin{tcolorbox}\relax
+命题2.8。对于每个具有 \(n\) 个顶点的弱 \({C}_{4}\) -自由图 \(G\) ，我们有
+\end{tcolorbox}
+
+\[
+\omega \left( G\right)  \geq  \frac{n}{\left( \begin{matrix} \alpha \left( G\right)  + 1 \\  2 \end{matrix}\right) }.
+\]
+
+Proof. Fix an independent set \(S = \left\{  {{x}_{1},\ldots ,{x}_{\alpha }}\right\}\) with \(\alpha  = \alpha \left( G\right)\) . Let \({A}_{i}\) be the set of neighbors of \({x}_{i}\) in \(G\) , and \({B}_{i}\) the set of vertices whose only neighbor in \(S\) is \({x}_{i}\) . Consider the family \(\mathcal{F}\) consisting of all \(\alpha\) sets \(\left\{  {x}_{i}\right\}   \cup  {B}_{i}\) and \(\left( \begin{array}{l} \alpha \\  2 \end{array}\right)\) sets \({A}_{i} \cap  {A}_{j}\) . We claim that:
+
+\begin{tcolorbox}\relax
+证明。固定一个独立集 \(S = \left\{  {{x}_{1},\ldots ,{x}_{\alpha }}\right\}\) ，满足 \(\alpha  = \alpha \left( G\right)\) 。设 \({A}_{i}\) 是 \({x}_{i}\) 在 \(G\) 中的邻点集， \({B}_{i}\) 是在 \(S\) 中唯一邻点为 \({x}_{i}\) 的顶点集。考虑由所有 \(\alpha\) 集 \(\left\{  {x}_{i}\right\}   \cup  {B}_{i}\) 和 \(\left( \begin{array}{l} \alpha \\  2 \end{array}\right)\) 集 \({A}_{i} \cap  {A}_{j}\) 组成的族 \(\mathcal{F}\) 。我们断言:
+\end{tcolorbox}
+
+(i) each member of \(\mathcal{F}\) forms a clique in \(G\) , and
+
+\begin{tcolorbox}\relax
+(i) \(\mathcal{F}\) 的每个成员在 \(G\) 中构成一个团，并且
+\end{tcolorbox}
+
+(ii) the members of \(\mathcal{F}\) cover all vertices of \(G\) .
+
+\begin{tcolorbox}\relax
+(ii) \(\mathcal{F}\) 的成员覆盖了 \(G\) 的所有顶点。
+\end{tcolorbox}
+
+The sets \({A}_{i} \cap  {A}_{j}\) are cliques because \(G\) is weakly \({C}_{4}\) -free: Any two vertices \(u \neq  v \in  {A}_{i} \cap  {A}_{j}\) must be joined by an edge, for otherwise \(\left\{  {{x}_{i},{x}_{j},u,v}\right\}\) would form a copy of \({C}_{4}\) as an induced subgraph. The sets \(\left\{  {x}_{i}\right\}   \cup  {B}_{i}\) are cliques because \(S\) is a maximal independent set: Otherwise we could replace \({x}_{i}\) in \(S\) by any two vertices from \({B}_{i}\) . By the same reason ( \(S\) being a maximal independent set), the members of \(\mathcal{F}\) must cover all vertices of \(G\) : If some vertex \(v\) were not covered, then \(S \cup  \{ v\}\) would be a larger independent set.
+
+\begin{tcolorbox}\relax
+集 \({A}_{i} \cap  {A}_{j}\) 是团，因为 \(G\) 是弱 \({C}_{4}\) -自由的:任意两个顶点 \(u \neq  v \in  {A}_{i} \cap  {A}_{j}\) 必定由一条边相连，否则 \(\left\{  {{x}_{i},{x}_{j},u,v}\right\}\) 会作为一个导出子图形成 \({C}_{4}\) 的一个副本。集 \(\left\{  {x}_{i}\right\}   \cup  {B}_{i}\) 是团，因为 \(S\) 是一个极大独立集:否则我们可以用 \({B}_{i}\) 中的任意两个顶点替换 \(S\) 中的 \({x}_{i}\) 。出于同样的原因( \(S\) 是一个极大独立集)， \(\mathcal{F}\) 的成员必定覆盖 \(G\) 的所有顶点:如果某个顶点 \(v\) 未被覆盖，那么 \(S \cup  \{ v\}\) 会是一个更大的独立集。
+\end{tcolorbox}
+
+Claims (i) and (ii), together with the averaging principle, imply that
+
+\begin{tcolorbox}\relax
+断言(i)和(ii)，连同平均原理，意味着
+\end{tcolorbox}
+
+\[
+\omega \left( G\right)  \geq  \frac{n}{\left| \mathcal{F}\right| } = \frac{n}{\alpha  + \left( \begin{array}{l} \alpha \\  2 \end{array}\right) } = \frac{n}{\left( \begin{matrix} \alpha  + 1 \\  2 \end{matrix}\right) }.
+\]
+
+Proposition 2.9. Let \(G\) be a weakly \({C}_{4}\) -free graph on \(n\) vertices, and \(d = \; {d}_{\min }\left( G\right)\) . Then, for every \(t \leq  \alpha \left( G\right)\) ,
+
+\begin{tcolorbox}\relax
+命题2.9。设 \(G\) 是一个有 \(n\) 个顶点的弱 \({C}_{4}\) -自由图，且 \(d = \; {d}_{\min }\left( G\right)\) 。那么，对于每个 \(t \leq  \alpha \left( G\right)\) ，
+\end{tcolorbox}
+
+\[
+\omega \left( G\right)  \geq  \frac{d \cdot  t - n}{\left( \begin{array}{l} t \\  2 \end{array}\right) }.
+\]
+
+Proof. Take an independent set \(S = \left\{  {{x}_{1},\ldots ,{x}_{t}}\right\}\) of size \(t\) and let \({A}_{i}\) be the set of neighbors of \({x}_{i}\) in \(G\) . Let \(m\) be the maximum of \(\left| {{A}_{i} \cap  {A}_{j}}\right|\) over all \(1 \leq  i < j \leq  t\) . We already know that each \({A}_{i} \cap  {A}_{j}\) must form a clique; hence, \(\omega \left( G\right)  \geq  m\) . On the other hand, by the Bonferroni inequality (Exercise 1.37) we have that
+
+\begin{tcolorbox}\relax
+证明。取一个大小为 \(t\) 的独立集 \(S = \left\{  {{x}_{1},\ldots ,{x}_{t}}\right\}\) ，设 \({A}_{i}\) 是 \({x}_{i}\) 在 \(G\) 中的邻点集。设 \(m\) 是所有 \(1 \leq  i < j \leq  t\) 上 \(\left| {{A}_{i} \cap  {A}_{j}}\right|\) 的最大值。我们已经知道每个 \({A}_{i} \cap  {A}_{j}\) 必定构成一个团；因此， \(\omega \left( G\right)  \geq  m\) 。另一方面，根据邦费罗尼不等式(练习1.37)，我们有
+\end{tcolorbox}
+
+\[
+n \geq  \left| {\mathop{\bigcup }\limits_{{i = 1}}^{t}{A}_{i}}\right|  \geq  {td} - \mathop{\sum }\limits_{{i < j}}\left| {{A}_{i} \cap  {A}_{j}}\right|  \geq  {td} - \left( \begin{array}{l} t \\  2 \end{array}\right) m
+\]
+
+from which the desired lower bound on \(\omega \left( G\right)\) follows.
+
+\begin{tcolorbox}\relax
+由此得出 \(\omega \left( G\right)\) 所需的下界。
+\end{tcolorbox}
+
+Now we are able to prove Theorem 2.6.
+
+\begin{tcolorbox}\relax
+现在我们能够证明定理2.6。
+\end{tcolorbox}
+
+Proof of Theorem 2.6. Let \(a\) be the average degree of \(G\) ; hence, \(a = 2\left| E\right| /n\) . By Proposition 2.7, we know that \(G\) has an induced subgraph of average degree \(\geq  a\) and minimum degree \(\geq  a/2\) . So, we may assume w.l.o.g. that the graph \(G\) itself has these two properties. We now consider the two possible cases.
+
+\begin{tcolorbox}\relax
+定理2.6的证明。设 \(a\) 是 \(G\) 的平均度；因此， \(a = 2\left| E\right| /n\) 。根据命题2.7，我们知道 \(G\) 有一个平均度为 \(\geq  a\) 且最小度为 \(\geq  a/2\) 的导出子图。所以，不失一般性，我们可以假设图 \(G\) 本身具有这两个性质。我们现在考虑两种可能的情况。
+\end{tcolorbox}
+
+If \(\alpha \left( G\right)  \geq  {4n}/a\) , then we apply Proposition 2.9 with* \(t = {4n}/a\) and obtain
+
+\begin{tcolorbox}\relax
+如果 \(\alpha \left( G\right)  \geq  {4n}/a\) ，那么我们对 \(t = {4n}/a\) 应用命题2.9并得到
+\end{tcolorbox}
+
+\[
+\omega \left( G\right)  \geq  \frac{\left( {a/2}\right)  \cdot  t - n}{\left( \begin{array}{l} t \\  2 \end{array}\right) } = \frac{n}{\left( \begin{matrix} {4n}/a \\  2 \end{matrix}\right) }.
+\]
+
+If \(\alpha \left( G\right)  \leq  {4n}/a\) , then we apply Proposition 2.8 and obtain
+
+\begin{tcolorbox}\relax
+如果 \(\alpha \left( G\right)  \leq  {4n}/a\) ，那么我们应用命题2.8并得到
+\end{tcolorbox}
+
+\[
+\omega \left( G\right)  \geq  \frac{n}{\left( \begin{matrix} \alpha \left( G\right)  + 1 \\  2 \end{matrix}\right) } \geq  \frac{n}{\left( \begin{matrix} {4n}/a + 1 \\  2 \end{matrix}\right) }.
+\]
+
+In both cases we obtain
+
+\begin{tcolorbox}\relax
+在这两种情况下我们都得到
+\end{tcolorbox}
+
+\[
+\omega \left( G\right)  \geq  \frac{n}{\left( \begin{matrix} {4n}/a + 1 \\  2 \end{matrix}\right) } = \frac{{a}^{2}}{{8n} + {2a}} \geq  {0.1}\frac{{a}^{2}}{n}.
+\]
+
+\section*{2.4 Zarankiewicz's problem}
+
+\begin{tcolorbox}\relax
+\section*{2.4 扎兰凯维奇问题}
+\end{tcolorbox}
+
+At most how many \(1\mathrm{\;s}\) can an \(n \times  {n0} - 1\) matrix contain if it has no \(a \times  b\) submatrix whose entries are all 1s? Zarankiewicz (1951) raised the problem of the estimation of this number for \(a = b = 3\) and \(n = 4,5,6\) and the general problem became known as Zarankiewicz's problem.
+
+\begin{tcolorbox}\relax
+如果一个 \(n \times  {n0} - 1\) 矩阵不包含所有元素都是1的 \(a \times  b\) 子矩阵，那么它最多能包含多少个 \(1\mathrm{\;s}\) ？扎兰凯维奇(1951年)提出了针对 \(a = b = 3\) 和 \(n = 4,5,6\) 估计这个数字的问题，这个一般问题后来被称为扎兰凯维奇问题。
+\end{tcolorbox}
+
+It is worth reformulating this problem in terms of bipartite graphs. A bipartite graph with parts of size \(n\) is a triple \(G = \left( {{V}_{1},{V}_{2},E}\right)\) , where \({V}_{1}\) and \({V}_{2}\) are disjoint \(n\) -element sets of vertices (or nodes), and \(E \subseteq  {V}_{1} \times  {V}_{2}\) is the set of edges. We say that the graph contains an \(a \times  b\) clique if there exist an \(a\) -element subset \(A \subseteq  {V}_{1}\) and a \(b\) -element subset \(B \subseteq  {V}_{2}\) such that \(A \times  B \subseteq  E\) . (Note that an \(a \times  b\) clique is not the same as a \(b \times  a\) clique, unless \(a = b\) .)
+
+\begin{tcolorbox}\relax
+值得用二分图来重新表述这个问题。一个两部分大小均为 \(n\) 的二分图是一个三元组 \(G = \left( {{V}_{1},{V}_{2},E}\right)\) ，其中 \({V}_{1}\) 和 \({V}_{2}\) 是不相交的 \(n\) 个顶点(或节点)的集合，并且 \(E \subseteq  {V}_{1} \times  {V}_{2}\) 是边的集合。如果存在一个 \(a\) 元子集 \(A \subseteq  {V}_{1}\) 和一个 \(b\) 元子集 \(B \subseteq  {V}_{2}\) 使得 \(A \times  B \subseteq  E\) ，我们就说这个图包含一个 \(a \times  b\) 团。(注意，一个 \(a \times  b\) 团与一个 \(b \times  a\) 团不同，除非 \(a = b\) 。)
+\end{tcolorbox}
+
+\HRule
+
+* For simplicity, we ignore ceilings and floors.
+
+\begin{tcolorbox}\relax
+* 为了简单起见，我们忽略向上取整和向下取整。
+\end{tcolorbox}
+
+\HRule
+
+Let \({k}_{a}\left( n\right)\) be the minimal integer \(k\) such that any bipartite graph with parts of size \(n\) and more than \(k\) edges contains at least one \(a \times  a\) clique. Using the probabilistic argument, it can be shown (see Exercise 20.6) that
+
+\begin{tcolorbox}\relax
+设 \({k}_{a}\left( n\right)\) 为最小整数 \(k\) ，使得任何具有大小为 \(n\) 的两部分且边数超过 \(k\) 的二分图至少包含一个 \(a \times  a\) 团。使用概率论证可以证明(见练习20.6)
+\end{tcolorbox}
+
+\[
+{k}_{a}\left( n\right)  \geq  c \cdot  {n}^{2 - 2/a}
+\]
+
+where \(c > 0\) is a constant, depending only on \(a\) . It turns out that this bound is not very far from the best possible, and this can be proved using the double counting argument. The result is essentially due to Kővári, Sós and Turán (1954). For \(a = 2\) , a lower bound \({k}_{2}\left( n\right)  \leq  3{n}^{3/2}\) was proved by Erdős (1938). He used this to prove that, if a set \(A \subseteq  \left\lbrack  n\right\rbrack\) is such that the products of any two of its different members are different, then \(\left| A\right|  \leq  \pi \left( n\right)  + O\left( {n}^{3/4}\right)\) , where \(\pi \left( n\right)\) is the number of primes not exceeding \(n\) .
+
+\begin{tcolorbox}\relax
+其中 \(c > 0\) 是一个仅依赖于 \(a\) 的常数。事实证明，这个界限与最佳可能值相差不远，并且可以使用双重计数论证来证明。该结果本质上归功于科瓦里、绍什和图兰(1954年)。对于 \(a = 2\) ，厄尔多斯(1938年)证明了一个下界 \({k}_{2}\left( n\right)  \leq  3{n}^{3/2}\) 。他用这个来证明，如果一个集合 \(A \subseteq  \left\lbrack  n\right\rbrack\) 满足其任意两个不同成员的乘积都不同，那么 \(\left| A\right|  \leq  \pi \left( n\right)  + O\left( {n}^{3/4}\right)\) ，其中 \(\pi \left( n\right)\) 是不超过 \(n\) 的素数的数量。
+\end{tcolorbox}
+\end{document}

@@ -1,0 +1,621 @@
+\documentclass[10pt]{article}
+\usepackage[verbose, a4paper, hmargin=2.5cm, vmargin=2.5cm]{geometry}
+
+\usepackage{fontspec}
+\usepackage{ctex}
+\usepackage{paratype}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{esint}
+\usepackage{stmaryrd}
+
+\usepackage[mathbf=sym]{unicode-math}
+\setmainfont{STIX Two Text}
+\setmathfont{STIX Two Math}
+
+\setsansfont{Arial}
+\setmonofont{Courier New}
+
+\usepackage{makecell}
+\usepackage{wasysym}
+\usepackage{pifont}
+\usepackage[export]{adjustbox}
+\usepackage{graphicx}
+\usepackage{mdframed}
+\usepackage{booktabs,array,multirow}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan,}
+\urlstyle{same}
+\usepackage[most]{tcolorbox}
+\definecolor{mygray}{RGB}{240,240,240}
+\tcbset{
+  colback=mygray,
+  boxrule=0pt,
+}
+\graphicspath{ {./images/} }
+\newcommand{\HRule}{\begin{center}\rule{0.9\linewidth}{0.2mm}\end{center}}
+\newcommand{\customfootnote}[1]{
+  \let\thefootnote\relax\footnotetext{#1}
+}
+\newcommand{\lt}{\mathrel{<}}
+\newcommand{\gt}{\mathrel{>}}
+\newcommand*\circled[1]{\tikz[baseline=(char.base)]{\node[shape=circle,draw,inner sep=1.5pt] (char) {\small #1};}}
+\setcounter{MaxMatrixCols}{256}
+\begin{document}
+\section*{3. Probabilistic Counting}
+
+\begin{tcolorbox}\relax
+\section*{3. 概率计数}
+\end{tcolorbox}
+
+Roughly speaking, the probabilistic method works as follows: trying to prove that an object with certain properties exists, one defines an appropriate probability space of objects and shows that a randomly chosen element of this space has the desired properties with a positive probability. A prototype of this method is the following averaging (counting) argument:
+
+\begin{tcolorbox}\relax
+大致来说，概率方法的工作方式如下:试图证明存在具有某些性质的对象时，先定义一个合适的对象概率空间，然后证明从这个空间中随机选取的元素具有所需性质的概率为正。该方法的一个原型是下面的平均(计数)论证:
+\end{tcolorbox}
+
+\[
+\text{ If }{x}_{1},\ldots ,{x}_{n} \in  \mathbb{R}\text{ and }
+\]
+
+\[
+\frac{{x}_{1} + \cdots  + {x}_{n}}{n} \geq  a \tag{3.1}
+\]
+
+then for some \(j\)
+
+\begin{tcolorbox}\relax
+那么对于某个 \(j\)
+\end{tcolorbox}
+
+\[
+{x}_{j} \geq  a\text{ . } \tag{3.2}
+\]
+
+The usefulness of the method lies in the fact that the average (3.1) is often easier to compute than to exhibit a specific \({x}_{j}\) for which (3.2) can be proved to hold.
+
+\begin{tcolorbox}\relax
+该方法的有用之处在于，平均式(3.1)通常比找出一个能证明式(3.2)成立的特定 \({x}_{j}\) 更容易计算。
+\end{tcolorbox}
+
+The goal of this chapter is to demonstrate the probabilistic method on simple examples (more impressive applications will be given in Part IV devoted to this method). In its simplest applications, probabilistic argument can be replaced by a straightforward counting, "counting with weights." However, as soon as one gets away from the simplest examples, the heart and soul of the method is the probabilistic point of view rather than the act of counting.
+
+\begin{tcolorbox}\relax
+本章的目标是通过简单例子展示概率方法(在专门讨论此方法的第四部分将给出更令人印象深刻的应用)。在其最简单的应用中，概率论证可以用直接计数，即“加权计数”来代替。然而，一旦脱离最简单的例子，该方法的核心和精髓就是概率观点而非计数行为。
+\end{tcolorbox}
+
+\section*{3.1 Probabilistic preliminaries}
+
+\begin{tcolorbox}\relax
+\section*{3.1 概率预备知识}
+\end{tcolorbox}
+
+We briefly recall some basic definitions of (discrete) probability.
+
+\begin{tcolorbox}\relax
+我们简要回顾一下(离散)概率的一些基本定义。
+\end{tcolorbox}
+
+A finite probability space consists of a finite set \(\Omega\) and a function (called also probability distribution) \(\Pr  : \Omega  \rightarrow  \left\lbrack  {0,1}\right\rbrack\) , such that \(\mathop{\sum }\limits_{{x \in  \Omega }}\Pr \left\lbrack  x\right\rbrack   = 1\) . A probability space is a representation of a random experiment, where we choose a member of \(\Omega\) at random and \(\Pr \left\lbrack  x\right\rbrack\) is the probability that \(x\) is chosen. Subsets \(A \subseteq  \Omega\) are called events. The probability of an event is defined by \(\Pr \left\lbrack  A\right\rbrack   \mathrel{\text{ := }} \mathop{\sum }\limits_{{x \in  A}}\Pr \left\lbrack  x\right\rbrack\) , i.e., the probability that a member of \(A\) is chosen.
+
+\begin{tcolorbox}\relax
+一个有限概率空间由一个有限集 \(\Omega\) 和一个函数(也称为概率分布) \(\Pr  : \Omega  \rightarrow  \left\lbrack  {0,1}\right\rbrack\) 组成，使得 \(\mathop{\sum }\limits_{{x \in  \Omega }}\Pr \left\lbrack  x\right\rbrack   = 1\) 。概率空间是一个随机实验的表示，其中我们随机选择 \(\Omega\) 的一个成员， \(\Pr \left\lbrack  x\right\rbrack\) 是选择 \(x\) 的概率。子集 \(A \subseteq  \Omega\) 称为事件。事件的概率由 \(\Pr \left\lbrack  A\right\rbrack   \mathrel{\text{ := }} \mathop{\sum }\limits_{{x \in  A}}\Pr \left\lbrack  x\right\rbrack\) 定义，即选择 \(A\) 的一个成员的概率。
+\end{tcolorbox}
+
+We call \(\Omega\) the domain (or a sample space) and we call \(\Pr\) a probability distribution. The most common probability distribution is the uniform distribution, which is defined as \(\Pr \left\lbrack  x\right\rbrack   = 1/\left| \Omega \right|\) for each \(x \in  \Omega\) ; the corresponding sample space is then called symmetric.
+
+\begin{tcolorbox}\relax
+我们称 \(\Omega\) 为定义域(或样本空间)，称 \(\Pr\) 为概率分布。最常见的概率分布是均匀分布，对于每个 \(x \in  \Omega\) ，其定义为 \(\Pr \left\lbrack  x\right\rbrack   = 1/\left| \Omega \right|\) ；相应的样本空间则称为对称的。
+\end{tcolorbox}
+
+Some elementary properties follow directly from the definitions. In particular, for any two events* \(A\) and \(B\) we have that
+
+\begin{tcolorbox}\relax
+一些基本性质直接由定义得出。特别地，对于任意两个事件* \(A\) 和 \(B\) ，我们有
+\end{tcolorbox}
+
+1. \(\Pr \left\lbrack  \Omega \right\rbrack   = 1,\Pr \left\lbrack  \varnothing \right\rbrack   = 0\) and \(\Pr \left\lbrack  A\right\rbrack   \geq  0\) for all \(A \subseteq  \Omega\) ;
+
+\begin{tcolorbox}\relax
+1. 对于所有 \(A \subseteq  \Omega\) ， \(\Pr \left\lbrack  \Omega \right\rbrack   = 1,\Pr \left\lbrack  \varnothing \right\rbrack   = 0\) 和 \(\Pr \left\lbrack  A\right\rbrack   \geq  0\) ；
+\end{tcolorbox}
+
+2. \(\Pr \left\lbrack  {A \cup  B}\right\rbrack   = \Pr \left\lbrack  A\right\rbrack   + \Pr \left\lbrack  B\right\rbrack   - \Pr \left\lbrack  {A \cap  B}\right\rbrack   \leq  \Pr \left\lbrack  A\right\rbrack   + \Pr \left\lbrack  B\right\rbrack\) ;
+
+3. \(\Pr \left\lbrack  {A \cup  B}\right\rbrack   = \Pr \left\lbrack  A\right\rbrack   + \Pr \left\lbrack  B\right\rbrack\) if \(A\) and \(B\) are disjoint;
+
+\begin{tcolorbox}\relax
+3. 如果 \(A\) 和 \(B\) 不相交，则 \(\Pr \left\lbrack  {A \cup  B}\right\rbrack   = \Pr \left\lbrack  A\right\rbrack   + \Pr \left\lbrack  B\right\rbrack\) ；
+\end{tcolorbox}
+
+4. \(\Pr \left\lbrack  \bar{A}\right\rbrack   = 1 - \Pr \left\lbrack  A\right\rbrack\) ;
+
+5. \(\Pr \left\lbrack  {A \smallsetminus  B}\right\rbrack   = \Pr \left\lbrack  A\right\rbrack   - \Pr \left\lbrack  {A \cap  B}\right\rbrack\) ;
+
+6. \(\Pr \left\lbrack  {A \cap  B}\right\rbrack   \geq  \Pr \left\lbrack  A\right\rbrack   - \Pr \left\lbrack  \bar{B}\right\rbrack\) ;
+
+7. If \({B}_{1},\ldots ,{B}_{m}\) is a partition of \(\Omega\) then \(\Pr \left\lbrack  A\right\rbrack   = \mathop{\sum }\limits_{{i = 1}}^{m}\Pr \left\lbrack  {A \cap  {B}_{i}}\right\rbrack\) .
+
+\begin{tcolorbox}\relax
+7. 如果 \({B}_{1},\ldots ,{B}_{m}\) 是 \(\Omega\) 的一个划分，则 \(\Pr \left\lbrack  A\right\rbrack   = \mathop{\sum }\limits_{{i = 1}}^{m}\Pr \left\lbrack  {A \cap  {B}_{i}}\right\rbrack\) 。
+\end{tcolorbox}
+
+For two events \(A\) and \(B\) , the conditional probability of \(A\) given \(B\) , denoted \(\Pr \left\lbrack  {A \mid  B}\right\rbrack\) , is the probability that one would assign to \(A\) if one knew that \(B\) occurs. Formally,
+
+\begin{tcolorbox}\relax
+对于两个事件 \(A\) 和 \(B\) ，给定 \(B\) 时 \(A\) 的条件概率，记为 \(\Pr \left\lbrack  {A \mid  B}\right\rbrack\) ，是在知道 \(B\) 发生的情况下分配给 \(A\) 的概率。形式上，
+\end{tcolorbox}
+
+\[
+\Pr \left\lbrack  {A \mid  B}\right\rbrack   \mathrel{\text{ := }} \frac{\Pr \left\lbrack  {A \cap  B}\right\rbrack  }{\Pr \left\lbrack  B\right\rbrack  },
+\]
+
+when \(\Pr \left\lbrack  B\right\rbrack   \neq  0\) . For example, if we are choosing a uniform integer from \(\{ 1,\ldots ,6\} ,A\) is the event that the number is 2 and \(B\) is the event that the number is even, then \(\Pr \left\lbrack  {A \mid  B}\right\rbrack   = 1/3\) , whereas \(\Pr \left\lbrack  {B \mid  A}\right\rbrack   = 1\) .
+
+\begin{tcolorbox}\relax
+当 \(\Pr \left\lbrack  B\right\rbrack   \neq  0\) 时。例如，如果我们从 \(\{ 1,\ldots ,6\} ,A\) 中选择一个均匀整数， \(\{ 1,\ldots ,6\} ,A\) 是数字为2的事件， \(B\) 是数字为偶数的事件，那么 \(\Pr \left\lbrack  {A \mid  B}\right\rbrack   = 1/3\) ，而 \(\Pr \left\lbrack  {B \mid  A}\right\rbrack   = 1\) 。
+\end{tcolorbox}
+
+Two events \(A\) and \(B\) are independent if \(\Pr \left\lbrack  {A \cap  B}\right\rbrack   = \Pr \left\lbrack  A\right\rbrack   \cdot  \Pr \left\lbrack  B\right\rbrack\) . If \(B \neq  \varnothing\) , this is equivalent to \(\Pr \left\lbrack  {A \mid  B}\right\rbrack   = \Pr \left\lbrack  A\right\rbrack\) . It is very important to note that the "independence" has nothing to do with the "disjointness" of the events: if, say, \(0 < \Pr \left\lbrack  A\right\rbrack   < 1\) , then the events \(A\) and \(\bar{A}\) are dependent!
+
+\begin{tcolorbox}\relax
+两个事件 \(A\) 和 \(B\) ，若满足 \(\Pr \left\lbrack  {A \cap  B}\right\rbrack   = \Pr \left\lbrack  A\right\rbrack   \cdot  \Pr \left\lbrack  B\right\rbrack\) ，则它们相互独立。若 \(B \neq  \varnothing\) ，这等价于 \(\Pr \left\lbrack  {A \mid  B}\right\rbrack   = \Pr \left\lbrack  A\right\rbrack\) 。需要特别注意的是，“独立性”与事件的“互斥性”毫无关系:比如说，若 \(0 < \Pr \left\lbrack  A\right\rbrack   < 1\) ，那么事件 \(A\) 和 \(\bar{A}\) 就是相关的！
+\end{tcolorbox}
+
+Let \(\Gamma\) be finite set, and \(0 \leq  p \leq  1\) . A random subset \(\mathbf{S}\) of \(\Gamma\) is obtained by flipping a coin, with probability \(p\) of success, for each element of \(\Gamma\) to determine whether the element is to be included in \(\mathbf{S}\) ; the distribution of \(\mathbf{S}\) is the probability distribution on \(\Omega  = {2}^{\Gamma }\) given by \(\Pr \left\lbrack  S\right\rbrack   = {p}^{\left| S\right| }{\left( 1 - p\right) }^{\left| \Gamma \right|  - \left| S\right| }\) for \(S \subseteq  \Gamma\) . We will mainly consider the case when \(\mathbf{S}\) is uniformly distributed, that is, when \(p = 1/2\) . In this case each subset \(S \subseteq  \Gamma\) receives the same probability \(\Pr \left\lbrack  S\right\rbrack   = {2}^{-\left| \Gamma \right| }\) . If \(\mathcal{F}\) is a family of subsets, then its random member \(\mathbf{S}\) is a uniformly distributed member; in this case, \(\Omega  = \mathcal{F}\) and \(\mathbf{S}\) has the probability distribution \(\Pr \left\lbrack  S\right\rbrack   = 1/\left| \mathcal{F}\right|\) . Note that, for \(p = 1/2\) , a random subset of \(\Gamma\) is just a random member of \({2}^{\Gamma }\) .
+
+\begin{tcolorbox}\relax
+设 \(\Gamma\) 为有限集，且 \(0 \leq  p \leq  1\) 。通过对 \(\Gamma\) 中的每个元素抛硬币来确定是否将其包含在 \(\mathbf{S}\) 中，抛硬币成功的概率为 \(p\) ，这样就得到了 \(\Gamma\) 的一个随机子集 \(\mathbf{S}\) ； \(\mathbf{S}\) 的分布是由 \(\Pr \left\lbrack  S\right\rbrack   = {p}^{\left| S\right| }{\left( 1 - p\right) }^{\left| \Gamma \right|  - \left| S\right| }\) 给出的 \(\Omega  = {2}^{\Gamma }\) 上的概率分布，其中 \(S \subseteq  \Gamma\) 。我们主要考虑 \(\mathbf{S}\) 均匀分布的情况，即 \(p = 1/2\) 。在这种情况下，每个子集 \(S \subseteq  \Gamma\) 的概率都是 \(\Pr \left\lbrack  S\right\rbrack   = {2}^{-\left| \Gamma \right| }\) 。如果 \(\mathcal{F}\) 是一个子集族，那么它的随机成员 \(\mathbf{S}\) 就是一个均匀分布的成员；在这种情况下， \(\Omega  = \mathcal{F}\) 且 \(\mathbf{S}\) 具有概率分布 \(\Pr \left\lbrack  S\right\rbrack   = 1/\left| \mathcal{F}\right|\) 。需要注意的是，对于 \(p = 1/2\) ， \(\Gamma\) 的一个随机子集就是 \({2}^{\Gamma }\) 的一个随机成员。
+\end{tcolorbox}
+
+A random variable is a variable defined as a function \(X : \Omega  \rightarrow  \mathbb{R}\) of the domain of a probability space. For example, if \(X\) is a uniform integer chosen from \(\{ 1,\ldots ,n\}\) , then \(Y \mathrel{\text{ := }} {2X}\) and \(Z \mathrel{\text{ := }}\) "the number of prime divisors of \(X\) " are both random variables, and so is \(X\) itself. In what follows, \(\Pr \left\lbrack  {X = s}\right\rbrack\) denotes the probability of the event \({X}^{-1}\left( s\right)  = \{ x \in  \Omega  : X\left( x\right)  = s\}\) . One says in this case that \(X\) takes value \(s \in  \mathbb{R}\) with probability \(\Pr \left\lbrack  {X = s}\right\rbrack\) . It is clear that events are a special type of random variables taking only two values 0 and 1 . Namely, one can identify an event \(A \subseteq  \Omega\) with its indicator random variable \({X}_{A}\) such that \({X}_{A}\left( x\right)  = 1\) if and only if \(x \in  A\) .
+
+\begin{tcolorbox}\relax
+随机变量是定义为概率空间定义域的函数 \(X : \Omega  \rightarrow  \mathbb{R}\) 的变量。例如，如果 \(X\) 是从 \(\{ 1,\ldots ,n\}\) 中选取的均匀整数，那么 \(Y \mathrel{\text{ := }} {2X}\) 和 \(Z \mathrel{\text{ := }}\) “ \(X\) 的素因子个数”都是随机变量， \(X\) 本身也是。在下文， \(\Pr \left\lbrack  {X = s}\right\rbrack\) 表示事件 \({X}^{-1}\left( s\right)  = \{ x \in  \Omega  : X\left( x\right)  = s\}\) 的概率。在这种情况下，可以说 \(X\) 取值 \(s \in  \mathbb{R}\) 的概率为 \(\Pr \left\lbrack  {X = s}\right\rbrack\) 。显然，事件是仅取0和1两个值的特殊类型的随机变量。也就是说，可以将事件 \(A \subseteq  \Omega\) 与其指示随机变量 \({X}_{A}\) 等同起来，使得当且仅当 \(x \in  A\) 时 \({X}_{A}\left( x\right)  = 1\) 。
+\end{tcolorbox}
+
+\HRule
+
+* Here and throughout \(\bar{A} = \Omega  \smallsetminus  A\) stands for the complement of \(A\) .
+
+\begin{tcolorbox}\relax
+* 在此处及全文中， \(\bar{A} = \Omega  \smallsetminus  A\) 表示 \(A\) 的补集。
+\end{tcolorbox}
+
+\HRule
+
+One of the most basic probabilistic notions is the expected value of a random variable. This is defined for any real-valued random variable \(X\) , and intuitively, it is the value that we would expect to obtain if we repeated a random experiment several times and took the average of the outcomes of \(X\) . Namely, if \(X\) takes values \({s}_{1},\ldots ,{s}_{m}\) , then the mean or expectation of \(X\) is defined as the weighted average of these values:
+
+\begin{tcolorbox}\relax
+最基本的概率概念之一是随机变量的期望值。它是针对任何实值随机变量 \(X\) 定义的，直观地说，它是我们多次重复随机实验并取 \(X\) 结果的平均值时预期得到的值。也就是说，如果 \(X\) 取值为 \({s}_{1},\ldots ,{s}_{m}\) ，那么 \(X\) 的均值或期望值被定义为这些值的加权平均值:
+\end{tcolorbox}
+
+\[
+\mathrm{E}\left\lbrack  X\right\rbrack   \mathrel{\text{ := }} \mathop{\sum }\limits_{{i = 1}}^{m}{s}_{i} \cdot  \Pr \left\lbrack  {X = {s}_{i}}\right\rbrack   = \mathop{\sum }\limits_{{x \in  \Omega }}X\left( x\right)  \cdot  \Pr \left\lbrack  x\right\rbrack  .
+\]
+
+For example, if \(X\) is the number of spots on the top face when we roll a fair die, then the expected number of spots is \(\mathrm{E}\left\lbrack  X\right\rbrack   = \mathop{\sum }\limits_{{i = 1}}^{6}i\left( {1/6}\right)  = {3.5}\) . In this book we will only consider random variables with finite ranges \(S\) , so that we will not be faced with the convergence issue of the corresponding series.
+
+\begin{tcolorbox}\relax
+例如，如果 \(X\) 是掷一颗均匀骰子时顶面出现的点数，那么点数的期望值是 \(\mathrm{E}\left\lbrack  X\right\rbrack   = \mathop{\sum }\limits_{{i = 1}}^{6}i\left( {1/6}\right)  = {3.5}\) 。在本书中，我们只考虑取值范围有限的随机变量 \(S\) ，这样我们就不会面临相应级数的收敛问题。
+\end{tcolorbox}
+
+Note that the probability distribution \(\Pr  : \Omega  \rightarrow  \left\lbrack  {0,1}\right\rbrack\) itself is a random variable, and its expectation is
+
+\begin{tcolorbox}\relax
+注意，概率分布 \(\Pr  : \Omega  \rightarrow  \left\lbrack  {0,1}\right\rbrack\) 本身就是一个随机变量，其期望值为
+\end{tcolorbox}
+
+\[
+\mathrm{E}\left\lbrack  \Pr \right\rbrack   = \mathop{\sum }\limits_{{x \in  \Omega }}\Pr {\left\lbrack  x\right\rbrack  }^{2}.
+\]
+
+In particular, if \(\Pr\) is a uniform distribution of a set with \(n\) elements, then its expectation is \(1/n\) , as it should be. The expectation of the indicator random variable \({X}_{A}\) of an event \(A\) is just its probability:
+
+\begin{tcolorbox}\relax
+特别地，如果 \(\Pr\) 是一个具有 \(n\) 个元素的集合的均匀分布，那么它的期望值是 \(1/n\) ，这是应该的。事件 \(A\) 的指示随机变量 \({X}_{A}\) 的期望值就是它的概率:
+\end{tcolorbox}
+
+\[
+\mathrm{E}\left\lbrack  {X}_{A}\right\rbrack   = 0 \cdot  \Pr \left\lbrack  {{X}_{A} = 0}\right\rbrack   + 1 \cdot  \Pr \left\lbrack  {{X}_{A} = 1}\right\rbrack   = \Pr \left\lbrack  {{X}_{A} = 1}\right\rbrack   = \Pr \left\lbrack  A\right\rbrack  .
+\]
+
+The probabilistic method is most striking when it is applied to prove theorems whose statement does not seem to suggest the need for probability at all. It is therefore surprising what results may be obtained from such simple principles like the union bound: The probability of a union of events is at most the sum of the probabilities of the events,
+
+\begin{tcolorbox}\relax
+当概率方法用于证明那些陈述中似乎完全不需要概率的定理时，它最为引人注目。因此，从诸如并集界这样简单的原理中能得到什么结果是令人惊讶的:事件并集的概率至多是各事件概率之和，
+\end{tcolorbox}
+
+\[
+\Pr \left\lbrack  {{A}_{1} \cup  {A}_{2} \cup  \cdots  \cup  {A}_{n}}\right\rbrack   \leq  \Pr \left\lbrack  {A}_{1}\right\rbrack   + \Pr \left\lbrack  {A}_{2}\right\rbrack   + \cdots  + \Pr \left\lbrack  {A}_{n}\right\rbrack \tag{3.3}
+\]
+
+Thus, if \({A}_{i}\) ’s are some "bad" events and \(\sum \Pr \left\lbrack  {A}_{i}\right\rbrack   < 1\) then we know that \(\Pr \left\lbrack  {{ \cap  }_{i}{\bar{A}}_{i}}\right\rbrack   = \Pr \left\lbrack  \overline{{ \cup  }_{i}{A}_{i}}\right\rbrack   = 1 - \Pr \left\lbrack  {{ \cup  }_{i}{A}_{i}}\right\rbrack   > 0\) , that is, with positive probability, none of these bad events happens. Already this simple fact often allows to show that some object with desired "good" properties exists.
+
+\begin{tcolorbox}\relax
+因此，如果 \({A}_{i}\) 是一些“坏”事件且 \(\sum \Pr \left\lbrack  {A}_{i}\right\rbrack   < 1\) ，那么我们知道 \(\Pr \left\lbrack  {{ \cap  }_{i}{\bar{A}}_{i}}\right\rbrack   = \Pr \left\lbrack  \overline{{ \cup  }_{i}{A}_{i}}\right\rbrack   = 1 - \Pr \left\lbrack  {{ \cup  }_{i}{A}_{i}}\right\rbrack   > 0\) ，也就是说，以正概率，这些坏事件都不会发生。仅这个简单事实常常就能表明存在某个具有期望“好”性质的对象。
+\end{tcolorbox}
+
+A next useful property is the linearity of expectation: If \({X}_{1},\ldots ,{X}_{n}\) are random variables and \({a}_{1},\ldots ,{a}_{n}\) real numbers, then
+
+\begin{tcolorbox}\relax
+下一个有用的性质是期望的线性:如果 \({X}_{1},\ldots ,{X}_{n}\) 是随机变量且 \({a}_{1},\ldots ,{a}_{n}\) 是实数，那么
+\end{tcolorbox}
+
+\[
+\mathrm{E}\left\lbrack  {{a}_{1}{X}_{1} + \cdots  + {a}_{n}{X}_{n}}\right\rbrack   = {a}_{1}\mathrm{E}\left\lbrack  {X}_{1}\right\rbrack   + \cdots  + {a}_{n}\mathrm{E}\left\lbrack  {X}_{n}\right\rbrack  .
+\]
+
+The equality follows directly from the definition \(\mathrm{E}\left\lbrack  X\right\rbrack\) . The power of this principle comes from there being no restrictions on the \({X}_{i}\) ’s.
+
+\begin{tcolorbox}\relax
+该等式直接由定义 \(\mathrm{E}\left\lbrack  X\right\rbrack\) 得出。这个原理的强大之处在于对 \({X}_{i}\) 没有限制。
+\end{tcolorbox}
+
+A general framework for the probabilistic method is the following. Many extremal problems can be defined by a pair \(\left( {M,f}\right)\) , where \(M\) is some finite set of objects and \(f : M \rightarrow  \mathbb{R}\) some function assigning each object \(x \in  M\) its "value". For example, \(M\) could be a set of graphs, satisfying some conditions, and \(f\left( x\right)\) could be the maximum size of a clique in \(x\) . Given a threshold value \(t\) , the goal is to show that an object \(x \in  M\) with \(f\left( x\right)  \geq  t\) exists. That is, we want to show that \(\mathop{\max }\limits_{{x \in  M}}f\left( x\right)  \geq  t\) .
+
+\begin{tcolorbox}\relax
+概率方法的一个通用框架如下。许多极值问题可以由一对 \(\left( {M,f}\right)\) 定义，其中 \(M\) 是某个有限对象集， \(f : M \rightarrow  \mathbb{R}\) 是一个为每个对象 \(x \in  M\) 赋予其“值”的函数。例如， \(M\) 可以是满足某些条件的图的集合， \(f\left( x\right)\) 可以是 \(x\) 中团的最大规模。给定一个阈值 \(t\) ，目标是证明存在一个对象 \(x \in  M\) 使得 \(f\left( x\right)  \geq  t\) 。也就是说，我们想要证明 \(\mathop{\max }\limits_{{x \in  M}}f\left( x\right)  \geq  t\) 。
+\end{tcolorbox}
+
+To solve this task, one defines an appropriate probability distribution Pr : \(M \rightarrow  \left\lbrack  {0,1}\right\rbrack\) and considers the resulting probability space. In this space the target function \(f\) becomes a random variable. One tries then to show that either \(\mathrm{E}\left\lbrack  f\right\rbrack   \geq  t\) or \(\Pr \left\lbrack  {f\left( x\right)  \geq  t}\right\rbrack   > 0\) holds. If at least one of these inequalities holds, then the existence of \(x \in  M\) with \(f\left( x\right)  \geq  t\) is already shown. Indeed, would \(f\left( x\right)  < t\) hold for all \(x \in  M\) , then we would have
+
+\begin{tcolorbox}\relax
+为了解决此任务，人们定义一个合适的概率分布Pr : \(M \rightarrow  \left\lbrack  {0,1}\right\rbrack\) 并考虑由此产生的概率空间。在这个空间中，目标函数 \(f\) 成为一个随机变量。然后人们试图证明要么 \(\mathrm{E}\left\lbrack  f\right\rbrack   \geq  t\) 成立要么 \(\Pr \left\lbrack  {f\left( x\right)  \geq  t}\right\rbrack   > 0\) 成立。如果这些不等式中至少有一个成立，那么就已经证明了存在具有 \(f\left( x\right)  \geq  t\) 的 \(x \in  M\) 。事实上，如果对于所有的 \(x \in  M\) 都有 \(f\left( x\right)  < t\) 成立，那么我们将会有
+\end{tcolorbox}
+
+\[
+\Pr \left\lbrack  {f\left( x\right)  \geq  t}\right\rbrack   = \Pr \left\lbrack  \varnothing \right\rbrack   = 0
+\]
+
+and
+
+\begin{tcolorbox}\relax
+并且
+\end{tcolorbox}
+
+\[
+\mathrm{E}\left\lbrack  f\right\rbrack   = \mathop{\sum }\limits_{i}i \cdot  \Pr \left\lbrack  {f = i}\right\rbrack   < \mathop{\sum }\limits_{i}t \cdot  \Pr \left\lbrack  {f = i}\right\rbrack   = t.
+\]
+
+The property
+
+\begin{tcolorbox}\relax
+性质
+\end{tcolorbox}
+
+\[
+\mathrm{E}\left\lbrack  f\right\rbrack   \geq  t\text{ implies }f\left( x\right)  \geq  t\text{ for at least one }x \in  M
+\]
+
+is sometimes called the pigeonhole principle of expectation: a random variable cannot always be smaller (or always greater) than its expectation.
+
+\begin{tcolorbox}\relax
+有时被称为期望的鸽巢原理:一个随机变量不可能总是小于(或总是大于)它的期望。
+\end{tcolorbox}
+
+In the next sections we give some simplest applications of the probabilistic method (more applications are given in Part IV).
+
+\begin{tcolorbox}\relax
+在接下来的章节中，我们给出概率方法的一些最简单的应用(更多应用在第四部分给出)。
+\end{tcolorbox}
+
+\section*{3.2 Tournaments}
+
+\begin{tcolorbox}\relax
+\section*{3.2 竞赛图}
+\end{tcolorbox}
+
+A tournament is an oriented graph \(T = \left( {V,E}\right)\) such that \(\left( {x,x}\right)  \notin  E\) for all \(x \in  V\) , and for any two vertices \(x \neq  y\) exactly one of \(\left( {x,y}\right)\) and \(\left( {y,x}\right)\) belongs to \(E\) . That is, each tournament is obtained from a complete graph by orienting its edges. The name tournament is natural, since one can think of the set \(V\) as a set of players in which each pair participates in a single match, where \(\left( {x,y}\right)  \in  E\) iff \(x\) beats \(y\) .
+
+\begin{tcolorbox}\relax
+竞赛图是一个有向图 \(T = \left( {V,E}\right)\) ，使得对于所有 \(x \in  V\) ， \(\left( {x,x}\right)  \notin  E\) 成立，并且对于任意两个顶点 \(x \neq  y\) ， \(\left( {x,y}\right)\) 和 \(\left( {y,x}\right)\) 中恰好有一个属于 \(E\) 。也就是说，每个竞赛图都是通过对完全图的边进行定向得到的。竞赛图这个名字很自然，因为可以把集合 \(V\) 看作是一组玩家，其中每对玩家都参加一场比赛，当且仅当 \(x\) 击败 \(y\) 时， \(\left( {x,y}\right)  \in  E\) 成立。
+\end{tcolorbox}
+
+Say that a tournament has the property \({P}_{k}\) if for every set of \(k\) players there is one who beats them all, i.e., if for any subset \(S \subseteq  V\) of \(k\) players there exists a player \(y \notin  S\) such that \(\left( {y,x}\right)  \in  E\) for all \(x \in  S\) .
+
+\begin{tcolorbox}\relax
+如果对于每一组 \(k\) 个玩家，都有一个玩家击败他们所有人，即对于 \(k\) 个玩家的任何子集 \(S \subseteq  V\) ，都存在一个玩家 \(y \notin  S\) ，使得对于所有 \(x \in  S\) ， \(\left( {y,x}\right)  \in  E\) 成立，那么就说一个竞赛图具有性质 \({P}_{k}\) 。
+\end{tcolorbox}
+
+Theorem 3.1 (Erdős 1963a). If \(n \geq  {k}^{2}{2}^{k + 1}\) , then there is a tournament of \(n\) players that has the property \({P}_{k}\) .
+
+\begin{tcolorbox}\relax
+定理3.1(厄尔多斯，1963a)。如果 \(n \geq  {k}^{2}{2}^{k + 1}\) ，那么存在一个有 \(n\) 个玩家的竞赛图具有性质 \({P}_{k}\) 。
+\end{tcolorbox}
+
+Proof. Consider a random tournament of \(n\) players, i.e., the outcome of every game is determined by the flip of fair coin. For a set \(S\) of \(k\) players, let \({A}_{S}\) be the event that no \(y \notin  S\) beats all of \(S\) . Each \(y \notin  S\) has probability \({2}^{-k}\) of beating all of \(S\) and there are \(n - k\) such possible \(y\) , all of whose chances are mutually independent. Hence \(\Pr \left\lbrack  {A}_{S}\right\rbrack   = {\left( 1 - {2}^{-k}\right) }^{n - k}\) and
+
+\begin{tcolorbox}\relax
+证明。考虑一个有 \(n\) 个玩家的随机竞赛图，即每场比赛的结果由抛一枚公平硬币决定。对于 \(k\) 个玩家的集合 \(S\) ，设 \({A}_{S}\) 是没有 \(y \notin  S\) 击败 \(S\) 中所有玩家的事件。每个 \(y \notin  S\) 击败 \(S\) 中所有玩家的概率是 \({2}^{-k}\) ，并且有 \(n - k\) 个这样的可能的 \(y\) ，它们的所有机会都是相互独立的。因此 \(\Pr \left\lbrack  {A}_{S}\right\rbrack   = {\left( 1 - {2}^{-k}\right) }^{n - k}\) 并且
+\end{tcolorbox}
+
+\[
+\Pr \left\lbrack  {\bigcup {A}_{S}}\right\rbrack   \leq  \left( \begin{array}{l} n \\  k \end{array}\right) {\left( 1 - {2}^{-k}\right) }^{n - k} < \frac{{n}^{k}}{k!}{\mathrm{e}}^{-\left( {n - k}\right) /{2}^{k}} \leq  {n}^{k}{\mathrm{e}}^{-n/{2}^{k}}.
+\]
+
+If \(n \geq  {k}^{2}{2}^{k + 1}\) , this probability is strictly smaller than 1 . Thus, for such an \(n\) , with positive probability no event \({A}_{S}\) occurs. This means that there is a point in the probability space for which none of the events \({A}_{S}\) happens. This point is a tournament \(T\) and this tournament has the property \({P}_{k}\) .
+
+\begin{tcolorbox}\relax
+如果 \(n \geq  {k}^{2}{2}^{k + 1}\) ，这个概率严格小于1。因此，对于这样的 \(n\) ，以正概率没有事件 \({A}_{S}\) 发生。这意味着在概率空间中有一个点，对于这个点，没有事件 \({A}_{S}\) 发生。这个点是一个竞赛图 \(T\) ，并且这个竞赛图具有性质 \({P}_{k}\) 。
+\end{tcolorbox}
+
+\section*{3.3 Universal sets}
+
+\begin{tcolorbox}\relax
+\section*{3.3 通用集}
+\end{tcolorbox}
+
+A set of 0-1 strings of length \(n\) is \(\left( {n,k}\right)\) -universal if, for any subset of \(k\) coordinates \(S = \left\{  {{i}_{1},\ldots ,{i}_{k}}\right\}\) , the projection
+
+\begin{tcolorbox}\relax
+长度为 \(n\) 的0-1字符串集合，如果对于 \(k\) 个坐标 \(S = \left\{  {{i}_{1},\ldots ,{i}_{k}}\right\}\) 的任何子集，其投影都是 \(\left( {n,k}\right)\) 通用的
+\end{tcolorbox}
+
+\[
+A{ \upharpoonright  }_{S} \mathrel{\text{ := }} \left\{  {\left( {{a}_{{i}_{1}},\ldots ,{a}_{{i}_{k}}}\right)  : \left( {{a}_{1},\ldots ,{a}_{n}}\right)  \in  A}\right\}
+\]
+
+of \(A\) onto the coordinates in \(S\) contains all possible \({2}^{k}\) configurations.
+
+\begin{tcolorbox}\relax
+\(A\) 在 \(S\) 中的坐标上的投影包含所有可能的 \({2}^{k}\) 配置。
+\end{tcolorbox}
+
+In Sects. 10.5 and 17.4 we will present two explicit constructions of such sets of size about \(n\) , when \(k \leq  \left( {\log n}\right) /3\) , and of size \({n}^{O\left( k\right) }\) , for arbitrary \(k\) . On the other hand, a simple probabilistic argument shows that \(\left( {n,k}\right)\) -universal sets of size \(k{2}^{k}{\log }_{2}n\) exist (note that \({2}^{k}\) is a trivial lower bound).
+
+\begin{tcolorbox}\relax
+在第10.5节和第17.4节中，当 \(k \leq  \left( {\log n}\right) /3\) 时，我们将给出两个大小约为 \(n\) 的此类集合的显式构造，对于任意 \(k\) ，大小为 \({n}^{O\left( k\right) }\) 。另一方面，一个简单的概率论证表明存在大小为 \(k{2}^{k}{\log }_{2}n\) 的 \(\left( {n,k}\right)\) 通用集(注意 \({2}^{k}\) 是一个平凡的下界)。
+\end{tcolorbox}
+
+Theorem 3.2 (Kleitman-Spencer 1973). If \(\left( \begin{array}{l} n \\  k \end{array}\right) {2}^{k}{\left( 1 - {2}^{-k}\right) }^{r} < 1\) , then there is an \(\left( {n,k}\right)\) -universal set of size \(r\) .
+
+\begin{tcolorbox}\relax
+定理3.2(克莱特曼 - 斯宾塞，1973年)。如果 \(\left( \begin{array}{l} n \\  k \end{array}\right) {2}^{k}{\left( 1 - {2}^{-k}\right) }^{r} < 1\) ，那么存在一个大小为 \(r\) 的 \(\left( {n,k}\right)\) 通用集。
+\end{tcolorbox}
+
+Proof. Let \(\mathbf{A}\) be a set of \(r\) random 0-1 strings of length \(n\) , each entry of which takes values 0 or 1 independently and with equal probability \(1/2\) . For every fixed set \(S\) of \(k\) coordinates and for every fixed vector \(v \in  \{ 0,1{\} }^{k}\) ,
+
+\begin{tcolorbox}\relax
+证明。设 \(\mathbf{A}\) 是一组长度为 \(n\) 的 \(r\) 个随机0-1字符串，其每个条目独立取值0或1，且概率相等为 \(1/2\) 。对于每一个固定的 \(k\) 坐标集 \(S\) 和每一个固定的向量 \(v \in  \{ 0,1{\} }^{k}\) ，
+\end{tcolorbox}
+
+\[
+\Pr \left\lbrack  {v \notin  \mathbf{A}{ \upharpoonright  }_{S}}\right\rbrack   = \mathop{\prod }\limits_{{a \in  \mathbf{A}}}\Pr \left\lbrack  {v \neq  a{ \upharpoonright  }_{S}}\right\rbrack   = \mathop{\prod }\limits_{{a \in  \mathbf{A}}}\left( {1 - {2}^{-\left| S\right| }}\right)  = {\left( 1 - {2}^{-k}\right) }^{r}.
+\]
+
+Since there are only \(\left( \begin{array}{l} n \\  k \end{array}\right) {2}^{k}\) possibilities to choose a pair \(\left( {S,v}\right)\) , the set \(\mathbf{A}\) is not \(\left( {n,k}\right)\) -universal with probability at most \(\left( \begin{array}{l} n \\  k \end{array}\right) {2}^{k}{\left( 1 - {2}^{-k}\right) }^{r}\) , which is strictly smaller than 1 . Thus, at least one set \(A\) of \(r\) vectors must be \(\left( {n,k}\right)\) -universal, as claimed.
+
+\begin{tcolorbox}\relax
+由于选择一对 \(\left( {S,v}\right)\) 只有 \(\left( \begin{array}{l} n \\  k \end{array}\right) {2}^{k}\) 种可能性，集合 \(\mathbf{A}\) 不是 \(\left( {n,k}\right)\) 通用集的概率至多为 \(\left( \begin{array}{l} n \\  k \end{array}\right) {2}^{k}{\left( 1 - {2}^{-k}\right) }^{r}\) ，这严格小于1。因此，如所声称的，至少有一组 \(r\) 个向量 \(A\) 必须是 \(\left( {n,k}\right)\) 通用集。
+\end{tcolorbox}
+
+\section*{3.4 Covering by bipartite cliques}
+
+\begin{tcolorbox}\relax
+\section*{3.4 由二分团覆盖}
+\end{tcolorbox}
+
+A biclique covering of a graph \(G\) is a set \({H}_{1},\ldots ,{H}_{t}\) of its complete bipartite subgraphs such that each edge of \(G\) belongs to at least one of these subgraphs. The weight of such a covering is the sum \(\mathop{\sum }\limits_{{i = 1}}^{t}\left| {V\left( {H}_{i}\right) }\right|\) of the number of vertices in these subgraphs. Let \(\operatorname{bc}\left( G\right)\) be the smallest weight of a biclique covering of \(G\) . Let \({K}_{n}\) be a complete graph on \(n\) vertices.
+
+\begin{tcolorbox}\relax
+图 \(G\) 的二分团覆盖是其完全二分法子图的集合 \({H}_{1},\ldots ,{H}_{t}\) ，使得 \(G\) 的每条边至少属于这些子图中的一个。这种覆盖的权重是这些子图中顶点数的总和 \(\mathop{\sum }\limits_{{i = 1}}^{t}\left| {V\left( {H}_{i}\right) }\right|\) 。设 \(\operatorname{bc}\left( G\right)\) 是 \(G\) 的二分团覆盖的最小权重。设 \({K}_{n}\) 是具有 \(n\) 个顶点的完全图。
+\end{tcolorbox}
+
+Theorem 3.3. If \(n\) is a power of two, then \(\operatorname{bc}\left( {K}_{n}\right)  = n{\log }_{2}n\) .
+
+\begin{tcolorbox}\relax
+定理3.3。如果 \(n\) 是2的幂次方，那么 \(\operatorname{bc}\left( {K}_{n}\right)  = n{\log }_{2}n\) 。
+\end{tcolorbox}
+
+Proof. Let \(n = {2}^{m}\) . We can construct a covering of \({K}_{n}\) as follows. Assign to each vertex \(v\) its own vector \({x}_{v} \in  \{ 0,1{\} }^{m}\) , and consider \(m = {\log }_{2}n\) bipartite cliques \({H}_{1},\ldots ,{H}_{m}\) , where two vertices \(u\) and \(v\) are adjacent in \({H}_{i}\) iff \({x}_{u}\left( i\right)  = 0\) and \({x}_{v}\left( i\right)  = 1\) . Since every two distinct vectors must differ in at least one coordinate, each edge of \({K}_{n}\) belongs to at least one of these bipartite cliques. Moreover, each of the cliques has weight \(\left( {n/2}\right)  + \left( {n/2}\right)  = n\) , since exactly \({2}^{m - 1} = n/2\) of the vectors in \(\{ 0,1{\} }^{m}\) have the same value in the \(i\) -th coordinate. So, the total weight of this covering is \({mn} = n{\log }_{2}n\) .
+
+\begin{tcolorbox}\relax
+证明。设 \(n = {2}^{m}\) 。我们可以如下构造 \({K}_{n}\) 的一个覆盖。为每个顶点 \(v\) 分配其自己的向量 \({x}_{v} \in  \{ 0,1{\} }^{m}\) ，并考虑 \(m = {\log }_{2}n\) 个二分团 \({H}_{1},\ldots ,{H}_{m}\) ，其中两个顶点 \(u\) 和 \(v\) 在 \({H}_{i}\) 中相邻当且仅当 \({x}_{u}\left( i\right)  = 0\) 和 \({x}_{v}\left( i\right)  = 1\) 。由于每两个不同的向量在至少一个坐标上必定不同， \({K}_{n}\) 的每条边至少属于这些二分团中的一个。此外，每个团的权重为 \(\left( {n/2}\right)  + \left( {n/2}\right)  = n\) ，因为在 \(\{ 0,1{\} }^{m}\) 中恰好 \({2}^{m - 1} = n/2\) 个向量在第 \(i\) 个坐标上具有相同的值。所以，这个覆盖的总权重是 \({mn} = n{\log }_{2}n\) 。
+\end{tcolorbox}
+
+To prove the lower bound we use a probabilistic argument. Let \({A}_{1} \times \; {B}_{1},\ldots ,{A}_{t} \times  {B}_{t}\) be a covering of \({K}_{n}\) by bipartite cliques. For a vertex \(v\) , let \({m}_{v}\) be the number of these cliques containing \(v\) . By the double-counting principle,
+
+\begin{tcolorbox}\relax
+为了证明下界，我们使用概率论证。设 \({A}_{1} \times \; {B}_{1},\ldots ,{A}_{t} \times  {B}_{t}\) 是 \({K}_{n}\) 的由二分团构成的覆盖。对于一个顶点 \(v\) ，设 \({m}_{v}\) 是包含 \(v\) 的这些团的数量。根据双重计数原理，
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = 1}}^{t}\left( {\left| {A}_{i}\right|  + \left| {B}_{i}\right| }\right)  = \mathop{\sum }\limits_{{v = 1}}^{n}{m}_{v}
+\]
+
+is the weight of the covering. So, it is enough to show that the right-hand sum is at least \(n{\log }_{2}n\) .
+
+\begin{tcolorbox}\relax
+是覆盖的权重。所以，足以证明右边的和至少为 \(n{\log }_{2}n\) 。
+\end{tcolorbox}
+
+To do this, we throw a fair 0-1 coin for each of the cliques \({A}_{i} \times  {B}_{i}\) and remove all vertices in \({A}_{i}\) from the graph if the outcome is 0 ; if the outcome is 1, then we remove \({B}_{i}\) . Let \(X = {X}_{1} + \cdots  + {X}_{n}\) , where \({X}_{v}\) is the indicator variable for the event "the vertex \(v\) survives."
+
+\begin{tcolorbox}\relax
+为此，我们为每个团 \({A}_{i} \times  {B}_{i}\) 抛一枚公平的0 - 1硬币，如果结果为0，则从图中移除 \({A}_{i}\) 中的所有顶点；如果结果为1，则我们移除 \({B}_{i}\) 。设 \(X = {X}_{1} + \cdots  + {X}_{n}\) ，其中 \({X}_{v}\) 是事件“顶点 \(v\) 存活”的指示变量。
+\end{tcolorbox}
+
+Since any two vertices of \({K}_{n}\) are joined by an edge, and since this edge is covered by at least one of the cliques, at most one vertex can survive at the end. This implies that \(\mathrm{E}\left\lbrack  X\right\rbrack   \leq  1\) . On the other hand, each vertex \(v\) will survive with probability \({2}^{-{m}_{v}}\) : there are \({m}_{v}\) steps that are "dangerous" for \(v\) , and in each of these steps the vertex \(v\) will survive with probability \(1/2\) . By the linearity of expectation,
+
+\begin{tcolorbox}\relax
+由于 \({K}_{n}\) 的任意两个顶点由一条边相连，并且由于这条边至少被其中一个团覆盖，最终最多只有一个顶点能存活。这意味着 \(\mathrm{E}\left\lbrack  X\right\rbrack   \leq  1\) 。另一方面，每个顶点 \(v\) 存活的概率为 \({2}^{-{m}_{v}}\) :有 \({m}_{v}\) 个步骤对 \(v\) 是“危险的”，并且在这些步骤中的每一步，顶点 \(v\) 存活的概率为 \(1/2\) 。根据期望的线性性质，
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{v = 1}}^{n}{2}^{-{m}_{v}} = \mathop{\sum }\limits_{{v = 1}}^{n}\Pr \left\lbrack  {v\text{ survives }}\right\rbrack   = \mathop{\sum }\limits_{{v = 1}}^{n}\mathrm{E}\left\lbrack  {X}_{v}\right\rbrack   = \mathrm{E}\left\lbrack  X\right\rbrack   \leq  1.
+\]
+
+We already know that the arithmetic mean of numbers \({a}_{1},\ldots ,{a}_{n}\) is at least their geometric mean (1.16):
+
+\begin{tcolorbox}\relax
+我们已经知道数 \({a}_{1},\ldots ,{a}_{n}\) 的算术平均值至少是它们的几何平均值(1.16):
+\end{tcolorbox}
+
+\[
+\frac{1}{n}\mathop{\sum }\limits_{{v = 1}}^{n}{a}_{v} \geq  {\left( \mathop{\prod }\limits_{{v = 1}}^{n}{a}_{v}\right) }^{1/n}
+\]
+
+When applied with \({a}_{v} = {2}^{-{m}_{v}}\) , this yields
+
+\begin{tcolorbox}\relax
+当应用于 \({a}_{v} = {2}^{-{m}_{v}}\) 时，这得出
+\end{tcolorbox}
+
+\[
+\frac{1}{n} \geq  \frac{1}{n}\mathop{\sum }\limits_{{v = 1}}^{n}{2}^{-{m}_{v}} \geq  {\left( \mathop{\prod }\limits_{{v = 1}}^{n}{2}^{-{m}_{v}}\right) }^{1/n} = {2}^{-\frac{1}{n}\mathop{\sum }\limits_{{v = 1}}^{n}{m}_{v}},
+\]
+
+from which \({2}^{\frac{1}{n}\mathop{\sum }\limits_{{v = 1}}^{n}{m}_{v}} \geq  n\) , and hence, also \(\mathop{\sum }\limits_{{v = 1}}^{n}{m}_{v} \geq  n{\log }_{2}n\) follows.
+
+\begin{tcolorbox}\relax
+由此可得 \({2}^{\frac{1}{n}\mathop{\sum }\limits_{{v = 1}}^{n}{m}_{v}} \geq  n\) ，进而也可得 \(\mathop{\sum }\limits_{{v = 1}}^{n}{m}_{v} \geq  n{\log }_{2}n\) 。
+\end{tcolorbox}
+
+\section*{3.5 2-colorable families}
+
+\begin{tcolorbox}\relax
+\section*{3.5 可二染色的集族}
+\end{tcolorbox}
+
+Let \(\mathcal{F}\) be a family of subsets of some finite set. Can we color the elements of the underlying set in red and blue so that no member of \(\mathcal{F}\) will be monochromatic? Such families are called 2-colorable.
+
+\begin{tcolorbox}\relax
+设 \(\mathcal{F}\) 为某个有限集的子集族。我们能否将基础集的元素染成红色和蓝色，使得 \(\mathcal{F}\) 中的任何成员都不是单色的？这样的集族称为可二染色的。
+\end{tcolorbox}
+
+Recall that a family is \(k\) -uniform if each member has exactly \(k\) elements.
+
+\begin{tcolorbox}\relax
+回想一下，如果一个集族 \(k\) 中每个成员恰好有 \(k\) 个元素，那么这个集族就是 \(k\) - 均匀的。
+\end{tcolorbox}
+
+Theorem 3.4 (Erdős 1963b). Every \(k\) -uniform family with fewer than \({2}^{k - 1}\) members is 2-colorable.
+
+\begin{tcolorbox}\relax
+定理3.4(厄尔多斯，1963b)。每个成员数少于 \({2}^{k - 1}\) 的 \(k\) - 均匀集族都是可二染色的。
+\end{tcolorbox}
+
+Proof. Let \(\mathcal{F}\) be an arbitrary \(k\) -uniform family of subsets of some finite set \(X\) . Consider a random 2-coloring obtained by coloring each point independently either red or blue, where each color is equally likely. Informally, we have an experiment in which a fair coin is flipped to determine the color of each point. For a member \(A \in  \mathcal{F}\) , let \({X}_{A}\) be the indicator random variable for the event that \(A\) is monochromatic. So, \(X = \mathop{\sum }\limits_{{A \in  \mathcal{F}}}{X}_{A}\) is the total number of monochromatic members.
+
+\begin{tcolorbox}\relax
+证明。设 \(\mathcal{F}\) 是某个有限集 \(X\) 的任意一个 \(k\) - 均匀子集族。考虑一种随机二染色，通过独立地将每个点染成红色或蓝色得到，其中每种颜色被选中的可能性相同。非正式地说，我们有一个实验，在这个实验中抛一枚公平的硬币来确定每个点的颜色。对于一个成员 \(A \in  \mathcal{F}\) ，设 \({X}_{A}\) 是表示 \(A\) 是单色这一事件的指示随机变量。所以， \(X = \mathop{\sum }\limits_{{A \in  \mathcal{F}}}{X}_{A}\) 是单色成员的总数。
+\end{tcolorbox}
+
+For a member \(A\) to be monochromatic, all its \(\left| A\right|  = k\) points must receive the same color. Since the colors are assigned at random and independently, this implies that each member of \(\mathcal{F}\) will be monochromatic with probability at most \(2 \cdot  {2}^{-k} = {2}^{1 - k}\) (factor 2 comes since we have two colors). Hence,
+
+\begin{tcolorbox}\relax
+对于一个成员 \(A\) 要成为单色的，它所有 \(\left| A\right|  = k\) 个点必须接收相同的颜色。由于颜色是随机且独立分配的，这意味着 \(\mathcal{F}\) 的每个成员是单色的概率至多为 \(2 \cdot  {2}^{-k} = {2}^{1 - k}\) (因子2是因为我们有两种颜色)。因此，
+\end{tcolorbox}
+
+\[
+\mathrm{E}\left\lbrack  X\right\rbrack   = \mathop{\sum }\limits_{{A \in  \mathcal{F}}}\mathrm{E}\left\lbrack  {X}_{A}\right\rbrack   = \mathop{\sum }\limits_{{A \in  \mathcal{F}}}{2}^{1 - k} = \left| \mathcal{F}\right|  \cdot  {2}^{1 - k}.
+\]
+
+Since points in our probability space are 2-colorings, the pigeonhole property of expectation implies that a coloring, leaving at most \(\left| \mathcal{F}\right|  \cdot  {2}^{1 - k}\) members of \(\mathcal{F}\) monochromatic, must exist.
+
+\begin{tcolorbox}\relax
+由于我们概率空间中的点是二染色，期望的鸽巢性质意味着必然存在一种染色，使得 \(\mathcal{F}\) 中至多 \(\left| \mathcal{F}\right|  \cdot  {2}^{1 - k}\) 个成员是单色的。
+\end{tcolorbox}
+
+In particular, if \(\left| \mathcal{F}\right|  < {2}^{k - 1}\) then no member of \(\mathcal{F}\) will be left monochromatic.
+
+\begin{tcolorbox}\relax
+特别地，如果 \(\left| \mathcal{F}\right|  < {2}^{k - 1}\) ，那么 \(\mathcal{F}\) 中没有成员会是单色的。
+\end{tcolorbox}
+
+The proof was quite easy. So one could ask whether we can replace \({2}^{k - 1}\) by, say, \({4}^{k}\) ? By turning the probabilistic argument "on its head" it can be shown that this is not possible. The sets now become random and each coloring defines an event.
+
+\begin{tcolorbox}\relax
+这个证明相当简单。所以有人可能会问，比如说，我们能否用 \({4}^{k}\) 来代替 \({2}^{k - 1}\) 呢？通过将概率论证“反过来”可以证明这是不可能的。现在集合变成了随机的，并且每种染色定义一个事件。
+\end{tcolorbox}
+
+Theorem 3.5 (Erdős 1964a). If \(k\) is sufficiently large, then there exists a \(k\) -uniform family \(\mathcal{F}\) such that \(\left| \mathcal{F}\right|  \leq  {k}^{2}{2}^{k}\) and \(\mathcal{F}\) is not 2-colorable.
+
+\begin{tcolorbox}\relax
+定理3.5(厄尔多斯，1964a)。如果 \(k\) 足够大，那么存在一个 \(k\) - 均匀集族 \(\mathcal{F}\) ，使得 \(\left| \mathcal{F}\right|  \leq  {k}^{2}{2}^{k}\) 且 \(\mathcal{F}\) 不可二染色。
+\end{tcolorbox}
+
+Proof. Set \(r = \left\lfloor  {{k}^{2}/2}\right\rfloor\) . Let \({\mathbf{A}}_{1},{\mathbf{A}}_{2},\ldots\) be independent random members of \(\left( \begin{matrix} \left\lbrack  r\right\rbrack  \\  k \end{matrix}\right)\) , that is, \({\mathbf{A}}_{i}\) ranges over the set of all \(A \subseteq  \{ 1,\ldots ,r\}\) with \(\left| A\right|  = k\) , and \(\Pr \left\lbrack  {{\mathbf{A}}_{i} = A}\right\rbrack   = {\left( \begin{array}{l} r \\  k \end{array}\right) }^{-1}\) . Consider the family \(\mathcal{F} = \left\{  {{\mathbf{A}}_{1},\ldots ,{\mathbf{A}}_{b}}\right\}\) , where \(b\) is a parameter to be specified later. Let \(\chi\) be a coloring of \(\{ 1,\ldots ,r\}\) in red and blue, with \(a\) red points and \(r - a\) blue points. Using Jensen’s inequality (see Proposition 1.12), for any such coloring and any \(i\) , we have
+
+\begin{tcolorbox}\relax
+证明。设 \(r = \left\lfloor  {{k}^{2}/2}\right\rfloor\) 。令 \({\mathbf{A}}_{1},{\mathbf{A}}_{2},\ldots\) 为 \(\left( \begin{matrix} \left\lbrack  r\right\rbrack  \\  k \end{matrix}\right)\) 中相互独立的随机成员，即 \({\mathbf{A}}_{i}\) 遍历所有满足 \(\left| A\right|  = k\) 的 \(A \subseteq  \{ 1,\ldots ,r\}\) 组成的集合，且 \(\Pr \left\lbrack  {{\mathbf{A}}_{i} = A}\right\rbrack   = {\left( \begin{array}{l} r \\  k \end{array}\right) }^{-1}\) 。考虑族 \(\mathcal{F} = \left\{  {{\mathbf{A}}_{1},\ldots ,{\mathbf{A}}_{b}}\right\}\) ，其中 \(b\) 是稍后要确定的参数。设 \(\chi\) 是对 \(\{ 1,\ldots ,r\}\) 的红蓝色着色，有 \(a\) 个红点和 \(r - a\) 个蓝点。利用詹森不等式(见命题1.12)，对于任何这样的着色以及任何 \(i\) ，我们有
+\end{tcolorbox}
+
+\[
+\Pr \left\lbrack  {{\mathbf{A}}_{i}\text{ is monochromatic }}\right\rbrack   = \Pr \left\lbrack  {{\mathbf{A}}_{i}\text{ is red }}\right\rbrack   + \Pr \left\lbrack  {{\mathbf{A}}_{i}\text{ is blue }}\right\rbrack
+\]
+
+\[
+= \frac{\left( \begin{array}{l} a \\  k \end{array}\right)  + \left( \begin{matrix} r - a \\  k \end{matrix}\right) }{\left( \begin{array}{l} r \\  k \end{array}\right) } \geq  2\left( \begin{matrix} r/2 \\  k \end{matrix}\right) /\left( \begin{array}{l} r \\  k \end{array}\right)  \mathrel{\text{ := }} p
+\]
+
+where, by the asymptotic formula (1.9) for the binomial coefficients, \(p\) is about \({\mathrm{e}}^{-1}{2}^{1 - k}\) . Since the members \({\mathbf{A}}_{i}\) of \(\mathcal{F}\) are independent, the probability that a given coloring \(\chi\) is legal for \(\mathcal{F}\) equals
+
+\begin{tcolorbox}\relax
+其中，根据二项式系数的渐近公式(1.9)， \(p\) 约为 \({\mathrm{e}}^{-1}{2}^{1 - k}\) 。由于 \(\mathcal{F}\) 的成员 \({\mathbf{A}}_{i}\) 相互独立，给定的着色 \(\chi\) 对 \(\mathcal{F}\) 合法的概率等于
+\end{tcolorbox}
+
+\[
+\mathop{\prod }\limits_{{i = 1}}^{b}\left( {1 - \Pr \left\lbrack  {{\mathbf{A}}_{i}\text{ is monochromatic }}\right\rbrack  ) \leq  {\left( 1 - p\right) }^{b}.}\right.
+\]
+
+Hence, the probability that at least one of all \({2}^{r}\) possible colorings will be legal for \(\mathcal{F}\) does not exceed \({2}^{r}{\left( 1 - p\right) }^{b} < {\mathrm{e}}^{r\ln 2 - {pb}}\) , which is less than 1 for \(b = \left( {r\ln 2}\right) /p = \left( {1 + o\left( 1\right) }\right) {k}^{2}{2}^{k - 2}\mathrm{e}\ln 2\) . But this means that there must be at least one realization of the (random) family \(\mathcal{F}\) , which has only \(b\) sets and which cannot be colored legally.
+
+\begin{tcolorbox}\relax
+因此，所有 \({2}^{r}\) 种可能的着色中至少有一种对 \(\mathcal{F}\) 合法的概率不超过 \({2}^{r}{\left( 1 - p\right) }^{b} < {\mathrm{e}}^{r\ln 2 - {pb}}\) ，对于 \(b = \left( {r\ln 2}\right) /p = \left( {1 + o\left( 1\right) }\right) {k}^{2}{2}^{k - 2}\mathrm{e}\ln 2\) ，该值小于1。但这意味着必然存在(随机)族 \(\mathcal{F}\) 的至少一种实现，它只有 \(b\) 个集合且不能合法着色。
+\end{tcolorbox}
+
+Let \(B\left( k\right)\) be the minimum possible number of sets in a \(k\) -uniform family which is not 2-colorable. We have already shown that
+
+\begin{tcolorbox}\relax
+设 \(B\left( k\right)\) 为非2 - 可着色的 \(k\) - 均匀族中集合的最小可能数量。我们已经证明了
+\end{tcolorbox}
+
+\[
+{2}^{k - 1} \leq  B\left( k\right)  \leq  {k}^{2}{2}^{k}.
+\]
+
+As for exact values of \(B\left( k\right)\) , only the first two \(B\left( 2\right)  = 3\) and \(B\left( 3\right)  = 7\) are known. The value \(B\left( 2\right)  = 3\) is realized by the graph \({K}_{3}\) . We address the inequality \(B\left( 3\right)  \leq  7\) in Exercise 3.9.
+
+\begin{tcolorbox}\relax
+至于 \(B\left( k\right)\) 的精确值，仅知道前两个 \(B\left( 2\right)  = 3\) 和 \(B\left( 3\right)  = 7\) 。值 \(B\left( 2\right)  = 3\) 由图 \({K}_{3}\) 实现。我们在练习3.9中讨论不等式 \(B\left( 3\right)  \leq  7\) 。
+\end{tcolorbox}
+
+There is yet another class of 2-colorable families, without any uniformity restriction.
+
+\begin{tcolorbox}\relax
+还有另一类2 - 可着色族，没有任何均匀性限制。
+\end{tcolorbox}
+
+Theorem 3.6. Let \(\mathcal{F}\) be an arbitrary family of subsets of a finite set, each of which has at least two elements. If every two non-disjoint members of \(\mathcal{F}\) share at least two common elements, then \(\mathcal{F}\) is 2-colorable.
+
+\begin{tcolorbox}\relax
+定理3.6。设 \(\mathcal{F}\) 是有限集的任意子集族，其中每个子集至少有两个元素。如果 \(\mathcal{F}\) 中任意两个非不相交的成员至少有两个公共元素，那么 \(\mathcal{F}\) 是2 - 可着色的。
+\end{tcolorbox}
+
+Proof. Let \(X = \left\{  {{x}_{1},\ldots ,{x}_{n}}\right\}\) be the underlying set. We will color the points \({x}_{1},\ldots ,{x}_{n}\) one-by-one so that we do not color all points of any set in \(\mathcal{F}\) with the same color. Color the first point \({x}_{1}\) arbitrarily. Suppose that \({x}_{1},\ldots ,{x}_{i}\) are already colored. If we cannot color the next element \({x}_{i + 1}\) in red then this means that there is a set \(A \in  \mathcal{F}\) such that \(A \subseteq  \left\{  {{x}_{1},\ldots ,{x}_{i + 1}}\right\}  ,{x}_{i + 1} \in  A\) and all the points in \(A \smallsetminus  \left\{  {x}_{i + 1}\right\}\) are red. Similarly, if we cannot color the next element \({x}_{i + 1}\) in blue, then there is a set \(B \in  \mathcal{F}\) such that \(B \subseteq  \left\{  {{x}_{1},\ldots ,{x}_{i + 1}}\right\}\) , \({x}_{i + 1} \in  B\) and all the points in \(B \smallsetminus  \left\{  {x}_{i + 1}\right\}\) are blue. But then \(A \cap  B = \left\{  {x}_{i + 1}\right\}\) , a contradiction. Thus, we can color the point \({x}_{i + 1}\) either red or blue. Proceeding in this way we will finally color all the points and no set of \(\mathcal{F}\) becomes monochromatic.
+
+\begin{tcolorbox}\relax
+证明。设 \(X = \left\{  {{x}_{1},\ldots ,{x}_{n}}\right\}\) 为基础集。我们将逐个给点 \({x}_{1},\ldots ,{x}_{n}\) 染色，使得我们不会用同一种颜色给 \(\mathcal{F}\) 中任何集合的所有点染色。任意给第一个点 \({x}_{1}\) 染色。假设 \({x}_{1},\ldots ,{x}_{i}\) 已经染好色。如果我们不能将下一个元素 \({x}_{i + 1}\) 染成红色，那么这意味着存在一个集合 \(A \in  \mathcal{F}\) ，使得 \(A \subseteq  \left\{  {{x}_{1},\ldots ,{x}_{i + 1}}\right\}  ,{x}_{i + 1} \in  A\) 且 \(A \smallsetminus  \left\{  {x}_{i + 1}\right\}\) 中的所有点都是红色。类似地，如果我们不能将下一个元素 \({x}_{i + 1}\) 染成蓝色，那么存在一个集合 \(B \in  \mathcal{F}\) ，使得 \(B \subseteq  \left\{  {{x}_{1},\ldots ,{x}_{i + 1}}\right\}\) ， \({x}_{i + 1} \in  B\) 且 \(B \smallsetminus  \left\{  {x}_{i + 1}\right\}\) 中的所有点都是蓝色。但这样 \(A \cap  B = \left\{  {x}_{i + 1}\right\}\) ，产生矛盾。因此，我们可以将点 \({x}_{i + 1}\) 染成红色或蓝色。以这种方式继续下去，我们最终会给所有点染色，并且 \(\mathcal{F}\) 中没有集合会变成单色。
+\end{tcolorbox}
+
+\section*{3.6 The choice number of graphs}
+
+\begin{tcolorbox}\relax
+\section*{3.6 图的选择数}
+\end{tcolorbox}
+
+The choice number (or list-coloring number) of a graph \(G\) , denoted by \({ch}\left( G\right)\) , is the minimum integer \(k\) such that for every assignment of a set \(S\left( v\right)\) of \(k\) colors to every vertex \(v\) of \(G\) , there is a legal coloring of \(G\) that assigns to each vertex \(v\) a color from \(S\left( v\right)\) . Recall that a coloring is legal if adjacent vertices receive different colors. Obviously, this number is at least the chromatic number \(\chi \left( G\right)\) of \(G\) .
+
+\begin{tcolorbox}\relax
+图 \(G\) 的选择数(或列表染色数)，记为 \({ch}\left( G\right)\) ，是最小整数 \(k\) ，使得对于给 \(G\) 的每个顶点 \(v\) 分配一个包含 \(k\) 种颜色的集合 \(S\left( v\right)\) 的每种分配方式，都存在 \(G\) 的一种合法染色，该染色给每个顶点 \(v\) 分配来自 \(S\left( v\right)\) 的一种颜色。回想一下，如果相邻顶点接收不同颜色，则染色是合法的。显然，这个数至少是 \(G\) 的色数 \(\chi \left( G\right)\) 。
+\end{tcolorbox}
+
+Theorem 3.7 (Alon 1992). For every bipartite \(n \times  n\) graph \(G\) with \(n \geq  3\) , we have that \({ch}\left( G\right)  \leq  2{\log }_{2}n\) .
+
+\begin{tcolorbox}\relax
+\end{document}

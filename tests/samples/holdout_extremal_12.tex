@@ -1,0 +1,487 @@
+\documentclass[10pt]{article}
+\usepackage[verbose, a4paper, hmargin=2.5cm, vmargin=2.5cm]{geometry}
+
+\usepackage{fontspec}
+\usepackage{ctex}
+\usepackage{paratype}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{esint}
+\usepackage{stmaryrd}
+
+\usepackage[mathbf=sym]{unicode-math}
+\setmainfont{STIX Two Text}
+\setmathfont{STIX Two Math}
+
+\setsansfont{Arial}
+\setmonofont{Courier New}
+
+\usepackage{makecell}
+\usepackage{wasysym}
+\usepackage{pifont}
+\usepackage[export]{adjustbox}
+\usepackage{graphicx}
+\usepackage{mdframed}
+\usepackage{booktabs,array,multirow}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan,}
+\urlstyle{same}
+\usepackage[most]{tcolorbox}
+\definecolor{mygray}{RGB}{240,240,240}
+\tcbset{
+  colback=mygray,
+  boxrule=0pt,
+}
+\graphicspath{ {./images/} }
+\newcommand{\HRule}{\begin{center}\rule{0.9\linewidth}{0.2mm}\end{center}}
+\newcommand{\customfootnote}[1]{
+  \let\thefootnote\relax\footnotetext{#1}
+}
+\newcommand{\lt}{\mathrel{<}}
+\newcommand{\gt}{\mathrel{>}}
+\newcommand*\circled[1]{\tikz[baseline=(char.base)]{\node[shape=circle,draw,inner sep=1.5pt] (char) {\small #1};}}
+\setcounter{MaxMatrixCols}{256}
+\begin{document}
+\section*{12. Designs}
+
+\begin{tcolorbox}\relax
+\section*{12. 设计}
+\end{tcolorbox}
+
+The use of combinatorial objects, called designs, originates from statistical applications. Let us assume that we wish to compare \(v\) varieties of wines. In order to make the testing procedure as fair as possible it is natural to require that:
+
+\begin{tcolorbox}\relax
+组合对象(称为设计)的使用起源于统计应用。假设我们希望比较 \(v\) 种葡萄酒。为了使测试过程尽可能公平，自然需要满足以下条件:
+\end{tcolorbox}
+
+(a) each participating person tastes the same number (say \(k\) ) of varieties so that each person's opinion has the same weight;
+
+\begin{tcolorbox}\relax
+(a) 每个参与的人品尝相同数量(比如 \(k\) )的品种，以便每个人的意见具有相同的权重；
+\end{tcolorbox}
+
+(b) each pair of varieties is compared by the same number (say \(\lambda\) ) of persons so that each variety gets the same treatment.
+
+\begin{tcolorbox}\relax
+(b) 每对品种被相同数量(比如 \(\lambda\) )的人比较，以便每个品种得到相同的对待。
+\end{tcolorbox}
+
+One possibility would be to let everyone taste all the varieties. But if \(v\) is large, this is very impractical (if not dangerous, as in the case of wines), and the comparisons become rather unreliable. Thus, we should try to design the experiment so that \(k < v\) .
+
+\begin{tcolorbox}\relax
+一种可能性是让每个人品尝所有品种。但如果 \(v\) 很大，这非常不切实际(如果不是危险的，就像葡萄酒的情况)，而且比较变得相当不可靠。因此，我们应该尝试设计实验，以便 \(k < v\) 。
+\end{tcolorbox}
+
+Definition 12.1. Let \(X = \{ 1,\ldots ,v\}\) be a set of points (or varieties). A \(\left( {v,k,\lambda }\right)\) design over \(X\) is a collection \(\mathcal{D}\) of distinct subsets of \(X\) (called blocks) such that the following properties are satisfied:
+
+\begin{tcolorbox}\relax
+定义12.1。设 \(X = \{ 1,\ldots ,v\}\) 为一组点(或品种)。在 \(X\) 上的 \(\left( {v,k,\lambda }\right)\) 设计是 \(X\) 的不同子集(称为区组)的集合 \(\mathcal{D}\) ，使得满足以下性质:
+\end{tcolorbox}
+
+(1) each set in \(\mathcal{D}\) contains exactly \(k\) points;
+
+\begin{tcolorbox}\relax
+(1) \(\mathcal{D}\) 中的每个集合恰好包含 \(k\) 个点；
+\end{tcolorbox}
+
+(2) every pair of distinct points is contained in exactly \(\lambda\) blocks.
+
+\begin{tcolorbox}\relax
+(2) 每对不同的点恰好包含在 \(\lambda\) 个块中。
+\end{tcolorbox}
+
+The number of blocks is usually denoted by \(b\) . If we replace (2) by the following property:
+
+\begin{tcolorbox}\relax
+块的数量通常用 \(b\) 表示。如果我们用以下属性替换(2):
+\end{tcolorbox}
+
+(2’) every \(t\) -element subset of \(X\) is contained in exactly \(\lambda\) blocks,
+
+\begin{tcolorbox}\relax
+(2’) \(X\) 的每个 \(t\) 元子集恰好包含在 \(\lambda\) 个块中，
+\end{tcolorbox}
+
+then the corresponding family is called a \(t - \left( {v,k,\lambda }\right)\) design. A Steiner system \(S\left( {t,k,v}\right)\) is a \(t - \left( {v,k,\lambda }\right)\) -design with \(\lambda  = 1\) . A design, in which \(b = v\) (i.e., the number of blocks and points is the same) is often called symmetric.
+
+\begin{tcolorbox}\relax
+那么相应的族称为 \(t - \left( {v,k,\lambda }\right)\) 设计。施泰纳系 \(S\left( {t,k,v}\right)\) 是具有 \(\lambda  = 1\) 的 \(t - \left( {v,k,\lambda }\right)\) 设计。一个设计，其中 \(b = v\) (即块和点的数量相同)通常称为对称的。
+\end{tcolorbox}
+
+\section*{12.1 Regularity}
+
+\begin{tcolorbox}\relax
+\section*{12.1 正则性}
+\end{tcolorbox}
+
+In every design, every pair of points lies in the same number of blocks. It is easy to show that then the same also holds for every single point. A family of sets \(\mathcal{F}\) is \(r\) -regular if every point lies in exactly \(r\) sets; \(r\) is the replication number of \(\mathcal{F}\) .
+
+\begin{tcolorbox}\relax
+在每个设计中，每对点都包含在相同数量的区组中。很容易证明，对于每个单点来说也是如此。如果每个点恰好包含在 \(r\) 个集合中，那么集合族 \(\mathcal{F}\) 就是 \(r\) 正则的； \(r\) 是 \(\mathcal{F}\) 的重复数。
+\end{tcolorbox}
+
+Theorem 12.2. Let \(\mathcal{D}\) be a \(\left( {v,k,\lambda }\right)\) design containing \(b\) blocks. Then \(\mathcal{D}\) is \(r\) -regular with the replication number \(r\) satisfying the equations
+
+\begin{tcolorbox}\relax
+定理12.2。设 \(\mathcal{D}\) 是一个包含 \(b\) 个区组的 \(\left( {v,k,\lambda }\right)\) 设计。那么 \(\mathcal{D}\) 是 \(r\) 正则的，其重复数 \(r\) 满足方程
+\end{tcolorbox}
+
+\[
+r\left( {k - 1}\right)  = \lambda \left( {v - 1}\right) . \tag{12.1}
+\]
+
+and
+
+\begin{tcolorbox}\relax
+以及
+\end{tcolorbox}
+
+\[
+{bk} = {vr}. \tag{12.2}
+\]
+
+Proof. Let \(a \in  X\) be fixed and assume that \(a\) occurs in \({r}_{a}\) blocks. We count in two ways the cardinality of the set
+
+\begin{tcolorbox}\relax
+证明。固定 \(a \in  X\) ，并假设 \(a\) 出现在 \({r}_{a}\) 个区组中。我们用两种方法计算集合
+\end{tcolorbox}
+
+\[
+\{ \left( {x,B}\right)  : B \in  \mathcal{D};a,x \in  B;x \neq  a\} .
+\]
+
+For each of the \(v - 1\) possibilities for \(x\left( {x \neq  a}\right)\) there are exactly \(\lambda\) blocks \(B\) containing both \(a\) and \(x\) . The cardinality of the set is therefore \(\left( {v - 1}\right) \lambda\) . On the other hand, for each of the \({r}_{a}\) blocks \(B\) containing \(a\) , the element \(x \in  B \smallsetminus  \{ a\}\) can be chosen in \(\left| B\right|  - 1 = k - 1\) ways. Hence \(\left( {v - 1}\right) \lambda  = {r}_{a}\left( {k - 1}\right)\) . This shows that \({r}_{a}\) is independent of the choice of \(a\) and proves (12.1).
+
+\begin{tcolorbox}\relax
+对于 \(x\left( {x \neq  a}\right)\) 的 \(v - 1\) 种可能性中的每一种，恰好有 \(\lambda\) 个区组 \(B\) 同时包含 \(a\) 和 \(x\) 。因此，该集合的基数是 \(\left( {v - 1}\right) \lambda\) 。另一方面，对于包含 \(a\) 的 \({r}_{a}\) 个区组 \(B\) 中的每一个，元素 \(x \in  B \smallsetminus  \{ a\}\) 可以有 \(\left| B\right|  - 1 = k - 1\) 种选择方式。因此 \(\left( {v - 1}\right) \lambda  = {r}_{a}\left( {k - 1}\right)\) 。这表明 \({r}_{a}\) 与 \(a\) 的选择无关，并证明了(12.1)。
+\end{tcolorbox}
+
+To prove the second claim we count in two ways the cardinality of the set
+
+\begin{tcolorbox}\relax
+为了证明第二个断言，我们用两种方法计算集合
+\end{tcolorbox}
+
+\[
+\{ \left( {x,B}\right)  : B \in  \mathcal{D},x \in  B\} .
+\]
+
+For each \(x \in  X\) the block \(B\) can be chosen in \(r\) ways. On the other hand, for each of the \(b\) blocks \(B\) the element \(x \in  B\) can be chosen in \(k\) ways. Hence \({vr} = {bk}\) , as desired.
+
+\begin{tcolorbox}\relax
+对于每个 \(x \in  X\) ，区组 \(B\) 可以有 \(r\) 种选择方式。另一方面，对于 \(b\) 个区组 \(B\) 中的每一个，元素 \(x \in  B\) 可以有 \(k\) 种选择方式。因此 \({vr} = {bk}\) ，正如所期望的。
+\end{tcolorbox}
+
+Thus, every design is an \(r\) -regular family with the parameter \(r\) satisfying both equations (12.1) and (12.2). It turns out that for regularity the second condition (12.2) is also sufficient. The proof presented here is due to David Billington (see Cameron 1994).
+
+\begin{tcolorbox}\relax
+因此，每个设计都是一个 \(r\) 正则族，其参数 \(r\) 同时满足方程(12.1)和(12.2)。事实证明，对于正则性来说，第二个条件(12.2)也是充分的。这里给出的证明归功于大卫·比林顿(见卡梅伦1994年的著作)。
+\end{tcolorbox}
+
+Theorem 12.3. Let \(k < v\) and \(b \leq  \left( \begin{array}{l} v \\  k \end{array}\right)\) . If \({bk} = {vr}\) then there is an \(r\) -regular family \(\mathcal{F}\) of \(k\) -subsets of \(\{ 1,\ldots ,v\}\) with \(\left| \mathcal{F}\right|  = b\) .
+
+\begin{tcolorbox}\relax
+定理12.3。设 \(k < v\) 和 \(b \leq  \left( \begin{array}{l} v \\  k \end{array}\right)\) 。如果 \({bk} = {vr}\) ，那么存在一个 \(r\) 正则族 \(\mathcal{F}\) ，它是 \(\{ 1,\ldots ,v\}\) 的 \(k\) 子集，且 \(\left| \mathcal{F}\right|  = b\) 。
+\end{tcolorbox}
+
+Proof. There is a simple way to make a \(k\) -uniform family \(\mathcal{F}\) "more regular." (We have already used a similar argument in the proof of Theorem 10.2 to make a given set of binary vectors "more hereditary.")
+
+\begin{tcolorbox}\relax
+证明。有一种简单的方法可以使一个 \(k\) 均匀族 \(\mathcal{F}\) “更正则”。(我们在定理10.2的证明中已经使用了类似的论证，以使给定的一组二进制向量“更具遗传性”。)
+\end{tcolorbox}
+
+Let \({r}_{x}\) be the replication number of \(x\) , the number of sets of \(\mathcal{F}\) which contain \(x\) . (In our previous notation this is the degree \(d\left( x\right)\) of a point in the family \(\mathcal{F}\) . Here we follow the notation which is usual in the design theory.)
+
+\begin{tcolorbox}\relax
+设 \({r}_{x}\) 是 \(x\) 的重复数，即包含 \(x\) 的 \(\mathcal{F}\) 集合的数量。(在我们之前的符号中，这是族 \(\mathcal{F}\) 中一个点的度 \(d\left( x\right)\) 。这里我们采用设计理论中常用的符号。)
+\end{tcolorbox}
+
+If \({r}_{x} > {r}_{y}\) , then there must exist a \(\left( {k - 1}\right)\) -set \(A\) , containing neither \(x\) nor \(y\) , such that \(\{ x\}  \cup  A \in  \mathcal{F}\) and \(\{ y\}  \cup  A \notin  \mathcal{F}\) . Now form a new family \({\mathcal{F}}^{\prime }\) by removing \(\{ x\}  \cup  A\) from \(\mathcal{F}\) and including \(\{ y\}  \cup  A\) in its place. In the new family, \({r}_{x}^{\prime } = {r}_{x} - 1,{r}_{y}^{\prime } = {r}_{y} + 1\) , and all other replication numbers are unaltered. Starting with any family of \(k\) -sets, we reach by this process a family in which all the replication numbers differ by at most 1 (an almost regular family), containing the same number of sets as the original family. By double counting, the average replication number is
+
+\begin{tcolorbox}\relax
+如果 \({r}_{x} > {r}_{y}\) ，那么必定存在一个 \(\left( {k - 1}\right)\) 集 \(A\) ，它既不包含 \(x\) 也不包含 \(y\) ，使得 \(\{ x\}  \cup  A \in  \mathcal{F}\) 且 \(\{ y\}  \cup  A \notin  \mathcal{F}\) 。现在通过从 \(\mathcal{F}\) 中移除 \(\{ x\}  \cup  A\) 并在其位置包含 \(\{ y\}  \cup  A\) 来形成一个新的族 \({\mathcal{F}}^{\prime }\) 。在新的族中， \({r}_{x}^{\prime } = {r}_{x} - 1,{r}_{y}^{\prime } = {r}_{y} + 1\) ，并且所有其他重复数不变。从任何 \(k\) 集的族开始，通过这个过程我们会得到一个族，其中所有重复数最多相差1(一个几乎正则的族)，并且包含与原始族相同数量的集合。通过双重计数，平均重复数是
+\end{tcolorbox}
+
+\[
+\frac{1}{v}\sum {r}_{x} = \frac{1}{v}\mathop{\sum }\limits_{{A \in  \mathcal{F}}}\left| A\right|  = \frac{bk}{v}
+\]
+
+and an almost regular family whose average replication number is an integer must be regular.
+
+\begin{tcolorbox}\relax
+并且一个平均重复数为整数的几乎正则族必定是正则的。
+\end{tcolorbox}
+
+\section*{12.2 Finite linear spaces}
+
+\begin{tcolorbox}\relax
+<\#\#\# 12.2 有限线性空间
+\end{tcolorbox}
+
+Sometimes it is possible to show that a design has at least as many blocks as it has points. The well-known Fisher's Inequality (Theorem 7.5) implies that if \(\mathcal{D}\) is a \(\left( {v,k,\lambda }\right)\) design then \(\left| \mathcal{D}\right|  \geq  v\) (see Exercise 12.1). Many generalizations exist. For example, the Petrenjuk-Ray-Chaudhuri-Wilson Inequality (Petrenjuk 1968, Ray-Chaudhuri, and Wilson 1975) states that, if \(\mathcal{D}\) is a \({2s} - \; \left( {v,k,\lambda }\right)\) design with \(v \geq  k + s\) then \(\left| \mathcal{D}\right|  \geq  \left( \begin{array}{l} v \\  s \end{array}\right)\) . Both results can be obtained using the linear algebra method (cf. Exercise 7.6).
+
+\begin{tcolorbox}\relax
+有时可以证明一个设计的区组数量至少与点数一样多。著名的费希尔不等式(定理7.5)表明，如果 \(\mathcal{D}\) 是一个 \(\left( {v,k,\lambda }\right)\) 设计，那么 \(\left| \mathcal{D}\right|  \geq  v\) (见练习12.1)。存在许多推广。例如，彼得连朱克 - 雷 - 乔杜里 - 威尔逊不等式(彼得连朱克1968年，雷 - 乔杜里和威尔逊1975年)指出，如果 \(\mathcal{D}\) 是一个具有 \(v \geq  k + s\) 的 \({2s} - \; \left( {v,k,\lambda }\right)\) 设计，那么 \(\left| \mathcal{D}\right|  \geq  \left( \begin{array}{l} v \\  s \end{array}\right)\) 。这两个结果都可以使用线性代数方法得到(参见练习7.6)。
+\end{tcolorbox}
+
+Some of these results, however, may be proved by direct double counting. Such, for example, is the argument due to Conway for the case of "finite linear spaces." (Do not confuse these linear spaces with those from Analysis.)
+
+\begin{tcolorbox}\relax
+然而，其中一些结果可以通过直接的双重计数来证明。例如，康威针对“有限线性空间”情况的论证就是如此。(不要将这些线性空间与分析中的那些混淆。)
+\end{tcolorbox}
+
+A (finite) linear space over a set \(X\) is a family \(\mathcal{L}\) of its subsets, called lines, such that:
+
+\begin{tcolorbox}\relax
+集合 \(X\) 上的一个(有限)线性空间是其一些子集组成的族 \(\mathcal{L}\) ，这些子集称为线线，使得:
+\end{tcolorbox}
+
+\begin{itemize}\relax
+\item\relax every line contains at least two points, and
+\end{itemize}
+
+\begin{tcolorbox}\relax
+\begin{itemize}\relax
+\item\relax 每条线至少包含两个点，并且
+\end{itemize}
+\end{tcolorbox}
+
+\begin{itemize}\relax
+\item\relax any two points are on exactly one line.
+\end{itemize}
+
+\begin{tcolorbox}\relax
+\begin{itemize}\relax
+\item\relax 任意两个点恰好位于一条线上。
+\end{itemize}
+\end{tcolorbox}
+
+Theorem 12.4 (De Bruijn-Erdős 1948). If \(\mathcal{L}\) is a linear space over \(X\) then \(\left| \mathcal{L}\right|  \geq  \left| X\right|\) , with equality iff any two lines share exactly one point.
+
+\begin{tcolorbox}\relax
+定理12.4(德布鲁因 - 埃尔德什1948年)。如果 \(\mathcal{L}\) 是 \(X\) 上的一个线性空间，那么 \(\left| \mathcal{L}\right|  \geq  \left| X\right|\) ，当且仅当任意两条线恰好共享一个点时取等号。
+\end{tcolorbox}
+
+Proof (due to J. Conway). Let \(b = \left| \mathcal{L}\right|  \geq  2\) and \(v = \left| X\right|\) . For a point \(x \in  X\) , let \({r}_{x}\) , as above, be its replication number, i.e., the number of lines in \(\mathcal{L}\) containing \(x\) . If \(x \notin  L\) then \({r}_{x} \geq  \left| L\right|\) because there are \(\left| L\right|\) lines joining \(x\) to the points on \(L\) . Suppose \(b \leq  v\) . So, for \(x \notin  L\) , we have
+
+\begin{tcolorbox}\relax
+证明(由J. 康威给出)。设 \(b = \left| \mathcal{L}\right|  \geq  2\) 和 \(v = \left| X\right|\) 。对于一个点 \(x \in  X\) ，如前所述，设 \({r}_{x}\) 是它的重复数，即 \(\mathcal{L}\) 中包含 \(x\) 的线的数量。如果 \(x \notin  L\) ，那么 \({r}_{x} \geq  \left| L\right|\) ，因为有 \(\left| L\right|\) 条线将 \(x\) 与 \(L\) 上的点相连。假设 \(b \leq  v\) 。所以，对于 \(x \notin  L\) ，我们有
+\end{tcolorbox}
+
+\[
+b\left( {v - \left| L\right| }\right)  \geq  v\left( {b - {r}_{x}}\right) .
+\]
+
+Hence
+
+\begin{tcolorbox}\relax
+因此
+\end{tcolorbox}
+
+\[
+b = \mathop{\sum }\limits_{{L \in  \mathcal{L}}}1 = \mathop{\sum }\limits_{{L \in  \mathcal{L}}}\mathop{\sum }\limits_{{x : x \notin  L}}\frac{1}{v - \left| L\right| } \leq  \frac{b}{v}\mathop{\sum }\limits_{{L \in  \mathcal{L}}}\mathop{\sum }\limits_{{x : x \notin  L}}\frac{1}{b - {r}_{x}}
+\]
+
+\[
+= \frac{b}{v}\mathop{\sum }\limits_{{x \in  X}}\mathop{\sum }\limits_{{L : x \notin  L}}\frac{1}{b - {r}_{x}} = \frac{b}{v}\mathop{\sum }\limits_{{x \in  X}}1 = b,
+\]
+
+and this implies that all inequalities are equalities so that \(b = v\) , and \({r}_{x} = \left| L\right|\) whenever \(x \notin  L\) .
+
+\begin{tcolorbox}\relax
+这意味着所有不等式都是等式，所以 \(b = v\) ，并且每当 \(x \notin  L\) 时 \({r}_{x} = \left| L\right|\) 。
+\end{tcolorbox}
+
+There are several methods to construct (symmetric) designs. In the next two sections we will study two of them: one comes from "difference sets" in abelian groups, and the other from "finite geometries." The third important construction, which arises from Hadamard matrices, will be described in Chap. 14 (see Theorem 14.11).
+
+\begin{tcolorbox}\relax
+有几种构造(对称)设计的方法。在接下来的两节中，我们将研究其中两种:一种来自阿贝尔群中的“差集”，另一种来自“有限几何”。第三种重要的构造来自哈达玛矩阵，将在第14章中描述(见定理14.11)。
+\end{tcolorbox}
+
+\section*{12.3 Difference sets}
+
+\begin{tcolorbox}\relax
+\section*{12.3 差集}
+\end{tcolorbox}
+
+Let \({\mathbb{Z}}_{v}\) be an additive Abelian group of integers modulo \(v\) . We can look at \({\mathbb{Z}}_{v}\) as the set of integers \(\{ 0,1,\ldots ,v - 1\}\) where the sum is modulo \(v\) .
+
+\begin{tcolorbox}\relax
+设 \({\mathbb{Z}}_{v}\) 是模 \(v\) 的整数加法阿贝尔群。我们可以将 \({\mathbb{Z}}_{v}\) 视为整数集 \(\{ 0,1,\ldots ,v - 1\}\) ，其中加法是模 \(v\) 的。
+\end{tcolorbox}
+
+Definition 12.5. Let \(2 \leq  k < v\) and \(\lambda  \geq  1\) . A \(\left( {v,k,\lambda }\right)\) difference set is a \(k\) -element subset \(D = \left\{  {{d}_{1},{d}_{2},\ldots ,{d}_{k}}\right\}   \subseteq  {\mathbb{Z}}_{v}\) such that the collection of values \({d}_{i} - {d}_{j}\left( {i \neq  j}\right)\) contains every element in \({\mathbb{Z}}_{v} \smallsetminus  \{ 0\}\) exactly \(\lambda\) times.
+
+\begin{tcolorbox}\relax
+定义12.5。设 \(2 \leq  k < v\) 和 \(\lambda  \geq  1\) 。一个 \(\left( {v,k,\lambda }\right)\) 差集是一个 \(k\) 元子集 \(D = \left\{  {{d}_{1},{d}_{2},\ldots ,{d}_{k}}\right\}   \subseteq  {\mathbb{Z}}_{v}\) ，使得值的集合 \({d}_{i} - {d}_{j}\left( {i \neq  j}\right)\) 包含 \({\mathbb{Z}}_{v} \smallsetminus  \{ 0\}\) 中的每个元素恰好 \(\lambda\) 次。
+\end{tcolorbox}
+
+Since the number of pairs \(\left( {i,j}\right)\) with \(i \neq  j\) equals \(k\left( {k - 1}\right)\) and these give each of the \(v - 1\) nonzero elements \(\lambda\) times as a difference, it follows that
+
+\begin{tcolorbox}\relax
+由于满足 \(i \neq  j\) 的 \(\left( {i,j}\right)\) 对的数量等于 \(k\left( {k - 1}\right)\) ，并且这些对给出每个 \(v - 1\) 个非零元素作为差出现 \(\lambda\) 次，因此可得
+\end{tcolorbox}
+
+\[
+\lambda \left( {v - 1}\right)  = k\left( {k - 1}\right) . \tag{12.3}
+\]
+
+If \(D\) is a difference set, we call the set
+
+\begin{tcolorbox}\relax
+如果 \(D\) 是一个差集，我们称集合
+\end{tcolorbox}
+
+\[
+a + D \mathrel{\text{ := }} \left\{  {a + {d}_{1},a + {d}_{2},\ldots ,a + {d}_{k}}\right\}
+\]
+
+a translate of \(D\) . Notice that our assumption \(k < v\) together with (12.3) implies that all the translates of a difference set are different. Indeed, if \(a + \; D = D\) for some \(a \neq  0\) , then there is a permutation \(\pi\) of \(\{ 1,\ldots ,k\}\) so that \(\pi \left( i\right)  \neq  i\) and \(a + {d}_{i} = {d}_{\pi \left( i\right) }\) for all \(i\) . Hence, \(a\) can be expressed as a difference \({d}_{\pi \left( i\right) } - {d}_{i}\) in \(k\) ways; but \(\lambda  < k\) by (12.3) and our assumption that \(k < v\) .
+
+\begin{tcolorbox}\relax
+为 \(D\) 的一个平移。注意，我们的假设 \(k < v\) 与(12.3)一起意味着差集的所有平移都是不同的。事实上，如果对于某个 \(a \neq  0\) 有 \(a + \; D = D\) ，那么存在 \(\{ 1,\ldots ,k\}\) 的一个置换 \(\pi\) ，使得对于所有 \(i\) 有 \(\pi \left( i\right)  \neq  i\) 和 \(a + {d}_{i} = {d}_{\pi \left( i\right) }\) 。因此， \(a\) 可以表示为 \(k\) 中 \({d}_{\pi \left( i\right) } - {d}_{i}\) 种方式的差；但根据(12.3)以及我们 \(k < v\) 的假设， \(\lambda  < k\) 。
+\end{tcolorbox}
+
+Theorem 12.6. If \(D = \left\{  {{d}_{1},{d}_{2},\ldots ,{d}_{k}}\right\}\) is a \(\left( {v,k,\lambda }\right)\) difference set then the translates
+
+\begin{tcolorbox}\relax
+定理12.6。如果 \(D = \left\{  {{d}_{1},{d}_{2},\ldots ,{d}_{k}}\right\}\) 是一个 \(\left( {v,k,\lambda }\right)\) 差集，那么平移
+\end{tcolorbox}
+
+\[
+D,1 + D,\ldots ,\left( {v - 1}\right)  + D
+\]
+
+are the blocks of a symmetric \(\left( {v,k,\lambda }\right)\) design.
+
+\begin{tcolorbox}\relax
+是一个对称 \(\left( {v,k,\lambda }\right)\) 设计的区组。
+\end{tcolorbox}
+
+Proof. We have \(v\) blocks over \(v\) points. Since, clearly, every one of the translates contains \(k\) points, it is sufficient to show that every pair of points is contained in exactly \(\lambda\) blocks. Let \(x,y \in  {\mathbb{Z}}_{v},x \neq  y\) . Suppose that \(x,y \in  a + D\) for some \(a \in  {\mathbb{Z}}_{v}\) . Then \(x = a + {d}_{i}\) and \(y = a + {d}_{j}\) for some pair \(i \neq  j\) . Also, we have \({d}_{i} - {d}_{j} = x - y = d\) . Now, there are exactly \(\lambda\) pairs \(i \neq  j\) such that \({d}_{i} - {d}_{j} = d\) , and for each such pairs, there is exactly one \(a\) for which \(x,y \in  a + D\) , namely, \(a = x - {d}_{i} = y - {d}_{j}\) .
+
+\begin{tcolorbox}\relax
+证明。我们在 \(v\) 个点上有 \(v\) 个区组。显然，每个平移都包含 \(k\) 个点，所以只需证明每对不同的点恰好包含在 \(\lambda\) 个区组中。设 \(x,y \in  {\mathbb{Z}}_{v},x \neq  y\) 。假设对于某个 \(a \in  {\mathbb{Z}}_{v}\) 有 \(x,y \in  a + D\) 。那么对于某对 \(i \neq  j\) 有 \(x = a + {d}_{i}\) 和 \(y = a + {d}_{j}\) 。此外，我们有 \({d}_{i} - {d}_{j} = x - y = d\) 。现在，恰好有 \(\lambda\) 对 \(i \neq  j\) 使得 \({d}_{i} - {d}_{j} = d\) ，并且对于每这样一对，恰好有一个 \(a\) 使得 \(x,y \in  a + D\) ，即 \(a = x - {d}_{i} = y - {d}_{j}\) 。
+\end{tcolorbox}
+
+Let us now describe one construction of difference sets. Squares (or quadratic residues) in \({\mathbb{Z}}_{v}\) are the elements \({a}^{2}\) for \(a \in  {\mathbb{Z}}_{v}\) .
+
+\begin{tcolorbox}\relax
+现在让我们描述一种差集的构造。 \({\mathbb{Z}}_{v}\) 中的平方(或二次剩余)是对于 \(a \in  {\mathbb{Z}}_{v}\) 的元素 \({a}^{2}\) 。
+\end{tcolorbox}
+
+Theorem 12.7. If \(v\) is a prime power and \(v \equiv  3{\;\operatorname{mod}\;4}\) , then the nonzero squares in \({\mathbb{Z}}_{v}\) form a \(\left( {v,k,\lambda }\right)\) difference set with \(k = \left( {v - 1}\right) /2\) and \(\lambda  = \; \left( {v - 3}\right) /4\) .
+
+\begin{tcolorbox}\relax
+定理12.7。如果 \(v\) 是一个素数幂且 \(v \equiv  3{\;\operatorname{mod}\;4}\) ，那么 \({\mathbb{Z}}_{v}\) 中的非零平方元构成一个具有 \(k = \left( {v - 1}\right) /2\) 和 \(\lambda  = \; \left( {v - 3}\right) /4\) 的 \(\left( {v,k,\lambda }\right)\) 差集。
+\end{tcolorbox}
+
+The condition \(v \equiv  3{\;\operatorname{mod}\;4}\) is only used to ensure that -1 is not a square in \({\mathbb{Z}}_{v}\) , i.e., that \(- 1 \text{ ≢ } {a}^{2}{\;\operatorname{mod}\;v}\) for all \(a \in  {\mathbb{Z}}_{v}\) . This fact follows from elementary group theory, and we omit its proof here.
+
+\begin{tcolorbox}\relax
+条件 \(v \equiv  3{\;\operatorname{mod}\;4}\) 仅用于确保 -1不是 \({\mathbb{Z}}_{v}\) 中的平方元，即对于所有 \(a \in  {\mathbb{Z}}_{v}\) ， \(- 1 \text{ ≢ } {a}^{2}{\;\operatorname{mod}\;v}\) 。这个事实可由基础群论得出，我们在此省略其证明。
+\end{tcolorbox}
+
+Proof. Let \(D\) be the set of all nonzero squares, and \(k = \left| D\right|\) . First, observe that \(k = \left( {v - 1}\right) /2\) . Indeed, the nonzero squares in \({\mathbb{Z}}_{v}\) are the elements \({a}^{2}\) for \(a \in  {\mathbb{Z}}_{v} \smallsetminus  \{ 0\}\) . But for every such \(a\) the equation \({x}^{2} = {a}^{2}\) has two different solutions \(x =  \pm  a\) . So, every pair \(\left( {+a, - a}\right)\) gives rise to only one square. This means that exactly half of the nonzero elements in \({\mathbb{Z}}_{v}\) are squares, and hence \(k = \left( {v - 1}\right) /2\) .
+
+\begin{tcolorbox}\relax
+证明。设 \(D\) 为所有非零平方元的集合，且 \(k = \left| D\right|\) 。首先，注意到 \(k = \left( {v - 1}\right) /2\) 。实际上， \({\mathbb{Z}}_{v}\) 中的非零平方元是 \({a}^{2}\) 形式的元素，其中 \(a \in  {\mathbb{Z}}_{v} \smallsetminus  \{ 0\}\) 。但对于每一个这样的 \(a\) ，方程 \({x}^{2} = {a}^{2}\) 有两个不同的解 \(x =  \pm  a\) 。所以，每一对 \(\left( {+a, - a}\right)\) 仅产生一个平方元。这意味着 \({\mathbb{Z}}_{v}\) 中恰好一半的非零元是平方元，因此 \(k = \left( {v - 1}\right) /2\) 。
+\end{tcolorbox}
+
+By the remark above,-1 is not a square in \({\mathbb{Z}}_{v}\) . Hence, if \(S\) is the set of all nonzero squares then \(- S = \{  - s : s \in  S\}\) is exactly the set of nonsquares. For any \(s \in  S\) , the pair \(\left( {x,y}\right)  \in  S \times  S\) satisfies the equation \(x - y = 1\) if and only if the pair \(\left( {{sx},{sy}}\right)  \in  S \times  S\) satisfies the equation \({sx} - {sy} = s\) , or equivalently, if and only if the pair \(\left( {{sy},{sx}}\right)  \in  S \times  S\) satisfies the equation \({sy} - {sx} =  - s\) . This shows that all nonzero squares \(s \in  S\) and all nonsquares \(- s \in   - S\) have the same number \(\lambda\) of representations as a difference of two nonzero squares. We can compute \(\lambda\) from the equation (12.3), which gives \(\lambda  = k\left( {k - 1}\right) /\left( {v - 1}\right)  = \left( {v - 3}\right) /4.\)
+
+\begin{tcolorbox}\relax
+根据上述说明， -1不是 \({\mathbb{Z}}_{v}\) 中的平方元。因此，如果 \(S\) 是所有非零平方元的集合，那么 \(- S = \{  - s : s \in  S\}\) 恰好是非平方元的集合。对于任何 \(s \in  S\) ，当且仅当 \(\left( {{sx},{sy}}\right)  \in  S \times  S\) 对满足方程 \({sx} - {sy} = s\) 时， \(\left( {x,y}\right)  \in  S \times  S\) 对满足方程 \(x - y = 1\) ，或者等价地，当且仅当 \(\left( {{sy},{sx}}\right)  \in  S \times  S\) 对满足方程 \({sy} - {sx} =  - s\) 时。这表明所有非零平方元 \(s \in  S\) 和所有非平方元 \(- s \in   - S\) 作为两个非零平方元之差的表示数 \(\lambda\) 相同。我们可以从方程(12.3)计算 \(\lambda\) ，其结果为 \(\lambda  = k\left( {k - 1}\right) /\left( {v - 1}\right)  = \left( {v - 3}\right) /4.\)
+\end{tcolorbox}
+
+\section*{12.4 Projective planes}
+
+\begin{tcolorbox}\relax
+\section*{12.4 射影平面}
+\end{tcolorbox}
+
+Let \(\mathcal{L} \subseteq  {2}^{X}\) be a linear space with \(\left| \mathcal{L}\right|  = b\) and \(\left| X\right|  = v\) . By Theorem 12.4, \(b \geq  v\) . In this section we will consider linear spaces with \(b = v\) and with an additional requirement that every line has the same number, say \(q + 1\) , of points. Then \(\mathcal{L}\) turns into a symmetric \(\left( {v,k,\lambda }\right)\) design with \(\lambda  = 1\) and \(k = q + 1\) . Such a design is known as a projective plane of order \(q\) . (The reason for taking the block size of the form \(k = q + 1\) is that, for any prime power \(q\) , such a design has a very transparent construction using the Galois field \({\mathbb{F}}_{q}\) ; we will give this construction below.) By Theorem 12.2, we have \(v = b = {q}^{2} + q + 1.\)
+
+\begin{tcolorbox}\relax
+设 \(\mathcal{L} \subseteq  {2}^{X}\) 为一个具有 \(\left| \mathcal{L}\right|  = b\) 和 \(\left| X\right|  = v\) 的线性空间。根据定理12.4， \(b \geq  v\) 。在本节中，我们将考虑具有 \(b = v\) 且满足每条直线具有相同数量(设为 \(q + 1\) )的点的线性空间。那么 \(\mathcal{L}\) 就变成了一个具有 \(\lambda  = 1\) 和 \(k = q + 1\) 的对称 \(\left( {v,k,\lambda }\right)\) 设计。这样的设计被称为阶为 \(q\) 的射影平面。(取块大小为 \(k = q + 1\) 形式的原因是，对于任何素数幂 \(q\) ，这样的设计使用伽罗瓦域 \({\mathbb{F}}_{q}\) 有非常直观的构造；我们将在下面给出这个构造。)根据定理12.2，我们有 \(v = b = {q}^{2} + q + 1.\)
+\end{tcolorbox}
+
+Projective planes have many applications. They are particularly useful to show that some bounds in Extremal Set Theory are optimal (cf., for example, Lemma 2.1 and Theorems 6.2, 11.3). Due to their importance, projective planes deserve a separate definition.
+
+\begin{tcolorbox}\relax
+射影平面有许多应用。它们对于证明极值集理论中的一些界是最优的特别有用(例如，参见引理2.1以及定理6.2、11.3)。由于它们的重要性，射影平面值得单独定义。
+\end{tcolorbox}
+
+Definition 12.8. A projective plane of order \(q\) consists of a set \(X\) of \({q}^{2} + q + 1\) elements called points, and a family \(\mathcal{L}\) of subsets of \(X\) called lines, having the following properties:
+
+\begin{tcolorbox}\relax
+定义12.8。阶为 \(q\) 的射影平面由一个包含 \({q}^{2} + q + 1\) 个元素的集合 \(X\) 组成，这些元素称为点，以及 \(X\) 的子集族 \(\mathcal{L}\) ，这些子集称为直线，具有以下性质:
+\end{tcolorbox}
+
+\begin{itemize}\relax
+\item\relax Every line has \(q + 1\) points.
+\end{itemize}
+
+\begin{tcolorbox}\relax
+\begin{itemize}\relax
+\item\relax 每条直线有 \(q + 1\) 个点。
+\end{itemize}
+\end{tcolorbox}
+
+\begin{itemize}\relax
+\item\relax Every two points lie on a unique line.
+\end{itemize}
+
+\begin{tcolorbox}\relax
+\begin{itemize}\relax
+\item\relax 任意两点位于唯一一条直线上。
+\end{itemize}
+\end{tcolorbox}
+
+The only possible projective plane of order \(q = 1\) is a triangle. For \(q = 2\) , the unique projective plane of order \(q\) is the famous Fano plane (see Fig. 12.1).
+
+\begin{tcolorbox}\relax
+阶为 \(q = 1\) 的唯一可能的射影平面是一个三角形。对于 \(q = 2\) ，阶为 \(q\) 的唯一射影平面是著名的法诺平面(见图12.1)。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.2\textwidth]{images/189_643_826_254_239_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Fig. 12.1 The Fano plane with 7 lines and 3 points on a line
+
+\begin{tcolorbox}\relax
+图12.1 具有7条直线且每条直线上有3个点的法诺平面
+\end{tcolorbox}
+
+Additional properties of projective planes are summarized as follows:
+
+\begin{tcolorbox}\relax
+射影平面的其他性质总结如下:
+\end{tcolorbox}
+
+Proposition 12.9. A projective plane of order \(q\) has the properties:
+
+\begin{tcolorbox}\relax
+命题12.9。阶为 \(q\) 的射影平面具有以下性质:
+\end{tcolorbox}
+
+(i) Any point lies on \(q + 1\) lines.
+
+\begin{tcolorbox}\relax
+(i) 任意一点位于 \(q + 1\) 条直线上。
+\end{tcolorbox}
+
+(ii) There are \({q}^{2} + q + 1\) lines.
+
+\begin{tcolorbox}\relax
+(ii) 有 \({q}^{2} + q + 1\) 条直线。
+\end{tcolorbox}
+
+(iii) Any two lines meet in a unique point.
+
+\end{document}

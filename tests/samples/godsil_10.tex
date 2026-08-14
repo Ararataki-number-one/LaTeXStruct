@@ -1,0 +1,612 @@
+\documentclass[10pt]{article}
+\usepackage[verbose, a4paper, hmargin=2.5cm, vmargin=2.5cm]{geometry}
+
+\usepackage{fontspec}
+\usepackage{ctex}
+\usepackage{paratype}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{esint}
+\usepackage{stmaryrd}
+
+\usepackage[mathbf=sym]{unicode-math}
+\setmainfont{STIX Two Text}
+\setmathfont{STIX Two Math}
+
+\setsansfont{Arial}
+\setmonofont{Courier New}
+
+\usepackage{makecell}
+\usepackage{wasysym}
+\usepackage{pifont}
+\usepackage[export]{adjustbox}
+\usepackage{graphicx}
+\usepackage{mdframed}
+\usepackage{booktabs,array,multirow}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan,}
+\urlstyle{same}
+\usepackage[most]{tcolorbox}
+\definecolor{mygray}{RGB}{240,240,240}
+\tcbset{
+  colback=mygray,
+  boxrule=0pt,
+}
+\graphicspath{ {./images/} }
+\newcommand{\HRule}{\begin{center}\rule{0.9\linewidth}{0.2mm}\end{center}}
+\newcommand{\customfootnote}[1]{
+  \let\thefootnote\relax\footnotetext{#1}
+}
+\newcommand{\lt}{\mathrel{<}}
+\newcommand{\gt}{\mathrel{>}}
+\newcommand*\circled[1]{\tikz[baseline=(char.base)]{\node[shape=circle,draw,inner sep=1.5pt] (char) {\small #1};}}
+\setcounter{MaxMatrixCols}{256}
+\begin{document}
+\section*{10 Strongly Regular Graphs}
+
+\begin{tcolorbox}\relax
+\section*{10 强正则图}
+\end{tcolorbox}
+
+In this chapter we return to the theme of combinatorial regularity with the study of strongly regular graphs. In addition to being regular, a strongly regular graph has the property that the number of common neighbours of two distinct vertices depends only on whether they are adjacent or nonadjacent. A connected strongly regular graph with connected complement is just a distance-regular graph of diameter two. Any vertex-transitive graph with a rank-three automorphism group is strongly regular, and we have already met several such graphs, including the Petersen graph, the Hoffman-Singleton graph, and the symplectic graphs of Section 8.11.
+
+\begin{tcolorbox}\relax
+本章回到组合正则性的主题，研究强正则图。除了度正则外，强正则图还要求任意两不同顶点的公共邻居数仅仅取决于它们是否相邻。一个连通且补图也连通的强正则图恰是直径为二的距离正则图。任何具有秩三自同构群的顶点传递图都是强正则的，我们已经遇到过几个这样的图，包括佩特森图、霍夫曼—辛格尔顿图以及第8.11节的辛型图。
+\end{tcolorbox}
+
+We present the basic theory of strongly regular graphs, primarily using the algebraic methods of earlier chapters. We show that the adjacency matrix of a strongly regular graph has just three eigenvalues, and develop a number of conditions that these eigenvalues satisfy, culminating in an elementary proof of the Krein bounds. Each of these conditions restricts the structure of a strongly regular graph, and most of them yield some additional information about the possible subgraphs of a strongly regular graph.
+
+\begin{tcolorbox}\relax
+我们给出强正则图的基本理论，主要仍用前几章的代数方法。证明强正则图的邻接矩阵只有三个特征值，并导出这些特征值满足的一系列条件，最终得到克莱因界的一个初等证明。这些条件各自限制了强正则图的结构，其中大多数还能为强正则图可能包含的子图提供额外信息。
+\end{tcolorbox}
+
+Although many strongly regular graphs have large and interesting groups, this is not at all typical, and it is probably true that "almost all" strongly regular graphs are asymmetric. We show how strongly regular graphs arise from Latin squares and designs, which supply numerous examples of strongly regular graphs with no reason to have large automorphism groups.
+
+\begin{tcolorbox}\relax
+尽管许多强正则图具有大型且有趣的群，这并非典型，且大概“几乎所有”强正则图都是无对称的。我们展示强正则图如何由拉丁方和设计构造，这些构造提供了大量没有理由拥有大自同构群的强正则图例子。
+\end{tcolorbox}
+
+\section*{10.1 Parameters}
+
+\begin{tcolorbox}\relax
+\section*{10.1 参数}
+\end{tcolorbox}
+
+Let \(X\) be a regular graph that is neither complete nor empty. Then \(X\) is said to be strongly regular with parameters
+
+\begin{tcolorbox}\relax
+设 \(X\) 为既非完全又非空的正则图。若满足以下条件，则称 \(X\) 为具有参数的强正则图
+\end{tcolorbox}
+
+\[
+\left( {n,k,a,c}\right)
+\]
+
+if it is \(k\) -regular, every pair of adjacent vertices has \(a\) common neighbours, and every pair of distinct nonadjacent vertices has \(c\) common neighbours. One simple example is the 5-cycle \({C}_{5}\) , which is a 2-regular graph such that adjacent vertices have no common neighbours and distinct nonadjacent vertices have precisely one common neighbour. Thus it is a \(\left( {5,2,0,1}\right)\) strongly regular graph.
+
+\begin{tcolorbox}\relax
+即它是 \(k\) -正则的，每一对相邻顶点有 \(a\) 个共同邻居，而每一对不同的不相邻顶点有 \(c\) 个共同邻居。一个简单例子是 5-循环 \({C}_{5}\) ，它是一个 2-正则图，相邻顶点没有共同邻居，不相邻且不同的顶点恰有一个共同邻居。因此它是一个 \(\left( {5,2,0,1}\right)\) 强正则图。
+\end{tcolorbox}
+
+It is straightforward to show that if \(X\) is strongly regular with parameters \(\left( {n,k,a,c}\right)\) , then its complement \(\bar{X}\) is also strongly regular with parameters \(\left( {n,\bar{k},\bar{a},\bar{c}}\right)\) , where
+
+\begin{tcolorbox}\relax
+容易证明，若 \(X\) 是参数为 \(\left( {n,k,a,c}\right)\) 的强正则图，则其补图 \(\bar{X}\) 也是强正则的，参数为 \(\left( {n,\bar{k},\bar{a},\bar{c}}\right)\) ，其中
+\end{tcolorbox}
+
+\[
+\bar{k} = n - k - 1
+\]
+
+\[
+\bar{a} = n - 2 - {2k} + c,
+\]
+
+\[
+\bar{c} = n - {2k} + a.
+\]
+
+A strongly regular graph \(X\) is called primitive if both \(X\) and its complement are connected, otherwise imprimitive. The next lemma shows that there is only one class of imprimitive strongly regular graphs.
+
+\begin{tcolorbox}\relax
+若强正则图 \(X\) 与其补图均连通，则称其为本原的，否则为非本原的。下一个引理表明，非本原强正则图仅有一类。
+\end{tcolorbox}
+
+Lemma 10.1.1 Let \(X\) be an \(\left( {n,k,a,c}\right)\) strongly regular graph. Then the following are equivalent:
+
+\begin{tcolorbox}\relax
+引理 10.1.1 设 \(X\) 为一个 \(\left( {n,k,a,c}\right)\) 强正则图。则下列各项等价:
+\end{tcolorbox}
+
+(a) \(X\) is not connected,
+
+\begin{tcolorbox}\relax
+(a) \(X\) 不连通，
+\end{tcolorbox}
+
+(b) \(c = 0\) ,
+
+(c) \(a = k - 1\) ,
+
+(d) \(X\) is isomorphic to \(m{K}_{k + 1}\) for some \(m > 1\) .
+
+\begin{tcolorbox}\relax
+(d) 存在某个 \(m > 1\) 使得 \(X\) 同构于 \(m{K}_{k + 1}\) 。
+\end{tcolorbox}
+
+Proof. Suppose that \(X\) is not connected and let \({X}_{1}\) be a component of \(X\) . A vertex in \({X}_{1}\) has no common neighbours with a vertex not in \({X}_{1}\) , and so \(c = 0\) . If \(c = 0\) , then any two neighbours of a vertex \(u \in  V\left( X\right)\) must be adjacent, and so \(a = k - 1\) . Finally, if \(a = k - 1\) , then the component containing any vertex must be a complete graph \({K}_{k + 1}\) , and hence \(X\) is a disjoint union of complete graphs.
+
+\begin{tcolorbox}\relax
+证明。假设 \(X\) 不连通，令 \({X}_{1}\) 为 \(X\) 的一个连通分支。 \({X}_{1}\) 中的一个顶点与不在 \({X}_{1}\) 中的顶点没有共同邻居，因此 \(c = 0\) 。若 \(c = 0\) ，则任意一个顶点 \(u \in  V\left( X\right)\) 的两个邻居必定相邻，因此 \(a = k - 1\) 。最后，若 \(a = k - 1\) ，则包含任一顶点的连通分支必为一完全图 \({K}_{k + 1}\) ，从而 \(X\) 是几个完全图的不相交并。
+\end{tcolorbox}
+
+Two simple families of examples of strongly regular graphs are provided by the line graphs of \({K}_{n}\) and \({K}_{n,n}\) . The graph \(L\left( {K}_{n}\right)\) has parameters
+
+\begin{tcolorbox}\relax
+两个简单的强正则图族由 \({K}_{n}\) 和 \({K}_{n,n}\) 的线图给出。图 \(L\left( {K}_{n}\right)\) 的参数为
+\end{tcolorbox}
+
+\[
+\left( {n\left( {n - 1}\right) /2,{2n} - 4,n - 2,4}\right) ,
+\]
+
+while \(L\left( {K}_{n,n}\right)\) has parameters
+
+\begin{tcolorbox}\relax
+而 \(L\left( {K}_{n,n}\right)\) 的参数为
+\end{tcolorbox}
+
+\[
+\left( {{n}^{2},{2n} - 2,n - 2,2}\right) \text{ . }
+\]
+
+These graphs are sometimes referred to as the triangular graphs and the square lattice graphs, respectively.
+
+\begin{tcolorbox}\relax
+这些图有时分别称为三角图和方格格点图。
+\end{tcolorbox}
+
+The parameters of a strongly regular graph are not independent. We can find some relationships between them by simple counting. Every vertex \(u\) has \(k\) neighbours, and hence \(n - k - 1\) non-neighbours. We will count the total number of edges between the neighbours and non-neighbours of \(u\) in two ways. Each of the \(k\) neighbours of \(u\) is adjacent to \(u\) itself, to \(a\) neighbours of \(u\) , and thus to \(k - a - 1\) non-neighbours of \(u\) , for a total of \(k\left( {k - a - 1}\right)\) edges. On the other hand, each of the \(n - k - 1\) non-neighbours of \(u\) is adjacent to \(c\) neighbours of \(u\) for a total of \(\left( {n - k - 1}\right) c\) edges. Therefore,
+
+\begin{tcolorbox}\relax
+强正则图的参数并非相互独立。我们可以通过简单计数得到它们之间的一些关系。每个顶点 \(u\) 有 \(k\) 个邻居，因此有 \(n - k - 1\) 个非邻居。我们将用两种方法计数 \(u\) 的邻居与非邻居之间的边的总数。每个 \(k\) 个邻居中的一个与 \(u\) 本身相邻，与 \(a\) 个 \(u\) 的邻居相邻，因此与 \(u\) 的 \(k - a - 1\) 个非邻居相邻，总共 \(k\left( {k - a - 1}\right)\) 条边。另一方面，每个 \(n - k - 1\) 个非邻居与 \(c\) 个 \(u\) 的邻居相邻，总共 \(\left( {n - k - 1}\right) c\) 条边。因此，
+\end{tcolorbox}
+
+\[
+k\left( {k - a - 1}\right)  = \left( {n - k - 1}\right) c. \tag{10.1}
+\]
+
+The study of strongly regular graphs often proceeds by constructing a list of possible parameter sets, and then trying to find the actual graphs with those parameter sets. We can view the above equation as a very simple example of a feasibility condition that must be satisfied by the parameters of any strongly regular graph.
+
+\begin{tcolorbox}\relax
+强正则图的研究通常通过构造可能的参数集列表，然后尝试寻找具有这些参数集的实际图来进行。我们可以将上述方程看作必须由任一强正则图参数满足的一个非常简单的可行性条件的例子。
+\end{tcolorbox}
+
+\section*{10.2 Eigenvalues}
+
+\begin{tcolorbox}\relax
+\section*{10.2 特征值}
+\end{tcolorbox}
+
+Suppose \(A\) is the adjacency matrix of the \(\left( {n,k,a,c}\right)\) strongly regular graph \(X\) . We can determine the eigenvalues of the matrix \(A\) from the parameters of \(X\) and thereby obtain some strong feasibility conditions.
+
+\begin{tcolorbox}\relax
+设 \(A\) 为 \(\left( {n,k,a,c}\right)\) 强正则图 \(X\) 的邻接矩阵。我们可以从 \(X\) 的参数确定矩阵 \(A\) 的特征值，从而得到一些强的可行性条件。
+\end{tcolorbox}
+
+The \({uv}\) -entry of the matrix \({A}^{2}\) is the number of walks of length two from the vertex \(u\) to the vertex \(v\) . In a strongly regular graph this number is determined only by whether \(u\) and \(v\) are equal, adjacent, or distinct and nonadjacent. Therefore, we get the equation
+
+\begin{tcolorbox}\relax
+矩阵 \({A}^{2}\) 的 \({uv}\) -项是从顶点 \(u\) 到顶点 \(v\) 的长度为二的步数。在强正则图中，这个数只由 \(u\) 与 \(v\) 是否相同、相邻或不同且不相邻决定。因此，我们得到等式
+\end{tcolorbox}
+
+\[
+{A}^{2} = {kI} + {aA} + c\left( {J - I - A}\right) ,
+\]
+
+which can be rewritten as
+
+\begin{tcolorbox}\relax
+可将其重写为
+\end{tcolorbox}
+
+\[
+{A}^{2} - \left( {a - c}\right) A - \left( {k - c}\right) I = {cJ}.
+\]
+
+We can use this equation to determine the eigenvalues of \(A\) . Since \(X\) is regular with valency \(k\) , it follows that \(k\) is an eigenvalue of \(A\) with eigenvector 1. By Lemma 8.4.1 any other eigenvector of \(A\) is orthogonal to 1. Let \(z\) be an eigenvector for \(A\) with eigenvalue \(\theta  \neq  k\) . Then
+
+\begin{tcolorbox}\relax
+我们可以用此等式来确定 \(A\) 的特征值。由于 \(X\) 是度为 \(k\) 的正则图，故 \(k\) 是 \(A\) 的一个特征值，对应特征向量为 1。由引理 8.4.1， \(A\) 的任何其他特征向量都与 1 正交。设 \(z\) 为 \(A\) 关于特征值 \(\theta  \neq  k\) 的一个特征向量。则
+\end{tcolorbox}
+
+\[
+{A}^{2}z - \left( {a - c}\right) {Az} - \left( {k - c}\right) {Iz} = {cJz} = 0,
+\]
+
+so
+
+\[
+{\theta }^{2} - \left( {a - c}\right) \theta  - \left( {k - c}\right)  = 0.
+\]
+
+Therefore, the eigenvalues of \(A\) different from \(k\) must be zeros of the quadratic \({x}^{2} - \left( {a - c}\right) x - \left( {k - c}\right)\) . If we set \(\Delta  = {\left( a - c\right) }^{2} + 4\left( {k - c}\right)\) (the discriminant of the quadratic) and denote the two zeros of this polynomial by \(\theta\) and \(\tau\) , we get
+
+\begin{tcolorbox}\relax
+因此，除了 \(k\) 外的 \(A\) 的特征值必须是二次多项式 \({x}^{2} - \left( {a - c}\right) x - \left( {k - c}\right)\) 的根。设 \(\Delta  = {\left( a - c\right) }^{2} + 4\left( {k - c}\right)\) (该二次的判别式)，并将该多项式的两个根记为 \(\theta\) 和 \(\tau\) ，则得到
+\end{tcolorbox}
+
+\[
+\theta  = \frac{\left( {a - c}\right)  + \sqrt{\Delta }}{2}
+\]
+
+\[
+\tau  = \frac{\left( {a - c}\right)  - \sqrt{\Delta }}{2}.
+\]
+
+Now, \({\theta \tau } = \left( {c - k}\right)\) , and so, provided that \(c < k\) , we get that \(\theta\) and \(\tau\) are nonzero with opposite signs. We shall usually assume that \(\theta  > 0\) . We see that the eigenvalues of a strongly regular graph are determined by its parameters (although strongly regular graphs with the same parameters need not be isomorphic).
+
+\begin{tcolorbox}\relax
+现在， \({\theta \tau } = \left( {c - k}\right)\) ，因此在 \(c < k\) 的前提下，得出 \(\theta\) 和 \(\tau\) 异号且均非零。我们通常假定 \(\theta  > 0\) 。由此可见，强正则图的特征值由其参数确定(尽管具有相同参数的强正则图不必同构)。
+\end{tcolorbox}
+
+The multiplicities of the eigenvalues are also determined by the parameters. To see this, let \({m}_{\theta }\) and \({m}_{\tau }\) be the multiplicities of \(\theta\) and \(\tau\) , respectively. Since \(k\) has multiplicity equal to one and the sum of all the eigenvalues is the trace of \(A\) (which is 0 ), we have
+
+\begin{tcolorbox}\relax
+特征值的重数也由参数决定。为此，设 \({m}_{\theta }\) 和 \({m}_{\tau }\) 分别为 \(\theta\) 和 \(\tau\) 的重数。由于 \(k\) 的重数为一且所有特征值之和等于 \(A\) 的迹(为 0)，我们有
+\end{tcolorbox}
+
+\[
+{m}_{\theta } + {m}_{\tau } = n - 1,\;{m}_{\theta }\theta  + {m}_{\tau }\tau  =  - k.
+\]
+
+Hence
+
+\begin{tcolorbox}\relax
+因此
+\end{tcolorbox}
+
+\[
+{m}_{\theta } =  - \frac{\left( {n - 1}\right) \tau  + k}{\theta  - \tau },\;{m}_{\tau } = \frac{\left( {n - 1}\right) \theta  + k}{\theta  - \tau }. \tag{10.2}
+\]
+
+Now,
+
+\begin{tcolorbox}\relax
+现在，
+\end{tcolorbox}
+
+\[
+{\left( \theta  - \tau \right) }^{2} = {\left( \theta  + \tau \right) }^{2} - {4\theta \tau } = {\left( a - c\right) }^{2} + 4\left( {k - c}\right)  = \Delta .
+\]
+
+Substituting the values for \(\theta\) and \(\tau\) into the expressions for the multiplicities, we get
+
+\begin{tcolorbox}\relax
+将 \(\theta\) 和 \(\tau\) 的值代入重数的表达式，得到
+\end{tcolorbox}
+
+\[
+{m}_{\theta } = \frac{1}{2}\left( {\left( {n - 1}\right)  - \frac{{2k} + \left( {n - 1}\right) \left( {a - c}\right) }{\sqrt{\Delta }}}\right)
+\]
+
+and
+
+\begin{tcolorbox}\relax
+和
+\end{tcolorbox}
+
+\[
+{m}_{\tau } = \frac{1}{2}\left( {\left( {n - 1}\right)  + \frac{{2k} + \left( {n - 1}\right) \left( {a - c}\right) }{\sqrt{\Delta }}}\right) .
+\]
+
+This argument yields a powerful feasibility condition. Given a parameter set we can compute \({m}_{\theta }\) and \({m}_{\tau }\) using these equations. If the results are not integers, then there cannot be a strongly regular graph with these parameters. In practice this is a very useful condition, as we shall see in Section 10.5. The classical application of this idea is to determine the possible valencies for a Moore graph with diameter two. We leave this as Exercise 7.
+
+\begin{tcolorbox}\relax
+该论证给出了一个有力的可行性条件。给定一组参数，可以用这些方程计算出 \({m}_{\theta }\) 和 \({m}_{\tau }\) 。如果结果不是整数，则不存在具有这些参数的强正则图。实际上这是一个非常有用的条件，如第 10.5 节将看到的。该思想的经典应用是确定直径为二的穆尔图的可能度数。留作练习 7。
+\end{tcolorbox}
+
+Lemma 10.2.1 A connected regular graph with exactly three distinct eigenvalues is strongly regular.
+
+\begin{tcolorbox}\relax
+引理 10.2.1 连通正则图若恰有三个不同特征值，则为强正则图。
+\end{tcolorbox}
+
+Proof. Suppose that \(X\) is connected and regular with eigenvalues \(k,\theta\) , and \(\tau\) , where \(k\) is the valency. If \(A = A\left( X\right)\) , then the matrix polynomial
+
+\begin{tcolorbox}\relax
+证。设 \(X\) 为连通且正则的，特征值为 \(k,\theta\) 和 \(\tau\) ，其中 \(k\) 为度数。若 \(A = A\left( X\right)\) ，则矩阵多项式
+\end{tcolorbox}
+
+\[
+M \mathrel{\text{ := }} \frac{1}{\left( {k - \theta }\right) \left( {k - \tau }\right) }\left( {A - {\theta I}}\right) \left( {A - {\tau I}}\right)
+\]
+
+has all its eigenvalues equal to 0 or 1 . Any eigenvector of \(A\) with eigenvalue \(\theta\) or \(\tau\) lies in the kernel of \(M\) , whence we see that the rank of \(M\) is equal to the multiplicity of \(k\) as an eigenvalue. Since \(X\) is connected, this multiplicity is one, and as \(M\mathbf{1} = \mathbf{1}\) , it follows that \(M = \frac{1}{n}J\) .
+
+\begin{tcolorbox}\relax
+的所有特征值均为 0 或 1。 \(A\) 的任一以 \(\theta\) 或 \(\tau\) 为特征值的特征向量都在 \(M\) 的核中，故可见 \(M\) 的秩等于 \(k\) 作为特征值的重数。由于 \(X\) 是连通的，该重数为 1，且由于 \(M\mathbf{1} = \mathbf{1}\) ，因此得出 \(M = \frac{1}{n}J\) 。
+\end{tcolorbox}
+
+We have shown that \(J\) is a quadratic polynomial in \(A\) , and thus \({A}^{2}\) is a linear combination of \(I,J\) , and \(A\) . Accordingly, \(X\) is strongly regular.
+
+\begin{tcolorbox}\relax
+我们已证明 \(J\) 是关于 \(A\) 的二次多项式，因此 \({A}^{2}\) 可表示为 \(I,J\) 与 \(A\) 的线性组合。由此可知 \(X\) 是强正则图。
+\end{tcolorbox}
+
+\section*{10.3 Some Characterizations}
+
+\begin{tcolorbox}\relax
+\section*{10.3 一些刻画}
+\end{tcolorbox}
+
+We begin this section with an important class of strongly regular graphs. Let \(q\) be a prime power such that \(q \equiv  1{\;\operatorname{mod}\;4}\) . Then the Paley graph \(P\left( q\right)\) has as vertex set the elements of the finite field \({GF}\left( q\right)\) , with two vertices being adjacent if and only if their difference is a nonzero square in \({GF}\left( q\right)\) . The congruence condition on \(q\) implies that -1 is a square in \({GF}\left( q\right)\) , and hence the graph is undirected. The Paley graph \(P\left( q\right)\) is strongly regular with parameters
+
+\begin{tcolorbox}\relax
+我们以一类重要的强正则图开始本节。设 \(q\) 为满足 \(q \equiv  1{\;\operatorname{mod}\;4}\) 的素数幂。则 Paley 图 \(P\left( q\right)\) 的顶点集合为有限域 \({GF}\left( q\right)\) 的元素，且当且仅当两顶点之差在 \({GF}\left( q\right)\) 中为非零平方时它们相邻。关于 \(q\) 的同余条件意味着 -1 在 \({GF}\left( q\right)\) 中是平方，因此该图为无向图。Paley 图 \(P\left( q\right)\) 是参数为 的强正则图
+\end{tcolorbox}
+
+\[
+\left( {q,\left( {q - 1}\right) /2,\left( {q - 5}\right) /4,\left( {q - 1}\right) /4}\right) \text{ . }
+\]
+
+By using the equations above we see that the eigenvalues \(\theta\) and \(\tau\) are \(\left( {-1 \pm  \sqrt{q}}\right) /2\) and that they have the same multiplicity \(\left( {q - 1}\right) /2\) .
+
+\begin{tcolorbox}\relax
+由上面的方程可见，特征值 \(\theta\) 和 \(\tau\) 为 \(\left( {-1 \pm  \sqrt{q}}\right) /2\) ，并且它们具有相同的重数 \(\left( {q - 1}\right) /2\) 。
+\end{tcolorbox}
+
+Lemma 10.3.1 Let \(X\) be strongly regular with parameters \(\left( {n,k,a,c}\right)\) and distinct eigenvalues \(k,\theta\) , and \(\tau\) . Then
+
+\begin{tcolorbox}\relax
+引理 10.3.1 设 \(X\) 为参数为 \(\left( {n,k,a,c}\right)\) 且不同特征值为 \(k,\theta\) 和 \(\tau\) 的强正则图。则
+\end{tcolorbox}
+
+\[
+{m}_{\theta }{m}_{\tau } = \frac{{nk}\bar{k}}{{\left( \theta  - \tau \right) }^{2}}.
+\]
+
+Proof. The proof of this lemma is left as an exercise.
+
+\begin{tcolorbox}\relax
+证明。此引理的证明作为练习留给读者。
+\end{tcolorbox}
+
+Lemma 10.3.2 Let \(X\) be strongly regular with parameters \(\left( {n,k,a,c}\right)\) and eigenvalues \(k,\theta\) , and \(\tau\) . If \({m}_{\theta } = {m}_{\tau }\) , then \(k = \left( {n - 1}\right) /2,a = \left( {n - 5}\right) /4\) , and \(c = \left( {n - 1}\right) /4\) .
+
+\begin{tcolorbox}\relax
+引理 10.3.2 设 \(X\) 为参数为 \(\left( {n,k,a,c}\right)\) 且特征值为 \(k,\theta\) 和 \(\tau\) 的强正则图。如果 \({m}_{\theta } = {m}_{\tau }\) ，则 \(k = \left( {n - 1}\right) /2,a = \left( {n - 5}\right) /4\) ，且 \(c = \left( {n - 1}\right) /4\) 。
+\end{tcolorbox}
+
+Proof. If \({m}_{\theta } = {m}_{\tau }\) , then they both equal \(\left( {n - 1}\right) /2\) , which we denote by \(m\) . Then \(m\) is coprime to \(n\) , and therefore it follows from the previous lemma that \({m}^{2}\) divides \(k\bar{k}\) . Since \(k + \bar{k} = n - 1\) , it must be the case that \(k\bar{k} \leq  {\left( n - 1\right) }^{2}/4 = {m}^{2}\) , with equality if and only if \(k = \bar{k}\) . Therefore, we must have equality, and so \(k = \bar{k} = m\) . Since \(m\left( {\theta  + \tau }\right)  =  - k\) , we see that \(\theta  + \tau  = a - c =  - 1\) , and so \(a = c - 1\) . Finally, because \(k\left( {k - a - 1}\right)  = \bar{k}c\) we see that \(c = k - a - 1\) , and hence \(c = k/2\) . Putting this all together shows that \(X\) has the stated parameters.
+
+\begin{tcolorbox}\relax
+证明。若 \({m}_{\theta } = {m}_{\tau }\) ，则二者都等于 \(\left( {n - 1}\right) /2\) ，记作 \(m\) 。于是 \(m\) 与 \(n\) 互素，因此由前一引理得出 \({m}^{2}\) 整除 \(k\bar{k}\) 。既然 \(k + \bar{k} = n - 1\) ，必然有 \(k\bar{k} \leq  {\left( n - 1\right) }^{2}/4 = {m}^{2}\) ，当且仅当 \(k = \bar{k}\) 时取等号。因此我们必须取等号，于是 \(k = \bar{k} = m\) 。由于 \(m\left( {\theta  + \tau }\right)  =  - k\) ，可见 \(\theta  + \tau  = a - c =  - 1\) ，因此 \(a = c - 1\) 。最后，因为 \(k\left( {k - a - 1}\right)  = \bar{k}c\) 我们得到 \(c = k - a - 1\) ，从而 \(c = k/2\) 。综上可知 \(X\) 具有所述参数。
+\end{tcolorbox}
+
+A graph with \({m}_{\theta } = {m}_{\tau }\) is called a conference graph. Therefore, all Paley graphs are conference graphs (but the converse is not true; there are conference graphs that are not Paley graphs).
+
+\begin{tcolorbox}\relax
+具有 \({m}_{\theta } = {m}_{\tau }\) 的图称为会议图。因此，所有 Paley 图都是会议图(但反之不然；存在非 Paley 的会议图)。
+\end{tcolorbox}
+
+The difference between \({m}_{\theta }\) and \({m}_{\tau }\) is given by
+
+\begin{tcolorbox}\relax
+\({m}_{\theta }\) 与 \({m}_{\tau }\) 的差由下式给出
+\end{tcolorbox}
+
+\[
+{m}_{\tau } - {m}_{\theta } = \frac{{2k} + \left( {n - 1}\right) \left( {a - c}\right) }{\sqrt{\Delta }}.
+\]
+
+If the numerator of this expression is nonzero, then \(\Delta\) must be a perfect square, and the eigenvalues \(\theta\) and \(\tau\) are rational. Because they are the roots of a monic quadratic with integer coefficients, they are integers. This gives us the following lemma.
+
+\begin{tcolorbox}\relax
+若此表达式的分子非零，则 \(\Delta\) 必为完全平方数，且特征值 \(\theta\) 和 \(\tau\) 为有理数。由于它们是系数为整数的首一二次多项式的根，故为整数。由此得到下列引理。
+\end{tcolorbox}
+
+Lemma 10.3.3 Let \(X\) be strongly regular with parameters \(\left( {n,k,a,c}\right)\) and eigenvalues \(k,\theta\) , and \(\tau\) . Then either
+
+\begin{tcolorbox}\relax
+引理 10.3.3 设 \(X\) 为参数为 \(\left( {n,k,a,c}\right)\) 且特征值为 \(k,\theta\) 和 \(\tau\) 的强正则图。则要么
+\end{tcolorbox}
+
+(a) \(X\) is a conference graph, or
+
+\begin{tcolorbox}\relax
+(a) \(X\) 是会议图，或
+\end{tcolorbox}
+
+(b) \({\left( \theta  - \tau \right) }^{2}\) is a perfect square and \(\theta\) and \(\tau\) are integers.
+
+\begin{tcolorbox}\relax
+(b) \({\left( \theta  - \tau \right) }^{2}\) 是完全平方数且 \(\theta\) 与 \(\tau\) 为整数。
+\end{tcolorbox}
+
+The graph \(L\left( {K}_{3,3}\right)\) satisfies both (a) and (b), and more generally, all Paley graphs \(P\left( q\right)\) where \(q\) is a square satisfy both these conditions.
+
+\begin{tcolorbox}\relax
+图 \(L\left( {K}_{3,3}\right)\) 同时满足 (a) 和 (b)，更一般地，所有当 \(q\) 为平方时的 Paley 图 \(P\left( q\right)\) 都满足这两个条件。
+\end{tcolorbox}
+
+We can use our results to severely restrict the parameter sets of the strongly regular graphs on \(p\) or \({2p}\) vertices when \(p\) is prime.
+
+\begin{tcolorbox}\relax
+当 \(p\) 为素数时，我们可以用以上结论严厉限制顶点数为 \(p\) 或 \({2p}\) 的强正则图的参数集合。
+\end{tcolorbox}
+
+Lemma 10.3.4 Let \(X\) be a strongly regular graph with \(p\) vertices, where \(p\) is prime. Then \(X\) is a conference graph.
+
+\begin{tcolorbox}\relax
+引理 10.3.4 设 \(X\) 为具有 \(p\) 个顶点的强正则图，且 \(p\) 为素数。则 \(X\) 为会议图。
+\end{tcolorbox}
+
+Proof. By Lemma 10.3.1 we have
+
+\begin{tcolorbox}\relax
+证明。由引理 10.3.1 我们有
+\end{tcolorbox}
+
+\[
+{\left( \theta  - \tau \right) }^{2} = \frac{{pk}\bar{k}}{{m}_{\theta }{m}_{\tau }}. \tag{10.3}
+\]
+
+If \(X\) is not a conference graph, then \({\left( \theta  - \tau \right) }^{2}\) is a perfect square. But since \(k,\bar{k},{m}_{\theta }\) , and \({m}_{\tau }\) are all nonzero values smaller than \(p\) , the right-hand side of (10.3) is not divisible by \({p}^{2}\) , which is a contradiction.
+
+\begin{tcolorbox}\relax
+若 \(X\) 不是会议图，则 \({\left( \theta  - \tau \right) }^{2}\) 为完全平方。但由于 \(k,\bar{k},{m}_{\theta }\) 、 \({m}_{\tau }\) 都是小于 \(p\) 的非零数，等式 (10.3) 的右边不能被 \({p}^{2}\) 整除，这与矛盾。
+\end{tcolorbox}
+
+Lemma 10.3.5 Let \(X\) be a primitive strongly regular graph with an eigenvalue \(\theta\) of multiplicity \(n/2\) . If \(k < n/2\) , then the parameters of \(X\) are
+
+\begin{tcolorbox}\relax
+引理 10.3.5 设 \(X\) 为一个本原强正则图，具有重数为 \(n/2\) 的特征值 \(\theta\) 。若 \(k < n/2\) ，则 \(X\) 的参数为
+\end{tcolorbox}
+
+\[
+\left( {{\left( 2\theta  + 1\right) }^{2} + 1,\theta \left( {{2\theta } + 1}\right) ,{\theta }^{2} - 1,{\theta }^{2}}\right) .
+\]
+
+Proof. Since \({m}_{\theta } = n - 1 - {m}_{\tau }\) , we see that \({m}_{\theta } \neq  {m}_{\tau }\) , and hence that \(\theta\) and \(\tau\) are integers.
+
+\begin{tcolorbox}\relax
+证明。由于 \({m}_{\theta } = n - 1 - {m}_{\tau }\) ，我们看到 \({m}_{\theta } \neq  {m}_{\tau }\) ，从而 \(\theta\) 和 \(\tau\) 为整数。
+\end{tcolorbox}
+
+First we will show by contradiction that \(\theta\) must be the eigenvalue of multiplicity \(n/2\) . Suppose instead that \({m}_{\tau } = n/2\) . From above we know that \({m}_{\tau } = \left( {{n\theta } + k - \theta }\right) /\left( {\theta  - \tau }\right)\) , and because \({m}_{\tau }\) divides \(n\) , it must also divide \(k - \theta\) . But since \(X\) is primitive, \(0 < \theta  < k\) , and so \(0 < k - \theta  < n/2\) , and hence \({m}_{\tau }\) cannot divide \(k - \theta\) . Therefore, we conclude that \({m}_{\theta } = n/2\) .
+
+\begin{tcolorbox}\relax
+首先我们以反证法说明 \(\theta\) 必须是重数为 \(n/2\) 的特征值。假设相反 \({m}_{\tau } = n/2\) 。由上可知 \({m}_{\tau } = \left( {{n\theta } + k - \theta }\right) /\left( {\theta  - \tau }\right)\) ，且因 \({m}_{\tau }\) 整除 \(n\) ，故也必整除 \(k - \theta\) 。但由于 \(X\) 是本原的， \(0 < \theta  < k\) ，因此 \(0 < k - \theta  < n/2\) ，故 \({m}_{\tau }\) 不可能整除 \(k - \theta\) 。因此我们得出 \({m}_{\theta } = n/2\) 。
+\end{tcolorbox}
+
+Now, \({m}_{\theta } = \left( {{n\tau } + k - \tau }\right) /\left( {\tau  - \theta }\right)\) , and since \({m}_{\theta }\) divides \(n\) , it must also divide \(k - \tau\) . But since \(- k \leq  \tau\) , we see that \(k - \tau  < n\) , and hence it must be the case that \({m}_{\theta } = k - \tau\) .
+
+\begin{tcolorbox}\relax
+现在， \({m}_{\theta } = \left( {{n\tau } + k - \tau }\right) /\left( {\tau  - \theta }\right)\) ，且由于 \({m}_{\theta }\) 整除 \(n\) ，故也必整除 \(k - \tau\) 。但因为 \(- k \leq  \tau\) ，我们看到 \(k - \tau  < n\) ，因此必须有 \({m}_{\theta } = k - \tau\) 。
+\end{tcolorbox}
+
+Set \(m = {m}_{\theta } = n/2\) . Then \({m}_{\tau } = m - 1\) , and since \(\operatorname{tr}A = 0\) and \(\operatorname{tr}{A}^{2} = {nk}\) , we have
+
+\begin{tcolorbox}\relax
+设 \(m = {m}_{\theta } = n/2\) 。则 \({m}_{\tau } = m - 1\) ，且由于 \(\operatorname{tr}A = 0\) 和 \(\operatorname{tr}{A}^{2} = {nk}\) ，我们有
+\end{tcolorbox}
+
+\[
+k + {m\theta } + \left( {m - 1}\right) \tau  = 0,\;{k}^{2} + m{\theta }^{2} + \left( {m - 1}\right) {\tau }^{2} = {2mk}.
+\]
+
+By expanding the terms \(\left( {m - 1}\right) \tau\) and \(\left( {m - 1}\right) {\tau }^{2}\) in the above expressions and then substituting \(k - m\) for the second occurrence of \(\tau\) in each case we get
+
+\begin{tcolorbox}\relax
+通过展开上述表达中的 \(\left( {m - 1}\right) \tau\) 和 \(\left( {m - 1}\right) {\tau }^{2}\) 项，然后在每种情况下将第二处出现的 \(\tau\) 替换为 \(k - m\) ，我们得到
+\end{tcolorbox}
+
+\[
+1 + \theta  + \tau  = 0,\;{\theta }^{2} + {\tau }^{2} = m,
+\]
+
+respectively. Combining these we get that \(m = {\theta }^{2} + {\left( \theta  + 1\right) }^{2}\) , and hence that \(k = \theta \left( {{2\theta } + 1}\right)\) . Finally, we know that \(c - k = {\theta \tau } =  - \left( {{\theta }^{2} + \theta }\right)\) , and so \(c = {\theta }^{2}\) ; we also know that \(a - c = \theta  + \tau  =  - 1\) , so \(a = {\theta }^{2} - 1\) . Hence the result is proved.
+
+\begin{tcolorbox}\relax
+分别。合并这些我们得到 \(m = {\theta }^{2} + {\left( \theta  + 1\right) }^{2}\) ，从而 \(k = \theta \left( {{2\theta } + 1}\right)\) 。最后，我们知道 \(c - k = {\theta \tau } =  - \left( {{\theta }^{2} + \theta }\right)\) ，因此 \(c = {\theta }^{2}\) ；我们也知道 \(a - c = \theta  + \tau  =  - 1\) ，所以 \(a = {\theta }^{2} - 1\) 。由此命题得证。
+\end{tcolorbox}
+
+Corollary 10.3.6 Let \(X\) be a primitive strongly regular graph with \({2p}\) vertices where \(p\) is prime. Then the parameters of \(X\) or its complement are
+
+\begin{tcolorbox}\relax
+推论 10.3.6 设 \(X\) 为一原始强正则图，具有 \({2p}\) 个顶点，且 \(p\) 为素数。则 \(X\) 或其补图的参数为
+\end{tcolorbox}
+
+\[
+\left( {{\left( 2\theta  + 1\right) }^{2} + 1,\theta \left( {{2\theta } + 1}\right) ,{\theta }^{2} - 1,{\theta }^{2}}\right) .
+\]
+
+Proof. By taking the complement if necessary, we may assume that \(k \leq  \left( {n - 1}\right) /2\) . The graph \(X\) cannot be a conference graph (because for a conference graph \(n = 2{m}_{\tau } + 1\) is odd), and hence \(\theta\) and \(\tau\) are integers. Since \({\left( \theta  - \tau \right) }^{2}{m}_{\theta }{m}_{\tau } = {2pk}\bar{k}\) , we see that either \(p\) divides \({\left( \theta  - \tau \right) }^{2}\) or \(p\) divides \({m}_{\theta }{m}_{\tau }\) . If \(p\) divides \({\left( \theta  - \tau \right) }^{2}\) , then so must \({p}^{2}\) , and hence \(p\) must divide \(k\bar{k}\) . Since \(k \leq  \left( {{2p} - 1}\right) /2\) , this implies that \(p\) must divide \(\bar{k}\) , and hence \(\bar{k} = p\) and \(k = p - 1\) . It is left as Exercise 1 to show that there are no primitive strongly regular graphs with \(k\) and \(\bar{k}\) coprime. On the other hand, if \(p\) divides \({m}_{\theta }{m}_{\tau }\) , then either \({m}_{\theta } = p\) or \({m}_{\tau } = p\) , and the result follows from Lemma 10.3.5.
+
+\begin{tcolorbox}\relax
+证明。必要时取补图，可假设 \(k \leq  \left( {n - 1}\right) /2\) 。图 \(X\) 不可能是会议图(因为会议图时 \(n = 2{m}_{\tau } + 1\) 为奇数)，故 \(\theta\) 与 \(\tau\) 为整数。由于 \({\left( \theta  - \tau \right) }^{2}{m}_{\theta }{m}_{\tau } = {2pk}\bar{k}\) ，可见要么 \(p\) 整除 \({\left( \theta  - \tau \right) }^{2}\) ，要么 \(p\) 整除 \({m}_{\theta }{m}_{\tau }\) 。若 \(p\) 整除 \({\left( \theta  - \tau \right) }^{2}\) ，则 \({p}^{2}\) 亦须整除，因此 \(p\) 必须整除 \(k\bar{k}\) 。又因 \(k \leq  \left( {{2p} - 1}\right) /2\) ，这意味着 \(p\) 必须整除 \(\bar{k}\) ，故 \(\bar{k} = p\) 与 \(k = p - 1\) 。作为练习 1 留下证明当 \(k\) 与 \(\bar{k}\) 互素时不存在原始强正则图。另一方面，若 \(p\) 整除 \({m}_{\theta }{m}_{\tau }\) ，则要么 \({m}_{\theta } = p\) 要么 \({m}_{\tau } = p\) ，由此可由引理 10.3.5 得出结论。
+\end{tcolorbox}
+
+Examples of such graphs can be obtained from certain Steiner systems. In particular, if \(D\) is a \(2 - \left( {{2\theta }\left( {\theta  + 1}\right)  + 1,\theta  + 1,1}\right)\) design, then the complement of the block graph of \(D\) is a graph with these parameters. Such designs are known only for \(\theta  \leq  4\) . However, there are many further examples of strongly regular graphs with these parameters.
+
+\begin{tcolorbox}\relax
+此类图的例子可由某些斯坦纳系统获得。特别地，若 \(D\) 为一 \(2 - \left( {{2\theta }\left( {\theta  + 1}\right)  + 1,\theta  + 1,1}\right)\) 设计，则 \(D\) 的区块图的补图是具有这些参数的图。此类设计仅在 \(\theta  \leq  4\) 已知。然而，具有这些参数的强正则图还有许多其他例子。
+\end{tcolorbox}
+
+\section*{10.4 Latin Square Graphs}
+
+\begin{tcolorbox}\relax
+\section*{10.4 拉丁方图}
+\end{tcolorbox}
+
+In this section we consider an extended example, namely the graphs arising from Latin squares. Recall from Section 4.5 that a Latin square of order \(n\) is an \(n \times  n\) matrix with entries from a set of size \(n\) such that each row and column contains each symbol precisely once. Here are three examples:
+
+\begin{tcolorbox}\relax
+在本节中我们考虑一个扩展例子，即由拉丁方产生的图。回想第4.5节，阶为 \(n\) 的拉丁方是一个 \(n \times  n\) 矩阵，其元素来自一个大小为 \(n\) 的集合，且每行每列每个符号恰好出现一次。下面给出三个例子:
+\end{tcolorbox}
+
+\[
+{L}_{1} = \left( \begin{array}{llll} 1 & 2 & 3 & 4 \\  2 & 1 & 4 & 3 \\  3 & 4 & 1 & 2 \\  4 & 3 & 2 & 1 \end{array}\right) ,\;{L}_{2} = \left( \begin{array}{llll} 1 & 3 & 4 & 2 \\  4 & 2 & 1 & 3 \\  2 & 4 & 3 & 1 \\  3 & 1 & 2 & 4 \end{array}\right) ,\;{L}_{3} = \left( \begin{array}{llll} 1 & 2 & 3 & 4 \\  4 & 1 & 2 & 3 \\  3 & 4 & 1 & 2 \\  2 & 3 & 4 & 1 \end{array}\right) .
+\]
+
+Two Latin squares \(L = \left( {l}_{ij}\right)\) and \(M = \left( {m}_{ij}\right)\) are said to be orthogonal if the \({n}^{2}\) pairs
+
+\begin{tcolorbox}\relax
+如果 \(L = \left( {l}_{ij}\right)\) 与 \(M = \left( {m}_{ij}\right)\) 的 \({n}^{2}\) 对
+\end{tcolorbox}
+
+\[
+\left( {{l}_{ij},{m}_{ij}}\right) ,\;\text{ where }\;1 \leq  i,j \leq  n,
+\]
+
+are all distinct. The Latin squares \({L}_{1}\) and \({L}_{2}\) shown above are orthogonal, as can easily be checked by "superimposing" the two squares and then checking that every ordered pair of elements from \(\{ 1,2,3,4\}\) occurs twice in the resulting array:
+
+\begin{tcolorbox}\relax
+全部互不相同，则称这两个拉丁方是正交的。上面所示的拉丁方 \({L}_{1}\) 与 \({L}_{2}\) 是正交的，这可以通过“叠加”两个方阵然后检查来自 \(\{ 1,2,3,4\}\) 的每一个有序对在所得数组中都出现两次来容易地验证:
+\end{tcolorbox}
+
+\[
+\begin{array}{llll} {1}^{1} & {2}^{3} & {3}^{4} & {4}^{2} \end{array}
+\]
+
+\[
+\begin{array}{llll} {2}^{4} & {1}^{2} & {4}^{1} & {3}^{3} \end{array}
+\]
+
+\(\begin{array}{llll} {3}^{2} & {4}^{4} & {1}^{3} & {2}^{1} \end{array}\)
+
+\(\begin{array}{llll} {4}^{3} & {3}^{1} & {2}^{2} & {1}^{4} \end{array}\)
+
+A set \(S\) of Latin squares is called mutually orthogonal if every pair of squares in \(S\) is orthogonal.
+
+\begin{tcolorbox}\relax
+集合 \(S\) 的拉丁方若每一对方阵互为正交，则称为相互正交的一组。
+\end{tcolorbox}
+
+An orthogonal array with parameters \(k\) and \(n\) is a \(k \times  {n}^{2}\) array with entries from a set \(N\) of size \(n\) such that the \({n}^{2}\) ordered pairs defined by any two rows of the matrix are all distinct. We denote an orthogonal array with these parameters by \({OA}\left( {k,n}\right)\) . A Latin square immediately gives rise to an \({OA}\left( {3,n}\right)\) by taking the three rows of the orthogonal array to be "row number," "column number," and "symbol":
+
+\begin{tcolorbox}\relax
+参数为 \(k\) 和 \(n\) 的正交阵是一个 \(k \times  {n}^{2}\) 阵，元素来自一个大小为 \(n\) 的集合 \(N\) ，满足由矩阵任意两行定义的 \({n}^{2}\) 个有序对全部互不相同。我们用 \({OA}\left( {k,n}\right)\) 表示具有这些参数的正交阵。一个拉丁方通过将正交阵的三行视为“行号”、“列号”和“符号”便立即得到一个 \({OA}\left( {3,n}\right)\) :
+\end{tcolorbox}
+
+\[
+\begin{array}{llllllllllllllll} 1 & 1 & 1 & 1 & 2 & 2 & 2 & 2 & 3 & 3 & 3 & 3 & 4 & 4 & 4 & 4 \\  1 & 2 & 3 & 4 & 1 & 2 & 3 & 4 & 1 & 2 & 3 & 4 & 1 & 2 & 3 & 4 \\  1 & 2 & 3 & 4 & 2 & 1 & 4 & 3 & 3 & 4 & 1 & 2 & 4 & 3 & 2 & 1 \end{array}
+\]
+
+Conversely, any \({OA}\left( {3,n}\right)\) gives rise to a Latin square (or in fact several Latin squares) by reversing this procedure and regarding two of the rows of the orthogonal array as the row and column indices of a Latin square.
+
+\begin{tcolorbox}\relax
+反过来，任一 \({OA}\left( {3,n}\right)\) 都可以通过逆转此过程并将正交阵的两行视为拉丁方的行和列索引而产生一个(或多个)拉丁方。
+\end{tcolorbox}
+
+In an analogous fashion an \({OA}\left( {k,n}\right)\) gives rise to a set of \(k - 2\) Latin squares. It is easy to see that these Latin squares are mutually orthogonal, and hence we have one half of the following result. (The other half is easy, and is left to the reader to ponder.)
+
+\begin{tcolorbox}\relax
+以类似方式，任一 \({OA}\left( {k,n}\right)\) 可产生一组 \(k - 2\) 个拉丁方。很容易看出这些拉丁方是相互正交的，因此我们得到了下述结果的一半。(另一半也很简单，留给读者思考。)
+\end{tcolorbox}
+
+\end{document}

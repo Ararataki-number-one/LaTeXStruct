@@ -1,0 +1,156 @@
+{
+ "name": "godsil_2",
+ "sample": "../../tests/samples/godsil_2.tex",
+ "pack": "bilingual",
+ "mode": "rule",
+ "labels": [
+  {
+   "needle": "Lemma 2.2.1 Let \\(G\\) be a permutation group acting on \\(V\\)",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 138
+  },
+  {
+   "needle": "Proof. Since \\(G\\) is transitive on \\(S\\) , it contains an e",
+   "kind": "proof",
+   "line": 144
+  },
+  {
+   "needle": "Lemma 2.2.2 (Orbit-stabilizer) Let \\(G\\) be a permutation gr",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 162
+  },
+  {
+   "needle": "Proof. By the previous lemma, the points of the orbit \\({x}^",
+   "kind": "proof",
+   "line": 172
+  },
+  {
+   "needle": "Lemma 2.2.3 Let \\(G\\) be a permutation group on the set \\(V\\",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 194
+  },
+  {
+   "needle": "Proof. Suppose that \\({x}^{g} = y\\) . First we show that eve",
+   "kind": "proof",
+   "line": 200
+  },
+  {
+   "needle": "Lemma 2.2.4 (\"Burnside\") Let \\(G\\) be a permutation group on",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 222
+  },
+  {
+   "needle": "Proof. We count in two ways the pairs \\(\\left( {g,x}\\right)\\",
+   "kind": "proof",
+   "line": 228
+  },
+  {
+   "needle": "Lemma 2.3.1 The size of the isomorphism class containing \\(X",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 282
+  },
+  {
+   "needle": "Proof. This follows from the orbit-stabilizer lemma. We leav",
+   "kind": "proof",
+   "line": 292
+  },
+  {
+   "needle": "Lemma 2.3.2 The number of isomorphism classes of graphs on \\",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 324
+  },
+  {
+   "needle": "Proof. We will leave some details to the reader. The support",
+   "kind": "proof",
+   "line": 334
+  },
+  {
+   "needle": "Corollary 2.3.3 Almost all graphs are asymmetric.",
+   "kind": "theorem-like",
+   "env": "corollary",
+   "line": 412
+  },
+  {
+   "needle": "Proof. Suppose that the proportion of isomorphism classes of",
+   "kind": "proof",
+   "line": 418
+  },
+  {
+   "needle": "Lemma 2.4.1 Let \\(G\\) be a group acting transitively on the ",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 505
+  },
+  {
+   "needle": "Proof. Let \\(\\Omega\\) be an orbit of \\(G\\) on \\(V \\times  V\\",
+   "kind": "proof",
+   "line": 511
+  },
+  {
+   "needle": "Lemma 2.4.2 Let \\(G\\) be a transitive permutation group on \\",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 533
+  },
+  {
+   "needle": "Proof. If \\(\\left( {x,y}\\right)\\) and \\(\\left( {y,x}\\right)\\",
+   "kind": "proof",
+   "line": 539
+  },
+  {
+   "needle": "Lemma 2.4.3 The automorphism group of \\(J\\left( {7,3,1}\\righ",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 557
+  },
+  {
+   "needle": "Proof. There are 35 partitions of the set \\(\\{ 0,1,\\ldots ,7",
+   "kind": "proof",
+   "line": 563
+  },
+  {
+   "needle": "Lemma 2.5.1 Let \\(G\\) be a transitive permutation group on \\",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 610
+  },
+  {
+   "needle": "Proof. In fact, we shall be proving the contrapositive state",
+   "kind": "proof",
+   "line": 616
+  },
+  {
+   "needle": "Lemma 2.6.1 Let \\(D\\) be a directed graph such that the in-v",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 652
+  },
+  {
+   "needle": "Proof. The difficulty is to show that if \\(D\\) is weakly con",
+   "kind": "proof",
+   "line": 658
+  },
+  {
+   "needle": "Lemma 2.6.2 Let \\(G\\) be a transitive permutation group on \\",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 670
+  },
+  {
+   "needle": "Proof. Suppose that \\(G\\) is imprimitive, and that \\({B}_{1}",
+   "kind": "proof",
+   "line": 676
+  },
+  {
+   "needle": "\\section*{Exercises}",
+   "kind": "exercise-section",
+   "line": 688
+  }
+ ]
+}

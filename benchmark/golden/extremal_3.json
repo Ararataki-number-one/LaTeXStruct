@@ -1,0 +1,69 @@
+{
+ "name": "extremal_3",
+ "sample": "../../tests/samples/extremal_3.tex",
+ "pack": "bilingual",
+ "mode": "rule",
+ "labels": [
+  {
+   "needle": "Theorem 3.1 (Erdős 1963a). If \\(n \\geq  {k}^{2}{2}^{k + 1}\\)",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 324
+  },
+  {
+   "needle": "Proof. Consider a random tournament of \\(n\\) players, i.e., ",
+   "kind": "proof",
+   "line": 330
+  },
+  {
+   "needle": "Proof. Let \\(\\mathbf{A}\\) be a set of \\(r\\) random 0-1 strin",
+   "kind": "proof",
+   "line": 380
+  },
+  {
+   "needle": "Theorem 3.3. If \\(n\\) is a power of two, then \\(\\operatornam",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 408
+  },
+  {
+   "needle": "Proof. Let \\(n = {2}^{m}\\) . We can construct a covering of ",
+   "kind": "proof",
+   "line": 414
+  },
+  {
+   "needle": "Theorem 3.4 (Erdős 1963b). Every \\(k\\) -uniform family with ",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 496
+  },
+  {
+   "needle": "Proof. Let \\(\\mathcal{F}\\) be an arbitrary \\(k\\) -uniform fa",
+   "kind": "proof",
+   "line": 502
+  },
+  {
+   "needle": "Theorem 3.5 (Erdős 1964a). If \\(k\\) is sufficiently large, t",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 536
+  },
+  {
+   "needle": "Theorem 3.6. Let \\(\\mathcal{F}\\) be an arbitrary family of s",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 594
+  },
+  {
+   "needle": "Proof. Let \\(X = \\left\\{  {{x}_{1},\\ldots ,{x}_{n}}\\right\\}\\",
+   "kind": "proof",
+   "line": 600
+  },
+  {
+   "needle": "Theorem 3.7 (Alon 1992). For every bipartite \\(n \\times  n\\)",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 618
+  }
+ ]
+}

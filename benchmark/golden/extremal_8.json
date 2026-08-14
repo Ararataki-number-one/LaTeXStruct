@@ -1,0 +1,59 @@
+{
+ "name": "extremal_8",
+ "sample": "../../tests/samples/extremal_8.tex",
+ "pack": "bilingual",
+ "mode": "rule",
+ "labels": [
+  {
+   "needle": "Theorem 8.1. Suppose that the largest chain in the poset \\(P",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 101
+  },
+  {
+   "needle": "Proof. Let \\({A}_{i}\\) be the set of points \\(x \\in  P\\) suc",
+   "kind": "proof",
+   "line": 107
+  },
+  {
+   "needle": "Theorem 8.2 (Dilworth's theorem). Suppose that the largest a",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 119
+  },
+  {
+   "needle": "Proof (due to Galvin 1994). We use induction on the cardinal",
+   "kind": "proof",
+   "line": 125
+  },
+  {
+   "needle": "Theorem 8.4 (Lipski 1978). There is a universal sequence for",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 265
+  },
+  {
+   "needle": "Theorem 8.6 (LYM Inequality). Let \\(\\mathcal{F}\\) be an anti",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 333
+  },
+  {
+   "needle": "Theorem 8.8 (Bollobás 1965). Let \\({A}_{1},\\ldots ,{A}_{m}\\)",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 395
+  },
+  {
+   "needle": "Theorem 8.9 (Tuza 1985). Let \\({A}_{1},\\ldots ,{A}_{m}\\) and",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 513
+  },
+  {
+   "needle": "Proof. Let \\(X\\) be the union of all sets \\({A}_{i} \\cup  {B",
+   "kind": "proof",
+   "line": 523
+  }
+ ]
+}

@@ -19,6 +19,25 @@ def check_env_balance(text: str) -> Dict:
     return {"ok": not ub and not ue, "unbalanced_begins": ub, "unbalanced_ends": ue}
 
 
+def compare_env_balance(before: str, after: str) -> Dict:
+    """基线对比：整理不得**新增**环境不平衡（原文自身的不平衡保持原样）。
+
+    适用于整书切片等"原文就截断"的输入：前后不平衡集合一致即通过。
+    """
+    b = check_env_balance(before)
+    a = check_env_balance(after)
+    no_new = (
+        sorted(b["unbalanced_begins"]) == sorted(a["unbalanced_begins"])
+        and sorted(b["unbalanced_ends"]) == sorted(a["unbalanced_ends"])
+    )
+    return {
+        "ok": a["ok"] or no_new,
+        "no_new": no_new,
+        "before_unbalanced": b["unbalanced_begins"] + b["unbalanced_ends"],
+        "after_unbalanced": a["unbalanced_begins"] + a["unbalanced_ends"],
+    }
+
+
 def check_braces(text: str) -> Dict:
     """花括号配平（跳过转义花括号）；结果仅作参考（advisory）。"""
     masked = _masked(text)

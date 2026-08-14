@@ -1,0 +1,174 @@
+{
+ "name": "extremal_1",
+ "sample": "../../tests/samples/extremal_1.tex",
+ "pack": "bilingual",
+ "mode": "rule",
+ "labels": [
+  {
+   "needle": "Proof. If we multiply the terms",
+   "kind": "proof",
+   "line": 82
+  },
+  {
+   "needle": "Example 1.1 (Parity of powers). To give a typical example, l",
+   "kind": "theorem-like",
+   "env": "example",
+   "line": 114
+  },
+  {
+   "needle": "Proposition 1.2.",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 152
+  },
+  {
+   "needle": "Proposition 1.3 (Pascal Triangle). For every integers \\(n \\g",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 194
+  },
+  {
+   "needle": "Proposition 1.4.",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 244
+  },
+  {
+   "needle": "Proof. Lower bound:",
+   "kind": "proof",
+   "line": 254
+  },
+  {
+   "needle": "Proposition 1.5. The number of integer solutions to the equa",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 372
+  },
+  {
+   "needle": "Proposition 1.6.",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 410
+  },
+  {
+   "needle": "Proof. If we consider any arrangement (i.e., a permutation) ",
+   "kind": "proof",
+   "line": 420
+  },
+  {
+   "needle": "Proof. Let \\({P}_{1},\\ldots ,{P}_{n}\\) be the persons. We ap",
+   "kind": "proof",
+   "line": 470
+  },
+  {
+   "needle": "Proposition 1.7. Let \\(\\mathcal{F}\\) be a family of subsets ",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 482
+  },
+  {
+   "needle": "Proof. Consider the incidence matrix \\(M = \\left( {m}_{x,A}\\",
+   "kind": "proof",
+   "line": 492
+  },
+  {
+   "needle": "Theorem 1.8 (Euler 1736). In every graph the sum of degrees ",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 504
+  },
+  {
+   "needle": "Proposition 1.9. For all positive integers \\(l \\leq  k \\leq ",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 530
+  },
+  {
+   "needle": "Proof. Let \\(\\mathcal{F}\\) be a smallest \\(l\\) -uniform fami",
+   "kind": "proof",
+   "line": 540
+  },
+  {
+   "needle": "Proposition 1.10. \\(\\left| {\\tau \\left( n\\right)  - \\ln n}\\r",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 588
+  },
+  {
+   "needle": "Proof. To apply the double counting principle, consider the ",
+   "kind": "proof",
+   "line": 594
+  },
+  {
+   "needle": "Proposition 1.11. Every graph on \\(n\\) vertices with fewer t",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 673
+  },
+  {
+   "needle": "Proof. Induction by \\(n\\) . When \\(n = 1\\) , the claim is va",
+   "kind": "proof",
+   "line": 679
+  },
+  {
+   "needle": "Proposition 1.12 (Jensen’s Inequality). If \\(0 \\leq  {\\lambd",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 740
+  },
+  {
+   "needle": "Proof. Easy induction on the number of summands \\(n\\) . For ",
+   "kind": "proof",
+   "line": 750
+  },
+  {
+   "needle": "Proposition 1.13 (Inclusion-Exclusion Principle). Let \\({A}_",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 864
+  },
+  {
+   "needle": "Proof. The sum is a linear combination of cardinalities of s",
+   "kind": "proof",
+   "line": 874
+  },
+  {
+   "needle": "Proposition 1.14. Let \\({A}_{1},\\ldots ,{A}_{n}\\) be a seque",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 924
+  },
+  {
+   "needle": "Proof. The left-hand of (1.20) is \\(\\left| {A}_{\\varnothing ",
+   "kind": "proof",
+   "line": 934
+  },
+  {
+   "needle": "Proposition 1.15. Let \\({A}_{1},\\ldots ,{A}_{n}\\) be sets, a",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 956
+  },
+  {
+   "needle": "Proof. Consider the set \\(X \\mathrel{\\text{ := }} \\mathop{\\b",
+   "kind": "proof",
+   "line": 966
+  },
+  {
+   "needle": "Proposition 1.16. The number of derangements of \\(\\{ 1,\\ldot",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 992
+  },
+  {
+   "needle": "Proof. We are going to apply the inclusion-exclusion formula",
+   "kind": "proof",
+   "line": 1008
+  },
+  {
+   "needle": "\\section*{Exercises}",
+   "kind": "exercise-section",
+   "line": 1024
+  }
+ ]
+}

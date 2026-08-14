@@ -1,0 +1,81 @@
+{
+ "name": "holdout_extremal_12",
+ "sample": "../../tests/samples/holdout_extremal_12.tex",
+ "pack": "bilingual",
+ "mode": "rule",
+ "labels": [
+  {
+   "needle": "Definition 12.1. Let \\(X = \\{ 1,\\ldots ,v\\}\\) be a set of po",
+   "kind": "theorem-like",
+   "env": "definition",
+   "line": 78
+  },
+  {
+   "needle": "Theorem 12.2. Let \\(\\mathcal{D}\\) be a \\(\\left( {v,k,\\lambda",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 126
+  },
+  {
+   "needle": "Proof. Let \\(a \\in  X\\) be fixed and assume that \\(a\\) occur",
+   "kind": "proof",
+   "line": 146
+  },
+  {
+   "needle": "Proof. There is a simple way to make a \\(k\\) -uniform family",
+   "kind": "proof",
+   "line": 190
+  },
+  {
+   "needle": "Theorem 12.4 (De Bruijn-Erdős 1948). If \\(\\mathcal{L}\\) is a",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 262
+  },
+  {
+   "needle": "Proof (due to J. Conway). Let \\(b = \\left| \\mathcal{L}\\right",
+   "kind": "proof",
+   "line": 268
+  },
+  {
+   "needle": "Definition 12.5. Let \\(2 \\leq  k < v\\) and \\(\\lambda  \\geq  ",
+   "kind": "theorem-like",
+   "env": "definition",
+   "line": 316
+  },
+  {
+   "needle": "Theorem 12.6. If \\(D = \\left\\{  {{d}_{1},{d}_{2},\\ldots ,{d}",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 348
+  },
+  {
+   "needle": "Proof. We have \\(v\\) blocks over \\(v\\) points. Since, clearl",
+   "kind": "proof",
+   "line": 364
+  },
+  {
+   "needle": "Theorem 12.7. If \\(v\\) is a prime power and \\(v \\equiv  3{\\;",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 376
+  },
+  {
+   "needle": "Proof. Let \\(D\\) be the set of all nonzero squares, and \\(k ",
+   "kind": "proof",
+   "line": 388
+  },
+  {
+   "needle": "Definition 12.8. A projective plane of order \\(q\\) consists ",
+   "kind": "theorem-like",
+   "env": "definition",
+   "line": 418
+  },
+  {
+   "needle": "Proposition 12.9. A projective plane of order \\(q\\) has the ",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 467
+  }
+ ]
+}

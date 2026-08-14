@@ -42,6 +42,29 @@ def test_report_markdown():
     assert "Precision" in md and "basic-book" in md and "内容不变" in md
 
 
+def test_expanded_corpus_and_holdout_separation():
+    from latexstruct.benchmark import HOLDOUT_DIR, evaluate_golden, run_all
+
+    dev = run_all()
+    assert len(dev) >= 14  # 原 4 组 + 新 10 组真实章节切片
+    total_labels = sum(r["labels_total"] for r in dev)
+    assert total_labels >= 190, total_labels  # 18 + 175 新标签
+    assert all(r["ok"] for r in dev), [r["name"] for r in dev if not r["ok"]]
+    # hold-out 默认不参与
+    holdout_files = list(HOLDOUT_DIR.glob("*.json"))
+    assert len(holdout_files) == 2
+    for p in holdout_files:
+        r = evaluate_golden(p)
+        assert r["ok"] is True, r  # 最终验证集同样全通过（未针对其调参）
+
+
+def test_report_summary_rates():
+    from latexstruct.benchmark import render_markdown, run_all
+
+    md = render_markdown(run_all())
+    assert "正文零改动率" in md and "引用保持率" in md and "编译成功率" in md
+
+
 def main():
     import traceback
 

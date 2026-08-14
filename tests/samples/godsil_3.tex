@@ -1,0 +1,763 @@
+\documentclass[10pt]{article}
+\usepackage[verbose, a4paper, hmargin=2.5cm, vmargin=2.5cm]{geometry}
+
+\usepackage{fontspec}
+\usepackage{ctex}
+\usepackage{paratype}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{esint}
+\usepackage{stmaryrd}
+
+\usepackage[mathbf=sym]{unicode-math}
+\setmainfont{STIX Two Text}
+\setmathfont{STIX Two Math}
+
+\setsansfont{Arial}
+\setmonofont{Courier New}
+
+\usepackage{makecell}
+\usepackage{wasysym}
+\usepackage{pifont}
+\usepackage[export]{adjustbox}
+\usepackage{graphicx}
+\usepackage{mdframed}
+\usepackage{booktabs,array,multirow}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan,}
+\urlstyle{same}
+\usepackage[most]{tcolorbox}
+\definecolor{mygray}{RGB}{240,240,240}
+\tcbset{
+  colback=mygray,
+  boxrule=0pt,
+}
+\graphicspath{ {./images/} }
+\newcommand{\HRule}{\begin{center}\rule{0.9\linewidth}{0.2mm}\end{center}}
+\newcommand{\customfootnote}[1]{
+  \let\thefootnote\relax\footnotetext{#1}
+}
+\newcommand{\lt}{\mathrel{<}}
+\newcommand{\gt}{\mathrel{>}}
+\newcommand*\circled[1]{\tikz[baseline=(char.base)]{\node[shape=circle,draw,inner sep=1.5pt] (char) {\small #1};}}
+\setcounter{MaxMatrixCols}{256}
+\begin{document}
+\section*{3 Transitive Graphs}
+
+\begin{tcolorbox}\relax
+\section*{3 传递图}
+\end{tcolorbox}
+
+We are going to study the properties of graphs whose automorphism group acts vertex transitively. A vertex-transitive graph is necessarily regular. One challenge is to find properties of vertex-transitive graphs that are not shared by all regular graphs. We will see that transitive graphs are more strongly connected than regular graphs in general. Cayley graphs form an important class of vertex-transitive graphs; we introduce them and offer some reasons why they are important and interesting.
+
+\begin{tcolorbox}\relax
+我们将研究自同构群在顶点上传递作用的图的性质。顶点传递图必定是正则的。一项挑战是寻找顶点传递图具有而并非常规正则图具有的性质。我们将看到传递图通常比正则图具有更强的连通性。Cayley 图构成一类重要的顶点传递图；我们将引入它们并给出一些说明其重要性和趣味性的理由。
+\end{tcolorbox}
+
+\section*{3.1 Vertex-Transitive Graphs}
+
+\begin{tcolorbox}\relax
+\section*{3.1 顶点传递图}
+\end{tcolorbox}
+
+A graph \(X\) is vertex transitive (or just transitive) if its automorphism group acts transitively on \(V\left( X\right)\) . Thus for any two distinct vertices of \(X\) there is an automorphism mapping one to the other.
+
+\begin{tcolorbox}\relax
+若图 \(X\) 的自同构群在 \(V\left( X\right)\) 上传递作用，则称其为顶点传递(或简称传递)图。因此，对于 \(X\) 的任意两个不同顶点，存在一个将一个映到另一个的自同构。
+\end{tcolorbox}
+
+An interesting family of vertex-transitive graphs is provided by the \(k\) - cubes \({Q}_{k}\) . The vertex set of \({Q}_{k}\) is the set of all \({2}^{k}\) binary \(k\) -tuples, with two being adjacent if they differ in precisely one coordinate position. We have already met the 3-cube \({Q}_{3}\) , which is normally just called the cube (see Figure 2.2), and Figure 3.1 shows the 4-cube \({Q}_{4}\) .
+
+\begin{tcolorbox}\relax
+一类有趣的顶点传递图是 \(k\) -立方体 \({Q}_{k}\) 。 \({Q}_{k}\) 的顶点集是所有 \({2}^{k}\) 位二进制 \(k\) 元组的集合，若两个元组在且仅在一个坐标位置不同则相邻。我们已遇到 3-立方体 \({Q}_{3}\) ，通常称为立方体(见图 2.2)，图 3.1 显示了 4-立方体 \({Q}_{4}\) 。
+\end{tcolorbox}
+
+Lemma 3.1.1 The \(k\) -cube \({Q}_{k}\) is vertex transitive.
+
+\begin{tcolorbox}\relax
+引理 3.1.1 \(k\) -立方体 \({Q}_{k}\) 是顶点传递的。
+\end{tcolorbox}
+
+Proof. If \(v\) is a fixed \(k\) -tuple, then the mapping
+
+\begin{tcolorbox}\relax
+证明。若 \(v\) 是固定的 \(k\) -元组，则映射
+\end{tcolorbox}
+
+\[
+{\rho }_{v} : x \mapsto  x + v
+\]
+
+(where addition is binary) is a permutation of the vertices of \({Q}_{k}\) . This mapping is an automorphism because the \(k\) -tuples \(x\) and \(y\) differ in precisely one coordinate position if and only if \(x + v\) and \(y + v\) differ in precisely one coordinate position. There are \({2}^{k}\) such permutations, and they form a subgroup \(H\) of the automorphism group of \({Q}_{k}\) . This subgroup acts transitively on \(V\left( {Q}_{k}\right)\) because for any two vertices \(x\) and \(y\) , the automorphism \({\rho }_{y - x}\) maps \(x\) to \(y\) .
+
+\begin{tcolorbox}\relax
+(加法为二元)是 \({Q}_{k}\) 顶点的一个置换。该映射是自同构，因为 \(k\) -元组 \(x\) 与 \(y\) 在且仅在一位坐标上不同当且仅当 \(x + v\) 与 \(y + v\) 在且仅在一位坐标上不同。共有 \({2}^{k}\) 个此类置换，它们构成自同构群的一个子群 \(H\) 。该子群在 \(V\left( {Q}_{k}\right)\) 上传递，因为对任意两个顶点 \(x\) 与 \(y\) ，自同构 \({\rho }_{y - x}\) 将 \(x\) 映到 \(y\) 。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.5\textwidth]{images/51_466_203_613_609_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 3.1. The 4-cube \({Q}_{4}\)
+
+\begin{tcolorbox}\relax
+图 3.1. 4-立方体 \({Q}_{4}\)
+\end{tcolorbox}
+
+The group \(H\) of Lemma 3.1.1 is not the full automorphism group of \({Q}_{k}\) . Any permutation of the \(k\) coordinate positions is an automorphism of \({Q}_{k}\) , and the set of all these permutations forms a subgroup \(K\) of \(\operatorname{Aut}\left( {Q}_{k}\right)\) , isomorphic to \(\operatorname{Sym}\left( k\right)\) . Therefore, \(\operatorname{Aut}\left( {Q}_{k}\right)\) contains the set \({HK}\) . By standard group theory, the size of \({HK}\) is given by
+
+\begin{tcolorbox}\relax
+引理 3.1.1 中的群 \(H\) 并非 \({Q}_{k}\) 的全部自同构群。任意对 \(k\) 坐标位置的置换都是 \({Q}_{k}\) 的自同构，这些置换的集合构成 \(\operatorname{Aut}\left( {Q}_{k}\right)\) 的一个子群 \(K\) ，同构于 \(\operatorname{Sym}\left( k\right)\) 。因此， \(\operatorname{Aut}\left( {Q}_{k}\right)\) 包含集合 \({HK}\) 。按标准群论， \({HK}\) 的大小由下式给出
+\end{tcolorbox}
+
+\[
+\left| {HK}\right|  = \frac{\left| H\right| \left| K\right| }{\left| H \cap  K\right| }
+\]
+
+It is straightforward to see that \(H \cap  K\) is the identity subgroup, whence we conclude that \(\left| {\operatorname{Aut}\left( {Q}_{k}\right) }\right|  \geq  {2}^{k}k\) !.
+
+\begin{tcolorbox}\relax
+显然 \(H \cap  K\) 是恒等子群，故我们得出 \(\left| {\operatorname{Aut}\left( {Q}_{k}\right) }\right|  \geq  {2}^{k}k\) ！
+\end{tcolorbox}
+
+Another family of vertex-transitive graphs that we have met before are the circulants. Any vertex can be mapped to any other vertex by using a suitable power of the cyclic permutation described in Section 1.5.
+
+\begin{tcolorbox}\relax
+我们以前遇到的另一类顶点传递图是循环图。可通过第 1.5 节所述的循环置换的适当幂将任一顶点映到任一其他顶点。
+\end{tcolorbox}
+
+The circulants and the \(k\) -cubes are both examples of a more general construction that produces many, but not all, vertex-transitive graphs.
+
+\begin{tcolorbox}\relax
+循环图和 \(k\) -立方体都是一种更一般构造的例子，该构造生成许多但并非全部的顶点传递图。
+\end{tcolorbox}
+
+Let \(G\) be a group and let \(C\) be a subset of \(G\) that is closed under taking inverses and does not contain the identity. Then the Cayley graph \(X\left( {G,C}\right)\) is the graph with vertex set \(G\) and edge set
+
+\begin{tcolorbox}\relax
+设 \(G\) 为群， \(C\) 为 \(G\) 的一个在取逆下封闭且不含单位元的子集。则 Cayley 图 \(X\left( {G,C}\right)\) 为顶点集为 \(G\) 、边集为
+\end{tcolorbox}
+
+\[
+E\left( {X\left( {G,C}\right) }\right)  = \left\{  {{gh} : h{g}^{-1} \in  C}\right\}  .
+\]
+
+If \(C\) is an arbitrary subset of \(G\) , then we can define a directed graph \(X\left( {G,C}\right)\) with vertex set \(G\) and arc set \(\left\{  {\left( {g,h}\right)  : h{g}^{-1} \in  C}\right\}\) . If \(C\) is inverse-closed and does not contain the identity, then this graph is undirected and has no loops, and the definition reduces to that of a Cayley graph. Most of the results for Cayley graphs apply in the more general directed case without modification, but we explicitly use directed Cayley graphs only in Section 3.8.
+
+\begin{tcolorbox}\relax
+若 \(C\) 为 \(G\) 的任意子集，则可定义一个有向图 \(X\left( {G,C}\right)\) ，顶点集为 \(G\) ，弧集为 \(\left\{  {\left( {g,h}\right)  : h{g}^{-1} \in  C}\right\}\) 。若 \(C\) 在取逆下封闭且不含单位元，则该图是无向且无回路的，定义退化为 Cayley 图。多数关于 Cayley 图的结果在更一般的有向情形下无需修改即可成立，但我们仅在第 3.8 节显式使用有向 Cayley 图。
+\end{tcolorbox}
+
+Theorem 3.1.2 The Cayley graph \(X\left( {G,C}\right)\) is vertex transitive.
+
+\begin{tcolorbox}\relax
+定理 3.1.2 Cayley 图 \(X\left( {G,C}\right)\) 是顶点传递的。
+\end{tcolorbox}
+
+Proof. For each \(g \in  G\) the mapping
+
+\begin{tcolorbox}\relax
+证明。对于每个 \(g \in  G\) 映射
+\end{tcolorbox}
+
+\[
+{\rho }_{g} : x \mapsto  {xg}
+\]
+
+is a permutation of the elements of \(G\) . This is an automorphism of \(X\left( {G,C}\right)\) because
+
+\begin{tcolorbox}\relax
+是对 \(G\) 元素的一个置换。由于……，这是 \(X\left( {G,C}\right)\) 的一个自同构因为
+\end{tcolorbox}
+
+\[
+\left( {yg}\right) {\left( xg\right) }^{-1} = {yg}{g}^{-1}{x}^{-1} = y{x}^{-1},
+\]
+
+and so \({xg} \sim  {yg}\) if and only if \(x \sim  y\) . The permutations \({\rho }_{g}\) form a subgroup of the automorphism group of \(X\left( {G,C}\right)\) isomorphic to \(G\) . This subgroup acts transitively on the vertices of \(X\left( {G,C}\right)\) because for any two vertices \(g\) and \(h\) , the automorphism \({\rho }_{{g}^{-1}h}\) maps \(g\) to \(h\) .
+
+\begin{tcolorbox}\relax
+并且因此 \({xg} \sim  {yg}\) 当且仅当 \(x \sim  y\) 。置换 \({\rho }_{g}\) 形成了同构于 \(G\) 的 \(X\left( {G,C}\right)\) 自同构群的一个子群。该子群在 \(X\left( {G,C}\right)\) 的顶点上传递作用，因为对于任意两顶点 \(g\) 和 \(h\) ，自同构 \({\rho }_{{g}^{-1}h}\) 将 \(g\) 映到 \(h\) 。
+\end{tcolorbox}
+
+The \(k\) -cube is a Cayley graph for the elementary abelian group \({\left( {\mathbb{Z}}_{2}\right) }^{k}\) , and a circulant on \(n\) vertices is a Cayley graph for the cyclic group of order \(n\) .
+
+\begin{tcolorbox}\relax
+\(k\) -维立方体是初等阿贝尔群 \({\left( {\mathbb{Z}}_{2}\right) }^{k}\) 的 Cayley 图，而有 \(n\) 个顶点的循环图是阶为 \(n\) 的循环群的 Cayley 图。
+\end{tcolorbox}
+
+Most small vertex-transitive graphs are Cayley graphs, but there are also many families of vertex-transitive graphs that are not Cayley graphs. In particular, the graphs \(J\left( {v,k,i}\right)\) are vertex transitive because \(\operatorname{Sym}\left( v\right)\) contains permutations that map any \(k\) -set to any other \(k\) -set, but in general they are not Cayley graphs. We content ourselves with a single example.
+
+\begin{tcolorbox}\relax
+大多数小的顶点传递图是 Cayley 图，但也有许多不是 Cayley 图的顶点传递图族。特别地，图 \(J\left( {v,k,i}\right)\) 是顶点传递的，因为 \(\operatorname{Sym}\left( v\right)\) 包含将任一 \(k\) -集映到任一其他 \(k\) -集的置换，但一般它们并非 Cayley 图。我们以一个例子为足。
+\end{tcolorbox}
+
+Lemma 3.1.3 The Petersen graph is not a Cayley graph.
+
+\begin{tcolorbox}\relax
+引理 3.1.3 佩特森图不是 Cayley 图。
+\end{tcolorbox}
+
+Proof. There are only two groups of order 10, the cyclic group \({\mathbb{Z}}_{10}\) and the dihedral group \({D}_{10}\) . You may verify that none of the cubic Cayley graphs on these groups are isomorphic to the Petersen graph (Exercise 2).
+
+\begin{tcolorbox}\relax
+证明。阶为 10 的群只有两种:循环群 \({\mathbb{Z}}_{10}\) 和二面体群 \({D}_{10}\) 。你可以验证在这些群上的任何三次 Cayley 图都不与佩特森图同构(练习 2)。
+\end{tcolorbox}
+
+We will return to study Cayley graphs in more detail in Section 3.7.
+
+\begin{tcolorbox}\relax
+我们将在第 3.7 节回过头来更详细地研究 Cayley 图。
+\end{tcolorbox}
+
+\section*{3.2 Edge-Transitive Graphs}
+
+\begin{tcolorbox}\relax
+\section*{3.2 边可传递图}
+\end{tcolorbox}
+
+A graph \(X\) is edge transitive if its automorphism group acts transitively on \(E\left( X\right)\) . It is straightforward to see that the graphs \(J\left( {v,k,i}\right)\) are edge transitive, but the circulants are not usually edge transitive.
+
+\begin{tcolorbox}\relax
+如果图 \(X\) 的自同构群在 \(E\left( X\right)\) 上传递作用，则称其为边可传递的。显然图 \(J\left( {v,k,i}\right)\) 是边可传递的，但循环图通常不是边可传递的。
+\end{tcolorbox}
+
+An arc in \(X\) is an ordered pair of adjacent vertices, and \(X\) is arc transitive if \(\operatorname{Aut}\left( X\right)\) acts transitively on its arcs. It is frequently useful to view an edge in a graph as a pair of oppositely directed arcs. An arc-transitive graph is necessarily vertex and edge transitive. In this section we will consider the relations between these various forms of transitivity.
+
+\begin{tcolorbox}\relax
+在 \(X\) 中，弧是相邻顶点的有序对；如果 \(\operatorname{Aut}\left( X\right)\) 在其弧上作传递作用，则称 \(X\) 为弧可传递的。将图中的一条边视为一对方向相反的弧常常很有用。弧可传递的图必然是顶点可传递和边可传递的。本节我们将考察这些不同可传递性之间的关系。
+\end{tcolorbox}
+
+The complete bipartite graphs \({K}_{m,n}\) are edge transitive, but not vertex transitive unless \(m = n\) , because no automorphism can map a vertex of valency \(m\) to a vertex of valency \(n\) . The next lemma shows that all graphs that are edge transitive but not vertex transitive are bipartite.
+
+\begin{tcolorbox}\relax
+完全二分图 \({K}_{m,n}\) 是边可传递的，但除非 \(m = n\) 否则不是顶点可传递的，因为没有自同构可以将度为 \(m\) 的顶点映到度为 \(n\) 的顶点。下一引理表明所有边可传递但非顶点可传递的图都是二分图。
+\end{tcolorbox}
+
+Lemma 3.2.1 Let \(X\) be an edge-transitive graph with no isolated vertices. If \(X\) is not vertex transitive, then \(\operatorname{Aut}\left( X\right)\) has exactly two orbits, and these two orbits are a bipartition of \(X\) .
+
+\begin{tcolorbox}\relax
+引理 3.2.1 设 \(X\) 为无孤立顶点的边可传递图。如果 \(X\) 非顶点可传递，则 \(\operatorname{Aut}\left( X\right)\) 恰有两个轨道，且这两个轨道构成 \(X\) 的一个二分。
+\end{tcolorbox}
+
+Proof. Suppose \(X\) is edge but not vertex transitive. Suppose that \(\{ x,y\}  \in \; E\left( X\right)\) . If \(w \in  V\left( X\right)\) , then \(w\) lies on an edge and there is an element of \(\operatorname{Aut}\left( X\right)\) that maps this edge onto \(\{ x,y\}\) . Hence any vertex of \(X\) lies in either the orbit of \(x\) under \(\operatorname{Aut}\left( X\right)\) , or the orbit of \(y\) . This shows that \(\operatorname{Aut}\left( X\right)\) has exactly two orbits. An edge that joins two vertices in one orbit cannot be mapped by an automorphism to an edge that contains a vertex from the other orbit. Since \(X\) is edge transitive and every vertex lies in an edge, it follows that there is no edge joining two vertices in the same orbit. Hence \(X\) is bipartite and the orbits are a bipartition for it.
+
+\begin{tcolorbox}\relax
+证明。假设 \(X\) 边可传递但非顶点可传递。假设 \(\{ x,y\}  \in \; E\left( X\right)\) 。若 \(w \in  V\left( X\right)\) ，则 \(w\) 位于一条边上，且存在 \(\operatorname{Aut}\left( X\right)\) 的元素将该边映到 \(\{ x,y\}\) 。因此 \(X\) 的任一顶点要么属于 \(x\) 在 \(\operatorname{Aut}\left( X\right)\) 下的轨道，要么属于 \(y\) 的轨道。由此可见 \(\operatorname{Aut}\left( X\right)\) 恰有两个轨道。连接同一轨道内两个顶点的边不可能被自同构映到含有另一轨道顶点的边。由于 \(X\) 是边可传递的且每个顶点都在某条边上，故不存在连接同一轨道内两个顶点的边。因此 \(X\) 是二分图，这两个轨道构成其二分。
+\end{tcolorbox}
+
+Figure 3.2 shows a regular graph that is edge transitive but not vertex transitive. The colouring of the vertices shows the bipartition.
+
+\begin{tcolorbox}\relax
+图 3.2 显示了一个正则图，该图边可传递但非顶点可传递。顶点的着色显示了二分。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.5\textwidth]{images/53_463_1139_609_608_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 3.2. A regular edge-transitive graph that is not vertex transitive
+
+\begin{tcolorbox}\relax
+图 3.2. 一个正则的边可传递但非顶点可传递的图
+\end{tcolorbox}
+
+An arc-transitive graph is, as we noted, always vertex and edge transitive. The converse is in general false; see the Notes at the end of the chapter for more. We do at least have the next result.
+
+\begin{tcolorbox}\relax
+如上所述，弧可传递的图总是顶点和边可传递的。反过来通常不成立；详见本章末的注。我们至少有下述结果。
+\end{tcolorbox}
+
+Lemma 3.2.2 If the graph \(X\) is vertex and edge transitive, but not arc transitive, then its valency is even.
+
+\begin{tcolorbox}\relax
+引理 3.2.2 若图 \(X\) 是顶点和边可传递的，但非弧可传递，则其度数为偶数。
+\end{tcolorbox}
+
+Proof. Let \(G = \operatorname{Aut}\left( X\right)\) , and suppose that \(x \in  V\left( X\right)\) . Let \(y\) be a vertex adjacent to \(x\) and \(\Omega\) be the orbit of \(G\) on \(V \times  V\) that contains \(\left( {x,y}\right)\) . Since \(X\) is edge transitive, every arc in \(X\) can be mapped by an automorphism to either \(\left( {x,y}\right)\) or \(\left( {y,x}\right)\) . Since \(X\) is not arc transitive, \(\left( {y,x}\right)  \notin  \Omega\) , and therefore \(\Omega\) is not symmetric. Therefore, \(X\) is the graph with edge set \(\Omega  \cup  {\Omega }^{T}\) . Because the out-valency of \(x\) is the same in \(\Omega\) and \({\Omega }^{T}\) , the valency of \(X\) must be even.
+
+\begin{tcolorbox}\relax
+证明。设 \(G = \operatorname{Aut}\left( X\right)\) ，并假设 \(x \in  V\left( X\right)\) 。令 \(y\) 为与 \(x\) 相邻的一个顶点，且 \(\Omega\) 为 \(V \times  V\) 上 \(G\) 的轨道，该轨道包含 \(\left( {x,y}\right)\) 。由于 \(X\) 是边可传递的， \(X\) 中的每个弧都可被自同构映到 \(\left( {x,y}\right)\) 或 \(\left( {y,x}\right)\) 。因 \(X\) 非弧可传递， \(\left( {y,x}\right)  \notin  \Omega\) ，因此 \(\Omega\) 非对称。于是， \(X\) 的边集为 \(\Omega  \cup  {\Omega }^{T}\) 。由于在 \(\Omega\) 与 \({\Omega }^{T}\) 中 \(x\) 的出度相同，故 \(X\) 的度必须为偶数。
+\end{tcolorbox}
+
+A simple corollary to this result is that a vertex- and edge-transitive graph of odd valency must be arc transitive. Figure 3.3 gives an example of a vertex- and edge-transitive graph that is not arc-transitive.
+
+\begin{tcolorbox}\relax
+由此结果可得一简单推论:奇度的顶点与边可传递图必为弧可传递。图 3.3 给出了一个顶点与边可传递但非弧可传递的示例。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.6\textwidth]{images/54_396_690_746_725_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 3.3. A vertex- and edge- but not arc-transitive graph
+
+\begin{tcolorbox}\relax
+图 3.3。一个顶点与边都可变换但弧不可变换的图
+\end{tcolorbox}
+
+\section*{3.3 Edge Connectivity}
+
+\begin{tcolorbox}\relax
+\section*{3.3 边连通性}
+\end{tcolorbox}
+
+An edge cutset in a graph \(X\) is a set of edges whose deletion increases the number of connected components of \(X\) . For a connected graph \(X\) , the edge connectivity is the minimum number of edges in an edge cutset, and will be denoted by \({\kappa }_{1}\left( X\right)\) . If a single edge \(e\) is an edge cutset, then we call \(e\) a bridge or a cut-edge. As the set of edges adjacent to a vertex is an edge cutset, the edge connectivity of a graph cannot be greater than its minimum valency. Therefore, the edge connectivity of a vertex-transitive graph is at most its valency. In this section we will prove that the edge connectivity of a connected vertex-transitive graph is equal to its valency.
+
+\begin{tcolorbox}\relax
+图 \(X\) 的一组边割集是删除这些边后使 \(X\) 的连通分支数增加的边集合。对于连通图 \(X\) ，边连通性是边割集中边数的最小值，记为 \({\kappa }_{1}\left( X\right)\) 。如果单条边 \(e\) 就构成边割集，则称 \(e\) 为桥或割边。由于与某顶点相邻的边构成一组边割集，图的边连通性不可能超过其最小度。因此，点传递图的边连通性至多为其度。在本节中我们将证明连通点传递图的边连通性等于其度。
+\end{tcolorbox}
+
+If \(A \subseteq  V\left( X\right)\) , then we define \(\partial A\) to be the set of edges with one end in \(A\) and one end not in \(A\) . So if \(A = \varnothing\) or \(A = V\left( X\right)\) , then \(\partial A = \varnothing\) , while the edge connectivity is the minimum size of \(\partial A\) as \(A\) ranges over the proper subsets of \(V\left( X\right)\) .
+
+\begin{tcolorbox}\relax
+如果 \(A \subseteq  V\left( X\right)\) ，则定义 \(\partial A\) 为一端在 \(A\) 内另一端不在 \(A\) 的边的集合。因此若 \(A = \varnothing\) 或 \(A = V\left( X\right)\) ，则 \(\partial A = \varnothing\) ，而边连通性就是随着 \(A\) 在 \(V\left( X\right)\) 的真子集上变化时 \(\partial A\) 的最小大小。
+\end{tcolorbox}
+
+Lemma 3.3.1 Let \(A\) and \(B\) be subsets of \(V\left( X\right)\) , for some graph \(X\) . Then
+
+\begin{tcolorbox}\relax
+引理 3.3.1 设 \(A\) 与 \(B\) 为图 \(X\) 中的 \(V\left( X\right)\) 子集，则
+\end{tcolorbox}
+
+\[
+\left| {\partial \left( {A \cup  B}\right) }\right|  + \left| {\partial \left( {A \cap  B}\right) }\right|  \leq  \left| {\partial A}\right|  + \left| {\partial B}\right| .
+\]
+
+Proof. The details are left as an exercise. We simply note here that the difference between the two sides is twice the number of edges joining \(A \smallsetminus  B\) to \(B \smallsetminus  A\) .
+
+\begin{tcolorbox}\relax
+证明。细节留作练习。这里我们仅指出两边之差是连接 \(A \smallsetminus  B\) 与 \(B \smallsetminus  A\) 的边数的两倍。
+\end{tcolorbox}
+
+Define an edge atom of a graph \(X\) to be a subset \(S\) such that \(\left| {\partial S}\right|  = \; {\kappa }_{1}\left( X\right)\) and, given this, \(\left| S\right|\) is minimal. Since \(\partial S = \partial V \smallsetminus  S\) , it follows that if \(S\) is an atom, then \(2\left| S\right|  \leq  \left| {V\left( X\right) }\right|\) .
+
+\begin{tcolorbox}\relax
+将图 \(X\) 的边原子定义为满足 \(S\) 且在此条件下 \(\left| S\right|\) 最小的子集 \(\left| {\partial S}\right|  = \; {\kappa }_{1}\left( X\right)\) 。由于 \(\partial S = \partial V \smallsetminus  S\) ，若 \(S\) 是原子，则 \(2\left| S\right|  \leq  \left| {V\left( X\right) }\right|\) 。
+\end{tcolorbox}
+
+Corollary 3.3.2 Any two distinct edge atoms are vertex disjoint.
+
+\begin{tcolorbox}\relax
+推论 3.3.2 任意两个不同的边原子顶点不相交。
+\end{tcolorbox}
+
+Proof. Assume \(\kappa  = {\kappa }_{1}\left( X\right)\) and let \(A\) and \(B\) be two distinct edge atoms in \(X\) . If \(A \cup  B = V\left( X\right)\) , then, since neither \(A\) nor \(B\) contains more than half the vertices of \(X\) , it follows that
+
+\begin{tcolorbox}\relax
+证明。设 \(\kappa  = {\kappa }_{1}\left( X\right)\) 且令 \(A\) 与 \(B\) 为 \(X\) 中的两个不同边原子。如果 \(A \cup  B = V\left( X\right)\) ，则由于 \(A\) 与 \(B\) 都不包含 \(X\) 超过一半的顶点，遂得
+\end{tcolorbox}
+
+\[
+\left| A\right|  = \left| B\right|  = \frac{1}{2}\left| {V\left( X\right) }\right|
+\]
+
+and hence that \(A \cap  B = \varnothing\) . So we may assume that \(A \cup  B\) is a proper subset of \(V\left( X\right)\) . Now, the previous lemma yields
+
+\begin{tcolorbox}\relax
+因此 \(A \cap  B = \varnothing\) 。所以我们可以假定 \(A \cup  B\) 是 \(V\left( X\right)\) 的真子集。现在，前面的引理得出
+\end{tcolorbox}
+
+\[
+\left| {\partial \left( {A \cup  B}\right) }\right|  + \left| {\partial \left( {A \cap  B}\right) }\right|  \leq  {2\kappa },
+\]
+
+and, since \(A \cup  B \neq  V\left( X\right)\) and \(A \cap  B \neq  \varnothing\) , this implies that
+
+\begin{tcolorbox}\relax
+并且，由于 \(A \cup  B \neq  V\left( X\right)\) 与 \(A \cap  B \neq  \varnothing\) ，这意味着
+\end{tcolorbox}
+
+\[
+\left| {\partial \left( {A \cup  B}\right) }\right|  = \left| {\partial \left( {A \cap  B}\right) }\right|  = \kappa .
+\]
+
+Since \(A \cap  B\) is a nonempty proper subset of the edge atom \(A\) , this is impossible. We are forced to conclude that \(A\) and \(B\) are disjoint.
+
+\begin{tcolorbox}\relax
+由于 \(A \cap  B\) 是边原子 \(A\) 的非空真子集，这是不可能的。我们不得不得出结论 \(A\) 与 \(B\) 不相交。
+\end{tcolorbox}
+
+Our next result answers all questions about the edge connectivity of a vertex-transitive graph.
+
+\begin{tcolorbox}\relax
+我们的下一个结果回答了关于点传递图边连通性的所有问题。
+\end{tcolorbox}
+
+Lemma 3.3.3 If \(X\) is a connected vertex-transitive graph, then its edge connectivity is equal to its valency.
+
+\begin{tcolorbox}\relax
+引理 3.3.3 若 \(X\) 是连通的点传递图，则其边连通性等于其度。
+\end{tcolorbox}
+
+Proof. Suppose that \(X\) has valency \(k\) . Let \(A\) be an edge atom of \(X\) . If \(A\) is a single vertex, then \(\left| {\partial A}\right|  = k\) and we are finished. Suppose that \(\left| A\right|  \geq  2\) . If \(g\) is an automorphism of \(X\) and \(B = {A}^{g}\) , then \(\left| B\right|  = \left| A\right|\) and \(\left| {\partial B}\right|  = \left| {\partial A}\right|\) . From the previous lemma we see that either \(A = B\) or \(A \cap  B = \varnothing\) . Therefore, \(A\) is a block of imprimitivity for \(\operatorname{Aut}\left( X\right)\) , and by Exercise 2.13 it follows that the subgraph of \(X\) induced by \(A\) is regular.
+
+\begin{tcolorbox}\relax
+证明。假设 \(X\) 的度为 \(k\) 。令 \(A\) 为 \(X\) 的一条边原子。如果 \(A\) 是单个顶点，则 \(\left| {\partial A}\right|  = k\) ，问题结束。假设 \(\left| A\right|  \geq  2\) 。若 \(g\) 是 \(X\) 的一个自同构且 \(B = {A}^{g}\) ，则 \(\left| B\right|  = \left| A\right|\) 与 \(\left| {\partial B}\right|  = \left| {\partial A}\right|\) 。由前一引理可见，要么 \(A = B\) 要么 \(A \cap  B = \varnothing\) 。因此， \(A\) 是 \(\operatorname{Aut}\left( X\right)\) 的不动分块，并且由练习 2.13 得出 \(X\) 在 \(A\) 诱导的子图是正则的。
+\end{tcolorbox}
+
+Suppose that the valency of this subgraph is \(\ell\) . Then each vertex in \(A\) has exactly \(k - \ell\) neighbours not in \(A\) , and so
+
+\begin{tcolorbox}\relax
+设该子图的度为 \(\ell\) 。则每个在 \(A\) 中的顶点恰有 \(k - \ell\) 个邻点不在 \(A\) ，因此
+\end{tcolorbox}
+
+\[
+\left| {\partial A}\right|  = \left| A\right| \left( {k - \ell }\right) .
+\]
+
+Since \(X\) is connected, \(\ell  < k\) , and so if \(\left| A\right|  \geq  k\) , then \(\left| {\partial A}\right|  \geq  k\) . Hence we may assume that \(\left| A\right|  < k\) . Since \(\ell  \leq  \left| A\right|  - 1\) , it follows that
+
+\begin{tcolorbox}\relax
+由于 \(X\) 连通， \(\ell  < k\) ，因此若 \(\left| A\right|  \geq  k\) ，则 \(\left| {\partial A}\right|  \geq  k\) 。因此我们可假设 \(\left| A\right|  < k\) 。既然 \(\ell  \leq  \left| A\right|  - 1\) ，则可得
+\end{tcolorbox}
+
+\[
+\left| {\partial A}\right|  \geq  \left| A\right| \left( {k + 1 - \left| A\right| }\right)
+\]
+
+The minimum value of the right side here occurs if \(\left| A\right|  = 1\) or \(k\) , when it is equal to \(k\) . Therefore, \(\left| {\partial A}\right|  \geq  k\) in all cases.
+
+\begin{tcolorbox}\relax
+右侧的最小值出现在 \(\left| A\right|  = 1\) 或 \(k\) 时，此时等于 \(k\) 。因此， \(\left| {\partial A}\right|  \geq  k\) 在所有情形下成立。
+\end{tcolorbox}
+
+\section*{3.4 Vertex Connectivity}
+
+\begin{tcolorbox}\relax
+\section*{3.4 顶点连通性}
+\end{tcolorbox}
+
+A vertex cutset in a graph \(X\) is a set of vertices whose deletion increases the number of connected components of \(X\) . The vertex connectivity (or just connectivity) of a connected graph \(X\) is the minimum number of vertices in a vertex cutset, and will be denoted by \({\kappa }_{0}\left( X\right)\) . For any \(k \leq  {\kappa }_{0}\left( X\right)\) we say that \(X\) is \(k\) -connected. Complete graphs have no vertex cutsets, but it is conventional to define \({\kappa }_{0}\left( {K}_{n}\right)\) to be \(n - 1\) . The fundamental result on connectivity is Menger's theorem, which we state after establishing one more piece of terminology. If \(u\) and \(v\) are distinct vertices of \(X\) , then two paths \(P\) and \(Q\) from \(u\) to \(v\) are openly disjoint if \(V\left( {P\smallsetminus \{ u,v\} }\right)\) and \(V(Q \smallsetminus \; \{ u,v\} )\) are disjoint sets.
+
+\begin{tcolorbox}\relax
+图 \(X\) 中的一个顶点割集是指删除后会增加 \(X\) 连通分支数的顶点集合。连通图 \(X\) 的顶点连通度(或简称连通度)是顶点割集的最小顶点数，记为 \({\kappa }_{0}\left( X\right)\) 。对于任意 \(k \leq  {\kappa }_{0}\left( X\right)\) ，若如此我们称 \(X\) 为 \(k\) -连通。完全图没有顶点割集，但惯例上将 \({\kappa }_{0}\left( {K}_{n}\right)\) 定义为 \(n - 1\) 。关于连通性的基本结果是 Menger 定理，我们在引入一个术语后陈述该定理。若 \(u\) 和 \(v\) 是 \(X\) 中不同的顶点，则从 \(u\) 到 \(v\) 的两条路径 \(P\) 和 \(Q\) 若满足 \(V\left( {P\smallsetminus \{ u,v\} }\right)\) 与 \(V(Q \smallsetminus \; \{ u,v\} )\) 是不相交的集合，则称这两条路径在内部互不相交。
+\end{tcolorbox}
+
+Theorem 3.4.1 (Menger) Let \(u\) and \(v\) be distinct vertices in the graph X. Then the maximum number of openly disjoint paths from \(u\) to \(v\) equals the minimum size of a set of vertices \(S\) such that \(u\) and \(v\) lie in distinct components of \(X \smallsetminus  S\) .
+
+\begin{tcolorbox}\relax
+定理 3.4.1(Menger)设 \(u\) 与 \(v\) 为图 X 中的不同顶点。则从 \(u\) 到 \(v\) 的内部互不相交路径的最大条数等于使得 \(u\) 与 \(v\) 位于 \(X \smallsetminus  S\) 不同分支的顶点集合 \(S\) 的最小大小。
+\end{tcolorbox}
+
+We say that the subset \(S\) of the theorem separates \(u\) and \(v\) . Clearly, two vertices joined by \(m\) openly disjoint paths cannot be separated by any set of size less than \(m\) . The significance of this theorem is that it implies that two vertices that cannot be separated by fewer than \(m\) vertices must be joined by \(m\) openly disjoint paths. A simple consequence of Menger’s theorem is that two vertices that cannot be separated by a single vertex must lie on a cycle. This is not too hard to prove directly. However, to prove that two vertices that cannot be separated by a set of size two are joined by three openly disjoint paths seems to be essentially as hard as the general case. Nonetheless, this is possibly the most important case. (It is the one that we make use of.)
+
+\begin{tcolorbox}\relax
+我们称定理中的子集 \(S\) 将 \(u\) 与 \(v\) 分开。显然，通过 \(m\) 条内部互不相交路径相连的两个顶点不可能被任意小于 \(m\) 的集合分开。该定理的意义在于，它蕴含若两个顶点不能被少于 \(m\) 个顶点分开，则必有 \(m\) 条内部互不相交的路径将它们连接。Menger 定理的一个简单推论是:不能被单个顶点分开的两个顶点必在同一圈上。这个结论直接证明并不难。然而，要证明不能被大小为二的集合分开的两顶点必由三条内部互不相交的路径连接，似乎与一般情形一样困难。尽管如此，这可能是最重要的情形(也是我们将要使用的)。
+\end{tcolorbox}
+
+There are a number of variations of Menger's theorem. In particular, two subsets \(A\) and \(B\) of \(V\left( X\right)\) of size \(m\) cannot be separated by fewer than \(m\) vertices if and only if there are \(m\) disjoint paths starting in \(A\) and ending in \(B\) . This is easily deduced from the result stated; we leave it as an exercise.
+
+\begin{tcolorbox}\relax
+Menger 定理有若干变体。特别地，若 \(A\) 与 \(B\) 为 \(V\left( X\right)\) 的子集且大小为 \(m\) ，则它们不能被少于 \(m\) 个顶点分开当且仅当存在 \(m\) 条互不相交的路径，其起点在 \(A\) ，终点在 \(B\) 。这可由已述结果轻易推得；我们将其作为习题留给读者。
+\end{tcolorbox}
+
+We have a precise bound for the connectivity of a vertex-transitive graph, which requires much more effort to prove than determining its edge connectivity did.
+
+\begin{tcolorbox}\relax
+我们对顶点传递图的连通度有精确下界，证明这一点比确定其边连通度要费力得多。
+\end{tcolorbox}
+
+Theorem 3.4.2 A vertex-transitive graph with valency \(k\) has vertex connectivity at least \(\frac{2}{3}\left( {k + 1}\right)\) .
+
+\begin{tcolorbox}\relax
+定理 3.4.2 顶点传递的图若度为 \(k\) ，则其顶点连通度至少为 \(\frac{2}{3}\left( {k + 1}\right)\) 。
+\end{tcolorbox}
+
+Figure 3.4 shows a 5-regular graph with vertex connectivity four, showing that equality can occur in this theorem.
+
+\begin{tcolorbox}\relax
+图 3.4 显示了一个顶点连通度为四的 5 正则图，表明本定理中可以取等号。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.4\textwidth]{images/57_540_450_455_446_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 3.4. A 5-regular graph with vertex connectivity four
+
+\begin{tcolorbox}\relax
+图 3.4. 一个顶点连通度为四的 5-正则图
+\end{tcolorbox}
+
+Before proving this result we need to develop some theory. If \(A\) is a set of vertices in \(X\) , let \(N\left( A\right)\) denote the vertices in \(V\left( X\right)  \smallsetminus  A\) with a neighbour in \(A\) and let \(\bar{A}\) be the complement of \(A \cup  N\left( A\right)\) in \(V\left( X\right)\) . A fragment of \(X\) is a subset \(A\) such that \(\bar{A} \neq  \varnothing\) and \(\left| {N\left( A\right) }\right|  = {\kappa }_{0}\left( X\right)\) . An atom of \(X\) is a fragment that contains the minimum possible number of vertices. Note that an atom must be connected and that if \(X\) is a \(k\) -regular graph with an atom consisting of a single vertex, then \({\kappa }_{0}\left( X\right)  = k\) . It is not hard to show that if \(A\) is a fragment, then \(N\left( A\right)  = N\left( \bar{A}\right)\) and \(\overline{\bar{A}} = A\) .
+
+\begin{tcolorbox}\relax
+在证明此结果之前我们需要发展一些理论。若 \(A\) 是 \(X\) 中的一组顶点，令 \(N\left( A\right)\) 表示在 \(V\left( X\right)  \smallsetminus  A\) 中与 \(A\) 有邻接的顶点，令 \(\bar{A}\) 为 \(V\left( X\right)\) 中去掉 \(A \cup  N\left( A\right)\) 的补集。 \(X\) 的一个片段是满足 \(\bar{A} \neq  \varnothing\) 和 \(\left| {N\left( A\right) }\right|  = {\kappa }_{0}\left( X\right)\) 的子集 \(A\) 。 \(X\) 的一个原子是包含尽可能少顶点的片段。注意原子必然是连通的，且若 \(X\) 是 \(k\) -正则图且有一个由单个顶点构成的原子，则 \({\kappa }_{0}\left( X\right)  = k\) 。不难证明若 \(A\) 是片段，则 \(N\left( A\right)  = N\left( \bar{A}\right)\) 和 \(\overline{\bar{A}} = A\) 。
+\end{tcolorbox}
+
+The following lemma records some further useful properties of fragments.
+
+\begin{tcolorbox}\relax
+下述引理记录了片段的一些进一步有用的性质。
+\end{tcolorbox}
+
+Lemma 3.4.3 Let \(A\) and \(B\) be fragments in a graph \(X\) . Then
+
+\begin{tcolorbox}\relax
+引理 3.4.3 设 \(A\) 和 \(B\) 为图 \(X\) 中的片段。则
+\end{tcolorbox}
+
+(a) \(N\left( {A \cap  B}\right)  \subseteq  \left( {A \cap  N\left( B\right) }\right)  \cup  \left( {N\left( A\right)  \cap  B}\right)  \cup  \left( {N\left( A\right)  \cap  N\left( B\right) }\right)\) .
+
+(b) \(N\left( {A \cup  B}\right)  = \left( {\bar{A} \cap  N\left( B\right) }\right)  \cup  \left( {N\left( A\right)  \cap  \bar{B}}\right)  \cup  \left( {N\left( A\right)  \cap  N\left( B\right) }\right)\) .
+
+(c) \(\bar{A} \cup  \bar{B} \subseteq  \overline{A \cap  B}\) .
+
+(d) \(\overline{A \cup  B} = \bar{A} \cap  \bar{B}\) .
+
+Proof. Suppose first that \(x \in  N\left( {A \cap  B}\right)\) . Since \(A \cap  B\) and \(N\left( {A \cap  B}\right)\) are disjoint, if \(x \in  A\) , then \(x \notin  B\) , and therefore it must lie in \(N\left( B\right)\) . Similarly, if \(x \in  B\) , then \(x \in  N\left( A\right)\) . If \(x\) does not lie in \(A\) or \(B\) , then \(x \in  N\left( A\right)  \cap  N\left( B\right)\) . Thus we have proved (a).
+
+\begin{tcolorbox}\relax
+证明。先假设 \(x \in  N\left( {A \cap  B}\right)\) 。由于 \(A \cap  B\) 与 \(N\left( {A \cap  B}\right)\) 不相交，若 \(x \in  A\) ，则 \(x \notin  B\) ，因此它必须位于 \(N\left( B\right)\) 中。类似地，若 \(x \in  B\) ，则 \(x \in  N\left( A\right)\) 。若 \(x\) 不位于 \(A\) 或 \(B\) ，则 \(x \in  N\left( A\right)  \cap  N\left( B\right)\) 。由此我们证明了 (a)。
+\end{tcolorbox}
+
+Analogous arguments show that \(N\left( {A \cup  B}\right)\) is contained in the union of \(\bar{A} \cap  N\left( B\right) ,N\left( A\right)  \cap  \bar{B}\) , and \(N\left( A\right)  \cap  N\left( B\right)\) . To obtain the reverse inclusion, note that if \(x \in  \bar{A} \cap  N\left( B\right)\) , then \(x\) does not lie in \(A\) or \(B\) . Since \(x \in  N\left( B\right)\) , it follows that \(x \in  N\left( {A \cup  B}\right)\) . Similarly, we see that if \(x \in  N\left( A\right)  \cap  \bar{B}\) or \(N\left( A\right)  \cap  N\left( B\right)\) , then \(x \in  N\left( {A \cup  B}\right)\) .
+
+\begin{tcolorbox}\relax
+类似的论证表明 \(N\left( {A \cup  B}\right)\) 包含于 \(\bar{A} \cap  N\left( B\right) ,N\left( A\right)  \cap  \bar{B}\) 与 \(N\left( A\right)  \cap  N\left( B\right)\) 的并集中。要得到反向包含，注意若 \(x \in  \bar{A} \cap  N\left( B\right)\) ，则 \(x\) 不位于 \(A\) 或 \(B\) 。由于 \(x \in  N\left( B\right)\) ，故得 \(x \in  N\left( {A \cup  B}\right)\) 。同样地，我们看到若 \(x \in  N\left( A\right)  \cap  \bar{B}\) 或 \(N\left( A\right)  \cap  N\left( B\right)\) ，则 \(x \in  N\left( {A \cup  B}\right)\) 。
+\end{tcolorbox}
+
+Next, if \(x \in  \bar{A}\) , then \(x\) does not lie in \(A\) or \(N\left( A\right)\) , and therefore does not lie in \(A \cap  B\) or \(N\left( {A \cap  B}\right)\) . So \(x \in  \overline{A \cap  B}\) . This proves (c). We leave the proof of (d) as an exercise.
+
+\begin{tcolorbox}\relax
+接着，若 \(x \in  \bar{A}\) ，则 \(x\) 不位于 \(A\) 或 \(N\left( A\right)\) ，因此也不位于 \(A \cap  B\) 或 \(N\left( {A \cap  B}\right)\) 。所以 \(x \in  \overline{A \cap  B}\) 。这证明了 (c)。我们将 (d) 的证明留作练习。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.4\textwidth]{images/58_534_399_456_432_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 3.5. Intersection of fragments
+
+\begin{tcolorbox}\relax
+图 3.5. 片段的交集
+\end{tcolorbox}
+
+Theorem 3.4.4 Let \(X\) be a graph on \(n\) vertices with connectivity \(\kappa\) . Suppose \(A\) and \(B\) are fragments of \(X\) and \(A \cap  B \neq  \varnothing\) . If \(\left| A\right|  \leq  \left| \bar{B}\right|\) , then \(A \cap  B\) is a fragment.
+
+\begin{tcolorbox}\relax
+定理 3.4.4 设 \(X\) 为一个有 \(n\) 个顶点且连通度为 \(\kappa\) 的图。若 \(A\) 与 \(B\) 分别为 \(X\) 与 \(A \cap  B \neq  \varnothing\) 的片段，且 \(\left| A\right|  \leq  \left| \bar{B}\right|\) ，则 \(A \cap  B\) 是一个片段。
+\end{tcolorbox}
+
+Proof. The intersections of \(A,N\left( A\right)\) , and \(\bar{A}\) with the sets \(B,N\left( B\right)\) , and \(\bar{B}\) partition \(V\left( X\right)\) into nine pieces, as shown in Figure 3.5. The cardinalities of five of these pieces are also defined in this figure. We present the proof as a number of steps.
+
+\begin{tcolorbox}\relax
+证明。 \(A,N\left( A\right)\) 和 \(\bar{A}\) 与 \(B,N\left( B\right)\) 和 \(\bar{B}\) 的交集将 \(V\left( X\right)\) 划分为九部分，如图 3.5 所示。该图还给出其中五部分的基数。以下按若干步骤给出证明。
+\end{tcolorbox}
+
+(a) \(\left| {A \cup  B}\right|  < n - \kappa\) .
+
+Since \(\left| F\right|  + \left| \bar{F}\right|  = n - \kappa\) for any fragment \(F\) of \(X\) ,
+
+\begin{tcolorbox}\relax
+因为 \(\left| F\right|  + \left| \bar{F}\right|  = n - \kappa\) 对任意 \(F\) 的片段 \(X\) 都成立，
+\end{tcolorbox}
+
+\[
+\left| A\right|  \leq  \left| \bar{B}\right|  = n - \kappa  - \left| B\right|
+\]
+
+and therefore \(\left| A\right|  + \left| B\right|  \leq  n - \kappa\) . Since \(A \cap  B\) is nonempty, the claim follows. (b) \(\left| {N\left( {A \cup  B}\right) }\right|  \leq  \kappa\) .
+
+\begin{tcolorbox}\relax
+因此 \(\left| A\right|  + \left| B\right|  \leq  n - \kappa\) 。既然 \(A \cap  B\) 非空，结论便成立。(b) \(\left| {N\left( {A \cup  B}\right) }\right|  \leq  \kappa\) 。
+\end{tcolorbox}
+
+From Lemma 3.4.3 we find that \(\left| {N\left( {A \cap  B}\right) }\right|  \leq  a + b + c\) and \(\left| {N\left( {A \cup  B}\right) }\right|  = \; c + d + e\) . Consequently,
+
+\begin{tcolorbox}\relax
+由引理 3.4.3 得到 \(\left| {N\left( {A \cap  B}\right) }\right|  \leq  a + b + c\) 和 \(\left| {N\left( {A \cup  B}\right) }\right|  = \; c + d + e\) 。因此，
+\end{tcolorbox}
+
+\[
+{2\kappa } = \left| {N\left( A\right) }\right|  + \left| {N\left( B\right) }\right|  = a + b + {2c} + d + e \geq  \left| {N\left( {A \cap  B}\right) }\right|  + \left| {N\left( {A \cup  B}\right) }\right| .({3.1}
+\]
+
+(3.1)
+
+Since \(\left| {N\left( {A \cap  B}\right) }\right|  \geq  \kappa\) , this implies that \(\left| {N\left( {A \cup  B}\right) }\right|  \leq  \kappa\) .
+
+\begin{tcolorbox}\relax
+由于 \(\left| {N\left( {A \cap  B}\right) }\right|  \geq  \kappa\) ，这意味着 \(\left| {N\left( {A \cup  B}\right) }\right|  \leq  \kappa\) 。
+\end{tcolorbox}
+
+(c) \(\bar{A} \cap  \bar{B} \neq  \varnothing\) .
+
+From (a) and (b) we see that \(\left| {A \cup  B}\right|  + \left| {N\left( {A \cup  B}\right) }\right|  < n\) . Hence \(\overline{A \cup  B} \neq  \varnothing\) , and the claim follows from Lemma 3.4.3(d).
+
+\begin{tcolorbox}\relax
+由 (a) 与 (b) 可见 \(\left| {A \cup  B}\right|  + \left| {N\left( {A \cup  B}\right) }\right|  < n\) 。故 \(\overline{A \cup  B} \neq  \varnothing\) ，并由引理 3.4.3(d) 得出结论。
+\end{tcolorbox}
+
+(d) \(\left| {N\left( {A \cup  B}\right) }\right|  = \kappa\) .
+
+For any fragment \(F\) we have \(N\left( F\right)  = N\left( \bar{F}\right)\) . Using part (a) of Lemma 3.4.3 and (b) we obtain
+
+\begin{tcolorbox}\relax
+对任一碎片 \(F\) 我们有 \(N\left( F\right)  = N\left( \bar{F}\right)\) 。利用引理 3.4.3 的 (a) 部分和 (b) 我们得到
+\end{tcolorbox}
+
+\[
+N\left( {\bar{A} \cap  \bar{B}}\right)  \subseteq  \left( {\bar{A} \cap  N\left( \bar{B}\right) }\right)  \cup  \left( {\bar{B} \cap  N\left( \bar{A}\right) }\right)  \cup  \left( {N\left( \bar{A}\right)  \cap  N\left( \bar{B}\right) }\right)
+\]
+
+\[
+= \left( {\bar{A} \cap  N\left( B\right) }\right)  \cup  \left( {\bar{B} \cap  N\left( A\right) }\right)  \cup  \left( {N\left( A\right)  \cap  N\left( B\right) }\right)
+\]
+
+\[
+= N\left( {A \cup  B}\right) \text{ . }
+\]
+
+Since \(\bar{A} \cap  \bar{B}\) is nonempty, \(\left| {N\left( {\bar{A} \cap  \bar{B}}\right) }\right|  \geq  \kappa\) and therefore \(\left| {N\left( {A \cup  B}\right) }\right|  \geq  \kappa\) . Taken with (b), we get the claim.
+
+\begin{tcolorbox}\relax
+由于 \(\bar{A} \cap  \bar{B}\) 非空，得 \(\left| {N\left( {\bar{A} \cap  \bar{B}}\right) }\right|  \geq  \kappa\) ，因此 \(\left| {N\left( {A \cup  B}\right) }\right|  \geq  \kappa\) 。与 (b) 合并，得到结论。
+\end{tcolorbox}
+
+(e) The set \(A \cap  B\) is a fragment.
+
+\begin{tcolorbox}\relax
+(e) 集合 \(A \cap  B\) 是一个碎片。
+\end{tcolorbox}
+
+From (3.1) we see that \(\left| {N\left( {A \cap  B}\right) }\right|  + \left| {N\left( {A \cup  B}\right) }\right|  \leq  {2\kappa }\) , whence (d) yields that \(N\left( {A \cap  B}\right)  \leq  \kappa\) .
+
+\begin{tcolorbox}\relax
+由 (3.1) 可见 \(\left| {N\left( {A \cap  B}\right) }\right|  + \left| {N\left( {A \cup  B}\right) }\right|  \leq  {2\kappa }\) ，由此 (d) 推出 \(N\left( {A \cap  B}\right)  \leq  \kappa\) 。
+\end{tcolorbox}
+
+Corollary 3.4.5 If \(A\) is an atom and \(B\) is a fragment of \(X\) , then \(A\) is a subset of exactly one of \(B,N\left( B\right)\) , and \(\bar{B}\) .
+
+\begin{tcolorbox}\relax
+推论 3.4.5 若 \(A\) 是一个原子且 \(B\) 是 \(X\) 的一个碎片，则 \(A\) 恰好是 \(B,N\left( B\right)\) 与 \(\bar{B}\) 中某一者的子集。
+\end{tcolorbox}
+
+Proof. Since \(A\) is an atom, \(\left| A\right|  \leq  \left| B\right|\) and \(\left| A\right|  \leq  \left| \bar{B}\right|\) . Hence the intersection of \(A\) with \(B\) or \(\bar{B}\) , if nonempty, would be a fragment. Since \(A\) is an atom, no proper subset of it can be a fragment. The result follows immediately. \(□\)
+
+\begin{tcolorbox}\relax
+证明。因为 \(A\) 是原子， \(\left| A\right|  \leq  \left| B\right|\) 与 \(\left| A\right|  \leq  \left| \bar{B}\right|\) 。因此 \(A\) 与 \(B\) 或 \(\bar{B}\) 的交集若非空将是一个碎片。既然 \(A\) 是原子，其任一真子集都不可能是碎片。结论立刻得出。 \(□\)
+\end{tcolorbox}
+
+Now, we can prove Theorem 3.4.2. Suppose that \(X\) is a vertex-transitive graph with valency \(k\) , and let \(A\) be an atom in \(X\) . If \(A\) is a single vertex, then \(\left| {N\left( A\right) }\right|  = k\) , and the theorem holds. Thus we may assume that \(\left| A\right|  \geq  2\) . If \(g \in  \operatorname{Aut}\left( X\right)\) , then \({A}^{g}\) is also an atom, and so by Corollary 3.4.5, either \(A = {A}^{g}\) or \(A \cap  {A}^{g} = \varnothing\) . Hence \(A\) is a block of imprimitivity for \(\operatorname{Aut}\left( X\right)\) , and its translates partition \(V\left( X\right)\) . Corollary 3.4.5 now yields that \(N\left( A\right)\) is partitioned by translates of \(A\) , and therefore
+
+\begin{tcolorbox}\relax
+现在我们可以证明定理 3.4.2。设 \(X\) 是一个度为 \(k\) 的顶点传递图，且令 \(A\) 为 \(X\) 的一个原子。如果 \(A\) 是单个顶点，则 \(\left| {N\left( A\right) }\right|  = k\) ，定理成立。因此我们可以假设 \(\left| A\right|  \geq  2\) 。若 \(g \in  \operatorname{Aut}\left( X\right)\) ，则 \({A}^{g}\) 也是一个原子，故由推论 3.4.5，要么 \(A = {A}^{g}\) 要么 \(A \cap  {A}^{g} = \varnothing\) 。因此 \(A\) 是 \(\operatorname{Aut}\left( X\right)\) 的一个不变块，其平移构成了对 \(V\left( X\right)\) 的划分。推论 3.4.5 现在又说明 \(N\left( A\right)\) 被 \(A\) 的平移所划分，因此
+\end{tcolorbox}
+
+\[
+\left| {N\left( A\right) }\right|  = t\left| A\right|
+\]
+
+for some integer \(t\) . Suppose \(u\) is a vertex \(A\) . Then the valency of \(u\) is at most
+
+\begin{tcolorbox}\relax
+对于某个整数 \(t\) 。设 \(u\) 是一个顶点 \(A\) 。那么 \(u\) 的度至多为
+\end{tcolorbox}
+
+\[
+\left| A\right|  - 1 + \left| {N\left( A\right) }\right|  = \left( {t + 1}\right) \left| A\right|  - 1,
+\]
+
+and from this it follows that \(k + 1 \leq  \left( {t + 1}\right) \left| A\right|\) and \({\kappa }_{0}\left( X\right)  \geq  \frac{t}{t + 1}k\) . To complete the proof we show that \(t \geq  2\) .
+
+\begin{tcolorbox}\relax
+由此可得 \(k + 1 \leq  \left( {t + 1}\right) \left| A\right|\) 与 \({\kappa }_{0}\left( X\right)  \geq  \frac{t}{t + 1}k\) 。为完成证明，我们展示 \(t \geq  2\) 。
+\end{tcolorbox}
+
+This is actually a consequence of Exercise 20, but since \(X\) is vertex transitive and the atoms are blocks of imprimitivity for \(\operatorname{Aut}\left( X\right)\) , there is a shorter argument. Suppose for a contradiction that \(t = 1\) . By Corollary 3.4.5, \(N\left( A\right)\) is a union of atoms, and so \(N\left( A\right)\) is an atom. Since \(\operatorname{Aut}\left( X\right)\) acts transitively on the atoms of \(X\) , it follows that \(\left| {N\left( {N\left( A\right) }\right) }\right|  = \left| A\right|\) , and since \(A \cap  N\left( {N\left( A\right) }\right)\) is nonempty, \(A = N\left( {N\left( A\right) }\right)\) . This implies that \(\bar{A} = \varnothing\) , and so \(A\) is not a fragment.
+
+\begin{tcolorbox}\relax
+这实际上是练习 20 的一个推论，但由于 \(X\) 是顶点传递的且原子是 \(\operatorname{Aut}\left( X\right)\) 的不变块，有一个更短的论证。为求矛盾，假设 \(t = 1\) 。由推论 3.4.5， \(N\left( A\right)\) 是原子的并集，因此 \(N\left( A\right)\) 是一个原子。既然 \(\operatorname{Aut}\left( X\right)\) 在 \(X\) 的原子上作用传递，便有 \(\left| {N\left( {N\left( A\right) }\right) }\right|  = \left| A\right|\) ，且由于 \(A \cap  N\left( {N\left( A\right) }\right)\) 非空， \(A = N\left( {N\left( A\right) }\right)\) 。这意味着 \(\bar{A} = \varnothing\) ，因此 \(A\) 不是一个片段。
+\end{tcolorbox}
+
+\section*{3.5 Matchings}
+
+\begin{tcolorbox}\relax
+\section*{3.5 匹配}
+\end{tcolorbox}
+
+A matching \(M\) in a graph \(X\) is a set of edges such that no two have a vertex in common. The size of a matching is the number of edges in it. A vertex contained in an edge of \(M\) is covered by \(M\) . A matching that covers every vertex of \(X\) is called a perfect matching or a 1-factor. Clearly, a graph that contains a perfect matching has an even number of vertices. A maximum matching is a matching with the maximum possible number of edges. (Without this convention there is a chance of confusion, since matchings can be partially ordered by inclusion or by size.)
+
+\begin{tcolorbox}\relax
+图 \(X\) 中的匹配 \(M\) 是一组边，其中任意两条边都没有公共顶点。匹配的大小是其中边的数量。包含在 \(M\) 的一条边中的顶点被 \(M\) 覆盖。覆盖 \(X\) 的每个顶点的匹配称为完美匹配或 1 - 因子。显然，包含完美匹配的图有偶数个顶点。最大匹配是具有最大可能边数的匹配。(如果没有这个约定，就有可能产生混淆，因为匹配可以按包含关系或大小进行偏序排序。)
+\end{tcolorbox}
+
+We will prove the following result. It implies that a connected vertex-transitive graph on an even number of vertices has a perfect matching, and that each vertex in a connected vertex-transitive graph on an odd number of vertices is missed by a matching that covers all the remaining vertices.
+
+\begin{tcolorbox}\relax
+我们将证明下述结果。它意味着:连通的顶点传递图且顶点数为偶数时存在完美匹配；在连通的顶点传递图且顶点数为奇数时，每个顶点都可以被某个覆盖其余顶点的匹配遗漏。
+\end{tcolorbox}
+
+Theorem 3.5.1 Let \(X\) be a connected vertex-transitive graph. Then \(X\) has a matching that misses at most one vertex, and each edge is contained in a maximum matching.
+
+\begin{tcolorbox}\relax
+定理 3.5.1 设 \(X\) 为连通的顶点传递图。则 \(X\) 有一个最多遗漏一个顶点的匹配，且每条边都包含在某个最大匹配中。
+\end{tcolorbox}
+
+We first verify the claim about the maximum size of a matching. This requires some preparation, including two lemmas. If \(M\) is a matching in \(X\) and \(P\) is a path in \(X\) such that every second edge of \(P\) lies in \(M\) , we say that \(P\) is an alternating path relative to \(M\) . Similarly, an alternating cycle is a cycle with every second edge in \(M\) .
+
+\begin{tcolorbox}\relax
+我们先验证关于匹配最大大小的断言。这需要一些准备，包括两个引理。若 \(M\) 是 \(X\) 中的一个匹配，且 \(P\) 是 \(X\) 中的一条路径，且 \(P\) 的每隔一条边属于 \(M\) ，则称 \(P\) 为相对于 \(M\) 的交替路径。同理，交替圈是每隔一条边属于 \(M\) 的圈。
+\end{tcolorbox}
+
+Suppose that \(M\) and \(N\) are matchings in \(X\) , and consider their symmetric difference \(M \oplus  N\) . Since \(M\) and \(N\) are regular subgraphs with valency one, \(M \oplus  N\) is a subgraph with maximum valency two, and therefore each component of it is either a path or a cycle. Since no vertex in \(M \oplus  N\) lies in two edges of \(M\) or of \(N\) , these paths and cycles are alternating relative to both \(M\) and \(N\) . In particular, each cycle must have even length.
+
+\begin{tcolorbox}\relax
+设 \(M\) 和 \(N\) 是 \(X\) 中的匹配，考虑它们的对称差 \(M \oplus  N\) 。由于 \(M\) 和 \(N\) 是度为一的正则子图， \(M \oplus  N\) 是最大度为二的子图，因此其每个连通分支要么为路径要么为圈。因在 \(M \oplus  N\) 中没有顶点同时属于 \(M\) 或同时属于 \(N\) 的两条边，这些路径和圈相对于 \(M\) 与 \(N\) 都是交替的。特别地，每个圈长度必为偶数。
+\end{tcolorbox}
+
+Suppose \(P\) is a path in \(M \oplus  N\) with odd length. We may assume without loss that \(P\) contains more edges of \(M\) than of \(N\) , in which case it follows that \(N \oplus  P\) is a matching in \(X\) that contains more edges than \(N\) . Hence, if \(M\) and \(N\) are maximum matchings, all paths in \(M \oplus  N\) have even length.
+
+\begin{tcolorbox}\relax
+设 \(P\) 是 \(M \oplus  N\) 中的一条奇长路径。我们可不失一般性地假定 \(P\) 含有比 \(M\) 更多的 \(N\) 的边，在此情况下可得 \(N \oplus  P\) 是 \(X\) 中的一个匹配，且包含的边比 \(N\) 多。因此，若 \(M\) 与 \(N\) 是最大匹配，则 \(M \oplus  N\) 中的所有路径均为偶长。
+\end{tcolorbox}
+
+Lemma 3.5.2 Let \(u\) and \(v\) be vertices in \(X\) such that no maximum matching misses both of them. Suppose that \({M}_{u}\) and \({M}_{v}\) are maximum matchings that miss \(u\) and \(v\) , respectively. Then there is a path of even length in \({M}_{u} \oplus  {M}_{v}\) with \(u\) and \(v\) as its end-vertices.
+
+\begin{tcolorbox}\relax
+引理 3.5.2 设 \(u\) 和 \(v\) 为 \(X\) 中的顶点，且不存在同时被某个最大匹配遗漏的两者。设 \({M}_{u}\) 与 \({M}_{v}\) 为分别遗漏 \(u\) 与 \(v\) 的最大匹配。则在 \({M}_{u} \oplus  {M}_{v}\) 中存在一条偶长路径，其端点为 \(u\) 与 \(v\) 。
+\end{tcolorbox}
+
+Proof. Our hypothesis implies that \(u\) and \(v\) are vertices of valency one in \({M}_{u} \oplus  {M}_{v}\) so, by our ruminations above, both vertices are end-vertices of paths in \({M}_{u} \oplus  {M}_{v}\) . As \({M}_{u}\) and \({M}_{v}\) have maximum size, these paths have even length. If they are end-vertices of the same path, we are finished.
+
+\begin{tcolorbox}\relax
+证明。我们的假设意味着 \(u\) 与 \(v\) 在 \({M}_{u} \oplus  {M}_{v}\) 中的度为一，故按上文推理，二者都是 \({M}_{u} \oplus  {M}_{v}\) 中某些路径的端点。由于 \({M}_{u}\) 与 \({M}_{v}\) 为最大匹配，这些路径为偶长。若它们为同一条路径的端点，则结论成立。
+\end{tcolorbox}
+
+Assume that they lie on distinct paths and let \(P\) be the path on \(u\) . Then \(P\) is an alternating path relative to \({M}_{v}\) with even length, and \({M}_{v} \oplus  P\) is a matching in \(X\) that misses \(u\) and \(v\) and has the same size as \({M}_{v}\) . This contradicts our choice of \(u\) and \(v\) .
+
+\begin{tcolorbox}\relax
+现假设它们位于不同路径上，令 \(P\) 为 \(u\) 上的那条路径。则 \(P\) 是相对于 \({M}_{v}\) 的偶长交替路径，且 \({M}_{v} \oplus  P\) 是 \(X\) 中的一个匹配，遗漏 \(u\) 与 \(v\) 且大小与 \({M}_{v}\) 相同。这与我们对 \(u\) 与 \(v\) 的选择矛盾。
+\end{tcolorbox}
+
+We are almost ready to prove the first part of our theorem. We call a vertex \(u\) in \(X\) critical if it is covered by every maximum matching. If \(X\) is vertex transitive and one vertex is critical, then all vertices are critical, whence \(X\) has a perfect matching. Given this, the next result implies the first claim in our theorem.
+
+\begin{tcolorbox}\relax
+我们几乎可以证明定理的第一部分了。若顶点 \(u\) 在 \(X\) 中被每个极大匹配覆盖，则称其为临界顶点。如果 \(X\) 顶点传递且有一个顶点是临界的，那么所有顶点均为临界，因此 \(X\) 存在完美匹配。鉴于此，下面的结果蕴含了定理的第一断言。
+\end{tcolorbox}
+
+Lemma 3.5.3 Let \(u\) and \(v\) be distinct vertices in \(X\) and let \(P\) be a path from \(u\) to \(v\) . If no vertex in \(V\left( P\right)  \smallsetminus  \{ u,v\}\) is critical, then no maximum matching misses both \(u\) and \(v\) .
+
+\begin{tcolorbox}\relax
+引理 3.5.3 设 \(u\) 和 \(v\) 为 \(X\) 中不同的顶点，且 \(P\) 是从 \(u\) 到 \(v\) 的一条路径。如果 \(V\left( P\right)  \smallsetminus  \{ u,v\}\) 中没有顶点是临界的，则不存在极大匹配同时遗漏 \(u\) 和 \(v\) 。
+\end{tcolorbox}
+
+Proof. The proof is by induction on the length of \(P\) . If \(u \sim  v\) , then no maximum matching misses both \(u\) and \(v\) ; hence we may assume that \(P\) has length at least two.
+
+\begin{tcolorbox}\relax
+证明。按 \(P\) 的长度作归纳。如果 \(u \sim  v\) ，则不存在极大匹配同时遗漏 \(u\) 和 \(v\) ；故可假设 \(P\) 的长度至少为二。
+\end{tcolorbox}
+
+Let \(x\) be a vertex on \(P\) distinct from \(u\) and \(v\) . Then \(u\) and \(x\) are joined in \(X\) by a path that contains no critical vertices. This path is shorter than \(P\) , so by induction, we conclude that no maximum matching misses both \(u\) and \(x\) . Similarly, no maximum matching misses both \(v\) and \(x\) .
+
+\end{document}

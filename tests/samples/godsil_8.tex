@@ -1,0 +1,600 @@
+\documentclass[10pt]{article}
+\usepackage[verbose, a4paper, hmargin=2.5cm, vmargin=2.5cm]{geometry}
+
+\usepackage{fontspec}
+\usepackage{ctex}
+\usepackage{paratype}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{esint}
+\usepackage{stmaryrd}
+
+\usepackage[mathbf=sym]{unicode-math}
+\setmainfont{STIX Two Text}
+\setmathfont{STIX Two Math}
+
+\setsansfont{Arial}
+\setmonofont{Courier New}
+
+\usepackage{makecell}
+\usepackage{wasysym}
+\usepackage{pifont}
+\usepackage[export]{adjustbox}
+\usepackage{graphicx}
+\usepackage{mdframed}
+\usepackage{booktabs,array,multirow}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan,}
+\urlstyle{same}
+\usepackage[most]{tcolorbox}
+\definecolor{mygray}{RGB}{240,240,240}
+\tcbset{
+  colback=mygray,
+  boxrule=0pt,
+}
+\graphicspath{ {./images/} }
+\newcommand{\HRule}{\begin{center}\rule{0.9\linewidth}{0.2mm}\end{center}}
+\newcommand{\customfootnote}[1]{
+  \let\thefootnote\relax\footnotetext{#1}
+}
+\newcommand{\lt}{\mathrel{<}}
+\newcommand{\gt}{\mathrel{>}}
+\newcommand*\circled[1]{\tikz[baseline=(char.base)]{\node[shape=circle,draw,inner sep=1.5pt] (char) {\small #1};}}
+\setcounter{MaxMatrixCols}{256}
+\begin{document}
+\section*{8 Matrix Theory}
+
+\begin{tcolorbox}\relax
+\section*{8 矩阵理论}
+\end{tcolorbox}
+
+There are various matrices that are naturally associated with a graph, such as the adjacency matrix, the incidence matrix, and the Laplacian. One of the main problems of algebraic graph theory is to determine precisely how, or whether, properties of graphs are reflected in the algebraic properties of such matrices.
+
+\begin{tcolorbox}\relax
+与图自然关联的矩阵有很多，如邻接矩阵、关联矩阵和拉普拉斯矩阵。代数图论的主要问题之一是准确判断图的性质是否以及如何反映在这些矩阵的代数性质上。
+\end{tcolorbox}
+
+Here we introduce the incidence and adjacency matrices of a graph, and the tools needed to work with them. This chapter could be subtitled "Linear Algebra for Graph Theorists," because it develops the linear algebra we need from fundamental results about symmetric matrices through to the Perron-Frobenius theorem and the spectral decomposition of symmetric matrices.
+
+\begin{tcolorbox}\relax
+在此我们介绍图的关联矩阵与邻接矩阵以及处理它们所需的工具。本章可副题为“图论者的线性代数”，因为它从对称矩阵的基本结论出发，推导出我们所需的线性代数内容，直至庞若—弗罗贝尼斯定理和对称矩阵的谱分解。
+\end{tcolorbox}
+
+Since many of the matrices that arise in graph theory are 01-matrices, further information can often be obtained by viewing the matrix over the finite field \({GF}\left( 2\right)\) . We illustrate this with an investigation into the binary rank of the adjacency matrix of a graph.
+
+\begin{tcolorbox}\relax
+鉴于图论中出现的许多矩阵是0-1矩阵，通过在有限域 \({GF}\left( 2\right)\) 上考察这些矩阵常能获得更多信息。我们以对图的邻接矩阵的二元秩的研究来说明这一点。
+\end{tcolorbox}
+
+\section*{8.1 The Adjacency Matrix}
+
+\begin{tcolorbox}\relax
+\section*{8.1 邻接矩阵}
+\end{tcolorbox}
+
+The adjacency matrix \(A\left( X\right)\) of a directed graph \(X\) is the integer matrix with rows and columns indexed by the vertices of \(X\) , such that the \({uv}\) -entry of \(A\left( X\right)\) is equal to the number of arcs from \(u\) to \(v\) (which is usually 0 or 1). If \(X\) is a graph, then we view each edge as a pair of arcs in opposite directions, and \(A\left( X\right)\) is a symmetric 01-matrix. Because a graph has no loops, the diagonal entries of \(A\left( X\right)\) are zero. Different directed graphs on the same vertex set have different adjacency matrices, even if they are isomorphic. This is not much of a problem, and in any case we have the following consolation, the proof of which is left as an exercise.
+
+\begin{tcolorbox}\relax
+有向图 \(X\) 的邻接矩阵 \(A\left( X\right)\) 是以 \(X\) 的顶点为行列索引的整数矩阵，且 \(A\left( X\right)\) 的 \({uv}\) 项等于从 \(u\) 到 \(v\) 的弧的数量(通常为 0 或 1)。如果 \(X\) 是无向图，则把每条边视为一对反向弧，且 \(A\left( X\right)\) 为对称的 01 矩阵。由于无向图没有自环， \(A\left( X\right)\) 的对角线元素为零。即便同构，作用在同一顶点集上的不同有向图也可能有不同的邻接矩阵。这并不成大问题，而且我们有如下慰藉，证明留作习题。
+\end{tcolorbox}
+
+Lemma 8.1.1 Let \(X\) and \(Y\) be directed graphs on the same vertex set. Then they are isomorphic if and only if there is a permutation matrix \(P\) such that \({P}^{T}A\left( X\right) P = A\left( Y\right)\) .
+
+\begin{tcolorbox}\relax
+引理 8.1.1 设 \(X\) 和 \(Y\) 为作用在同一顶点集上的有向图。当且仅当存在置换矩阵 \(P\) 使得 \({P}^{T}A\left( X\right) P = A\left( Y\right)\) 时，它们同构。
+\end{tcolorbox}
+
+Since permutation matrices are orthogonal, \({P}^{T} = {P}^{-1}\) , and so if \(X\) and \(Y\) are isomorphic directed graphs, then \(A\left( X\right)\) and \(A\left( Y\right)\) are similar matrices. The characteristic polynomial of a matrix \(A\) is the polynomial
+
+\begin{tcolorbox}\relax
+因为置换矩阵是正交的， \({P}^{T} = {P}^{-1}\) ，所以若有向图 \(X\) 和 \(Y\) 同构，则 \(A\left( X\right)\) 与 \(A\left( Y\right)\) 是相似矩阵。矩阵 \(A\) 的特征多项式定义为多项式
+\end{tcolorbox}
+
+\[
+\phi \left( {A,x}\right)  = \det \left( {{xI} - A}\right) ,
+\]
+
+and we let \(\phi \left( {X,x}\right)\) denote the characteristic polynomial of \(A\left( X\right)\) . The spectrum of a matrix is the list of its eigenvalues together with their multiplicities. The spectrum of a graph \(X\) is the spectrum of \(A\left( X\right)\) (and similarly we refer to the eigenvalues and eigenvectors of \(A\left( X\right)\) as the eigenvalues and eigenvectors of \(X\) ). Lemma 8.1.1 shows that \(\phi \left( {X,x}\right)  = \phi \left( {Y,x}\right)\) if \(X\) and \(Y\) are isomorphic, and so the spectrum is an invariant of the isomorphism class of a graph.
+
+\begin{tcolorbox}\relax
+并且我们用 \(\phi \left( {X,x}\right)\) 表示 \(A\left( X\right)\) 的特征多项式。矩阵的谱是其特征值及其重数的列表。图 \(X\) 的谱是其邻接矩阵 \(A\left( X\right)\) 的谱(同样我们把 \(A\left( X\right)\) 的特征值和特征向量称为 \(X\) 的特征值和特征向量)。引理 8.1.1 表明若 \(X\) 与 \(Y\) 同构，则 \(\phi \left( {X,x}\right)  = \phi \left( {Y,x}\right)\) ，因此谱是图同构类的不变量。
+\end{tcolorbox}
+
+However, it is not hard to see that the spectrum of a graph does not determine its isomorphism class. Figure 8.1 shows two graphs that are not isomorphic but share the characteristic polynomial
+
+\begin{tcolorbox}\relax
+然而，不难看出图的谱不能决定其同构类。图 8.1 展示了两幅不相同构但共享特征多项式
+\end{tcolorbox}
+
+\[
+\left( {x + 2}\right) {\left( x + 1\right) }^{2}{\left( x - 1\right) }^{2}\left( {{x}^{2} - {2x} - 6}\right) ,
+\]
+
+and hence have spectrum
+
+\begin{tcolorbox}\relax
+因此具有谱
+\end{tcolorbox}
+
+\[
+\left\{  {-2, - {1}^{\left( 2\right) },{1}^{\left( 2\right) },1 \pm  \sqrt{7}}\right\}
+\]
+
+(where the superscripts give the multiplicities of eigenvalues with multiplicity greater than one). Two graphs with the same spectrum are called cospectral.
+
+\begin{tcolorbox}\relax
+(上标表示重数大于一的特征值的重数)。具有相同谱的两图称为共谱图。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.6\textwidth]{images/179_438_1549_662_258_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 8.1. Two cospectral graphs
+
+\begin{tcolorbox}\relax
+图 8.1:两幅共谱图
+\end{tcolorbox}
+
+The graphs of Figure 8.1 show that the valencies of the vertices are not determined by the spectrum, and that whether a graph is planar is not determined by the spectrum. In general, if there is a cospectral pair of graphs, only one of which has a certain property \(\mathcal{P}\) , then \(\mathcal{P}\) cannot be determined by the spectrum. Such cospectral pairs have been found for a large number of graph-theoretical properties.
+
+\begin{tcolorbox}\relax
+图 8.1 表明顶点的度不由谱决定，图是否平面也不由谱决定。一般地，若存在一对共谱图且仅其中一幅具有某性质 \(\mathcal{P}\) ，则该性质不能由谱确定。已为大量图论性质找到这类共谱对。
+\end{tcolorbox}
+
+However, the next result shows that there is some useful information that can be obtained from the spectrum. A walk of length \(r\) in a directed graph \(X\) is a sequence of vertices
+
+\begin{tcolorbox}\relax
+不过，下面的结果表明谱可以提供一些有用的信息。有向图 \(X\) 中长度为 \(r\) 的一次游走是顶点序列
+\end{tcolorbox}
+
+\[
+{v}_{0} \sim  {v}_{1} \sim  \cdots  \sim  {v}_{r}
+\]
+
+A walk is closed if its first and last vertices are the same. This definition is similar to that of a path (Section 1.2), with the important difference being that a walk is permitted to use vertices more than once.
+
+\begin{tcolorbox}\relax
+若游走的首末顶点相同，则称为闭合游走。此定义与路径(第 1.2 节)相似，重要区别在于游走允许重复经过顶点。
+\end{tcolorbox}
+
+Lemma 8.1.2 Let \(X\) be a directed graph with adjacency matrix A. The number of walks from \(u\) to \(v\) in \(X\) with length \(r\) is \({\left( {A}^{r}\right) }_{uv}\) .
+
+\begin{tcolorbox}\relax
+引理 8.1.2 设有向图 \(X\) 的邻接矩阵为 A。从 \(u\) 到 \(v\) 的长度为 \(r\) 的游走数为 \({\left( {A}^{r}\right) }_{uv}\) 。
+\end{tcolorbox}
+
+Proof. This is easily proved by induction on \(r\) , as you are invited to do. \(□\)
+
+\begin{tcolorbox}\relax
+证明。按 \(r\) 归纳易证，留作练习。 \(□\)
+\end{tcolorbox}
+
+The trace of a square matrix \(A\) is the sum of its diagonal entries and is denoted by \(\operatorname{tr}A\) . The previous result shows that the number of closed walks of length \(r\) in \(X\) is \(\operatorname{tr}{A}^{r}\) , and hence we get the following corollary:
+
+\begin{tcolorbox}\relax
+方阵 \(A\) 的迹是其对角线元素之和，记为 \(\operatorname{tr}A\) 。前述结果表明图 \(X\) 中长度为 \(r\) 的闭合游走数为 \(\operatorname{tr}{A}^{r}\) ，由此得到如下推论:
+\end{tcolorbox}
+
+Corollary 8.1.3 Let \(X\) be a graph with e edges and \(t\) triangles. If \(A\) is the adjacency matrix of \(X\) , then
+
+\begin{tcolorbox}\relax
+推论 8.1.3 设 \(X\) 为一图，具有 e 条边和 \(t\) 个三角形。若 \(A\) 为 \(X\) 的邻接矩阵，则
+\end{tcolorbox}
+
+(a) \(\operatorname{tr}A = 0\) ,
+
+(b) \(\operatorname{tr}{A}^{2} = {2e}\) ,
+
+(c) \(\operatorname{tr}{A}^{3} = {6t}\) .
+
+Since the trace of a square matrix is also equal to the sum of its eigenvalues, and the eigenvalues of \({A}^{r}\) are the \(r\) th powers of the eigenvalues of \(A\) , we see that \(\operatorname{tr}{A}^{r}\) is determined by the spectrum of \(A\) . Therefore, the spectrum of a graph \(X\) determines at least the number of vertices, edges, and triangles in \(X\) . The graphs \({K}_{1,4}\) and \({K}_{1} \cup  {C}_{4}\) are cospectral and do not have the same number of 4-cycles, so it is difficult to extend these observations.
+
+\begin{tcolorbox}\relax
+由于方阵的迹等于其特征值之和，且 \({A}^{r}\) 的特征值是 \(A\) 特征值的 \(r\) 次幂，我们看到 \(\operatorname{tr}{A}^{r}\) 由 \(A\) 的谱决定。因此，图 \(X\) 的谱至少能确定其顶点数、边数和三角形数。图 \({K}_{1,4}\) 和 \({K}_{1} \cup  {C}_{4}\) 是等谱的但四圈数量不同，因此很难将这些观察推广。
+\end{tcolorbox}
+
+\section*{8.2 The Incidence Matrix}
+
+\begin{tcolorbox}\relax
+\section*{8.2 关联矩阵}
+\end{tcolorbox}
+
+The incidence matrix \(B\left( X\right)\) of a graph \(X\) is the 01-matrix with rows and columns indexed by the vertices and edges of \(X\) , respectively, such that the \({uf}\) -entry of \(B\left( X\right)\) is equal to one if and only if the vertex \(u\) is in the edge \(f\) . If \(X\) has \(n\) vertices and \(e\) edges, then \(B\left( X\right)\) has order \(n \times  e\) .
+
+\begin{tcolorbox}\relax
+图 \(X\) 的关联矩阵 \(B\left( X\right)\) 是一个 0-1 矩阵，行和列分别由 \(X\) 的顶点和边索引，且矩阵的 \({uf}\) 项当且仅当顶点 \(u\) 属于边 \(f\) 时等于一。若 \(X\) 有 \(n\) 个顶点和 \(e\) 条边，则 \(B\left( X\right)\) 的阶为 \(n \times  e\) 。
+\end{tcolorbox}
+
+The rank of the adjacency matrix of a graph can be computed in polynomial time, but we do not have a simple combinatorial expression for it. We do have one for the rank of the incidence matrix.
+
+\begin{tcolorbox}\relax
+图的邻接矩阵的秩可以在多项式时间内计算，但我们没有简单的组合式表达。对于关联矩阵的秩，我们有一个这样的表达式。
+\end{tcolorbox}
+
+Theorem 8.2.1 Let \(X\) be a graph with \(n\) vertices and \({c}_{0}\) bipartite connected components. If \(B\) is the incidence matrix of \(X\) , then its rank is given by \(\mathrm{{rk}}B = n - {c}_{0}\) .
+
+\begin{tcolorbox}\relax
+定理 8.2.1 设 \(X\) 为具有 \(n\) 个顶点和 \({c}_{0}\) 个二分连通分支的图。若 \(B\) 是 \(X\) 的关联矩阵，则其秩为 \(\mathrm{{rk}}B = n - {c}_{0}\) 。
+\end{tcolorbox}
+
+Proof. We shall show that the null space of \(B\) has dimension \({c}_{0}\) , and hence that \(\operatorname{rk}B = n - {c}_{0}\) . Suppose that \(z\) is a vector in \({\mathbb{R}}^{n}\) such that \({z}^{T}B = 0\) . If \({uv}\) is an edge of \(X\) , then \({z}_{u} + {z}_{v} = 0\) . It follows by an easy induction that if \(u\) and \(v\) are vertices of \(X\) joined by a path of length \(r\) , then \({z}_{u} = {\left( -1\right) }^{r}{z}_{v}\) . Therefore, if we view \(z\) as a function on \(V\left( X\right)\) , it is identically zero on any component of \(X\) that is not bipartite, and takes equal and opposite values on the two colour classes of any bipartite component. The space of such vectors has dimension \({c}_{0}\) .
+
+\begin{tcolorbox}\relax
+证明。我们将证明 \(B\) 的零空间的维数为 \({c}_{0}\) ，从而得出 \(\operatorname{rk}B = n - {c}_{0}\) 。设 \(z\) 是 \({\mathbb{R}}^{n}\) 中的向量且满足 \({z}^{T}B = 0\) 。若 \({uv}\) 是 \(X\) 的一条边，则 \({z}_{u} + {z}_{v} = 0\) 。由简单归纳可得:若 \(u\) 与 \(v\) 是由一条长度为 \(r\) 的路相连的 \(X\) 的顶点，则 \({z}_{u} = {\left( -1\right) }^{r}{z}_{v}\) 。因此，若将 \(z\) 视为定义在 \(V\left( X\right)\) 上的函数，则在任何非二分的连通分支上它恒为零，而在任一二分分支的两个着色类上取相等且相反的值。此类向量空间的维数为 \({c}_{0}\) 。
+\end{tcolorbox}
+
+The inner product of two columns of \(B\left( X\right)\) is nonzero if and only if the corresponding edges have a common vertex, which immediately yields the following result.
+
+\begin{tcolorbox}\relax
+\(B\left( X\right)\) 的两列的内积当且仅当对应的两条边有公共顶点时非零，由此立刻得到下述结果。
+\end{tcolorbox}
+
+Lemma 8.2.2 Let \(B\) be the incidence matrix of the graph \(X\) , and let \(L\) be the line graph of \(X\) . Then \({B}^{T}B = {2I} + A\left( L\right)\) .
+
+\begin{tcolorbox}\relax
+引理 8.2.2 设 \(B\) 为图 \(X\) 的关联矩阵，且令 \(L\) 为 \(X\) 的线图。则 \({B}^{T}B = {2I} + A\left( L\right)\) 。
+\end{tcolorbox}
+
+If \(X\) is a graph on \(n\) vertices, let \(\Delta \left( X\right)\) be the diagonal \(n \times  n\) matrix with rows and columns indexed by \(V\left( X\right)\) with \({uu}\) -entry equal to the valency of vertex \(u\) . The inner product of any two distinct rows of \(B\left( X\right)\) is equal to the number of edges joining the corresponding vertices. Thus it is zero or one according as these vertices are adjacent or not, and we have the following:
+
+\begin{tcolorbox}\relax
+若 \(X\) 为一个有 \(n\) 个顶点的图，令 \(\Delta \left( X\right)\) 为以 \(V\left( X\right)\) 为行列索引的对角矩阵 \(n \times  n\) ，且其 \({uu}\) 项等于顶点 \(u\) 的度。 \(B\left( X\right)\) 的任意两不同行的内积等于对应顶点之间的边数。因此该内积为零或一，分别对应这些顶点是否相邻，由此得到:
+\end{tcolorbox}
+
+Lemma 8.2.3 Let \(B\) be the incidence matrix of the graph \(X\) . Then \(B{B}^{T} = \; \Delta \left( X\right)  + A\left( X\right)\) .
+
+\begin{tcolorbox}\relax
+引理 8.2.3 设 \(B\) 为图 \(X\) 的关联矩阵。则 \(B{B}^{T} = \; \Delta \left( X\right)  + A\left( X\right)\) 。
+\end{tcolorbox}
+
+When \(X\) is regular the last two results imply a simple relation between the eigenvalues of \(L\left( X\right)\) and those of \(X\) , but to prove this we also need the following result.
+
+\begin{tcolorbox}\relax
+当 \(X\) 为正则图时，最后两条结果蕴含了 \(L\left( X\right)\) 的特征值与 \(X\) 的特征值之间的简单关系，但为证明此点我们还需要下面的结果。
+\end{tcolorbox}
+
+Lemma 8.2.4 If \(C\) and \(D\) are matrices such that \({CD}\) and \({DC}\) are both defined, then \(\det \left( {I - {CD}}\right)  = \det \left( {I - {DC}}\right)\) .
+
+\begin{tcolorbox}\relax
+引理 8.2.4 若 \(C\) 与 \(D\) 为矩阵，且 \({CD}\) 与 \({DC}\) 均有定义，则 \(\det \left( {I - {CD}}\right)  = \det \left( {I - {DC}}\right)\) 。
+\end{tcolorbox}
+
+Proof. If
+
+\begin{tcolorbox}\relax
+证明。若
+\end{tcolorbox}
+
+\[
+X = \left( \begin{matrix} I & C \\  D & I \end{matrix}\right) ,\;Y = \left( \begin{matrix} I & 0 \\   - D & I \end{matrix}\right) ,
+\]
+
+then
+
+\begin{tcolorbox}\relax
+则
+\end{tcolorbox}
+
+\[
+{XY} = \left( \begin{matrix} I - {CD} & C \\  0 & I \end{matrix}\right) ,\;{YX} = \left( \begin{matrix} I & C \\  0 & I - {DC} \end{matrix}\right) ,
+\]
+
+and since \(\det {XY} = \det {YX}\) , it follows that \(\det \left( {I - {CD}}\right)  = \det \left( {I - {DC}}\right)\) . \(□\)
+
+\begin{tcolorbox}\relax
+且由于 \(\det {XY} = \det {YX}\) ，可得 \(\det \left( {I - {CD}}\right)  = \det \left( {I - {DC}}\right)\) 。 \(□\)
+\end{tcolorbox}
+
+This result implies that \(\det \left( {I - {x}^{-1}{CD}}\right)  = \det \left( {I - {x}^{-1}{DC}}\right)\) , from which it follows that \({CD}\) and \({DC}\) have the same nonzero eigenvalues with the same multiplicities.
+
+\begin{tcolorbox}\relax
+这一结论意味着 \(\det \left( {I - {x}^{-1}{CD}}\right)  = \det \left( {I - {x}^{-1}{DC}}\right)\) ，由此可得 \({CD}\) 和 \({DC}\) 具有相同的非零特征值且重数相同。
+\end{tcolorbox}
+
+Lemma 8.2.5 Let \(X\) be a regular graph of valency \(k\) with \(n\) vertices and e edges and let \(L\) be the line graph of \(X\) . Then
+
+\begin{tcolorbox}\relax
+引理 8.2.5 设 \(X\) 为一个度为 \(k\) 的正则图，具有 \(n\) 个顶点和 e 条边，且令 \(L\) 为 \(X\) 的线图。则
+\end{tcolorbox}
+
+\[
+\phi \left( {L,x}\right)  = {\left( x + 2\right) }^{e - n}\phi \left( {X,x - k + 2}\right) .
+\]
+
+Proof. Substituting \(C = {x}^{-1}{B}^{T}\) and \(D = B\) into the previous lemma we get
+
+\begin{tcolorbox}\relax
+证明。将 \(C = {x}^{-1}{B}^{T}\) 和 \(D = B\) 代入前一引理，我们得到
+\end{tcolorbox}
+
+\[
+\det \left( {{I}_{e} - {x}^{-1}{B}^{T}B}\right)  = \det \left( {{I}_{n} - {x}^{-1}B{B}^{T}}\right) ,
+\]
+
+whence
+
+\begin{tcolorbox}\relax
+因此
+\end{tcolorbox}
+
+\[
+\det \left( {x{I}_{e} - {B}^{T}B}\right)  = {x}^{e - n}\det \left( {x{I}_{n} - B{B}^{T}}\right) .
+\]
+
+Noting that \(\Delta \left( X\right)  = {kI}\) and using Lemma 8.2.2 and Lemma 8.2.3, we get
+
+\begin{tcolorbox}\relax
+注意到 \(\Delta \left( X\right)  = {kI}\) 并利用引理 8.2.2 与引理 8.2.3，我们得到
+\end{tcolorbox}
+
+\[
+\det \left( {\left( {x - 2}\right) {I}_{e} - A\left( L\right) }\right)  = {x}^{e - n}\det \left( {\left( {x - k}\right) {I}_{n} - A\left( X\right) }\right) ,
+\]
+
+and so
+
+\begin{tcolorbox}\relax
+因此
+\end{tcolorbox}
+
+\[
+\phi \left( {L,x - 2}\right)  = {x}^{e - n}\phi \left( {X,x - k}\right) ,
+\]
+
+whence our claim follows.
+
+\begin{tcolorbox}\relax
+由此我们的断言成立。
+\end{tcolorbox}
+
+\section*{8.3 The Incidence Matrix of an Oriented Graph}
+
+\begin{tcolorbox}\relax
+\section*{8.3 有向图的关联矩阵}
+\end{tcolorbox}
+
+An orientation of a graph \(X\) is the assignment of a direction to each edge; this means that we declare one end of the edge to be the head of the edge and the other to be the tail, and view the edge as oriented from its tail to its head. Although this definition should be clear, we occasionally need a more formal version. Recall that an arc of a graph is an ordered pair of adjacent vertices. An orientation of \(X\) can then be defined as a function \(\sigma\) from the arcs of \(X\) to \(\{  - 1,1\}\) such that if \(\left( {u,v}\right)\) is an arc, then
+
+\begin{tcolorbox}\relax
+图的一个取向 \(X\) 是给每条边指定一个方向；这就是说我们把一端定为边的头(head)，另一端为尾(tail)，并把该边视为从尾指向头。尽管此定义应当清楚，但有时需更形式的表述。回想一下弧是有序的相邻顶点对。因而， \(X\) 的一个取向可定义为从 \(X\) 的弧到 \(\{  - 1,1\}\) 的函数 \(\sigma\) ，满足若 \(\left( {u,v}\right)\) 是某弧，则
+\end{tcolorbox}
+
+\[
+\sigma \left( {u,v}\right)  =  - \sigma \left( {v,u}\right) .
+\]
+
+If \(\sigma \left( {u,v}\right)  = 1\) , then we will regard the edge \({uv}\) as oriented from tail \(u\) to head \(v\) .
+
+\begin{tcolorbox}\relax
+如果是 \(\sigma \left( {u,v}\right)  = 1\) ，则我们将把边 \({uv}\) 视为从尾 \(u\) 指向头 \(v\) 。
+\end{tcolorbox}
+
+An oriented graph is a graph together with a particular orientation. We will sometimes use \({X}^{\sigma }\) to denote the oriented graph determined by the specific orientation \(\sigma\) . (You may, if you choose, view oriented graphs as a special class of directed graphs. We tend to view them as graphs with extra structure.) Figure 8.2 shows an example of an oriented graph, using arrows to indicate the orientation.
+
+\begin{tcolorbox}\relax
+有向图是图连同一个特定的取向。我们有时用 \({X}^{\sigma }\) 表示由特定取向 \(\sigma\) 确定的有向图。(如果愿意，也可将有向图视为有向图的一个特殊类。但我们倾向于把它们看作带有额外结构的无向图。)图8.2举出一个有向图的例子，用箭头表示取向。
+\end{tcolorbox}
+
+The incidence matrix \(D\left( {X}^{\sigma }\right)\) of an oriented graph \({X}^{\sigma }\) is the \(\{ 0, \pm  1\}\) - matrix with rows and columns indexed by the vertices and edges of \(X\) , respectively, such that the \({uf}\) -entry of \(D\left( {X}^{\sigma }\right)\) is equal to 1 if the vertex \(u\) is the head of the edge \(f, - 1\) if \(u\) is the tail of \(f\) , and 0 otherwise. If \(X\) has \(n\) vertices and \(e\) edges, then \(D\left( {X}^{\sigma }\right)\) has order \(n \times  e\) . For example, the incidence matrix of the graph of Figure 8.2 is
+
+\begin{tcolorbox}\relax
+有向图 \({X}^{\sigma }\) 的关联矩阵 \(D\left( {X}^{\sigma }\right)\) 是一个以 \(X\) 的顶点和边分别索引行与列的 \(\{ 0, \pm  1\}\) 矩阵，使得 \(D\left( {X}^{\sigma }\right)\) 的 \({uf}\) 项当顶点 \(u\) 是边 \(f, - 1\) 的头时等于1，当 \(u\) 是 \(f\) 的尾时等于-1，其他情况为0。若 \(X\) 有 \(n\) 个顶点和 \(e\) 条边，则 \(D\left( {X}^{\sigma }\right)\) 的阶为 \(n \times  e\) 。例如，图8.2的图的关联矩阵为
+\end{tcolorbox}
+
+\[
+\left( \begin{array}{rrrrrr}  - 1 & 1 & 0 & 0 & 0 & 0 \\  1 & 0 &  - 1 & 1 & 0 & 0 \\  0 & 0 & 1 & 0 & 1 &  - 1 \\  0 & 0 & 0 & 0 &  - 1 & 0 \\  0 &  - 1 & 0 &  - 1 & 0 & 1 \end{array}\right) .
+\]
+
+\begin{center}
+\includegraphics[max width=0.3\textwidth]{images/183_566_202_398_349_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 8.2. An oriented graph
+
+\begin{tcolorbox}\relax
+图8.2. 一个有向图
+\end{tcolorbox}
+
+Although there are many different ways to orient a given graph, many of the results about oriented graphs are independent of the choice of orientation. For example, the next result shows that the rank of the incidence matrix of an oriented graph depends only on \(X\) , rather than on the particular orientation given to \(X\) .
+
+\begin{tcolorbox}\relax
+尽管对给定图有多种取向，但关于有向图的许多结论与取向的选择无关。例如，下面的结果表明有向图关联矩阵的秩仅取决于 \(X\) ，而不取决于给 \(X\) 的具体取向。
+\end{tcolorbox}
+
+Theorem 8.3.1 Let \(X\) be a graph with \(n\) vertices and \(c\) connected components. If \(\sigma\) is an orientation of \(X\) and \(D\) is the incidence matrix of \({X}^{\sigma }\) , then \(\operatorname{rk}D = n - c\) .
+
+\begin{tcolorbox}\relax
+定理8.3.1 令 \(X\) 为有 \(n\) 个顶点和 \(c\) 个连通分支的图。若 \(\sigma\) 是 \(X\) 的一个取向且 \(D\) 是由 \({X}^{\sigma }\) 得到的关联矩阵，则 \(\operatorname{rk}D = n - c\) 。
+\end{tcolorbox}
+
+Proof. We shall show that the null space of \(D\) has dimension \(c\) , and hence that \(\operatorname{rk}D = n - c\) . Suppose that \(z\) is a vector in \({\mathbb{R}}^{n}\) such that \({z}^{T}B = 0\) . If \({uv}\) is an edge of \(X\) , then \({z}_{u} - {z}_{v} = 0\) . Therefore, if we view \(z\) as a function on \(V\left( X\right)\) , it is constant on any connected component of \(X\) . The space of such vectors has dimension \(c\) .
+
+\begin{tcolorbox}\relax
+证明。我们将证明 \(D\) 的零空间维数为 \(c\) ，因此 \(\operatorname{rk}D = n - c\) 。设 \(z\) 是 \({\mathbb{R}}^{n}\) 中的向量且满足 \({z}^{T}B = 0\) 。若 \({uv}\) 是 \(X\) 的一条边，则 \({z}_{u} - {z}_{v} = 0\) 。因此，若将 \(z\) 视为定义在 \(V\left( X\right)\) 上的函数，则它在任何连通分支上常数。此类向量空间的维数为 \(c\) 。
+\end{tcolorbox}
+
+We note the following analogue to Lemma 8.2.3.
+
+\begin{tcolorbox}\relax
+我们注意到如下类似于引理8.2.3的结论。
+\end{tcolorbox}
+
+Lemma 8.3.2 If \(\sigma\) is an orientation of \(X\) and \(D\) is the incidence matrix of \({X}^{\sigma }\) , then \(D{D}^{T} = \Delta \left( X\right)  - A\left( X\right)\) .
+
+\begin{tcolorbox}\relax
+引理8.3.2 若 \(\sigma\) 是 \(X\) 的一个取向且 \(D\) 是由 \({X}^{\sigma }\) 得到的关联矩阵，则 \(D{D}^{T} = \Delta \left( X\right)  - A\left( X\right)\) 。
+\end{tcolorbox}
+
+If \(X\) is a plane graph, then each orientation of \(X\) determines an orientation of its dual. This orientation is obtained by viewing each edge of \({X}^{ * }\) as arising from rotating the corresponding edge of \(X\) through \({90}^{ \circ  }\) clockwise (as in Figure 8.3). We will use \(\sigma\) to denote the orientation of both \(X\) and \({X}^{ * }\) .
+
+\begin{tcolorbox}\relax
+若 \(X\) 是平面图，则 \(X\) 的每个取向决定了其对偶图的一个取向。这个取向通过把 \({X}^{ * }\) 的每条边视为对应于将 \(X\) 的相应边顺时针旋转 \({90}^{ \circ  }\) 所得到(如图8.3所示)。我们将用 \(\sigma\) 表示对 \(X\) 和 \({X}^{ * }\) 两者的取向。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.6\textwidth]{images/184_434_199_668_240_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 8.3. Orienting the edges of the dual
+
+\begin{tcolorbox}\relax
+图 8.3. 为对偶图定向边
+\end{tcolorbox}
+
+Lemma 8.3.3 Let \(X\) and \(Y\) be dual plane graphs, and let \(\sigma\) be an orientation of \(X\) . If \(D\) and \(E\) are the incidence matrices of \({X}^{\sigma }\) and \({Y}^{\sigma }\) , then \(D{E}^{T} = 0.\)
+
+\begin{tcolorbox}\relax
+引理 8.3.3 设 \(X\) 与 \(Y\) 为对偶平面图， \(\sigma\) 为 \(X\) 的一个定向。如果 \(D\) 与 \(E\) 是 \({X}^{\sigma }\) 与 \({Y}^{\sigma }\) 的关联矩阵，则 \(D{E}^{T} = 0.\)
+\end{tcolorbox}
+
+Proof. If \(u\) is an edge of \(X\) and \(F\) is a face, there are exactly two edges on \(u\) and in \(F\) . Denote them by \(g\) and \(h\) and assume, for convenience, that \(g\) precedes \(h\) as we go clockwise around \(F\) . Then the \({uF}\) -entry of \(D{E}^{T}\) is equal to
+
+\begin{tcolorbox}\relax
+证明 若 \(u\) 是 \(X\) 的一条边且 \(F\) 是一个面，则在 \(u\) 与 \(F\) 上恰有两条边。记作 \(g\) 与 \(h\) ，并为方便起见，假定沿 \(F\) 的顺时针方向行进时 \(g\) 在 \(h\) 之前。则 \({uF}\) 的条目 \(D{E}^{T}\) 等于
+\end{tcolorbox}
+
+\[
+{D}_{ug}{E}_{gF}^{T} + {D}_{uh}{E}_{hF}^{T}\text{ . }
+\]
+
+If the orientation of the edge \(g\) is reversed, then the value of the product \({D}_{ug}{E}_{gF}^{T}\) does not change. Hence the value of the sum is independent of the orientation \(\sigma\) , and so we may assume that \(g\) has head \(u\) and that \(f\) has tail \(u\) . This implies that the edges in \(Y\) corresponding to \(g\) and \(h\) both have head \(F\) , and a simple computation now yields that the sum is zero.
+
+\begin{tcolorbox}\relax
+若将边 \(g\) 的定向反转，则乘积 \({D}_{ug}{E}_{gF}^{T}\) 的值不变。故该和的值与定向 \(\sigma\) 无关，因此我们可以假定 \(g\) 的头是 \(u\) 且 \(f\) 的尾是 \(u\) 。这意味着对应于 \(g\) 与 \(h\) 的 \(Y\) 中的边均以 \(F\) 为头，简单计算即可得到该和为零。
+\end{tcolorbox}
+
+\section*{8.4 Symmetric Matrices}
+
+\begin{tcolorbox}\relax
+\section*{8.4 对称矩阵}
+\end{tcolorbox}
+
+In this section we review the main results of the linear algebra of symmetric matrices over the real numbers, which form the basis for the remainder of this chapter.
+
+\begin{tcolorbox}\relax
+本节回顾实对称矩阵线性代数的主要结果，它们构成本章其余部分的基础。
+\end{tcolorbox}
+
+Lemma 8.4.1 Let \(A\) be a real symmetric matrix. If \(u\) and \(v\) are eigenvectors of \(A\) with different eigenvalues, then \(u\) and \(v\) are orthogonal.
+
+\begin{tcolorbox}\relax
+引理 8.4.1 设 \(A\) 为实对称矩阵。若 \(u\) 与 \(v\) 是 \(A\) 的具有不同特征值的特征向量，则 \(u\) 与 \(v\) 正交。
+\end{tcolorbox}
+
+Proof. Suppose that \({Au} = {\lambda u}\) and \({Av} = {\tau v}\) . As \(A\) is symmetric, \({u}^{T}{Av} = \; {\left( {v}^{T}Au\right) }^{T}\) . However, the left-hand side of this equation is \(\tau {u}^{T}v\) and the right-hand side is \(\lambda {u}^{T}v\) , and so if \(\tau  \neq  \lambda\) , it must be the case that \({u}^{T}v = 0\) .
+
+\begin{tcolorbox}\relax
+证明。假设 \({Au} = {\lambda u}\) 与 \({Av} = {\tau v}\) 。由于 \(A\) 是对称的， \({u}^{T}{Av} = \; {\left( {v}^{T}Au\right) }^{T}\) 。然而，该等式的左边是 \(\tau {u}^{T}v\) ，右边是 \(\lambda {u}^{T}v\) ，因此若 \(\tau  \neq  \lambda\) ，则必有 \({u}^{T}v = 0\) 。
+\end{tcolorbox}
+
+Lemma 8.4.2 The eigenvalues of a real symmetric matrix \(A\) are real numbers.
+
+\begin{tcolorbox}\relax
+引理 8.4.2 实对称矩阵 \(A\) 的特征值是实数。
+\end{tcolorbox}
+
+Proof. Let \(u\) be an eigenvector of \(A\) with eigenvalue \(\lambda\) . Then by taking the complex conjugate of the equation \({Au} = {\lambda u}\) we get \(A\bar{u} = \overline{\lambda }\bar{u}\) , and so \(\bar{u}\) is also an eigenvector of \(A\) . Now, by definition an eigenvector is not zero, so \({u}^{T}\bar{u} > 0\) . By the previous lemma, \(u\) and \(\bar{u}\) cannot have different eigenvalues, so \(\lambda  = \overline{\lambda }\) , and the claim is proved.
+
+\begin{tcolorbox}\relax
+证明。设 \(u\) 是 \(A\) 的一个特征向量，对应特征值为 \(\lambda\) 。对等式 \({Au} = {\lambda u}\) 取复共轭得 \(A\bar{u} = \overline{\lambda }\bar{u}\) ，因此 \(\bar{u}\) 也是 \(A\) 的一个特征向量。由定义特征向量非零，故 \({u}^{T}\bar{u} > 0\) 。由前一引理， \(u\) 与 \(\bar{u}\) 不可能有不同的特征值，故 \(\lambda  = \overline{\lambda }\) ，命题得证。
+\end{tcolorbox}
+
+We shall now prove that a real symmetric matrix is diagonalizable. For this we need a simple lemma that expresses one of the most important properties of symmetric matrices. A subspace \(U\) is said to be \(A\) -invariant if \({Au} \in  U\) for all \(u \in  U\) .
+
+\begin{tcolorbox}\relax
+现将证明实对称矩阵可对角化。为此我们需要一个简单引理，表述了对称矩阵最重要的性质之一。子空间 \(U\) 若对所有 \(u \in  U\) 满足 \({Au} \in  U\) ，则称其为 \(A\) -不变。
+\end{tcolorbox}
+
+Lemma 8.4.3 Let \(A\) be a real symmetric \(n \times  n\) matrix. If \(U\) is an \(A\) - invariant subspace of \({\mathbb{R}}^{n}\) , then \({U}^{ \bot  }\) is also \(A\) -invariant.
+
+\begin{tcolorbox}\relax
+引理 8.4.3 设 \(A\) 为实对称的 \(n \times  n\) 矩阵。若 \(U\) 是 \({\mathbb{R}}^{n}\) 的一个 \(A\) -不变子空间，则 \({U}^{ \bot  }\) 也为 \(A\) -不变。
+\end{tcolorbox}
+
+Proof. For any two vectors \(u\) and \(v\) , we have
+
+\begin{tcolorbox}\relax
+证明。对任意两向量 \(u\) 与 \(v\) ，我们有
+\end{tcolorbox}
+
+\[
+{v}^{T}\left( {Au}\right)  = {\left( Av\right) }^{T}u.
+\]
+
+If \(u \in  U\) , then \({Au} \in  U\) ; hence if \(v \in  {U}^{ \bot  }\) , then \({v}^{T}{Au} = 0\) . Consequently, \({\left( Av\right) }^{T}u = 0\) whenever \(u \in  U\) and \(v \in  {U}^{ \bot  }\) . This implies that \({Av} \in  {U}^{ \bot  }\) whenever \(v \in  {U}^{ \bot  }\) , and therefore \({U}^{ \bot  }\) is \(A\) -invariant.
+
+\begin{tcolorbox}\relax
+若 \(u \in  U\) ，则 \({Au} \in  U\) ；因此若 \(v \in  {U}^{ \bot  }\) ，则 \({v}^{T}{Au} = 0\) 。于是当 \(u \in  U\) 与 \(v \in  {U}^{ \bot  }\) 时有 \({\left( Av\right) }^{T}u = 0\) 。这意味着当 \(v \in  {U}^{ \bot  }\) 时有 \({Av} \in  {U}^{ \bot  }\) ，因此 \({U}^{ \bot  }\) 是 \(A\) -不变的。
+\end{tcolorbox}
+
+Any square matrix has at least one eigenvalue, because there must be at least one solution to the polynomial equation \(\det \left( {{xI} - A}\right)  = 0\) . Hence a real symmetric matrix \(A\) has at least one real eigenvalue, \(\theta\) say, and hence at least one real eigenvector (any vector in the kernel of \(A - {\theta I}\) , to be precise). Our next result is a crucial strengthening of this fact.
+
+\begin{tcolorbox}\relax
+任一方阵至少有一个特征值，因为多项式方程 \(\det \left( {{xI} - A}\right)  = 0\) 必有至少一个解。因此实对称矩阵 \(A\) 至少有一个实特征值，记为 \(\theta\) ，从而至少有一个实特征向量(确切地说为 \(A - {\theta I}\) 的核中的任一向量)。我们的下一个结果是对此事实的一个关键加强。
+\end{tcolorbox}
+
+Lemma 8.4.4 Let \(A\) be an \(n \times  n\) real symmetric matrix. If \(U\) is a nonzero A-invariant subspace of \({\mathbb{R}}^{n}\) , then \(U\) contains a real eigenvector of \(A\) .
+
+\begin{tcolorbox}\relax
+引理 8.4.4 设 \(A\) 为一个 \(n \times  n\) 的实对称矩阵。若 \(U\) 是 \({\mathbb{R}}^{n}\) 的一个非零 \(A\) -不变子空间，则 \(U\) 含有 \(A\) 的一个实特征向量。
+\end{tcolorbox}
+
+Proof. Let \(R\) be a matrix whose columns form an orthonormal basis for \(U\) . Then, because \(U\) is \(A\) -invariant, \({AR} = {RB}\) for some square matrix \(B\) . Since \({R}^{T}R = I\) , we have
+
+\begin{tcolorbox}\relax
+证明。设 \(R\) 为其列构成 \(U\) 的一个正交单位基的矩阵。由于 \(U\) 是 \(A\) -不变的，故存在某个方阵 \(B\) 使得 \({AR} = {RB}\) 。既然 \({R}^{T}R = I\) ，我们便有
+\end{tcolorbox}
+
+\[
+{R}^{T}{AR} = {R}^{T}{RB} = B,
+\]
+
+which implies that \(B\) is symmetric, as well as real. Since every symmetric matrix has at least one eigenvalue, we may choose a real eigenvector \(u\) of \(B\) with eigenvalue \(\lambda\) . Then \({ARu} = {RBu} = {\lambda Ru}\) , and since \(u \neq  0\) and the columns of \(R\) are linearly independent, \({Ru} \neq  0\) . Therefore, \({Ru}\) is an eigenvector of \(A\) contained in \(U\) .
+
+\begin{tcolorbox}\relax
+这意味着 \(B\) 是对称的，并且是实的。既然每个对称矩阵至少有一个特征值，我们可以选择 \(B\) 的一个实特征向量 \(u\) ，其对应特征值为 \(\lambda\) 。然后 \({ARu} = {RBu} = {\lambda Ru}\) ，并且由于 \(u \neq  0\) 和 \(R\) 的列线性无关， \({Ru} \neq  0\) 。因此， \({Ru}\) 是包含于 \(U\) 的 \(A\) 的一个特征向量。
+\end{tcolorbox}
+
+Theorem 8.4.5 Let \(A\) be a real symmetric \(n \times  n\) matrix. Then \({\mathbb{R}}^{n}\) has an orthonormal basis consisting of eigenvectors of \(A\) .
+
+\begin{tcolorbox}\relax
+定理 8.4.5 设 \(A\) 为一个实对称的 \(n \times  n\) 矩阵。则 \({\mathbb{R}}^{n}\) 存在由 \(A\) 的特征向量组成的正交归一基。
+\end{tcolorbox}
+
+Proof. Let \(\left\{  {{u}_{1},\ldots ,{u}_{m}}\right\}\) be an orthonormal (and hence linearly independent) set of \(m < n\) eigenvectors of \(A\) , and let \(M\) be the subspace that they span. Since \(A\) has at least one eigenvector, \(m \geq  1\) . The subspace \(M\) is \(A\) -invariant, and hence \({M}^{ \bot  }\) is \(A\) -invariant, and so \({M}^{ \bot  }\) contains a (normalized) eigenvector \({u}_{m + 1}\) . Then \(\left\{  {{u}_{1},\ldots ,{u}_{m},{u}_{m + 1}}\right\}\) is an orthonormal set of \(m + 1\) eigenvectors of \(A\) . Therefore, a simple induction argument shows that a set consisting of one normalized eigenvector can be extended to an orthonormal basis consisting of eigenvectors of \(A\) .
+
+\begin{tcolorbox}\relax
+证明。设 \(\left\{  {{u}_{1},\ldots ,{u}_{m}}\right\}\) 为一组正交归一(因此线性无关)的 \(m < n\) 个 \(A\) 的特征向量，记其张成的子空间为 \(M\) 。既然 \(A\) 至少有一个特征向量， \(m \geq  1\) 。子空间 \(M\) 对 \(A\) 不变，因此 \({M}^{ \bot  }\) 对 \(A\) 也不变，故 \({M}^{ \bot  }\) 包含一个(归一化的)特征向量 \({u}_{m + 1}\) 。于是 \(\left\{  {{u}_{1},\ldots ,{u}_{m},{u}_{m + 1}}\right\}\) 是一组由 \(m + 1\) 个 \(A\) 的特征向量组成的正交归一集。因此，通过简单的归纳论证，由一个归一化的特征向量可以扩展为由 \(A\) 的特征向量组成的正交归一基。
+\end{tcolorbox}
+
+Corollary 8.4.6 If \(A\) is an \(n \times  n\) real symmetric matrix, then there are matrices \(L\) and \(D\) such that \({L}^{T}L = L{L}^{T} = I\) and \({LA}{L}^{T} = D\) , where \(D\) is the diagonal matrix of eigenvalues of \(A\) .
+
+\begin{tcolorbox}\relax
+推论 8.4.6 若 \(A\) 是一个 \(n \times  n\) 的实对称矩阵，则存在矩阵 \(L\) 和 \(D\) 使得 \({L}^{T}L = L{L}^{T} = I\) 且 \({LA}{L}^{T} = D\) ，其中 \(D\) 为 \(A\) 的特征值对角矩阵。
+\end{tcolorbox}
+
+Proof. Let \(L\) be the matrix whose rows are an orthonormal basis of eigenvectors of \(A\) . We leave it as an exercise to show that \(L\) has the stated properties.
+
+\begin{tcolorbox}\relax
+证明。令 \(L\) 为其行由 \(A\) 的一组正交归一特征向量组成的矩阵。我们将留作练习证明 \(L\) 具有所述性质。
+\end{tcolorbox}
+
+\section*{8.5 Eigenvectors}
+
+\begin{tcolorbox}\relax
+\section*{8.5 特征向量}
+\end{tcolorbox}
+
+Most introductory linear algebra courses impart the belief that the way to compute the eigenvalues of a matrix is to find the zeros of its characteristic polynomial. For matrices with order greater than two, this is false. Generally, the best way to obtain eigenvalues is to find eigenvectors: If \({Ax} = {\theta x}\) , then \(\theta\) is an eigenvalue of \(A\) .
+
+\begin{tcolorbox}\relax
+大多数入门线性代数课程都会让人误以为计算矩阵特征值的办法是求其特征多项式的根。对于阶数大于二的矩阵，这并不成立。通常，获得特征值的最好方法是找到特征向量:如果 \({Ax} = {\theta x}\) ，那么 \(\theta\) 是 \(A\) 的一个特征值。
+\end{tcolorbox}
+\end{document}

@@ -1,0 +1,169 @@
+{
+ "name": "godsil_3",
+ "sample": "../../tests/samples/godsil_3.tex",
+ "pack": "bilingual",
+ "mode": "rule",
+ "labels": [
+  {
+   "needle": "Lemma 3.1.1 The \\(k\\) -cube \\({Q}_{k}\\) is vertex transitive",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 78
+  },
+  {
+   "needle": "Proof. If \\(v\\) is a fixed \\(k\\) -tuple, then the mapping",
+   "kind": "proof",
+   "line": 84
+  },
+  {
+   "needle": "Theorem 3.1.2 The Cayley graph \\(X\\left( {G,C}\\right)\\) is v",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 155
+  },
+  {
+   "needle": "Proof. For each \\(g \\in  G\\) the mapping",
+   "kind": "proof",
+   "line": 161
+  },
+  {
+   "needle": "Lemma 3.1.3 The Petersen graph is not a Cayley graph.",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 199
+  },
+  {
+   "needle": "Proof. There are only two groups of order 10, the cyclic gro",
+   "kind": "proof",
+   "line": 205
+  },
+  {
+   "needle": "Lemma 3.2.1 Let \\(X\\) be an edge-transitive graph with no is",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 241
+  },
+  {
+   "needle": "Proof. Suppose \\(X\\) is edge but not vertex transitive. Supp",
+   "kind": "proof",
+   "line": 247
+  },
+  {
+   "needle": "Lemma 3.2.2 If the graph \\(X\\) is vertex and edge transitive",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 276
+  },
+  {
+   "needle": "Proof. Let \\(G = \\operatorname{Aut}\\left( X\\right)\\) , and s",
+   "kind": "proof",
+   "line": 282
+  },
+  {
+   "needle": "Lemma 3.3.1 Let \\(A\\) and \\(B\\) be subsets of \\(V\\left( X\\ri",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 323
+  },
+  {
+   "needle": "Proof. The details are left as an exercise. We simply note h",
+   "kind": "proof",
+   "line": 333
+  },
+  {
+   "needle": "Corollary 3.3.2 Any two distinct edge atoms are vertex disjo",
+   "kind": "theorem-like",
+   "env": "corollary",
+   "line": 345
+  },
+  {
+   "needle": "Proof. Assume \\(\\kappa  = {\\kappa }_{1}\\left( X\\right)\\) and",
+   "kind": "proof",
+   "line": 351
+  },
+  {
+   "needle": "Lemma 3.3.3 If \\(X\\) is a connected vertex-transitive graph,",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 393
+  },
+  {
+   "needle": "Proof. Suppose that \\(X\\) has valency \\(k\\) . Let \\(A\\) be a",
+   "kind": "proof",
+   "line": 399
+  },
+  {
+   "needle": "Theorem 3.4.1 (Menger) Let \\(u\\) and \\(v\\) be distinct verti",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 443
+  },
+  {
+   "needle": "Theorem 3.4.2 A vertex-transitive graph with valency \\(k\\) h",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 467
+  },
+  {
+   "needle": "Lemma 3.4.3 Let \\(A\\) and \\(B\\) be fragments in a graph \\(X\\",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 502
+  },
+  {
+   "needle": "Proof. Suppose first that \\(x \\in  N\\left( {A \\cap  B}\\right",
+   "kind": "proof",
+   "line": 516
+  },
+  {
+   "needle": "Theorem 3.4.4 Let \\(X\\) be a graph on \\(n\\) vertices with co",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 545
+  },
+  {
+   "needle": "Proof. The intersections of \\(A,N\\left( A\\right)\\) , and \\(\\",
+   "kind": "proof",
+   "line": 551
+  },
+  {
+   "needle": "Corollary 3.4.5 If \\(A\\) is an atom and \\(B\\) is a fragment ",
+   "kind": "theorem-like",
+   "env": "corollary",
+   "line": 639
+  },
+  {
+   "needle": "Proof. Since \\(A\\) is an atom, \\(\\left| A\\right|  \\leq  \\lef",
+   "kind": "proof",
+   "line": 645
+  },
+  {
+   "needle": "Theorem 3.5.1 Let \\(X\\) be a connected vertex-transitive gra",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 701
+  },
+  {
+   "needle": "Lemma 3.5.2 Let \\(u\\) and \\(v\\) be vertices in \\(X\\) such th",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 725
+  },
+  {
+   "needle": "Proof. Our hypothesis implies that \\(u\\) and \\(v\\) are verti",
+   "kind": "proof",
+   "line": 731
+  },
+  {
+   "needle": "Lemma 3.5.3 Let \\(u\\) and \\(v\\) be distinct vertices in \\(X\\",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 749
+  },
+  {
+   "needle": "Proof. The proof is by induction on the length of \\(P\\) . If",
+   "kind": "proof",
+   "line": 755
+  }
+ ]
+}

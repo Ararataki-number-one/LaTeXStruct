@@ -1,0 +1,562 @@
+\documentclass[10pt]{article}
+\usepackage[verbose, a4paper, hmargin=2.5cm, vmargin=2.5cm]{geometry}
+
+\usepackage{fontspec}
+\usepackage{ctex}
+\usepackage{paratype}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{esint}
+\usepackage{stmaryrd}
+
+\usepackage[mathbf=sym]{unicode-math}
+\setmainfont{STIX Two Text}
+\setmathfont{STIX Two Math}
+
+\setsansfont{Arial}
+\setmonofont{Courier New}
+
+\usepackage{makecell}
+\usepackage{wasysym}
+\usepackage{pifont}
+\usepackage[export]{adjustbox}
+\usepackage{graphicx}
+\usepackage{mdframed}
+\usepackage{booktabs,array,multirow}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan,}
+\urlstyle{same}
+\usepackage[most]{tcolorbox}
+\definecolor{mygray}{RGB}{240,240,240}
+\tcbset{
+  colback=mygray,
+  boxrule=0pt,
+}
+\graphicspath{ {./images/} }
+\newcommand{\HRule}{\begin{center}\rule{0.9\linewidth}{0.2mm}\end{center}}
+\newcommand{\customfootnote}[1]{
+  \let\thefootnote\relax\footnotetext{#1}
+}
+\newcommand{\lt}{\mathrel{<}}
+\newcommand{\gt}{\mathrel{>}}
+\newcommand*\circled[1]{\tikz[baseline=(char.base)]{\node[shape=circle,draw,inner sep=1.5pt] (char) {\small #1};}}
+\setcounter{MaxMatrixCols}{256}
+\begin{document}
+\section*{6. Sunflowers}
+
+\begin{tcolorbox}\relax
+\section*{6. 向日葵}
+\end{tcolorbox}
+
+One of most beautiful results in extremal set theory is the so-called Sunflower Lemma discovered by Erdős and Rado (1960) asserting that in a sufficiently large uniform family, some highly regular configurations, called "sunflowers," must occur, regardless of the size of the universe. In this chapter we will consider this result as well as some of its modifications and applications.
+
+\begin{tcolorbox}\relax
+极值集合论中最优美的结果之一是由埃尔德什和拉多(1960 年)发现的所谓向日葵引理，该引理断言，在一个足够大的均匀族中，无论全集的大小如何，一些高度规则的配置，即所谓的“向日葵”，必定会出现。在本章中，我们将研究这个结果及其一些变体和应用。
+\end{tcolorbox}
+
+\section*{6.1 The sunflower lemma}
+
+\begin{tcolorbox}\relax
+\section*{6.1 向日葵引理}
+\end{tcolorbox}
+
+A sunflower (or \(\Delta\) -system) with \(k\) petals and a core \(Y\) is a collection of sets \({S}_{1},\ldots ,{S}_{k}\) such that \({S}_{i} \cap  {S}_{j} = Y\) for all \(i \neq  j\) ; the sets \({S}_{i} \smallsetminus  Y\) are petals, and we require that none of them is empty. Note that a family of pairwise disjoint sets is a sunflower (with an empty core).
+
+\begin{tcolorbox}\relax
+一个具有 \(k\) 个花瓣和一个核 \(Y\) 的向日葵(或 \(\Delta\) -系统)是一组集合 \({S}_{1},\ldots ,{S}_{k}\) ，使得对于所有 \(i \neq  j\) 都有 \({S}_{i} \cap  {S}_{j} = Y\) ；集合 \({S}_{i} \smallsetminus  Y\) 是花瓣，并且我们要求它们都不为空。注意，一族两两不相交的集合是一个向日葵(核为空)。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.2\textwidth]{images/108_615_1423_311_309_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Fig. 6.1 A sunflower with 8 petals
+
+\begin{tcolorbox}\relax
+图6.1 一个有8个花瓣的向日葵
+\end{tcolorbox}
+
+Sunflower Lemma. Let \(\mathcal{F}\) be family of sets each of cardinality s. If \(\left| \mathcal{F}\right|  > s!{\left( k - 1\right) }^{s}\) then \(\mathcal{F}\) contains a sunflower with \(k\) petals.
+
+\begin{tcolorbox}\relax
+向日葵引理。设 \(\mathcal{F}\) 是一族基数均为s的集合。如果 \(\left| \mathcal{F}\right|  > s!{\left( k - 1\right) }^{s}\) ，那么 \(\mathcal{F}\) 包含一个具有 \(k\) 个花瓣的向日葵。
+\end{tcolorbox}
+
+Proof. We proceed by induction on \(s\) . For \(s = 1\) , we have more than \(k - 1\) points (disjoint 1-element sets), so any \(k\) of them form a sunflower with \(k\) petals (and an empty core). Now let \(s \geq  2\) , and take a maximal family \(\mathcal{A} = \left\{  {{A}_{1},\ldots ,{A}_{t}}\right\}\) of pairwise disjoint members of \(\mathcal{F}\) .
+
+\begin{tcolorbox}\relax
+证明。我们对 \(s\) 进行归纳。对于 \(s = 1\) ，我们有多于 \(k - 1\) 个点(不相交的单元素集)，所以其中任意 \(k\) 个点构成一个具有 \(k\) 个花瓣(且核为空)的向日葵。现在设 \(s \geq  2\) ，并取 \(\mathcal{F}\) 中一族两两不相交成员的极大族 \(\mathcal{A} = \left\{  {{A}_{1},\ldots ,{A}_{t}}\right\}\) 。
+\end{tcolorbox}
+
+If \(t \geq  k\) , these sets form a sunflower with \(t \geq  k\) petals (and empty core), and we are done.
+
+\begin{tcolorbox}\relax
+如果 \(t \geq  k\) ，这些集合构成一个具有 \(t \geq  k\) 个花瓣(且核为空)的向日葵，这样我们就完成了证明。
+\end{tcolorbox}
+
+Assume that \(t \leq  k - 1\) , and let \(B = {A}_{1} \cup  \cdots  \cup  {A}_{t}\) . Then \(\left| B\right|  \leq  s\left( {k - 1}\right)\) . By the maximality of \(\mathcal{A}\) , the set \(B\) intersects every member of \(\mathcal{F}\) . By the pigeonhole principle, some point \(x \in  B\) must be contained in at least
+
+\begin{tcolorbox}\relax
+假设 \(t \leq  k - 1\) ，并设 \(B = {A}_{1} \cup  \cdots  \cup  {A}_{t}\) 。那么 \(\left| B\right|  \leq  s\left( {k - 1}\right)\) 。由 \(\mathcal{A}\) 的极大性，集合 \(B\) 与 \(\mathcal{F}\) 的每个成员都相交。根据鸽巢原理，某个点 \(x \in  B\) 必定至少包含在
+\end{tcolorbox}
+
+\[
+\frac{\left| \mathcal{F}\right| }{\left| B\right| } > \frac{s!{\left( k - 1\right) }^{s}}{s\left( {k - 1}\right) } = \left( {s - 1}\right) !{\left( k - 1\right) }^{s - 1}
+\]
+
+members of \(\mathcal{F}\) . Let us delete \(x\) from these sets and consider the family
+
+\begin{tcolorbox}\relax
+\(\mathcal{F}\) 的成员中。我们从这些集合中删除 \(x\) 并考虑族
+\end{tcolorbox}
+
+\[
+{\mathcal{F}}_{x} \mathrel{\text{ := }} \{ S \smallsetminus  \{ x\}  : S \in  \mathcal{F},x \in  S\} .
+\]
+
+By the induction hypothesis, this family contains a sunflower with \(k\) petals. Adding \(x\) to the members of this sunflower, we get the desired sunflower in the original family \(\mathcal{F}\) .
+
+\begin{tcolorbox}\relax
+根据归纳假设，这个族包含一个具有 \(k\) 个花瓣的向日葵。将 \(x\) 添加到这个向日葵的成员中，我们在原来的族 \(\mathcal{F}\) 中得到所需的向日葵。
+\end{tcolorbox}
+
+It is not known if the bound \(s!{\left( k - 1\right) }^{s}\) is the best possible. Let \(f\left( {s,k}\right)\) denote the least integer so that any \(s\) -uniform family of \(f\left( {s,k}\right)\) sets contains a sunflower with \(k\) petals. Then
+
+\begin{tcolorbox}\relax
+目前尚不清楚界 \(s!{\left( k - 1\right) }^{s}\) 是否是最优的。设 \(f\left( {s,k}\right)\) 表示最小的整数，使得任何由 \(f\left( {s,k}\right)\) 个集合组成的 \(s\) -均匀族都包含一个具有 \(k\) 个花瓣的向日葵。那么
+\end{tcolorbox}
+
+\[
+{\left( k - 1\right) }^{s} < f\left( {s,k}\right)  \leq  s!{\left( k - 1\right) }^{s} + 1. \tag{6.1}
+\]
+
+The upper bound is the sunflower lemma, the lower bound is Exercise 6.2. The gap between the upper and lower bound for \(f\left( {s,k}\right)\) is still huge (by a factor of \(s!\) ).
+
+\begin{tcolorbox}\relax
+上界是向日葵引理，下界是练习6.2。 \(f\left( {s,k}\right)\) 的上下界之间的差距仍然很大(相差 \(s!\) 倍)。
+\end{tcolorbox}
+
+Conjecture 6.1 (Erdős and Rado). For every fixed \(k\) there is a constant \(C = \; C\left( k\right)\) such that \(f\left( {s,k}\right)  < {C}^{s}\) .
+
+\begin{tcolorbox}\relax
+猜想6.1(埃尔德什和拉多)。对于每个固定的 \(k\) ，存在一个常数 \(C = \; C\left( k\right)\) ，使得 \(f\left( {s,k}\right)  < {C}^{s}\) 。
+\end{tcolorbox}
+
+The conjecture remains open even for \(k = 3\) (note that in this case the sunflower lemma requires at least \(s!{2}^{s} \approx  {s}^{s}\) sets). Several authors have slightly improved the bounds in (6.1). In particular, J. Spencer has proved
+
+\begin{tcolorbox}\relax
+即使对于 \(k = 3\) ，这个猜想仍然未解决(注意在这种情况下向日葵引理至少需要 \(s!{2}^{s} \approx  {s}^{s}\) 个集合)。几位作者对(6.1)中的界进行了轻微改进。特别地，J. 斯宾塞证明了
+\end{tcolorbox}
+
+\[
+f\left( {s,3}\right)  \leq  {\mathrm{e}}^{c\sqrt{s}}s!
+\]
+
+For \(s\) fixed and \(k\) sufficiently large, Kostochka et al. (1999) have proved
+
+\begin{tcolorbox}\relax
+对于固定的 \(s\) 且 \(k\) 足够大，科斯托奇卡等人(1999年)证明了
+\end{tcolorbox}
+
+\[
+f\left( {s,k}\right)  \leq  {k}^{s}\left( {1 + c{k}^{-{2}^{-s}}}\right) ,
+\]
+
+where \(c\) is a constant depending only on \(s\) .
+
+\begin{tcolorbox}\relax
+其中 \(c\) 是仅依赖于 \(s\) 的常数。
+\end{tcolorbox}
+
+But the proof or disproof of the conjecture is nowhere in sight.
+
+\begin{tcolorbox}\relax
+但这个猜想的证明或证伪仍然毫无头绪。
+\end{tcolorbox}
+
+A family \(\mathcal{F} = \left\{  {{S}_{1},\ldots ,{S}_{m}}\right\}\) is called a weak \(\Delta\) -system if there is some \(\lambda\) such that \(\left| {{S}_{i} \cap  {S}_{j}}\right|  = \lambda\) whenever \(i \neq  j\) . Of course, not every such system is a sunflower: in a weak \(\Delta\) -system it is enough that all the cardinalities of mutual intersections coincide whereas in a sunflower we require that these intersections all have the same elements. However, the following interesting result due to M. Deza states that if a weak \(\Delta\) -system has many members then it is, in fact, "strong," i.e., forms a sunflower. We state this result without proof.
+
+\begin{tcolorbox}\relax
+如果存在某个 \(\lambda\) ，使得当 \(i \neq  j\) 时， \(\left| {{S}_{i} \cap  {S}_{j}}\right|  = \lambda\) ，那么族 \(\mathcal{F} = \left\{  {{S}_{1},\ldots ,{S}_{m}}\right\}\) 被称为弱 \(\Delta\) -系统。当然，并非每个这样的系统都是向日葵:在弱 \(\Delta\) -系统中，只要所有相互交集的基数一致就足够了，而在向日葵中，我们要求这些交集都有相同的元素。然而，M. 德扎的以下有趣结果表明，如果一个弱 \(\Delta\) -系统有很多成员，那么它实际上是“强的”，即形成一个向日葵。我们陈述这个结果但不给出证明。
+\end{tcolorbox}
+
+Theorem 6.2 (Deza 1973). Let \(\mathcal{F}\) be an \(s\) -uniform weak \(\Delta\) -system. If \(\left| \mathcal{F}\right|  \geq \; {s}^{2} - s + 2\) then \(\mathcal{F}\) is a sunflower.
+
+\begin{tcolorbox}\relax
+定理6.2(德扎，1973年)。设 \(\mathcal{F}\) 是一个 \(s\) 均匀的弱 \(\Delta\) -系统。如果 \(\left| \mathcal{F}\right|  \geq \; {s}^{2} - s + 2\) ，那么 \(\mathcal{F}\) 是一个向日葵。
+\end{tcolorbox}
+
+The family of lines in a projective plane of order \(s - 1\) shows that this bound is optimal (see Exercise 6.1).
+
+\begin{tcolorbox}\relax
+阶为 \(s - 1\) 的射影平面中的直线族表明这个界是最优的(见练习6.1)。
+\end{tcolorbox}
+
+A related problem is to estimate the maximal possible number \(F\left( {n,k}\right)\) of members in a family \(\mathcal{F}\) of subsets of an \(n\) -element set such that \(\mathcal{F}\) does not contain a weak \(\Delta\) -system with \(k\) members. It is known that
+
+\begin{tcolorbox}\relax
+一个相关问题是估计 \(n\) 元集的子集族 \(\mathcal{F}\) 中成员的最大可能数量 \(F\left( {n,k}\right)\) ，使得 \(\mathcal{F}\) 不包含具有 \(k\) 个成员的弱 \(\Delta\) -系统。已知
+\end{tcolorbox}
+
+\[
+{2}^{{0.01}{\left( n\ln n\right) }^{1/3}} \leq  F\left( {n,3}\right)  \leq  {1.99}^{n}.
+\]
+
+The upper bound was proved by Frankl and Rödl (1987), and the lower bound by Kostochka and R"odl (1998).
+
+\begin{tcolorbox}\relax
+上界由弗兰克尔和勒德尔(1987年)证明，下界由科斯秋克卡和勒德尔(1998年)证明。
+\end{tcolorbox}
+
+\section*{6.2 Modifications}
+
+\begin{tcolorbox}\relax
+\section*{6.2 修改}
+\end{tcolorbox}
+
+Due to its importance, the sunflower lemma was modified in various directions. If \({S}_{1},\ldots ,{S}_{k}\) form a sunflower with a core \(Y\) , then we have two nice properties:
+
+\begin{tcolorbox}\relax
+由于其重要性，向日葵引理在多个方向上得到了修改。如果 \({S}_{1},\ldots ,{S}_{k}\) 构成一个以核心 \(Y\) 的向日葵，那么我们有两个很好的性质:
+\end{tcolorbox}
+
+(a) the core \(Y\) lies entirely in all the sets \({S}_{1},\ldots ,{S}_{k}\) ;
+
+\begin{tcolorbox}\relax
+(a) 核心 \(Y\) 完全包含在所有集合 \({S}_{1},\ldots ,{S}_{k}\) 中；
+\end{tcolorbox}
+
+(b) the sets \({S}_{1} \smallsetminus  Y,\ldots ,{S}_{k} \smallsetminus  Y\) are mutually disjoint.
+
+\begin{tcolorbox}\relax
+(b) 集合 \({S}_{1} \smallsetminus  Y,\ldots ,{S}_{k} \smallsetminus  Y\) 相互不相交。
+\end{tcolorbox}
+
+It is therefore natural to look at what happens if we relax any of these two conditions.
+
+\begin{tcolorbox}\relax
+因此，研究如果我们放宽这两个条件中的任何一个会发生什么是很自然的。
+\end{tcolorbox}
+
+\section*{6.2.1 Relaxed core}
+
+\begin{tcolorbox}\relax
+\section*{6.2.1 放宽的核心}
+\end{tcolorbox}
+
+We can relax property (a) and require that only the differences \({S}_{i} \smallsetminus  Y\) be non-empty and mutually disjoint for some set \(Y\) .
+
+\begin{tcolorbox}\relax
+我们可以放宽属性 (a)，并要求对于某个集合 \(Y\) ，只有差集 \({S}_{i} \smallsetminus  Y\) 是非空且互不相交的。
+\end{tcolorbox}
+
+Given distinct finite sets \({S}_{1},\ldots ,{S}_{k}\) , their common part is the set
+
+\begin{tcolorbox}\relax
+给定不同的有限集 \({S}_{1},\ldots ,{S}_{k}\) ，它们的公共部分是集合
+\end{tcolorbox}
+
+\[
+Y \mathrel{\text{ := }} \mathop{\bigcup }\limits_{{i \neq  j}}\left( {{S}_{i} \cap  {S}_{j}}\right) .
+\]
+
+Note that, if \(\left| Y\right|  < \mathop{\min }\limits_{i}\left| {S}_{i}\right|\) then all the sets \({S}_{1} \smallsetminus  Y,\ldots ,{S}_{k} \smallsetminus  Y\) are nonempty and mutually disjoint.
+
+\begin{tcolorbox}\relax
+注意，如果 \(\left| Y\right|  < \mathop{\min }\limits_{i}\left| {S}_{i}\right|\) ，那么所有集合 \({S}_{1} \smallsetminus  Y,\ldots ,{S}_{k} \smallsetminus  Y\) 都是非空且互不相交的。
+\end{tcolorbox}
+
+Lemma 6.3 (Füredi 1980). Let \(\mathcal{F}\) be a finite family of sets, and \(s = \; \mathop{\max }\limits_{{S \in  \mathcal{F}}}\left| S\right|\) . If \(\left| \mathcal{F}\right|  > {\left( k - 1\right) }^{s}\) then the common part of some \(k\) of its members has fewer than \(s\) elements.
+
+\begin{tcolorbox}\relax
+引理6.3(富雷迪，1980年)。设 \(\mathcal{F}\) 是一个有限集族，且 \(s = \; \mathop{\max }\limits_{{S \in  \mathcal{F}}}\left| S\right|\) 。如果 \(\left| \mathcal{F}\right|  > {\left( k - 1\right) }^{s}\) ，那么其某些 \(k\) 成员的公共部分的元素少于 \(s\) 个。
+\end{tcolorbox}
+
+Proof. We prove a contraposition of this claim: If the common part of every \(k\) members of \(\mathcal{F}\) has at least \(s = \mathop{\max }\limits_{{S \in  \mathcal{F}}}\left| S\right|\) elements, then \(\left| \mathcal{F}\right|  \leq  {\left( k - 1\right) }^{s}\) . The cases \(k = 2\) and \(s = 1\) are trivial. Apply induction on \(k\) . Once \(k\) is fixed, apply induction on \(s\) . Let \({S}_{0}\) be an arbitrary member of \(\mathcal{F}\) of size \(s\) . We have
+
+\begin{tcolorbox}\relax
+证明。我们证明此断言的逆否命题:如果 \(\mathcal{F}\) 中每 \(k\) 个成员的公共部分至少有 \(s = \mathop{\max }\limits_{{S \in  \mathcal{F}}}\left| S\right|\) 个元素，那么 \(\left| \mathcal{F}\right|  \leq  {\left( k - 1\right) }^{s}\) 。 \(k = 2\) 和 \(s = 1\) 的情况很简单。对 \(k\) 进行归纳。一旦 \(k\) 确定，对 \(s\) 进行归纳。设 \({S}_{0}\) 是 \(\mathcal{F}\) 中大小为 \(s\) 的任意成员。我们有
+\end{tcolorbox}
+
+\[
+\left| \mathcal{F}\right|  = 1 + \mathop{\sum }\limits_{{X \subset  {S}_{0}}}\left| \left\{  {S \in  \mathcal{F} : S \cap  {S}_{0} = X}\right\}  \right| . \tag{6.2}
+\]
+
+Fix now an arbitrary \(X \subset  {S}_{0}\) , and consider the family
+
+\begin{tcolorbox}\relax
+现在固定任意一个 \(X \subset  {S}_{0}\) ，并考虑族
+\end{tcolorbox}
+
+\[
+{\mathcal{F}}_{X} \mathrel{\text{ := }} \left\{  {S \smallsetminus  {S}_{0} : S \in  \mathcal{F},S \cap  {S}_{0} = X}\right\}  .
+\]
+
+The maximum size of its member is \({s}^{\prime } \leq  s - \left| X\right|\) . Moreover, the common part of any its \({k}^{\prime } = k - 1\) members \({S}_{1} \smallsetminus  {S}_{0},\ldots ,{S}_{k - 1} \smallsetminus  {S}_{0}\) is the common part of \(k\) members \({S}_{0},{S}_{1},\ldots ,{S}_{k - 1}\) of \(\mathcal{F}\) minus \(X\) , and hence is at least \(s - \left| X\right|  \geq  {s}^{\prime }\) . We can therefore apply the induction hypothesis with \({s}^{\prime } \leq  s - \left| X\right| ,{k}^{\prime } = k - 1\) and deduce
+
+\begin{tcolorbox}\relax
+其成员的最大大小为 \({s}^{\prime } \leq  s - \left| X\right|\) 。此外，其任意 \({k}^{\prime } = k - 1\) 个成员 \({S}_{1} \smallsetminus  {S}_{0},\ldots ,{S}_{k - 1} \smallsetminus  {S}_{0}\) 的公共部分是 \(\mathcal{F}\) 的 \(k\) 个成员 \({S}_{0},{S}_{1},\ldots ,{S}_{k - 1}\) 的公共部分减去 \(X\) ，因此至少为 \(s - \left| X\right|  \geq  {s}^{\prime }\) 。因此，我们可以对 \({s}^{\prime } \leq  s - \left| X\right| ,{k}^{\prime } = k - 1\) 应用归纳假设并推断出
+\end{tcolorbox}
+
+\[
+\left| {\mathcal{F}}_{X}\right|  \leq  {\left( k - 2\right) }^{s - \left| X\right| }. \tag{6.3}
+\]
+
+Combining (6.2) and (6.3) we obtain
+
+\begin{tcolorbox}\relax
+结合(6.2)和(6.3)我们得到
+\end{tcolorbox}
+
+\[
+\left| \mathcal{F}\right|  \leq  1 + \mathop{\sum }\limits_{{X \subset  {S}_{0}}}{\left( k - 2\right) }^{s - \left| X\right| } \leq  \mathop{\sum }\limits_{{i = 0}}^{s}\left( \begin{matrix} s \\  i \end{matrix}\right) {\left( k - 2\right) }^{s - i} = {\left( k - 1\right) }^{s},
+\]
+
+as desired.
+
+\begin{tcolorbox}\relax
+正如所期望的。
+\end{tcolorbox}
+
+\section*{6.2.2 Relaxed disjointness}
+
+\begin{tcolorbox}\relax
+\section*{6.2.2 放宽的不相交性}
+\end{tcolorbox}
+
+What if we relax the disjointness property (b) of sunflowers, and only require that the differences \({S}_{1} \smallsetminus  Y,\ldots ,{S}_{k} \smallsetminus  Y\) cannot be intersected (blocked) by a set of size smaller than some number \(t\) ? In this case we say that sets \({S}_{1},\ldots ,{S}_{k}\) form a "flower" with \(t\) petals.
+
+\begin{tcolorbox}\relax
+如果我们放宽向日葵的不相交性属性 (b)，只要求差集 \({S}_{1} \smallsetminus  Y,\ldots ,{S}_{k} \smallsetminus  Y\) 不能被大小小于某个数 \(t\) 的集合相交(阻断)会怎样？在这种情况下，我们说集合 \({S}_{1},\ldots ,{S}_{k}\) 形成了一朵有 \(t\) 片花瓣的“花”。
+\end{tcolorbox}
+
+A blocking set of a family \(\mathcal{F}\) is a set which intersects all the members of \(\mathcal{F}\) ; the minimum number of elements in a blocking set is the blocking number of \(\mathcal{F}\) and is denoted by \(\tau \left( \mathcal{F}\right)\) ; if \(\varnothing  \in  \mathcal{F}\) then we set \(\tau \left( \mathcal{F}\right)  = 0\) . A restriction of a family \(\mathcal{F}\) onto a set \(Y\) is the family
+
+\begin{tcolorbox}\relax
+集合族 \(\mathcal{F}\) 的一个阻断集是与 \(\mathcal{F}\) 的所有成员都相交的集合；阻断集中元素的最小数量是 \(\mathcal{F}\) 的阻断数，用 \(\tau \left( \mathcal{F}\right)\) 表示；如果 \(\varnothing  \in  \mathcal{F}\) ，那么我们设 \(\tau \left( \mathcal{F}\right)  = 0\) 。集合族 \(\mathcal{F}\) 在集合 \(Y\) 上的限制是集合族
+\end{tcolorbox}
+
+\[
+{\mathcal{F}}_{Y} \mathrel{\text{ := }} \{ S \smallsetminus  Y : S \in  \mathcal{F},S \supseteq  Y\} .
+\]
+
+A flower with \(k\) petals and a core \(Y\) is a family \(\mathcal{F}\) such that \(\tau \left( {\mathcal{F}}_{Y}\right)  \geq  k\) . Note that every sunflwover is a flower with the same number of petals, but not every flower is a sunflower (give an example).
+
+\begin{tcolorbox}\relax
+一朵有 \(k\) 片花瓣和一个核 \(Y\) 的花是一个集合族 \(\mathcal{F}\) ，使得 \(\tau \left( {\mathcal{F}}_{Y}\right)  \geq  k\) 。注意，每一个向日葵都是一朵花瓣数量相同的花，但不是每一朵花都是向日葵(举个例子)。
+\end{tcolorbox}
+
+Håstad et al. (1995) observed that the proof of the sunflower lemma can be easily modified to yield a similar result for flowers.
+
+\begin{tcolorbox}\relax
+哈斯塔德等人(1995年)观察到，向日葵引理的证明可以很容易地修改，以得到关于花的类似结果。
+\end{tcolorbox}
+
+Lemma 6.4. Let \(\mathcal{F}\) be a family of sets each of cardinality \(s\) , and \(k \geq  1\) and integer. If \(\left| \mathcal{F}\right|  > {\left( k - 1\right) }^{s}\) then \(\mathcal{F}\) contains a flower with \(k\) petals.
+
+\begin{tcolorbox}\relax
+引理6.4。设 \(\mathcal{F}\) 是一个集合族，其中每个集合的基数为 \(s\) ， \(k \geq  1\) 是一个整数。如果 \(\left| \mathcal{F}\right|  > {\left( k - 1\right) }^{s}\) ，那么 \(\mathcal{F}\) 包含一朵有 \(k\) 片花瓣的花。
+\end{tcolorbox}
+
+Proof. Induction on \(s\) . The basis \(s = 1\) is trivial since then \(\mathcal{F}\) consists of at least \(k\) distinct single-element sets. Now suppose that the lemma is true for \(s - 1\) and prove it for \(s\) . Take a family \(\mathcal{F}\) of sets each of cardinality \(s\) , and assume that \(\left| \mathcal{F}\right|  > {\left( k - 1\right) }^{s}\) . If \(\tau \left( \mathcal{F}\right)  \geq  k\) then the family \(\mathcal{F}\) itself is a flower with at least \({\left( k - 1\right) }^{s} + 1 \geq  k\) petals (and an empty core). Otherwise, some set of size \(k - 1\) intersects all the members of \(\mathcal{F}\) , and hence, at least \(\left| \mathcal{F}\right| /\left( {k - 1}\right)\) of the members must contain some point \(x\) . The family
+
+\begin{tcolorbox}\relax
+证明。对 \(s\) 进行归纳。基础情况 \(s = 1\) 是显然的，因为那时 \(\mathcal{F}\) 至少由 \(k\) 个不同的单元素集组成。现在假设该引理对 \(s - 1\) 成立，并证明对 \(s\) 也成立。取一个集合族 \(\mathcal{F}\) ，其中每个集合的基数为 \(s\) ，并假设 \(\left| \mathcal{F}\right|  > {\left( k - 1\right) }^{s}\) 。如果 \(\tau \left( \mathcal{F}\right)  \geq  k\) ，那么集合族 \(\mathcal{F}\) 本身就是一朵至少有 \({\left( k - 1\right) }^{s} + 1 \geq  k\) 片花瓣(且核为空)的花。否则，某个大小为 \(k - 1\) 的集合与 \(\mathcal{F}\) 的所有成员都相交，因此，至少 \(\left| \mathcal{F}\right| /\left( {k - 1}\right)\) 个成员必须包含某个点 \(x\) 。集合族
+\end{tcolorbox}
+
+\[
+{\mathcal{F}}_{x} \mathrel{\text{ := }} \{ S \smallsetminus  \{ x\}  : S \in  \mathcal{F},x \in  S\}
+\]
+
+has
+
+\begin{tcolorbox}\relax
+有
+\end{tcolorbox}
+
+\[
+\left| {\mathcal{F}}_{x}\right|  \geq  \frac{\left| \mathcal{F}\right| }{k - 1} > {\left( k - 1\right) }^{s - 1}
+\]
+
+members, each of cardinality \(s - 1\) . By the induction hypothesis, the family \({\mathcal{F}}_{x}\) contains a flower with \(k\) petals and some core \(Y,x \notin  Y\) . Adding the element \(x\) back to the sets in this flower, we obtain a flower in \(\mathcal{F}\) with the same number of petals and the core \(Y \cup  \{ x\}\) .
+
+\begin{tcolorbox}\relax
+个成员，每个成员的基数为 \(s - 1\) 。根据归纳假设，集合族 \({\mathcal{F}}_{x}\) 包含一朵有 \(k\) 片花瓣和某个核 \(Y,x \notin  Y\) 的花。将元素 \(x\) 加回到这朵花中的集合中，我们在 \(\mathcal{F}\) 中得到一朵花瓣数量相同且核为 \(Y \cup  \{ x\}\) 的花。
+\end{tcolorbox}
+
+\section*{6.3 Applications}
+
+\begin{tcolorbox}\relax
+\section*{6.3 应用}
+\end{tcolorbox}
+
+The sunflower lemma and its modifications have many applications in complexity theory. In particular, the combinatorial part of the celebrated lower bounds argument for monotone circuits, found by Razborov (1985), is based on this lemma and on its modification due to Füredi (Lemma 6.3). Andreev (1987) has also used his modification (Exercise 6.5) to prove exponential lower bounds for such circuits. In this section we will show how the last modification (Lemma 6.4) can be used to obtain some information about the number of minterms and to prove lower bounds for small depth non-monotone circuits.
+
+\begin{tcolorbox}\relax
+向日葵引理及其变体在复杂性理论中有许多应用。特别地，拉兹博罗夫(1985年)发现的著名的单调电路下界论证的组合部分基于此引理及其由富雷迪给出的变体(引理6.3)。安德烈耶夫(1987年)也使用了他的变体(练习6.5)来证明此类电路的指数下界。在本节中，我们将展示如何使用最后一个变体(引理6.4)来获取关于极小项数量的一些信息，并证明小深度非单调电路的下界。
+\end{tcolorbox}
+
+\section*{6.3.1 The number of minterms}
+
+\begin{tcolorbox}\relax
+\section*{6.3.1 最小项的数量}
+\end{tcolorbox}
+
+Let \({x}_{1},\ldots ,{x}_{n}\) be boolean variables taking their values in \(\{ 0,1\}\) . A monomial is an And of literals, and a clause is an Or of literals, where a literal is either a variable \({x}_{i}\) or its negation \({\bar{x}}_{i} = {x}_{i} \oplus  1\) . Thus, we have \({2}^{s}\left( \begin{array}{l} n \\  s \end{array}\right)\) monomials and that many clauses of size \(s\) .
+
+\begin{tcolorbox}\relax
+设 \({x}_{1},\ldots ,{x}_{n}\) 为在 \(\{ 0,1\}\) 中取值的布尔变量。单项式是文字的与运算，子句是文字的或运算，其中文字要么是变量 \({x}_{i}\) ，要么是其否定 \({\bar{x}}_{i} = {x}_{i} \oplus  1\) 。因此，我们有 \({2}^{s}\left( \begin{array}{l} n \\  s \end{array}\right)\) 个单项式以及同样数量的大小为 \(s\) 的子句。
+\end{tcolorbox}
+
+A 1-term of a boolean function \(f : \{ 0,1{\} }^{n} \rightarrow  \{ 0,1\}\) is a monomial \(M\) such that \(M\left( a\right)  \leq  f\left( a\right)\) for all inputs \(a \in  \{ 0,1{\} }^{n}\) . That is, if we set all literals of \(M\) to 1, then the function \(f\) is forced to take value 1 independent on what values we assign to the remaining variables. Dually, a 0-term of \(f\) is a clause \(C\) such that \(C\left( a\right)  \geq  f\left( a\right)\) for all inputs \(a \in  \{ 0,1{\} }^{n}\) . A minterm of \(f\) is a 1-term \(M\) of \(f\) which is minimal in the sense that deleting every single literal from \(M\) already violates this property.
+
+\begin{tcolorbox}\relax
+布尔函数 \(f : \{ 0,1{\} }^{n} \rightarrow  \{ 0,1\}\) 的一个1 - 项是一个单项式 \(M\) ，使得对于所有输入 \(a \in  \{ 0,1{\} }^{n}\) ， \(M\left( a\right)  \leq  f\left( a\right)\) 成立。也就是说，如果我们将 \(M\) 的所有文字都设为1，那么函数 \(f\) 必然取值为1，而与我们为其余变量赋予的值无关。对偶地， \(f\) 的一个0 - 项是一个子句 \(C\) ，使得对于所有输入 \(a \in  \{ 0,1{\} }^{n}\) ， \(C\left( a\right)  \geq  f\left( a\right)\) 成立。 \(f\) 的一个最小项是 \(f\) 的一个1 - 项 \(M\) ，其意义在于从 \(M\) 中删除任何一个文字都会破坏此属性。
+\end{tcolorbox}
+
+A boolean function \(f\) is a \(t\) -And-Or (or a \(t\) -CNF) if it can be written as an And of an arbitrary number of clauses, each of size at most \(t\) .
+
+\begin{tcolorbox}\relax
+布尔函数 \(f\) 是一个 \(t\) - 与或(或一个 \(t\) - 合取范式)函数，如果它可以写成任意数量子句的与运算，每个子句的大小至多为 \(t\) 。
+\end{tcolorbox}
+
+Lemma 6.5. Let \(f\) be a \(t\) -And-Or function on \(n\) variables. Then for every \(s = 1,\ldots ,n\) the function \(f\) has at most \({t}^{s}\) minterms of size \(s\) .
+
+\begin{tcolorbox}\relax
+引理6.5。设 \(f\) 是一个关于 \(n\) 个变量的 \(t\) - 与或函数。那么对于每个 \(s = 1,\ldots ,n\) ，函数 \(f\) 至多有 \({t}^{s}\) 个大小为 \(s\) 的最小项。
+\end{tcolorbox}
+
+Proof. Let \(f = {C}_{1} \land  \cdots  \land  {C}_{m}\) , where each clause \({C}_{i}\) has size at most \(t\) . We interpret the clauses as sets of their literals, and let \(\mathcal{C} = \left\{  {{C}_{1},\ldots ,{C}_{m}}\right\}\) be the corresponding family of these sets. Let \(\mathcal{F}\) be the family of all minterms of \(f\) that have size \(s\) (we look at minterms as sets of their literals). Then every set in \(\mathcal{C}\) intersects each set in \(\mathcal{F}\) (see Exercise 6.9).
+
+\begin{tcolorbox}\relax
+证明。设 \(f = {C}_{1} \land  \cdots  \land  {C}_{m}\) ，其中每个子句 \({C}_{i}\) 的大小至多为 \(t\) 。我们将子句解释为其文字的集合，并设 \(\mathcal{C} = \left\{  {{C}_{1},\ldots ,{C}_{m}}\right\}\) 为这些集合对应的族。设 \(\mathcal{F}\) 为 \(f\) 的所有大小为 \(s\) 的最小项的族(我们将最小项视为其文字的集合)。那么 \(\mathcal{C}\) 中的每个集合都与 \(\mathcal{F}\) 中的每个集合相交(见练习6.9)。
+\end{tcolorbox}
+
+Suppose that \(\left| \mathcal{F}\right|  > {t}^{s}\) . Then, by Lemma 6.4, \(\mathcal{F}\) has a flower with \(t + 1\) petals. That is, there exists a set of literals \(Y\) such that no set of at most \(t\) literals can intersect all the members of the family
+
+\begin{tcolorbox}\relax
+假设 \(\left| \mathcal{F}\right|  > {t}^{s}\) 。那么，根据引理6.4， \(\mathcal{F}\) 有一个带有 \(t + 1\) 个花瓣的花。也就是说，存在一组文字 \(Y\) ，使得至多 \(t\) 个文字的任何集合都不能与该族的所有成员相交。
+\end{tcolorbox}
+
+\[
+{\mathcal{F}}_{Y} = \{ M \smallsetminus  Y : M \in  \mathcal{F},M \supseteq  Y\} .
+\]
+
+The set \(Y\) is a proper part of at least one minterm of \(f\) , meaning that \(Y\) cannot intersect all the clauses in \(\mathcal{C}\) . Take a clause \(C \in  \mathcal{C}\) such that \(C \cap  Y = \varnothing\) . Since this clause intersects all the sets in \(\mathcal{F}\) , this means that it must intersect all the sets in \({\mathcal{F}}_{Y}\) . But this is impossible because \(C\) has size at most \(t\) .
+
+\begin{tcolorbox}\relax
+集合 \(Y\) 是 \(f\) 的至少一个最小项的真子集，这意味着 \(Y\) 不能与 \(\mathcal{C}\) 中的所有子句相交。取一个子句 \(C \in  \mathcal{C}\) ，使得 \(C \cap  Y = \varnothing\) 。由于这个子句与 \(\mathcal{F}\) 中的所有集合相交，这意味着它必须与 \({\mathcal{F}}_{Y}\) 中的所有集合相交。但这是不可能的，因为 \(C\) 的大小至多为 \(t\) 。
+\end{tcolorbox}
+
+\section*{6.3.2 Small depth formulas}
+
+\begin{tcolorbox}\relax
+\section*{6.3.2 小深度公式}
+\end{tcolorbox}
+
+An \(s\) -threshold function is a monotone boolean function \({T}_{s}^{n}\) which accepts a 0-1 vector if and only if it has at least \(s\) ones. That is,
+
+\begin{tcolorbox}\relax
+一个 \(s\) 阈值函数是一个单调布尔函数 \({T}_{s}^{n}\) ，当且仅当一个0-1向量至少有 \(s\) 个1时，该函数接受这个向量。也就是说，
+\end{tcolorbox}
+
+\[
+{T}_{s}^{n}\left( {{x}_{1},\ldots ,{x}_{n}}\right)  = 1\text{ if and only if }{x}_{1} + \cdots  + {x}_{n} \geq  s\text{ . }
+\]
+
+This function can be computed by the following formula:
+
+\begin{tcolorbox}\relax
+此函数可通过以下公式计算:
+\end{tcolorbox}
+
+\[
+{T}_{s}^{n}\left( {{x}_{1},\ldots ,{x}_{n}}\right)  = \mathop{\bigvee }\limits_{{I : \left| I\right|  = s}}\mathop{\bigwedge }\limits_{{i \in  I}}{x}_{i}
+\]
+
+This formula is monotone (has no negated literals) and has depth 2 (there are only two alternations between And and Or operations). But the size of this formula (the number of literals in it) is \(s\left( \begin{array}{l} n \\  s \end{array}\right)\) . Can \({T}_{s}^{n}\) be computed by a substantially smaller formula if we allow negated literals and/or a larger depth?
+
+\begin{tcolorbox}\relax
+此公式是单调的(没有否定文字)且深度为2(与运算和或运算之间只有两次交替)。但是这个公式的规模(其中文字的数量)是 \(s\left( \begin{array}{l} n \\  s \end{array}\right)\) 。如果我们允许使用否定文字和/或更大的深度，能否用一个规模小得多的公式来计算 \({T}_{s}^{n}\) ？
+\end{tcolorbox}
+
+Håstad (1986) proved that, for \(s = \lfloor n/2\rfloor\) , each such formula computing \({T}_{s}^{n}\) must have size exponential in \(n\) , even if we allow any constant depth, i.e., any constant number of alternations of And's and Or's. Razborov (1987) has proved that the same holds even if we allow sum modulo 2 as an additional operation. Both these proofs employ non-trivial machinery: the switching lemma and approximations of boolean functions by low-degree polynomials.
+
+\begin{tcolorbox}\relax
+哈斯塔德(1986年)证明，对于 \(s = \lfloor n/2\rfloor\) ，计算 \({T}_{s}^{n}\) 的每个这样的公式即使允许任意常数深度，即与运算和或运算的任意常数次数交替，其规模也必定是 \(n\) 的指数形式。拉兹博罗夫(1987年)证明，即使允许模2加法作为额外运算，情况依然如此。这两个证明都使用了非平凡的工具:开关引理和用低次多项式逼近布尔函数。
+\end{tcolorbox}
+
+On the other hand, Håstad et al. (1995) have shown that, at least for depth-3, one can deduce the same lower bound in an elementary way using the flower lemma (Lemma 6.4). In fact, their proof holds for depth-3 circuits but, to demonstrate the idea, it is enough to show how it works for special depth-3 formulas.
+
+\begin{tcolorbox}\relax
+另一方面，哈斯塔德等人(1995年)已经证明，至少对于深度为3的情况，可以使用花引理(引理6.4)以一种基本的方式推导出相同的下界。事实上，他们的证明适用于深度为3的电路，但为了说明这个想法，展示它如何适用于特殊的深度为3的公式就足够了。
+\end{tcolorbox}
+
+An Or-And-Or formula is a formula of the form
+
+\begin{tcolorbox}\relax
+一个“或-与-或”公式是具有如下形式的公式
+\end{tcolorbox}
+
+\[
+F = {F}_{1} \vee  {F}_{2} \vee  \cdots  \vee  {F}_{t} \tag{6.4}
+\]
+
+where each \({F}_{i}\) is an And-Or formula, that is, each \({F}_{i}\) is an And of an arbitrary number of clauses, each clause being an Or of literals (variables or their negations). We say that such a formula has bottom fan-in \(k\) if each of its clauses has at most \(k\) positive literals (the number of negated variables may be arbitrary). The size of a formula is the total number of literals in it.
+
+\begin{tcolorbox}\relax
+其中每个 \({F}_{i}\) 都是一个与或公式，也就是说，每个 \({F}_{i}\) 都是任意数量子句的与，每个子句都是文字(变量或其否定)的或。如果这样的公式的每个子句最多有 \(k\) 个正文字(否定变量的数量可以是任意的)，我们就说这样的公式具有底部扇入 \(k\) 。公式的大小是其中文字的总数。
+\end{tcolorbox}
+
+At this point, let us note that the condition on bottom fan-in is not crucial: if the size of \(F\) is not too large then it is possible to set some small number of variables to constant 1 so that the resulting formula will already satisfy this condition (see Exercise 6.10).
+
+\begin{tcolorbox}\relax
+此时，我们注意到关于底部扇入的条件并非关键条件:如果 \(F\) 的规模不是太大，那么可以将一些少量变量设置为常数1，使得得到的公式已经满足该条件(见练习6.10)。
+\end{tcolorbox}
+
+The idea of Håstad et al. (1995) is accumulated in the following lemma.
+
+\begin{tcolorbox}\relax
+哈斯塔德等人(1995年)的想法总结在以下引理中。
+\end{tcolorbox}
+
+Lemma 6.6. Let \(F = {F}_{1} \vee  {F}_{2} \vee  \cdots  \vee  {F}_{t}\) be an Or-And-Or formula of bottom fan-in \(k\) . Suppose that \(F\) rejects all vectors with fewer than \(s\) ones. Then \(F\) cannot accept more than \(t{k}^{s}\) vectors with precisely \(s\) ones.
+
+\begin{tcolorbox}\relax
+引理6.6。设 \(F = {F}_{1} \vee  {F}_{2} \vee  \cdots  \vee  {F}_{t}\) 为一个底扇入为 \(k\) 的或-与-或公式。假设 \(F\) 拒绝所有1的个数少于 \(s\) 的向量。那么 \(F\) 接受的恰好有 \(s\) 个1的向量不能超过 \(t{k}^{s}\) 个。
+\end{tcolorbox}
+
+Note that this lemma immediately implies that every Or-And-Or formula of bottom fan-in \(k\) computing the threshold function \({T}_{s}^{n}\) has size at least
+
+\begin{tcolorbox}\relax
+请注意，此引理立即意味着，计算阈值函数 \({T}_{s}^{n}\) 的每个底扇入为 \(k\) 的或-与-或公式的大小至少为
+\end{tcolorbox}
+
+\[
+\left( \begin{array}{l} n \\  s \end{array}\right) {k}^{-s} > {\left( \frac{n}{ks}\right) }^{s}.
+\]
+
+Proof. Suppose that \(F\) accepts more than \(t{k}^{s}\) vectors with precisely \(s\) ones. Then some of its And-Or subformulas \({F}_{i}\) accepts more than \({k}^{s}\) of such vectors. Let \(A\) be this set of vectors with \(s\) ones accepted by \({F}_{i}\) ; hence
+
+\begin{tcolorbox}\relax
+证明。假设 \(F\) 接受了超过 \(t{k}^{s}\) 个恰好有 \(s\) 个1的向量。那么它的一些与或子公式 \({F}_{i}\) 接受了超过 \({k}^{s}\) 个这样的向量。设 \(A\) 是被 \({F}_{i}\) 接受的具有 \(s\) 个1的向量集合；因此
+\end{tcolorbox}
+
+\[
+\left| A\right|  > {k}^{s}\text{ . }
+\]
+
+The formula \({F}_{i}\) has the form
+
+\begin{tcolorbox}\relax
+公式 \({F}_{i}\) 具有以下形式
+\end{tcolorbox}
+
+\[
+{F}_{i} = {C}_{1} \land  {C}_{2} \land  \cdots  \land  {C}_{r}
+\]
+\end{document}

@@ -1,0 +1,495 @@
+\documentclass[10pt]{article}
+\usepackage[verbose, a4paper, hmargin=2.5cm, vmargin=2.5cm]{geometry}
+
+\usepackage{fontspec}
+\usepackage{ctex}
+\usepackage{paratype}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{esint}
+\usepackage{stmaryrd}
+
+\usepackage[mathbf=sym]{unicode-math}
+\setmainfont{STIX Two Text}
+\setmathfont{STIX Two Math}
+
+\setsansfont{Arial}
+\setmonofont{Courier New}
+
+\usepackage{makecell}
+\usepackage{wasysym}
+\usepackage{pifont}
+\usepackage[export]{adjustbox}
+\usepackage{graphicx}
+\usepackage{mdframed}
+\usepackage{booktabs,array,multirow}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan,}
+\urlstyle{same}
+\usepackage[most]{tcolorbox}
+\definecolor{mygray}{RGB}{240,240,240}
+\tcbset{
+  colback=mygray,
+  boxrule=0pt,
+}
+\graphicspath{ {./images/} }
+\newcommand{\HRule}{\begin{center}\rule{0.9\linewidth}{0.2mm}\end{center}}
+\newcommand{\customfootnote}[1]{
+  \let\thefootnote\relax\footnotetext{#1}
+}
+\newcommand{\lt}{\mathrel{<}}
+\newcommand{\gt}{\mathrel{>}}
+\newcommand*\circled[1]{\tikz[baseline=(char.base)]{\node[shape=circle,draw,inner sep=1.5pt] (char) {\small #1};}}
+\setcounter{MaxMatrixCols}{256}
+\begin{document}
+\section*{1.8 Planar Graphs}
+
+\begin{tcolorbox}\relax
+\section*{1.8 平面图}
+\end{tcolorbox}
+
+We have already seen that graphs can conveniently be given by drawings where each vertex is represented by a point and each edge \({uv}\) by a line connecting \(u\) and \(v\) . A graph is called planar if it can be drawn without crossing edges.
+
+\begin{tcolorbox}\relax
+我们已经看到，图常用图示表示:每个顶点表示为一点，每条边 \({uv}\) 表示为连接 \(u\) 与 \(v\) 的一条线。若能画出无交叉边的表示，则称该图为平面图。
+\end{tcolorbox}
+
+Although this definition is intuitively clear, it is topologically imprecise. To make it precise, consider a function that maps each vertex of a graph \(X\) to a distinct point of the plane, and each edge of \(X\) to a continuous non self-intersecting curve in the plane joining its endpoints. Such a function is called a planar embedding if the curves corresponding to nonincident edges do not meet, and the curves corresponding to incident edges meet only at the point representing their common vertex. A graph is planar if and only if it has a planar embedding. Figure 1.10 shows two planar graphs: the complete graph \({K}_{4}\) and the octahedron.
+
+\begin{tcolorbox}\relax
+尽管该定义直观清楚，但在拓扑上不够精确。为使其精确，考虑一个函数，将图的每个顶点 \(X\) 映到平面上的不同点，将每条边 \(X\) 映到连接其端点的连续且不自交的平面曲线。若非相交的边对应的曲线不相交，且相邻边对应的曲线只在表示它们公共顶点的点处相交，则该函数称为平面嵌入。图当且仅当存在平面嵌入时为平面图。图 1.10 显示了两个平面图:完全图 \({K}_{4}\) 与八面体。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.6\textwidth]{images/30_411_207_715_258_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 1.10. Planar graphs \({K}_{4}\) and the octahedron
+
+\begin{tcolorbox}\relax
+图 1.10。平面图 \({K}_{4}\) 和八面体
+\end{tcolorbox}
+
+A plane graph is a planar graph together with a fixed embedding. The edges of the graph divide the plane into regions called the faces of the plane graph. All but one of these regions is bounded, with the unbounded region called the infinite or external face. The length of a face is the number of edges bounding it.
+
+\begin{tcolorbox}\relax
+平面图(plane graph)是带有固定嵌入的平面图。图的边将平面划分为若干区域，称为该平面图的面(faces)。除一个外所有区域有界，未被包围的区域称为无穷面或外部面。面的长度是围成该面的边的数目。
+\end{tcolorbox}
+
+Euler's famous formula gives the relationship between the number of vertices, edges, and faces of a connected plane graph.
+
+\begin{tcolorbox}\relax
+欧拉著名的公式给出了连通平面图的顶点数、边数与面数之间的关系。
+\end{tcolorbox}
+
+Theorem 1.8.1 (Euler) If a connected plane graph has \(n\) vertices, \(e\) edges and \(f\) faces, then
+
+\begin{tcolorbox}\relax
+定理 1.8.1(欧拉) 若连通平面图有 \(n\) 个顶点、 \(e\) 条边与 \(f\) 个面，则
+\end{tcolorbox}
+
+\[
+n - e + f = 2.
+\]
+
+A maximal planar graph is a planar graph \(X\) such that the graph formed by adding an edge between any two nonadjacent vertices of \(X\) is not planar. If an embedding of a planar graph has a face of length greater than three, then an edge can be added between two vertices of that face. Therefore, in any embedding of a maximal planar graph, every face is a triangle. Since each edge lies in two faces, we have
+
+\begin{tcolorbox}\relax
+极大平面图是这样的平面图 \(X\) :对任意两非相邻顶点在图中加入一条边后所得的图均非平面。若某一嵌入中的面长度大于三，则可在该面上的两顶点之间加入一条边。因此，在任何极大平面图的嵌入中，每个面都是三角形。由于每条边属于两个面，我们有
+\end{tcolorbox}
+
+\[
+{2e} = {3f}
+\]
+
+and so by Euler's formula,
+
+\begin{tcolorbox}\relax
+因此由欧拉公式可得，
+\end{tcolorbox}
+
+\[
+e = {3n} - 6\text{ . }
+\]
+
+A planar graph on \(n\) vertices with \({3n} - 6\) edges is necessarily maximal; such graphs are called planar triangulations . Both the graphs of Figure 1.10 are planar triangulations.
+
+\begin{tcolorbox}\relax
+在 \(n\) 个顶点和 \({3n} - 6\) 条边上的平面图必为极大；这样的图称为平面三角剖分(planar triangulations)。图 1.10 的两个图都是平面三角剖分。
+\end{tcolorbox}
+
+A planar graph can be embedded into the plane in infinitely many ways. The two embeddings of Figure 1.11 are easily seen to be combinatorially different: the first has faces of length 3, 3, 4, and 6 while the second has faces of lengths3,3,5, and 5 . It is an important result of topological graph theory that a 3-connected graph has essentially a unique embedding. (See Section 3.4 for the explanation of what a 3-connected graph is.)
+
+\begin{tcolorbox}\relax
+平面图可以有无限多种嵌入。图 1.11 的两种嵌入在组合意义上显然不同:第一种的面长度为 3、3、4、6，而第二种的面长度为 3、3、5、5。拓扑图论中的一个重要结果是:三连通图的嵌入在本质上是唯一的。(关于三连通图的定义见第 3.4 节。)
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.6\textwidth]{images/31_395_352_748_190_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 1.11. Two plane graphs
+
+\begin{tcolorbox}\relax
+图 1.11。两个平面图
+\end{tcolorbox}
+
+Given a plane graph \(X\) , we can form another plane graph called the dual graph \({X}^{ * }\) . The vertices of \({X}^{ * }\) correspond to the faces of \(X\) , with each vertex being placed in the corresponding face. Every edge \(e\) of \(X\) gives rise to an edge of \({X}^{ * }\) joining the two faces of \(X\) that contain \(e\) (see Figure 1.12).
+
+\begin{tcolorbox}\relax
+给定一个平面图 \(X\) ，我们可以构造另一个称为对偶图 \({X}^{ * }\) 的平面图。 \({X}^{ * }\) 的顶点对应于 \(X\) 的面，每个顶点放在相应的面内。 \(X\) 的每条边 \(e\) 都对应 \({X}^{ * }\) 的一条边，连接包含该 \(e\) 的两个面(见图 1.12)。
+\end{tcolorbox}
+
+Notice that two faces of \(X\) may share more than one common edge, in which case the graph \({X}^{ * }\) may contain multiple edges, meaning that two vertices are joined by more than one edge. This requires the obvious generalization to our definition of a graph, but otherwise causes no difficulties. Once again, explicit warning will be given when it is necessary to consider graphs with multiple edges.
+
+\begin{tcolorbox}\relax
+注意， \(X\) 的两面可能共享多于一条公共边，在这种情况下图 \({X}^{ * }\) 可能包含重边，即两顶点之间由多于一条边相连。这要求对图的定义作显然的推广，但除此之外不引起困难。必要时会明确提示考虑含重边的图。
+\end{tcolorbox}
+
+Since each face in a planar triangulation is a triangle, its dual is a cubic graph. Considering the graphs of Figure 1.10, it is easy to check that \({K}_{4}\) is isomorphic to its dual; such graphs are called self-dual. The dual of the octahedron is a bipartite cubic graph on eight vertices known as the cube, which we will discuss further in Section 3.1.
+
+\begin{tcolorbox}\relax
+由于平面三角剖分中的每个面都是三角形，其对偶图为三次图。考虑图 1.10，可容易检验 \({K}_{4}\) 与其对偶同构；这样的图称为自对偶。八面体的对偶是一个八个顶点的二分三次图，称为立方体，我们将在第 3.1 节进一步讨论。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.4\textwidth]{images/31_527_1353_483_429_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 1.12. The planar dual
+
+\begin{tcolorbox}\relax
+图 1.12。平面对偶
+\end{tcolorbox}
+
+As defined above, the planar dual of any graph \(X\) is connected, so if \(X\) is not connected, then \({\left( {X}^{ * }\right) }^{ * }\) is not isomorphic to \(X\) . However, this is the only difficulty, and it can be shown that if \(X\) is connected, then \({\left( {X}^{ * }\right) }^{ * }\) is isomorphic to \(X\) .
+
+\begin{tcolorbox}\relax
+如上所述，任何图的平面对偶 \(X\) 是连通的，因此如果 \(X\) 不连通，则 \({\left( {X}^{ * }\right) }^{ * }\) 与 \(X\) 不同构。然而，这是唯一的困难，可以证明若 \(X\) 连通，则 \({\left( {X}^{ * }\right) }^{ * }\) 与 \(X\) 同构。
+\end{tcolorbox}
+
+The notion of embedding a graph in the plane can be generalized directly to embedding a graph in any surface. The dual of a graph embedded in any surface is defined analogously to the planar dual.
+
+\begin{tcolorbox}\relax
+将图嵌入平面的概念可直接推广到将图嵌入任意曲面。嵌入于任意曲面的图的对偶按与平面对偶类似的方式定义。
+\end{tcolorbox}
+
+The real projective plane is a nonorientable surface, which can be represented on paper by a circle with diametrically opposed points identified. The complete graph \({K}_{6}\) is not planar, but it can be embedded in the projective plane, as shown in Figure 1.13. This embedding of \({K}_{6}\) is a triangulation in the projective plane, so its dual is a cubic graph, which turns out to be the Petersen graph.
+
+\begin{tcolorbox}\relax
+实射影平面是不可定向的曲面，可在纸上用一个圆并将对称点配对表示。完全图 \({K}_{6}\) 非平面，但可如图 1.13 所示嵌入射影平面。此在射影平面的嵌入是一个三角剖分，其对偶是一个三次图，结果就是 Petersen 图。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.4\textwidth]{images/32_547_626_445_446_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 1.13. An embedding of \({K}_{6}\) in the projective plane
+
+\begin{tcolorbox}\relax
+图 1.13. 在射影平面中嵌入 \({K}_{6}\)
+\end{tcolorbox}
+
+The torus is an orientable surface, which can be represented physically in Euclidean 3-space by the surface of a torus, or doughnut. It can be represented on paper by a rectangle where the points on the bottom side are identified with the points directly above them on the top side, and the points of the left side are identified with the points directly to the right of them on the right side. The complete graph \({K}_{7}\) is not planar, nor can it be embedded in the projective plane, but it can be embedded in the torus as shown in Figure 1.14 (note that due to the identification the four "corners" are actually the same point). This is another triangulation; its dual is a cubic graph known as the Heawood graph, which is discussed in Section 5.10.
+
+\begin{tcolorbox}\relax
+环面是可定向的曲面，在欧氏三维空间中可由甜甜圈形状的表面表示。在纸上可用一个矩形表示，矩形底边的点与顶边正上方的点配对，左边的点与右边正右方的点配对。完全图 \({K}_{7}\) 既非平面，也不能嵌入射影平面，但可如图 1.14 所示嵌入环面(注意由于配对，四个“角”实际上是同一点)。这又是一个三角剖分；其对偶是一个三次图，称为 Heawood 图，在第 5.10 节中讨论。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.2\textwidth]{images/32_604_1684_325_328_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 1.14. An embedding of \({K}_{7}\) in the torus
+
+\begin{tcolorbox}\relax
+图 1.14. 在环面中嵌入 \({K}_{7}\)
+\end{tcolorbox}
+
+\section*{Exercises}
+
+\begin{tcolorbox}\relax
+\section*{练习}
+\end{tcolorbox}
+
+1. Let \(X\) be a graph with \(n\) vertices. Show that \(X\) is complete or empty if and only if every transposition of \(\{ 1,\ldots ,n\}\) belongs to \(\operatorname{Aut}\left( X\right)\) .
+
+\begin{tcolorbox}\relax
+1. 设 \(X\) 为有 \(n\) 个顶点的图。证明当且仅当每个 \(\{ 1,\ldots ,n\}\) 的换位都属于 \(\operatorname{Aut}\left( X\right)\) 时， \(X\) 是完全图或空图。
+\end{tcolorbox}
+
+2. Show that \(X\) and \(\bar{X}\) have the same automorphism group, for any graph \(X\) .
+
+\begin{tcolorbox}\relax
+2. 证明对任意图 \(X\) ， \(X\) 与 \(\bar{X}\) 具有相同的自同构群。
+\end{tcolorbox}
+
+3. Show that if \(x\) and \(y\) are vertices in the graph \(X\) and \(g \in  \operatorname{Aut}\left( X\right)\) , then the distance between \(x\) and \(y\) in \(X\) is equal to the distance between \({x}^{g}\) and \({y}^{g}\) in \(X\) .
+
+\begin{tcolorbox}\relax
+3. 证明若 \(x\) 与 \(y\) 是图 \(X\) 中的顶点且 \(g \in  \operatorname{Aut}\left( X\right)\) ，则在 \(X\) 中 \(x\) 与 \(y\) 的距离等于在 \(X\) 中 \({x}^{g}\) 与 \({y}^{g}\) 的距离。
+\end{tcolorbox}
+
+4. Show that if \(f\) is a homomorphism from the graph \(X\) to the graph \(Y\) and \({x}_{1}\) and \({x}_{2}\) are vertices in \(X\) , then
+
+\begin{tcolorbox}\relax
+4. 证明若 \(f\) 是从图 \(X\) 到图 \(Y\) 的同态，且 \({x}_{1}\) 与 \({x}_{2}\) 是 \(X\) 中的顶点，则
+\end{tcolorbox}
+
+\[
+{d}_{X}\left( {{x}_{1},{x}_{2}}\right)  \geq  {d}_{Y}\left( {f\left( {x}_{1}\right) ,f\left( {x}_{2}\right) }\right) .
+\]
+
+5. Show that if \(Y\) is a subgraph of \(X\) and \(f\) is a homomorphism from \(X\) to \(Y\) such that \(f \upharpoonright  Y\) is a bijection, then \(Y\) is a retract.
+
+\begin{tcolorbox}\relax
+5. 证明若 \(Y\) 是 \(X\) 的一个子图，且存在从 \(X\) 到 \(Y\) 的同态 \(f\) 使得 \(f \upharpoonright  Y\) 为双射，则 \(Y\) 是一个收缩子图(retract)。
+\end{tcolorbox}
+
+6. Show that a retract \(Y\) of \(X\) is an induced subgraph of \(X\) . Then show that it is isometric, that is, if \(x\) and \(y\) are vertices of \(Y\) , then \({d}_{X}\left( {x,y}\right)  = {d}_{Y}\left( {x,y}\right) .\)
+
+\begin{tcolorbox}\relax
+6. 证明 \(X\) 的一个收缩子图 \(Y\) 是 \(X\) 的诱导子图。然后证明它是等距的，即若 \(x\) 与 \(y\) 是 \(Y\) 的顶点，则 \({d}_{X}\left( {x,y}\right)  = {d}_{Y}\left( {x,y}\right) .\)
+\end{tcolorbox}
+
+7. Show that any edge in a bipartite graph \(X\) is a retract of \(X\) .
+
+\begin{tcolorbox}\relax
+7. 证明二分图 \(X\) 的任一条边都是 \(X\) 的一个收缩子图。
+\end{tcolorbox}
+
+8. The diameter of a graph is the maximum distance between two distinct vertices. (It is usually taken to be infinite if the graph is not connected.) Determine the diameter of \(J\left( {v,k,k - 1}\right)\) when \(v > {2k}\) .
+
+\begin{tcolorbox}\relax
+8. 图的直径是两不同顶点之间距离的最大值。(若图不连通，通常取为无限大。)当 \(v > {2k}\) 时，确定 \(J\left( {v,k,k - 1}\right)\) 的直径。
+\end{tcolorbox}
+
+9. Show that \(\operatorname{Aut}\left( {K}_{n}\right)\) is not isomorphic to \(\operatorname{Aut}\left( {L\left( {K}_{n}\right) }\right)\) if and only if \(n = 2\) or 4 .
+
+\begin{tcolorbox}\relax
+9. 证明当且仅当 \(n = 2\) 或 4 时， \(\operatorname{Aut}\left( {K}_{n}\right)\) 不同构于 \(\operatorname{Aut}\left( {L\left( {K}_{n}\right) }\right)\) 。
+\end{tcolorbox}
+
+10. Show that the graph \({K}_{5} \smallsetminus  e\) (obtained by deleting any edge \(e\) from \({K}_{5}\) ) is not a line graph.
+
+\begin{tcolorbox}\relax
+10. 证明从 \({K}_{5}\) 中删除任一条边 \(e\) 得到的图 \({K}_{5} \smallsetminus  e\) 不是线图。
+\end{tcolorbox}
+
+11. Show that \({K}_{1,3}\) is not an induced subgraph of a line graph.
+
+\begin{tcolorbox}\relax
+11. 证明 \({K}_{1,3}\) 不是线图的一个诱导子图。
+\end{tcolorbox}
+
+12. Prove that any induced subgraph of a line graph is a line graph.
+
+\begin{tcolorbox}\relax
+12. 证明任何线图的诱导子图仍然是线图。
+\end{tcolorbox}
+
+13. Prove Krausz's characterization of line graphs (Theorem 1.7.2).
+
+\begin{tcolorbox}\relax
+13. 证明 Krausz 对线图的刻画(定理 1.7.2)。
+\end{tcolorbox}
+
+14. Find all graphs \(G\) such that \(L\left( G\right)  \cong  G\) .
+
+\begin{tcolorbox}\relax
+14. 找出所有满足 \(L\left( G\right)  \cong  G\) 的图 \(G\) 。
+\end{tcolorbox}
+
+15. Show that if \(X\) is a graph with minimum valency at least four, \(\operatorname{Aut}\left( X\right)\) and \(\operatorname{Aut}\left( {L\left( X\right) }\right)\) are isomorphic.
+
+\begin{tcolorbox}\relax
+15. 证明若图 \(X\) 的最小度至少为四，则 \(\operatorname{Aut}\left( X\right)\) 与 \(\operatorname{Aut}\left( {L\left( X\right) }\right)\) 同构。
+\end{tcolorbox}
+
+16. Let \(S\) be a set of nonzero vectors from an \(m\) -dimensional vector space. Let \(X\left( S\right)\) be the graph with the elements of \(S\) as its vertices, with two vectors \(x\) and \(y\) adjacent if and only if \({x}^{T}y \neq  0\) . (Call \(X\left( S\right)\) the "nonorthogonality" graph of \(S\) .) Show that any independent set in \(X\left( S\right)\) has cardinality at most \(m\) .
+
+\begin{tcolorbox}\relax
+16. 设 \(S\) 为一个 \(m\) 维向量空间中的一组非零向量。令 \(X\left( S\right)\) 为以 \(S\) 元素为顶点的图，当且仅当 \({x}^{T}y \neq  0\) 时，向量 \(x\) 与 \(y\) 相邻。(称 \(X\left( S\right)\) 为 \(S\) 的“非正交”图。)证明 \(X\left( S\right)\) 中的任一独立集的基数至多为 \(m\) 。
+\end{tcolorbox}
+
+17. Let \(X\) be a graph with \(n\) vertices. Show that the line graph of \(X\) is the nonorthogonality graph of a set of vectors in \({\mathbb{R}}^{n}\) .
+
+\begin{tcolorbox}\relax
+17. 设 \(X\) 为一个有 \(n\) 个顶点的图。证明 \(X\) 的线图是某组向量在 \({\mathbb{R}}^{n}\) 中的非正交图。
+\end{tcolorbox}
+
+18. Show that a graph is bipartite if and only if it contains no odd cycles.
+
+\begin{tcolorbox}\relax
+18. 证明:一个图当且仅当不含奇环时为二分图。
+\end{tcolorbox}
+
+19. Show that a tree on \(n\) vertices has \(n - 1\) edges.
+
+\begin{tcolorbox}\relax
+19. 证明:一棵有 \(n\) 个顶点的树有 \(n - 1\) 条边。
+\end{tcolorbox}
+
+20. Let \(X\) be a connected graph. Let \(T\left( X\right)\) be the graph with the spanning trees of \(X\) as its vertices, where two spanning trees are adjacent if the symmetric difference of their edge sets has size two. Show that \(T\left( X\right)\) is connected.
+
+\begin{tcolorbox}\relax
+20. 设 \(X\) 为连通图。令 \(T\left( X\right)\) 为以 \(X\) 的生成树为顶点的图，当两棵生成树的边集的对称差的大小为二时它们相邻。证明 \(T\left( X\right)\) 是连通的。
+\end{tcolorbox}
+
+21. Show that if two trees have isomorphic line graphs, they are isomorphic.
+
+\begin{tcolorbox}\relax
+21. 证明:若两棵树的线图同构，则这两棵树同构。
+\end{tcolorbox}
+
+22. Use Euler's identity to show that \({K}_{5}\) is not planar.
+
+\begin{tcolorbox}\relax
+22. 用欧拉恒等式证明 \({K}_{5}\) 非平面。
+\end{tcolorbox}
+
+23. Construct an infinite family of self-dual planar graphs.
+
+\begin{tcolorbox}\relax
+23. 构造一个自对偶平面图的无限族。
+\end{tcolorbox}
+
+24. A graph is self-complementary if it is isomorphic to its complement. Show that \(L\left( {K}_{3,3}\right)\) is self-complementary.
+
+\begin{tcolorbox}\relax
+24. 若一个图与其补图同构，则称其自补。证明 \(L\left( {K}_{3,3}\right)\) 自补。
+\end{tcolorbox}
+
+25. Show that if there is a self-complementary graph \(X\) on \(n\) vertices, then \(n \equiv  0,1{\;\operatorname{mod}\;4}\) . If \(X\) is regular, show that \(n \equiv  1{\;\operatorname{mod}\;4}\) .
+
+\begin{tcolorbox}\relax
+25. 证明:若存在一个在 \(n\) 个顶点上的自补图 \(X\) ，则 \(n \equiv  0,1{\;\operatorname{mod}\;4}\) 。若 \(X\) 为正则图，证明 \(n \equiv  1{\;\operatorname{mod}\;4}\) 。
+\end{tcolorbox}
+
+26. The lexicographic product \(X\left\lbrack  Y\right\rbrack\) of two graphs \(X\) and \(Y\) has vertex set \(V\left( X\right)  \times  V\left( Y\right)\) where \(\left( {x,y}\right)  \sim  \left( {{x}^{\prime },{y}^{\prime }}\right)\) if and only if
+
+\begin{tcolorbox}\relax
+26. 两图 \(X\) 和 \(Y\) 的字典积 \(X\left\lbrack  Y\right\rbrack\) 的顶点集为 \(V\left( X\right)  \times  V\left( Y\right)\) ，其中 \(\left( {x,y}\right)  \sim  \left( {{x}^{\prime },{y}^{\prime }}\right)\) 当且仅当
+\end{tcolorbox}
+
+(a) \(x\) is adjacent to \({x}^{\prime }\) in \(X\) , or
+
+\begin{tcolorbox}\relax
+(a) \(x\) 在 \(X\) 中与 \({x}^{\prime }\) 相邻，或
+\end{tcolorbox}
+
+(b) \(x = {x}^{\prime }\) and \(y\) is adjacent to \({y}^{\prime }\) in \(Y\) .
+
+\begin{tcolorbox}\relax
+(b) \(x = {x}^{\prime }\) 与 \(y\) 在 \(Y\) 中与 \({y}^{\prime }\) 相邻。
+\end{tcolorbox}
+
+Show that the complement of the lexicographic product of \(X\) and \(Y\) is the lexicographic product of \(\bar{X}\) and \(\bar{Y}\) .
+
+\begin{tcolorbox}\relax
+证明: \(X\) 与 \(Y\) 的字典积的补图是 \(\bar{X}\) 与 \(\bar{Y}\) 的字典积。
+\end{tcolorbox}
+
+\section*{Notes}
+
+\begin{tcolorbox}\relax
+\section*{注}
+\end{tcolorbox}
+
+For those readers interested in a more comprehensive view of graph theory itself, we recommend the books by West [6] and Diestel [2].
+
+\begin{tcolorbox}\relax
+对于想更全面了解图论的读者，推荐 West [6] 和 Diestel [2] 的著作。
+\end{tcolorbox}
+
+The problem of determining whether two graphs are isomorphic has a long history, as it has many applications - for example, among chemists who wish to tabulate all molecules in a certain class. All attempts to find a collection of easily computable graph parameters that are sufficient to distinguish any pair of nonisomorphic graphs have failed. Nevertheless the problem of determining graph isomorphism has not been shown to be NP-complete. It is considered a prime candidate for membership in the class of problems in NP that are neither NP-complete nor in P (if indeed NP ≠ P).
+
+\begin{tcolorbox}\relax
+判定两图是否同构的问题有着悠久的历史，并且应用广泛——例如化学家希望列出某一类所有分子。任何试图找到一组易于计算且足以区分任意非同构图对的图参数的努力都已失败。然而，图同构问题尚未被证明为 NP-完全问题。若 NP ≠ P，则它被视为属于 NP 但既非 NP-完全也不在 P 的主要候选问题之一。
+\end{tcolorbox}
+
+In practice, computer programs such as Brendan McKay's nauty [5] can determine isomorphisms between most graphs up to about 20000 vertices, though there are significant "pathological" cases where certain very highly structured graphs on only a few hundred vertices cannot be dealt with. Determining the automorphism group of a graph is closely related to determining whether two graphs are isomorphic. As we have already seen, it is often easy to find some automorphisms of a graph, but quite difficult to show that one has identified the full automorphism group of the graph. Once again, for moderately sized graphs with explicit descriptions, use of a computer is recommended.
+
+\begin{tcolorbox}\relax
+在实践中，诸如 Brendan McKay 的 nauty [5] 等计算机程序可以确定大多数顶点数达约 20000 的图之间的同构，尽管存在一些“病态”情况:某些结构高度特殊的图，即便只有几百个顶点也无法处理。判定一张图的自同构群与判定两图是否同构密切相关。正如我们已见，通常容易找到图的一些自同构，但很难证明已找到了图的完整自同构群。对于具有明确描述的中等规模图，仍建议使用计算机。
+\end{tcolorbox}
+
+Many graph parameters are known to be NP-hard to compute. For example, determining the chromatic number of a graph or finding the size of the maximum clique are both NP-hard.
+
+\begin{tcolorbox}\relax
+许多图参数已知计算上是 NP-困难的。例如，判定图的色数或求最大团的大小均为 NP-困难。
+\end{tcolorbox}
+
+Krausz's theorem (Theorem 1.7.2) comes from [4] and is surprisingly useful. A proof in English appears in [6], but you are better advised to construct your own. Beineke's result (Theorem 1.7.4) is proved in [1].
+
+\begin{tcolorbox}\relax
+Krausz 定理(定理 1.7.2)来自 [4]，且出人意料地有用。英文证明见 [6]，但更建议你自行构造证明。Beineke 的结果(定理 1.7.4)见 [1] 的证明。
+\end{tcolorbox}
+
+Most introductory texts on graph theory discuss planar graphs. For more complete information about embeddings of graphs, we recommend Gross and Tucker [3].
+
+\begin{tcolorbox}\relax
+大多数入门图论教材都讨论平面图。关于图的嵌入的更完整资料，推荐 Gross 和 Tucker [3]。
+\end{tcolorbox}
+
+Part of the charm of graph theory is that it is easy to find interesting and worthwhile problems that can be attacked by elementary methods, and with some real prospect of success. We offer the following by way of example. Define the iterated line graph \({L}^{n}\left( X\right)\) of a graph \(X\) by setting \({L}^{1}\left( X\right)\) equal to \(L\left( X\right)\) and, if \(n > 1\) , defining \({L}^{n}\left( X\right)\) to be \(L\left( {{L}^{n - 1}\left( X\right) }\right)\) . It is an open question, due to Ron Graham, whether a tree \(T\) is determined by the integer sequence
+
+\begin{tcolorbox}\relax
+图论的魅力部分在于容易找到可由基本方法攻克且有实际成功希望的有趣问题。举例说明如下。将图 \(X\) 的迭代线图 \({L}^{n}\left( X\right)\) 定义为把 \({L}^{1}\left( X\right)\) 置为 \(L\left( X\right)\) 并且，若 \(n > 1\) ，则将 \({L}^{n}\left( X\right)\) 定义为 \(L\left( {{L}^{n - 1}\left( X\right) }\right)\) 。Ron Graham 提出一个未解的问题:一棵树 \(T\) 是否由整数序列 决定
+\end{tcolorbox}
+
+\[
+\left| {V\left( {{L}^{n}\left( T\right) }\right) }\right| ,\;n \geq  1
+\]
+
+\section*{References}
+
+\begin{tcolorbox}\relax
+\section*{参考文献}
+\end{tcolorbox}
+
+[1] L. W. Beinekke, Derived graphs and digraphs, Beiträge zur Graphentheorie, (1968), 17-33.
+
+\begin{tcolorbox}\relax
+[1] L. W. Beinekke, Derived graphs and digraphs, Beiträge zur Graphentheorie, (1968), 17-33.
+\end{tcolorbox}
+
+[2] R. DIESTEL, Graph Theory, Springer-Verlag, New York, 1997.
+
+\begin{tcolorbox}\relax
+[2] R. DIESTEL, Graph Theory, Springer-Verlag, New York, 1997.
+\end{tcolorbox}
+
+[3] J. L. GROSS AND T. W. TUCKER, Topological Graph Theory, John Wiley \& Sons Inc., New York, 1987.
+
+\begin{tcolorbox}\relax
+[3] J. L. GROSS AND T. W. TUCKER, Topological Graph Theory, John Wiley \& Sons Inc., New York, 1987.
+\end{tcolorbox}
+
+[4] J. KRAUSZ, Démonstration nouvelle d'une théorème de Whitney sur les réseaux, Mat. Fiz. Lapok, 50 (1943), 75-85.
+
+\begin{tcolorbox}\relax
+[4] J. KRAUSZ, Démonstration nouvelle d'une théorème de Whitney sur les réseaux, Mat. Fiz. Lapok, 50 (1943), 75-85.
+\end{tcolorbox}
+
+[5] B. McKAY, nauty user's guide (version 1.5), tech. rep., Department of Computer Science, Australian National University, 1990.
+
+\begin{tcolorbox}\relax
+[5] B. McKAY, nauty user's guide (version 1.5), tech. rep., Department of Computer Science, Australian National University, 1990.
+\end{tcolorbox}
+
+[6] D. B. WEST, Introduction to Graph Theory, Prentice Hall Inc., Upper Saddle River, NJ, 1996.
+
+\begin{tcolorbox}\relax
+[6] D. B. WEST, Introduction to Graph Theory, Prentice Hall Inc., Upper Saddle River, NJ, 1996.
+\end{tcolorbox}
+
+\end{document}

@@ -1,0 +1,63 @@
+{
+ "name": "extremal_6",
+ "sample": "../../tests/samples/extremal_6.tex",
+ "pack": "bilingual",
+ "mode": "rule",
+ "labels": [
+  {
+   "needle": "Proof. We proceed by induction on \\(s\\) . For \\(s = 1\\) , we",
+   "kind": "proof",
+   "line": 89
+  },
+  {
+   "needle": "Theorem 6.2 (Deza 1973). Let \\(\\mathcal{F}\\) be an \\(s\\) -un",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 187
+  },
+  {
+   "needle": "Lemma 6.3 (Füredi 1980). Let \\(\\mathcal{F}\\) be a finite fam",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 273
+  },
+  {
+   "needle": "Proof. We prove a contraposition of this claim: If the commo",
+   "kind": "proof",
+   "line": 279
+  },
+  {
+   "needle": "Lemma 6.4. Let \\(\\mathcal{F}\\) be a family of sets each of c",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 359
+  },
+  {
+   "needle": "Proof. Induction on \\(s\\) . The basis \\(s = 1\\) is trivial s",
+   "kind": "proof",
+   "line": 365
+  },
+  {
+   "needle": "Lemma 6.5. Let \\(f\\) be a \\(t\\) -And-Or function on \\(n\\) va",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 427
+  },
+  {
+   "needle": "Proof. Let \\(f = {C}_{1} \\land  \\cdots  \\land  {C}_{m}\\) , w",
+   "kind": "proof",
+   "line": 433
+  },
+  {
+   "needle": "Lemma 6.6. Let \\(F = {F}_{1} \\vee  {F}_{2} \\vee  \\cdots  \\ve",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 527
+  },
+  {
+   "needle": "Proof. Suppose that \\(F\\) accepts more than \\(t{k}^{s}\\) vec",
+   "kind": "proof",
+   "line": 543
+  }
+ ]
+}

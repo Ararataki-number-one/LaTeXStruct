@@ -1,0 +1,104 @@
+{
+ "name": "extremal_2",
+ "sample": "../../tests/samples/extremal_2.tex",
+ "pack": "bilingual",
+ "mode": "rule",
+ "labels": [
+  {
+   "needle": "Lemma 2.1 (Corrádi 1969). Let \\({A}_{1},\\ldots ,{A}_{N}\\) be",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 72
+  },
+  {
+   "needle": "Proof. Just count. By (1.11), we have for each \\(i = 1,\\ldot",
+   "kind": "proof",
+   "line": 82
+  },
+  {
+   "needle": "Lemma 2.2. Let \\(X\\) be a set of \\(n\\) elements, and let \\({",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 124
+  },
+  {
+   "needle": "Proof. Again, let us just count. On the one hand, using Jens",
+   "kind": "proof",
+   "line": 134
+  },
+  {
+   "needle": "Lemma 2.2 is a very special (but still illustrative) case of",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 164
+  },
+  {
+   "needle": "Lemma 2.3 (Erdős 1964b). Let \\(X\\) be a set of \\(n\\) element",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 170
+  },
+  {
+   "needle": "Theorem 2.4 (Reiman 1958). If \\(G = \\left( {V,E}\\right)\\) on",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 218
+  },
+  {
+   "needle": "Proof. Let \\(G = \\left( {V,E}\\right)\\) be a \\({C}_{4}\\) -fre",
+   "kind": "proof",
+   "line": 228
+  },
+  {
+   "needle": "Example 2.5 (Construction of dense \\({C}_{4}\\) -free graphs)",
+   "kind": "theorem-like",
+   "env": "example",
+   "line": 307
+  },
+  {
+   "needle": "Theorem 2.4 says that a graph cannot have many edges, unless",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 347
+  },
+  {
+   "needle": "Theorem 2.6. If an \\(n\\) -vertex graph \\(G = \\left( {V,E}\\ri",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 376
+  },
+  {
+   "needle": "Proposition 2.7. Every graph \\(G\\) has an induced subgraph \\",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 398
+  },
+  {
+   "needle": "Proof. We remove vertices one-by-one. To avoid the danger of",
+   "kind": "proof",
+   "line": 408
+  },
+  {
+   "needle": "Proposition 2.8. For every weakly \\({C}_{4}\\) -free graph \\(",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 441
+  },
+  {
+   "needle": "Proposition 2.9. Let \\(G\\) be a weakly \\({C}_{4}\\) -free gra",
+   "kind": "theorem-like",
+   "env": "proposition",
+   "line": 485
+  },
+  {
+   "needle": "Proof. Take an independent set \\(S = \\left\\{  {{x}_{1},\\ldot",
+   "kind": "proof",
+   "line": 495
+  },
+  {
+   "needle": "Proof of Theorem 2.6. Let \\(a\\) be the average degree of \\(G",
+   "kind": "proof",
+   "line": 517
+  }
+ ]
+}

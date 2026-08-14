@@ -1,0 +1,527 @@
+\documentclass[10pt]{article}
+\usepackage[verbose, a4paper, hmargin=2.5cm, vmargin=2.5cm]{geometry}
+
+\usepackage{fontspec}
+\usepackage{ctex}
+\usepackage{paratype}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{esint}
+\usepackage{stmaryrd}
+
+\usepackage[mathbf=sym]{unicode-math}
+\setmainfont{STIX Two Text}
+\setmathfont{STIX Two Math}
+
+\setsansfont{Arial}
+\setmonofont{Courier New}
+
+\usepackage{makecell}
+\usepackage{wasysym}
+\usepackage{pifont}
+\usepackage[export]{adjustbox}
+\usepackage{graphicx}
+\usepackage{mdframed}
+\usepackage{booktabs,array,multirow}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan,}
+\urlstyle{same}
+\usepackage[most]{tcolorbox}
+\definecolor{mygray}{RGB}{240,240,240}
+\tcbset{
+  colback=mygray,
+  boxrule=0pt,
+}
+\graphicspath{ {./images/} }
+\newcommand{\HRule}{\begin{center}\rule{0.9\linewidth}{0.2mm}\end{center}}
+\newcommand{\customfootnote}[1]{
+  \let\thefootnote\relax\footnotetext{#1}
+}
+\newcommand{\lt}{\mathrel{<}}
+\newcommand{\gt}{\mathrel{>}}
+\newcommand*\circled[1]{\tikz[baseline=(char.base)]{\node[shape=circle,draw,inner sep=1.5pt] (char) {\small #1};}}
+\setcounter{MaxMatrixCols}{256}
+\begin{document}
+\section*{4 Arc-Transitive Graphs}
+
+\begin{tcolorbox}\relax
+\section*{4 弧对称图}
+\end{tcolorbox}
+
+An arc in a graph is an ordered pair of adjacent vertices, and so a graph is arc-transitive if its automorphism group acts transitively on the set of arcs. As we have seen, this is a stronger property than being either vertex transitive or edge transitive, and so we can say even more about arc-transitive graphs. The first few sections of this chapter consider the basic theory leading up to Tutte's remarkable results on cubic arc-transitive graphs. We then consider some examples of arc-transitive graphs, including three of the most famous graphs of all: the Petersen graph, the Coxeter graph, and Tutte's 8-cage.
+
+\begin{tcolorbox}\relax
+图中的一条弧是有序的相邻顶点对，因此如果自同构群在弧的集合上传递作用，则该图为弧对称。如我们已见，这比顶点传递或边传递更强，因此关于弧对称图我们能得出更多结论。本章最初几节考察导向 Tutte 对三次弧对称图的惊人成果的基本理论。随后我们考察一些弧对称图的例子，其中包括三个位列最著名的图:佩特森图、考克斯特图和 Tutte 的 8-圈架。
+\end{tcolorbox}
+
+\section*{4.1 Arc-Transitive Graphs}
+
+\begin{tcolorbox}\relax
+\section*{4.1 弧传递图}
+\end{tcolorbox}
+
+An \(s\) -arc in a graph is a sequence of vertices \(\left( {{v}_{0},\ldots ,{v}_{s}}\right)\) such that consecutive vertices are adjacent and \({v}_{i - 1} \neq  {v}_{i + 1}\) when \(0 < i < s\) . Note that an \(s\) -arc is permitted to use the same vertex more than once, although in all cases of interest this will not happen. A graph is \(s\) -arc transitive if its automorphism group is transitive on \(s\) -arcs. If \(s \geq  1\) , then it is both obvious and easy to prove that an \(s\) -arc transitive graph is also \(\left( {s - 1}\right)\) -arc transitive. A 0-arc transitive graph is just another name for a vertex-transitive graph, and a 1-arc transitive graph is another name for an arc-transitive graph. A 1-arc transitive graph is also sometimes called a symmetric graph.
+
+\begin{tcolorbox}\relax
+图中的一个 \(s\) -弧是顶点序列 \(\left( {{v}_{0},\ldots ,{v}_{s}}\right)\) ，其相邻的顶点两两相邻并且 \({v}_{i - 1} \neq  {v}_{i + 1}\) 当 \(0 < i < s\) 。注意，允许 \(s\) -弧重复使用同一顶点，尽管在所有关心的情形中不会发生。若图的自同构群在 \(s\) -弧上是传递的，则称该图为 \(s\) -弧传递的。若 \(s \geq  1\) ，则显然且易于证明 \(s\) -弧传递的图也为 \(\left( {s - 1}\right)\) -弧传递。0-弧传递图即顶点传递图的另一称谓，1-弧传递图即弧传递图的另一称谓。1-弧传递图有时亦称为对称图。
+\end{tcolorbox}
+
+A cycle on \(n\) vertices is \(s\) -arc transitive for all \(s\) , which only shows that truth and utility are different concepts. A more interesting example is provided by the cube, which is 2-arc transitive. The cube is not 3-arc transitive because 3-arcs that form three sides of a four-cycle cannot be mapped to 3-arcs that do not (see Figure 4.1).
+
+\begin{tcolorbox}\relax
+一个有 \(n\) 个顶点的圈对所有 \(s\) 都是 \(s\) -弧传递的，这只能说明真理与实用性并非同一概念。一个更有趣的例子是立方体，它是 2-弧传递的。立方体不是 3-弧传递的，因为构成四环三条边的 3-弧不能映射为不构成三边的 3-弧(见图 4.1)。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.6\textwidth]{images/77_427_370_684_261_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 4.1. Inequivalent 3-arcs in the cube
+
+\begin{tcolorbox}\relax
+图 4.1. 立方体中不同价的 3-弧
+\end{tcolorbox}
+
+A graph \(X\) is \(s\) -arc transitive if it has a group \(G\) of automorphisms such that \(G\) is transitive, and the stabilizer \({G}_{u}\) of a vertex \(u\) acts transitively on the \(s\) -arcs with initial vertex \(u\) .
+
+\begin{tcolorbox}\relax
+若图 \(X\) 存在一群自同构 \(G\) ，使得 \(G\) 在图上是传递的，且某顶点 \(u\) 的稳定子 \({G}_{u}\) 在以 \(u\) 为初始顶点的 \(s\) -弧上作传递作用，则称该图为 \(s\) -弧传递的。
+\end{tcolorbox}
+
+Lemma 4.1.1 The graphs \(J\left( {v,k,i}\right)\) are at least arc transitive.
+
+\begin{tcolorbox}\relax
+引理 4.1.1 图 \(J\left( {v,k,i}\right)\) 至少是弧传递的。
+\end{tcolorbox}
+
+Proof. Consider the vertex \(\{ 1,\ldots ,k\}\) . The stabilizer of this vertex contains \(\operatorname{Sym}\left( k\right)  \times  \operatorname{Sym}\left( {v - k}\right)\) . Clearly, any two \(k\) -sets meeting this initial vertex in an \(i\) -set can be mapped to each other by this group.
+
+\begin{tcolorbox}\relax
+证明。取顶点 \(\{ 1,\ldots ,k\}\) 。该顶点的稳定子包含 \(\operatorname{Sym}\left( k\right)  \times  \operatorname{Sym}\left( {v - k}\right)\) 。显然，任意两个在此初始顶点处相交于一个 \(i\) -集的 \(k\) -集可被该群相互映射。
+\end{tcolorbox}
+
+Lemma 4.1.2 The graphs \(J\left( {{2k} + 1,k,0}\right)\) are at least 2-arc transitive.
+
+\begin{tcolorbox}\relax
+引理 4.1.2 图 \(J\left( {{2k} + 1,k,0}\right)\) 至少是 2-弧传递的。
+\end{tcolorbox}
+
+The girth of a graph is the length of the shortest cycle in it. Our first result implies that the subgraphs induced by \(s\) -arcs in \(s\) -arc transitive graphs are paths.
+
+\begin{tcolorbox}\relax
+图的圈长是其中最短圈的长度。我们的第一个结果蕴含:在 \(s\) -弧传递图中，由 \(s\) -弧所诱导的子图是路径。
+\end{tcolorbox}
+
+Lemma 4.1.3 (Tutte) If \(X\) is an \(s\) -arc transitive graph with valency at least three and girth \(g\) , then \(g \geq  {2s} - 2\) .
+
+\begin{tcolorbox}\relax
+引理 4.1.3(Tutte)若 \(X\) 是一幅度至少为三且圈长为 \(g\) 的 \(s\) -弧传递图，则 \(g \geq  {2s} - 2\) 。
+\end{tcolorbox}
+
+Proof. We may assume that \(s \geq  3\) , since the condition on the girth is otherwise meaningless. It is easy to see that \(X\) contains a cycle of length \(g\) and a path of length \(g\) whose end-vertices are not adjacent. Therefore \(X\) contains a \(g\) -arc with adjacent end-vertices and a \(g\) -arc with nonadjacent end-vertices; clearly, no automorphism can map one to the other, and so \(s < g\) . Since \(X\) contains cycles of length \(g\) , and since these contain \(s\) - arcs, it follows that any \(s\) -arc must lie in a cycle of length \(g\) . Suppose that \({v}_{0},\ldots ,{v}_{s}\) is an \(s\) -arc. Denote it by \(\alpha\) . Since \({v}_{s - 1}\) has valency at least three, it is adjacent to a vertex \(w\) other than \({v}_{s - 2}\) and \({v}_{s}\) , and since the girth of \(X\) is at least \(s\) , this vertex cannot lie in \(\alpha\) . Hence we may replace \({v}_{s}\) by \(w\) , obtaining a second \(s\) -arc \(\beta\) that intersects \(\alpha\) in an \(\left( {s - 1}\right)\) -arc. Since \(\beta\) must lie in a circuit of length \(g\) , we thus obtain a pair of circuits of length \(g\) that have at least \(s - 1\) edges in common.
+
+\begin{tcolorbox}\relax
+证明。我们可以假设 \(s \geq  3\) ，否则关于圈长度的条件毫无意义。很容易看出 \(X\) 包含一个长度为 \(g\) 的回路和一条长度为 \(g\) 且端点不相邻的路。因此 \(X\) 含有一个端点相邻的 \(g\) -弧和一个端点不相邻的 \(g\) -弧；显然，没有自同构能将二者映为彼此，于是 \(s < g\) 。既然 \(X\) 包含长度为 \(g\) 的回路，且这些回路包含 \(s\) -弧，便可知任何 \(s\) -弧必须位于某一长度为 \(g\) 的回路中。设 \({v}_{0},\ldots ,{v}_{s}\) 为一条 \(s\) -弧，记为 \(\alpha\) 。由于 \({v}_{s - 1}\) 的次数至少为三，它除 \({v}_{s - 2}\) 与 \({v}_{s}\) 外还与另一个顶点 \(w\) 相邻，且因 \(X\) 的圈长至少为 \(s\) ，该顶点不可能落在 \(\alpha\) 中。故我们可以用 \(w\) 代替 \({v}_{s}\) ，得到第二条与 \(\alpha\) 在一个 \(\left( {s - 1}\right)\) -弧上相交的 \(s\) -弧 \(\beta\) 。因为 \(\beta\) 必须位于一条长度为 \(g\) 的回路中，遂得到一对具有至少 \(s - 1\) 条公共边的长度为 \(g\) 的回路。
+\end{tcolorbox}
+
+If we delete these \(s - 1\) edges from the graph formed by the edges of the two circuits of length \(g\) , the resulting graph still contains a cycle of length at most \({2g} - {2s} + 2\) . Hence \({2g} - {2s} + 2 \geq  g\) , and the result follows.
+
+\begin{tcolorbox}\relax
+如果我们从由两条长度为 \(g\) 的回路的边构成的图中删除这 \(s - 1\) 条边，得到的图仍包含长度不超过 \({2g} - {2s} + 2\) 的回路。因此 \({2g} - {2s} + 2 \geq  g\) ，结论随之成立。
+\end{tcolorbox}
+
+Given this lemma, it is natural to ask what can be said about the s-arc transitive graphs with girth \({2s} - 2\) . It follows from our next result that these graphs are, in the language of Section 5.6, generalized polygons. It is a consequence of results we state there that \(s \leq  9\) .
+
+\begin{tcolorbox}\relax
+根据此引理，自然要问关于圈长为 \({2s} - 2\) 的 s-弧传递图可得何种结论。由下一条结果可知，这些图用第 5.6 节的语言是广义多边形。根据我们在那里陈述的结果，可得 \(s \leq  9\) 。
+\end{tcolorbox}
+
+Lemma 4.1.4 (Tutte) If \(X\) is an \(s\) -arc transitive graph with girth \({2s} - 2\) , it is bipartite and has diameter \(s - 1\) .
+
+\begin{tcolorbox}\relax
+引理 4.1.4(Tutte) 若 \(X\) 是一幅圈长为 \({2s} - 2\) 的 \(s\) -弧传递图，则它是二分图且直径为 \(s - 1\) 。
+\end{tcolorbox}
+
+Proof. We first observe that if \(X\) has girth \({2s} - 2\) , then any \(s\) -arc lies in at most one cycle of length \({2s} - 2\) , and so if \(X\) is \(s\) -arc transitive, it follows that every \(s\) -arc lies in a unique cycle of length \({2s} - 2\) . Clearly, \(X\) has diameter at least \(s - 1\) , because opposite vertices in a cycle of length \({2s} - 2\) are at this distance. Now, let \(u\) be a vertex of \(X\) and suppose for a contradiction that \(v\) is a vertex at distance \(s\) from it. Then there is an \(s\) -arc joining \(u\) to \(v\) , which must lie in a cycle of length \({2s} - 2\) . Since a cycle of this length has diameter \(s - 1\) , it follows that \(v\) cannot be of distance \(s\) from \(u\) . Therefore, the diameter of \(X\) is at most \(s - 1\) and hence equal to \(s - 1\) .
+
+\begin{tcolorbox}\relax
+证明。首先注意若 \(X\) 的圈长为 \({2s} - 2\) ，则任一 \(s\) -弧最多位于一条长度为 \({2s} - 2\) 的回路中，故若 \(X\) 为 \(s\) -弧传递，则每一 \(s\) -弧都位于唯一的一条长度为 \({2s} - 2\) 的回路中。显然 \(X\) 的直径至少为 \(s - 1\) ，因为长度为 \({2s} - 2\) 的回路中对顶点之间的距离即该值。现取 \(u\) 为 \(X\) 的一顶点，若反设存在一顶点 \(v\) 与其距离为 \(s\) ，则存在一条连接 \(u\) 与 \(v\) 的 \(s\) -弧，该弧必位于一条长度为 \({2s} - 2\) 的回路中。既然该长度的回路的直径为 \(s - 1\) ，则 \(v\) 不可能与 \(u\) 的距离为 \(s\) 。因此 \(X\) 的直径至多为 \(s - 1\) ，故等于 \(s - 1\) 。
+\end{tcolorbox}
+
+If \(X\) is not bipartite, then it contains an odd cycle; suppose \(C\) is an odd cycle of minimal length. Because the diameter of \(X\) is \(s - 1\) , the cycle must have length \({2s} - 1\) . Let \(u\) be a vertex of \(C\) , and let \(v\) and \({v}^{\prime }\) be the two adjacent vertices in \(C\) at distance \(s - 1\) from \(u\) . Then we can form an \(s\) -arc \(\left( {u,\ldots ,v,{v}^{\prime }}\right)\) . This \(s\) -arc lies in a cycle \({C}^{\prime }\) of length \({2s} - 2\) . The vertices of \(C\) and \({C}^{\prime }\) not internal to the \(s\) -arc form a cycle of length less than \({2s} - 2\) , which is a contradiction.
+
+\begin{tcolorbox}\relax
+如果 \(X\) 不是二分图，则它包含一条奇环；设 \(C\) 是一条最短的奇环。由于 \(X\) 的直径为 \(s - 1\) ，该环的长度必为 \({2s} - 1\) 。令 \(u\) 为 \(C\) 的一个顶点，且令 \(v\) 与 \({v}^{\prime }\) 为 \(C\) 中与 \(u\) 距离为 \(s - 1\) 的两个相邻顶点。于是我们可以构成一条 \(s\) -弧 \(\left( {u,\ldots ,v,{v}^{\prime }}\right)\) 。这条 \(s\) -弧位于一条长度为 \({2s} - 2\) 的环 \({C}^{\prime }\) 中。 \(C\) 与 \({C}^{\prime }\) 中不属于该 \(s\) -弧内部的顶点组成一条长度小于 \({2s} - 2\) 的环，这与假设矛盾。
+\end{tcolorbox}
+
+In Section 4.5 we will use this lemma to show that \(s\) -arc transitive graphs with girth \({2s} - 2\) are distance transitive.
+
+\begin{tcolorbox}\relax
+在第 4.5 节我们将用此引理证明，圈长为 \({2s} - 2\) 的 \(s\) -弧传递图是距离传递的。
+\end{tcolorbox}
+
+\section*{4.2 Arc Graphs}
+
+\begin{tcolorbox}\relax
+\section*{4.2 弧图}
+\end{tcolorbox}
+
+If \(s \geq  1\) and \(\alpha  = \left( {{x}_{0},\ldots ,{x}_{s}}\right)\) is an arc in \(X\) , we define its head head \(\left( \alpha \right)\) to be the \(\left( {s - 1}\right)\) -arc \(\left( {{x}_{1},\ldots ,{x}_{s}}\right)\) and its tail tail \(\left( \alpha \right)\) to be the \(\left( {s - 1}\right)\) -arc \(\left( {{x}_{0},\ldots ,{x}_{s - 1}}\right)\) . If \(\alpha\) and \(\beta\) are \(s\) -arcs, then we say that \(\beta\) follows \(\alpha\) if there is an \(\left( {s + 1}\right)\) -arc \(\gamma\) such that \(\operatorname{head}\left( \gamma \right)  = \beta\) and \(\operatorname{tail}\left( \gamma \right)  = \alpha\) . (Somewhat more colourfully, we say that \(\alpha\) can be shunted onto \(\beta\) , and envisage pushing \(\alpha\) one step onto \(\beta\) .) Let \(s\) be a nonnegative integer. We use \({X}^{\left( s\right) }\) to denote the directed graph with the \(s\) -arcs of \(X\) as its vertices, such that \(\left( {\alpha ,\beta }\right)\) is an arc if and only if \(\alpha\) can be shunted onto \(\beta\) . Any automorphisms of \(X\) extend naturally to automorphisms of \({X}^{\left( s\right) }\) , and so if \(X\) is \(s\) -arc transitive, then \({X}^{\left( s\right) }\) is vertex transitive.
+
+\begin{tcolorbox}\relax
+若 \(s \geq  1\) 和 \(\alpha  = \left( {{x}_{0},\ldots ,{x}_{s}}\right)\) 是 \(X\) 中的一条弧，定义其首端 head \(\left( \alpha \right)\) 为 \(\left( {s - 1}\right)\) -弧 \(\left( {{x}_{1},\ldots ,{x}_{s}}\right)\) ，其尾端 tail \(\left( \alpha \right)\) 为 \(\left( {s - 1}\right)\) -弧 \(\left( {{x}_{0},\ldots ,{x}_{s - 1}}\right)\) 。若 \(\alpha\) 和 \(\beta\) 是 \(s\) -弧，若存在一条 \(\left( {s + 1}\right)\) -弧 \(\gamma\) 使得 \(\operatorname{head}\left( \gamma \right)  = \beta\) 与 \(\operatorname{tail}\left( \gamma \right)  = \alpha\) ，则称 \(\beta\) 紧接在 \(\alpha\) 之后。(更形象地说，称 \(\alpha\) 可以被推进到 \(\beta\) ，想象把 \(\alpha\) 向前推进一步至 \(\beta\) 。)令 \(s\) 为非负整数。用 \({X}^{\left( s\right) }\) 表示以 \(X\) 的 \(s\) -弧为顶点的有向图，使得当且仅当 \(\alpha\) 可以被推进到 \(\beta\) 时， \(\left( {\alpha ,\beta }\right)\) 为一条弧。 \(X\) 的任一自同构自然扩展为 \({X}^{\left( s\right) }\) 的自同构，因此若 \(X\) 为 \(s\) -弧传递，则 \({X}^{\left( s\right) }\) 为顶点传递。
+\end{tcolorbox}
+
+Lemma 4.2.1 Let \(X\) and \(Y\) be directed graphs and let \(f\) be a homomorphism from \(X\) onto \(Y\) such that every edge in \(Y\) is the image of an edge in X. Suppose \({y}_{0},\ldots ,{y}_{r}\) is a path in \(Y\) . Then for each vertex \({x}_{0}\) in \(X\) such that \(f\left( {x}_{0}\right)  = {y}_{0}\) , there is a path \({x}_{0},\ldots ,{x}_{r}\) such that \(f\left( {x}_{i}\right)  = {y}_{i}\) .
+
+\begin{tcolorbox}\relax
+引理 4.2.1 设 \(X\) 与 \(Y\) 为有向图，且有从 \(X\) 到 \(Y\) 的满同态 \(f\) ，满足 \(Y\) 中的每条边都是 \(X\) 中某条边的像。设 \({y}_{0},\ldots ,{y}_{r}\) 是 \(Y\) 中的一条路径。则对于 \(X\) 中任一顶点 \({x}_{0}\) 使得 \(f\left( {x}_{0}\right)  = {y}_{0}\) ，存在一条路径 \({x}_{0},\ldots ,{x}_{r}\) 使得 \(f\left( {x}_{i}\right)  = {y}_{i}\) 。
+\end{tcolorbox}
+
+\section*{Proof. Exercise.}
+
+\begin{tcolorbox}\relax
+\section*{证明。习题。}
+\end{tcolorbox}
+
+Define a "spindle" in \(X\) to be a subgraph consisting of two given vertices joined by three paths, with any two of these paths having only the given vertices in common. Define a "bicycle" to be a subgraph consisting either of two cycles with exactly one vertex in common, or two vertex-disjoint cycles and a path joining them having only its end-vertices in common with the cycles. We claim that if \(X\) is a spindle or a bicycle, then \({X}^{\left( 1\right) }\) is strongly connected. We leave the proof of this as an easy exercise. Nonetheless, it is the key to the proof of the following result.
+
+\begin{tcolorbox}\relax
+在 \(X\) 中将“主轴”定义为由两定点通过三条互除了这两点外不再相交的路径连接而成的子图。将“自行车”定义为由下列之一构成的子图:两个恰有一个公共顶点的圈，或两个顶点互不相交的圈再加一条仅与圈的端点相交的路径。我们声称若 \(X\) 是主轴或自行车，则 \({X}^{\left( 1\right) }\) 是强连通的。此处证明留作易题。但这却是下述结论证明的关键。
+\end{tcolorbox}
+
+Theorem 4.2.2 If \(X\) is a connected graph with minimum valency two that is not a cycle, then \({X}^{\left( s\right) }\) is strongly connected for all \(s \geq  0\) .
+
+\begin{tcolorbox}\relax
+定理 4.2.2 若 \(X\) 是一个最小度至少为二且非单圈的连通图，则对一切 \(s \geq  0\) ， \({X}^{\left( s\right) }\) 都是强连通的。
+\end{tcolorbox}
+
+Proof. First we shall prove the result for \(s = 0\) and \(s = 1\) , and then by induction on \(s\) . If \(s = 0\) , then \({X}_{0}\) is the graph obtained by replacing each edge of \(X\) with a pair of oppositely directed arcs, so the result is clearly true. If \(s = 1\) , then we must show that any 1-arc can be shunted onto any other 1-arc. Since \(X\) is connected, we can shunt any 1-arc onto any edge of \(X\) , but not necessarily facing in the right direction. Therefore, it is necessary and sufficient to show that we can reverse the direction of any 1-arc, that is, shunt \({xy}\) onto \({yx}\) .
+
+\begin{tcolorbox}\relax
+证明。先为 \(s = 0\) 与 \(s = 1\) 证明该结论，然后对 \(s\) 归纳。如果 \(s = 0\) ，则 \({X}_{0}\) 是通过将 \(X\) 的每条边替换为一对方向相反的弧所得的图，故结论显然成立。如果 \(s = 1\) ，则须证明任一 1-弧都可被转移到任一另一 1-弧上。由于 \(X\) 连通，我们可以把任一 1-弧转移到 \(X\) 的任一条边上，但方向可能不对。因此，必要且充分的是证明我们能反转任一 1-弧的方向，即将 \({xy}\) 转移到 \({yx}\) 上。
+\end{tcolorbox}
+
+Since \(X\) has minimum valency at least two and is finite, it contains a cycle, \(C\) say. If \(C\) does not contain both \(x\) and \(y\) , then there is a (possibly empty) path in \(X\) joining \(y\) to \(C\) . It is now easy to shunt \({xy}\) along the path, around \(C\) , then back along the path in the opposite direction to \({yx}\) .
+
+\begin{tcolorbox}\relax
+由于 \(X\) 的最小度至少为二且图有限，故它含有一个圈，记为 \(C\) 。若 \(C\) 不同时包含 \(x\) 与 \(y\) ，则在 \(X\) 中存在一条(可能为空的)路径将 \(y\) 与 \(C\) 连接。现在可以沿该路径将 \({xy}\) 转移，绕过 \(C\) ，然后沿该路径逆向返回至 \({yx}\) 。
+\end{tcolorbox}
+
+If \(x\) and \(y\) are in \(V\left( C\right)\) but \({xy} \notin  E\left( C\right)\) , then \(C\) together with the edge \({xy}\) is a spindle, and we are done.
+
+\begin{tcolorbox}\relax
+若 \(x\) 与 \(y\) 都在 \(V\left( C\right)\) 但 \({xy} \notin  E\left( C\right)\) ，则 \(C\) 连同边 \({xy}\) 构成一个主轴，命题得证。
+\end{tcolorbox}
+
+Hence we may assume that \({xy} \in  E\left( C\right)\) . Since \(X\) is not a cycle, there is a vertex in \(C\) adjacent to a vertex not in \(C\) . Suppose \(w\) in \(V\left( C\right)\) is adjacent to a vertex \(z\) not in \(C\) . Let \(P\) be a path with maximal length in \(X\) , starting with \(w\) and \(z\) , in this order. Then the last vertex of \(P\) is adjacent to a vertex in \(P\) or a vertex in \(C\) . If it is adjacent to a vertex in \(C\) other than \(w\) , then \({xy}\) is an edge in a spindle. If it is adjacent to \(w\) or to a vertex of \(P\) not in \(C\) , then \({xy}\) is an edge in a bicycle. In either case we are done.
+
+\begin{tcolorbox}\relax
+因此我们可假设 \({xy} \in  E\left( C\right)\) 。因 \(X\) 不是单圈，故在 \(C\) 中有一顶点与 \(C\) 外的一顶点相邻。设 \(w\) 在 \(V\left( C\right)\) 中与一顶点 \(z\) (不在 \(C\) 中)相邻。令 \(P\) 为在 \(X\) 中以 \(w\) 与 \(z\) (按此顺序)起始的最长路径。则 \(P\) 的最后一顶点要么与 \(P\) 中的某顶点相邻，要么与 \(C\) 中的某顶点相邻。若它与除 \(w\) 外的 \(C\) 中某顶点相邻，则 \({xy}\) 是主轴中的一条边。若它与 \(w\) 或与 \(P\) 中不在 \(C\) 的某顶点相邻，则 \({xy}\) 是自行车中的一条边。两种情形下命题均得证。
+\end{tcolorbox}
+
+Now, assume that \({X}^{\left( s\right) }\) is strongly connected for some \(s \geq  1\) . It is easy to see that the operation of taking the head of an \(\left( {s + 1}\right)\) -arc is a homomorphism from \({X}^{\left( s + 1\right) }\) to \({X}^{\left( s\right) }\) . Since \(X\) has minimum valency at least two, each \(s\) -arc is the head of an \(\left( {s + 1}\right)\) -arc, and it follows that every edge of \({X}^{\left( s\right) }\) is the image of an edge in \({X}^{\left( s + 1\right) }\) . Let \(\alpha\) and \(\beta\) be any two \(\left( {s + 1}\right)\) -arcs in \(X\) . Since \({X}^{\left( s\right) }\) is strongly connected, there is a path in it joining head \(\left( \alpha \right)\) to \(\operatorname{tail}\left( \beta \right)\) . By the lemma above, this path lifts to a path in \({X}^{\left( s + 1\right) }\) from \(\alpha\) to a vertex \(\gamma\) where head \(\left( \gamma \right)  = \operatorname{tail}\left( \beta \right)\) . Since \(s \geq  1\) and \(X\) has minimum valency at least two, we see that \(\gamma\) can be shunted onto \(\beta\) . Thus \(\alpha\) can be shunted to \(\beta\) via \(\gamma\) , and so there is a path in \({X}^{\left( s + 1\right) }\) from \(\alpha\) to \(\beta\) .
+
+\begin{tcolorbox}\relax
+现在，假设对于某个 \(s \geq  1\) ， \({X}^{\left( s\right) }\) 是强连通的。容易看出，取一个 \(\left( {s + 1}\right)\) -弧的终点是从 \({X}^{\left( s + 1\right) }\) 到 \({X}^{\left( s\right) }\) 的一个同态。由于 \(X\) 的最小度至少为二，每个 \(s\) -弧都是某个 \(\left( {s + 1}\right)\) -弧的终点，因而 \({X}^{\left( s\right) }\) 的每条边都是 \({X}^{\left( s + 1\right) }\) 中某条边的像。令 \(\alpha\) 和 \(\beta\) 为 \(X\) 中任意两条 \(\left( {s + 1}\right)\) -弧。既然 \({X}^{\left( s\right) }\) 是强连通的，便存在一条在其中将终点 \(\left( \alpha \right)\) 连到 \(\operatorname{tail}\left( \beta \right)\) 的路径。由上面的引理，这条路径可以提升为 \({X}^{\left( s + 1\right) }\) 中从 \(\alpha\) 到某一顶点 \(\gamma\) 的路径，其终点为 \(\left( \gamma \right)  = \operatorname{tail}\left( \beta \right)\) 。由于 \(s \geq  1\) 与 \(X\) 的最小度至少为二，我们看到可将 \(\gamma\) 转移至 \(\beta\) 。因此 \(\alpha\) 可经由 \(\gamma\) 转移到 \(\beta\) ，于是存在一条从 \(\alpha\) 到 \(\beta\) 的 \({X}^{\left( s + 1\right) }\) 中的路径。
+\end{tcolorbox}
+
+In the next section we will use this theorem to prove that an arc-transitive cubic graph is \(s\) -arc regular, for some \(s\) . This is a crucial step in Tutte’s work on arc-transitive cubic graphs.
+
+\begin{tcolorbox}\relax
+在下一节我们将用此定理证明一个弧传递的三次图对于某个 \(s\) 是 \(s\) -弧正则的。这是图论中图弧传递三次图研究(Tutte 工作)的关键一步。
+\end{tcolorbox}
+
+\section*{4.3 Cubic Arc-Transitive Graphs}
+
+\begin{tcolorbox}\relax
+\section*{4.3 三正则弧可传图}
+\end{tcolorbox}
+
+In 1947 Tutte showed that for any \(s\) -arc transitive cubic graph, \(s \leq  5\) . This was, eventually, the stimulus for a lot of work. One outcome of this was a proof, by Richard Weiss, that for any \(s\) -arc transitive graph, \(s \leq  7\) . This is a very deep result, the proof of which depends on the classification of the finite simple groups.
+
+\begin{tcolorbox}\relax
+1947 年，Tutte 证明对于任意 \(s\) -弧可传的三正则图， \(s \leq  5\) 。这一结果最终激发了大量研究。其中一个成果是 Richard Weiss 的证明，表明对于任意 \(s\) -弧可传的图， \(s \leq  7\) 。这是一个非常深刻的结果，其证明依赖于有限简单群的分类。
+\end{tcolorbox}
+
+We used a form of the next result in proving Theorem 3.10.4.
+
+\begin{tcolorbox}\relax
+我们在证明定理 3.10.4 时使用了下述结果的一种形式。
+\end{tcolorbox}
+
+Lemma 4.3.1 Let \(X\) be a strongly connected directed graph, let \(G\) be a transitive subgroup of its automorphism group, and, if \(u \in  V\left( X\right)\) , let \(N\left( u\right)\) be the set of vertices \(v\) in \(V\left( X\right)\) such that \(\left( {u,v}\right)\) is an arc of \(X\) . If there is a vertex \(u\) of \(X\) such that \({G}_{u} \upharpoonright  N\left( u\right)\) is the identity, then \(G\) is regular.
+
+\begin{tcolorbox}\relax
+引理 4.3.1 设 \(X\) 为强连通有向图， \(G\) 为其自同构群的传递子群，且若 \(u \in  V\left( X\right)\) ，则令 \(N\left( u\right)\) 为顶点集 \(v\) 在 \(V\left( X\right)\) 中的子集，使得 \(\left( {u,v}\right)\) 为 \(X\) 的一条弧。若存在 \(X\) 的顶点 \(u\) 使得 \({G}_{u} \upharpoonright  N\left( u\right)\) 为恒等元，则 \(G\) 是正则的。
+\end{tcolorbox}
+
+Proof. Suppose \(u \in  V\left( X\right)\) and \({G}_{u} \upharpoonright  N\left( u\right)\) is the identity group. By Lemma 2.2.3, if \(v \in  V\left( X\right)\) , then \({G}_{v}\) is conjugate in \(G\) to \({G}_{u}\) . Hence \({G}_{v} \upharpoonright  N\left( v\right)\) must be the identity for all vertices \(v\) of \(X\) .
+
+\begin{tcolorbox}\relax
+证明。假设 \(u \in  V\left( X\right)\) 与 \({G}_{u} \upharpoonright  N\left( u\right)\) 为恒等群。由引理 2.2.3，若 \(v \in  V\left( X\right)\) ，则 \({G}_{v}\) 在 \(G\) 中与 \({G}_{u}\) 共轭。因此对 \(X\) 的所有顶点 \(v\) ， \({G}_{v} \upharpoonright  N\left( v\right)\) 必为恒等元。
+\end{tcolorbox}
+
+Assume, by way of contradiction, that \({G}_{u}\) is not the identity group. Since \(X\) is strongly connected, we may choose a directed path that goes from \(u\) to a vertex, \(w\) say, that is not fixed by \({G}_{u}\) . Choose this path to have minimum possible length, and let \(v\) denote the second-last vertex on it. Thus \(v\) is fixed by \({G}_{u}\) , and \(\left( {v,w}\right)\) is an arc in \(X\) . Since \({G}_{u}\) fixes all vertices in \(N\left( u\right)\) , we see that \(v \neq  u\) .
+
+\begin{tcolorbox}\relax
+假设相反，认为 \({G}_{u}\) 不是恒等群。由于 \(X\) 强连通，我们可选取一条定向路径从 \(u\) 到某一不被 \({G}_{u}\) 固定的顶点，记作 \(w\) 。选取该路径使其长度最小，令 \(v\) 为其倒数第二个顶点。因此 \(v\) 被 \({G}_{u}\) 固定，且 \(\left( {v,w}\right)\) 是 \(X\) 中的一条弧。由于 \({G}_{u}\) 固定 \(N\left( u\right)\) 中的所有顶点，我们有 \(v \neq  u\) 。
+\end{tcolorbox}
+
+Since \({G}_{u}\) fixes \(v\) , it fixes \(N\left( v\right)\) but acts nontrivially on it, because it does not fix \(w\) . Hence \({G}_{v} \upharpoonright  N\left( v\right)\) is not the identity. This contradiction forces us to conclude that \({G}_{u} = \langle e\rangle\) .
+
+\begin{tcolorbox}\relax
+既然 \({G}_{u}\) 固定 \(v\) ，它就固定 \(N\left( v\right)\) ，但在其上非平凡作用，因为它不固定 \(w\) 。因此 \({G}_{v} \upharpoonright  N\left( v\right)\) 不是恒等元。此矛盾迫使我们得出结论 \({G}_{u} = \langle e\rangle\) 。
+\end{tcolorbox}
+
+A graph is \(s\) -arc regular if for any two \(s\) -arcs there is a unique automorphism mapping the first to the second.
+
+\begin{tcolorbox}\relax
+若对于任意两条 \(s\) -弧存在唯一的自同构把第一条映到第二条，则称该图为 \(s\) -弧正则。
+\end{tcolorbox}
+
+Lemma 4.3.2 Let \(X\) be a connected cubic graph that is s-arc transitive, but not \(\left( {s + 1}\right)\) -arc transitive. Then \(X\) is s-arc regular.
+
+\begin{tcolorbox}\relax
+引理 4.3.2 设 \(X\) 为连通三正则图，且为 s-弧可传但非 \(\left( {s + 1}\right)\) -弧可传。则 \(X\) 为 s-弧正则。
+\end{tcolorbox}
+
+Proof. We note that if \(X\) is cubic, then \({X}^{\left( s\right) }\) has out-valency two. Now let \(G\) be the automorphism group of \(X\) , let \(\alpha\) be an \(s\) -arc in \(X\) , and let \(H\) be the subgroup of \(G\) fixing each vertex in \(\alpha\) . Then \(G\) acts vertex transitively on \({X}^{\left( s\right) }\) , and \(H\) is the stabilizer in \(G\) of the vertex \(\alpha\) in \({X}^{\left( s\right) }\) . If the restriction of \(H\) to the out-neighbours of \(\alpha\) is not trivial, then \(H\) must swap the two \(s\) -arcs that follow \(\alpha\) . Now, any two \(\left( {s + 1}\right)\) -arcs in \(X\) can be mapped by elements of \(G\) to \(\left( {s + 1}\right)\) -arcs that have \(\alpha\) as the "initial" \(s\) -arc; hence in this case we see that \(G\) is transitive on the \(\left( {s + 1}\right)\) -arcs of \(X\) , which contradicts our initial assumption.
+
+\begin{tcolorbox}\relax
+证明。注意如果 \(X\) 是三正则的，那么 \({X}^{\left( s\right) }\) 的出度为二。设 \(G\) 为 \(X\) 的自同构群， \(\alpha\) 为 \(X\) 中的一条 \(s\) -弧， \(H\) 为 \(G\) 中固定 \(\alpha\) 上每个顶点的子群。则 \(G\) 在 \({X}^{\left( s\right) }\) 上作顶点传递，且 \(H\) 是 \(G\) 在 \({X}^{\left( s\right) }\) 上对顶点 \(\alpha\) 的稳定子。如果 \(H\) 在 \(\alpha\) 的出邻居上的限制不平凡，那么 \(H\) 必定交换紧跟在 \(\alpha\) 之后的两个 \(s\) -弧。现在，任意两条 \(\left( {s + 1}\right)\) -弧都可以被 \(G\) 的元素映到以 \(\alpha\) 为“起始” \(s\) -弧的 \(\left( {s + 1}\right)\) -弧；因此在这种情况下我们看到 \(G\) 在 \(X\) 的 \(\left( {s + 1}\right)\) -弧上是传递的，这与我们的初始假设矛盾。
+\end{tcolorbox}
+
+Hence the restriction of \(H\) to the out-neighbours of \(\alpha\) is trivial, and it follows from Lemma 4.3.1 that \(H\) itself is trivial. Therefore, we have proved that \({G}_{\alpha } = \langle e\rangle\) , and so \(G\) acts regularly on the \(s\) -arcs of \(X\) .
+
+\begin{tcolorbox}\relax
+因此 \(H\) 在 \(\alpha\) 的出邻居上的限制是平凡的，由引理 4.3.1 可知 \(H\) 本身是平凡的。因此我们已证明 \({G}_{\alpha } = \langle e\rangle\) ，从而 \(G\) 在 \(X\) 的 \(s\) -弧上作正则作用。
+\end{tcolorbox}
+
+If \(X\) is a regular graph with valency \(k\) on \(n\) vertices and \(s \geq  1\) , then there exactly \({nk}{\left( k - 1\right) }^{s - 1}s\) -arcs. It follows that if \(X\) is \(s\) -arc transitive then \(\left| {\operatorname{Aut}\left( X\right) }\right|\) must be divisible by \({nk}{\left( k - 1\right) }^{s - 1}\) , and if \(X\) is \(s\) -arc regular, then \(\left| {\operatorname{Aut}\left( X\right) }\right|  = {nk}{\left( k - 1\right) }^{s - 1}\) . In particular, a cubic arc-transitive graph \(X\) is \(s\) -arc regular if and only if
+
+\begin{tcolorbox}\relax
+若 \(X\) 是一个在 \(n\) 个顶点上、度数为 \(k\) 的正则图且有 \(s \geq  1\) ，则恰有 \({nk}{\left( k - 1\right) }^{s - 1}s\) 条 \({nk}{\left( k - 1\right) }^{s - 1}s\) -弧。由此若 \(X\) 是 \(s\) -弧传递的，则 \(\left| {\operatorname{Aut}\left( X\right) }\right|\) 必须能被 \({nk}{\left( k - 1\right) }^{s - 1}\) 整除；若 \(X\) 是 \(s\) -弧正则的，则 \(\left| {\operatorname{Aut}\left( X\right) }\right|  = {nk}{\left( k - 1\right) }^{s - 1}\) 。特别地，三正则弧传递图 \(X\) 当且仅当它是 \(s\) -弧正则的
+\end{tcolorbox}
+
+\[
+\left| {\operatorname{Aut}\left( X\right) }\right|  = \left( {3n}\right) {2}^{s - 1}\text{ . }
+\]
+
+For an example, consider the cube. The alternative drawing of the cube in Figure 4.2 makes it clear that the stabilizer of a vertex contains Sym(3), and therefore its automorphism group has size at least 48. We observed earlier that the cube is not 3-arc transitive, so by Lemma 4.3.2 it must be precisely 2-arc regular, with full automorphism group of order 48.
+
+\begin{tcolorbox}\relax
+举例，考虑立方体。图 4.2 中立方体的另一种画法清楚地表明一个顶点的稳定子含有 Sym(3)，因此其自同构群的阶至少为 48。我们前面已注意到立方体不是 3-弧传递的，所以由引理 4.3.2 它必须正好是 2-弧正则的，其全自同构群的阶为 48。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.2\textwidth]{images/81_606_901_323_272_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 4.2. The cube redrawn
+
+\begin{tcolorbox}\relax
+图 4.2. 重新绘制的立方体
+\end{tcolorbox}
+
+Finally, we state Tutte's theorem.
+
+\begin{tcolorbox}\relax
+最后，我们陈述 Tutte 的定理。
+\end{tcolorbox}
+
+Theorem 4.3.3 If \(X\) is an \(s\) -arc regular cubic graph, then \(s \leq  5\) .
+
+\begin{tcolorbox}\relax
+定理 4.3.3 若 \(X\) 是一幅 \(s\) -弧正则的三正则图，则 \(s \leq  5\) 。
+\end{tcolorbox}
+
+The smallest 5-arc regular cubic graph is Tutte's 8-cage on 30 vertices, which we shall meet in Section 4.7.
+
+\begin{tcolorbox}\relax
+最小的 5-弧正则三正则图是 Tutte 的 8-圈(8-cage)，有 30 个顶点，我们将在第 4.7 节遇到它。
+\end{tcolorbox}
+
+Corollary 4.3.4 If \(X\) is an arc-transitive cubic graph, \(v \in  V\left( X\right)\) , and \(G = \operatorname{Aut}\left( X\right)\) , then \(\left| {G}_{v}\right|\) divides 48 and is divisible by three.
+
+\begin{tcolorbox}\relax
+推论 4.3.4 若 \(X\) 是一幅弧传递的三正则图， \(v \in  V\left( X\right)\) ，且 \(G = \operatorname{Aut}\left( X\right)\) ，则 \(\left| {G}_{v}\right|\) 整除 48 且被三整除。
+\end{tcolorbox}
+
+\section*{4.4 The Petersen Graph}
+
+\begin{tcolorbox}\relax
+\section*{4.4 佩特森图}
+\end{tcolorbox}
+
+The Petersen graph is one of the most remarkable of all graphs. Despite having only 10 vertices, it plays a central role in so many different aspects of graph theory that almost any graph theorist will automatically be forced to give it special consideration when forming or testing new theorems. We have already met the Petersen graph in several guises: as \(J\left( {5,2,0}\right)\) or \(\overline{L\left( {K}_{5}\right) }\) in Section 1.5, as the dual of \({K}_{6}\) in the projective plane in Section 1.8, and as one of the five nonhamiltonian vertex-transitive graphs in Section 3.6. Two different drawings of it are shown in Figure 4.3.
+
+\begin{tcolorbox}\relax
+佩特森图是所有图中最值得注意的图之一。尽管只有 10 个顶点，它在图论的诸多方面都居于核心地位，以至于任何图论学者在构造或检验新定理时几乎都会自然而然地给予它特殊关注。我们已在几种不同情形下遇到过佩特森图:在第 1.5 节作为 \(J\left( {5,2,0}\right)\) 或 \(\overline{L\left( {K}_{5}\right) }\) ，在第 1.8 节作为投影平面中 \({K}_{6}\) 的对偶，以及在第 3.6 节作为五个非哈密顿并且顶点传递的图之一。图 4.3 展示了它的两种不同画法。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.8\textwidth]{images/82_303_335_926_386_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 4.3. Two more drawings of the Petersen graph
+
+\begin{tcolorbox}\relax
+图 4.3. 佩特森图的另外两种画法
+\end{tcolorbox}
+
+The Petersen graph can also be constructed from the dodecahedron, which is shown in Figure 1.4. Every vertex \(v\) in the dodecahedron has a unique vertex \({v}^{\prime }\) at distance five from it. Consider the graph whose vertex set is the ten pairs of the form \(\left\{  {v,{v}^{\prime }}\right\}\) , where \(\left\{  {u,{u}^{\prime }}\right\}\) is adjacent to \(\left\{  {v,{v}^{\prime }}\right\}\) if and only if there is a perfect matching between them. The resulting graph is the Petersen graph. In this situation we say that the dodecahedron is a 2-fold cover of the Petersen graph. We consider covers in more detail in Section 6.8.
+
+\begin{tcolorbox}\relax
+佩特森图也可以由二十面体构造，二十面体见图 1.4。二十面体中的每个顶点 \(v\) 都有一个与之距离为五的唯一顶点 \({v}^{\prime }\) 。考虑这样一个图:其顶点集是十个形如 \(\left\{  {v,{v}^{\prime }}\right\}\) 的对，且当且仅当它们之间存在完美匹配时， \(\left\{  {u,{u}^{\prime }}\right\}\) 与 \(\left\{  {v,{v}^{\prime }}\right\}\) 相邻。所得的图即为佩特森图。在这种情况下，我们说二十面体是佩特森图的二重覆盖。我们将在第 6.8 节中更详细地讨论覆盖。
+\end{tcolorbox}
+
+Since \(\operatorname{Sym}\left( 5\right)\) acts on \(J\left( {5,2,0}\right)\) , we see that the automorphism group of the Petersen graph has order at least 120, and therefore it is at least 3-arc transitive (also see Exercise 5). Because the Petersen graph has girth five, by Lemma 4.1.3 it cannot be 4-arc transitive. Hence it is 3-arc regular, and its automorphism group has order exactly 120. Therefore, Sym(5) in its action on the 2-element subsets of a set of five elements is the full automorphism group of the Petersen graph.
+
+\begin{tcolorbox}\relax
+由于 \(\operatorname{Sym}\left( 5\right)\) 在 \(J\left( {5,2,0}\right)\) 上有作用，我们看到佩特森图的自同构群阶至少为 120，因此它至少是 3 弧传递的(另见练习 5)。因为佩特森图的girth 为五，按引理 4.1.3 它不可能是 4 弧传递的。因此它是 3 弧正规(3-arc regular)，其自同构群的阶恰为 120。因此，Sym(5) 在对五元素集合的 2 元子集上的作用就是佩特森图的全自同构群。
+\end{tcolorbox}
+
+The Petersen graph plays an important role in one of the most famous of all graph-theoretical problems. The four colour problem asks whether every plane graph can have its faces coloured with four colours such that faces with a common edge receive different colours. It can be shown that this is equivalent to the assertion that a cubic planar graph with edge connectivity at least two can have its edges coloured with three colours such that incident edges receive different colours (that is, has a proper 3- edge colouring). The Petersen graph was the first cubic graph discovered that did not have a proper 3-edge colouring.
+
+\begin{tcolorbox}\relax
+佩特森图在最著名的图论问题之一中起着重要作用。四色问题询问是否每个平面图的面都可以用四种颜色着色，使得共用边的面颜色不同。可证明，这等价于下述断言:每个边连通度至少为二的三次平面图的边都可用三种颜色着色，使相邻边颜色不同(即有一个适当的 3-边着色)。佩特森图是第一个被发现的不具有适当 3-边着色的三次图。
+\end{tcolorbox}
+
+Theorem 4.4.1 The Petersen graph cannot be 3-edge coloured.
+
+\begin{tcolorbox}\relax
+定理 4.4.1 佩特森图不能被 3-边着色。
+\end{tcolorbox}
+
+Proof. Let \(P\) denote the Petersen graph, and suppose for a contradiction that it can be 3-edge coloured. Since \(P\) is cubic, each colour class is a 1- factor of \(P\) . A simple case argument shows that each edge lies in precisely two 1-factors (Figure 4.4 shows the two 1-factors containing the vertical
+
+\begin{tcolorbox}\relax
+证明。令 \(P\) 表示佩特森图，假设为矛盾它可以被 3-边着色。由于 \(P\) 是三次的，每一种颜色类都是 \(P\) 的一个 1-因子。简单的情形分析表明每条边恰好属于两个 1-因子(图 4.4 显示了包含竖直“辐条”边的两个 1-因子)。对于这两个 1-因子中的每一个，剩余的边组成一个同构于 \(P\) 的图，该图不能被划分为两个 1-因子。
+\end{tcolorbox}
+
+"spoke" edge). For each of these 1-factors, the remaining edges form a graph isomorphic to \(2{C}_{5}\) that cannot be partitioned into two 1-factors. Since \(P\) is edge transitive, this is true for all 1-factors of \(P\) , and thus \(P\) is not 3-edge colourable.
+
+\begin{tcolorbox}\relax
+“辐”边)。对于这每一个一因子，剩下的边构成一个同构于 \(2{C}_{5}\) 的图，且不能划分为两个一因子。由于 \(P\) 对边传递， \(P\) 的所有一因子都具有此性质，因此 \(P\) 不是三边可着色的。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.8\textwidth]{images/83_310_431_911_368_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 4.4. Two 1-factors through an edge of \(P\)
+
+\begin{tcolorbox}\relax
+图 4.4. 通过 \(P\) 的一条边的两个 1-因子
+\end{tcolorbox}
+
+Thus the Petersen graph made the first of its many appearances as a counterexample. Since it is not planar, it is not a counterexample to the four colour problem, which was eventually proved in 1977, thus becoming the four colour theorem.
+
+\begin{tcolorbox}\relax
+因此佩特森图首次以反例的身份出现。由于它不可平面化，它不是四色问题的反例；四色问题最终在 1977 年被证明，从而成为四色定理。
+\end{tcolorbox}
+
+We have already observed that there is a cycle through any nine vertices in the Petersen graph. Let \(X \smallsetminus  v\) denote the subgraph of \(X\) induced by \(V\left( X\right)  \smallsetminus  \{ v\}\) . A nonhamiltonian graph \(X\) such that \(X \smallsetminus  v\) is hamiltonian for all \(v\) is called hypohamiltonian. The Petersen graph is the unique smallest hypohamiltonian graph; the next smallest have 13 and 15 vertices, respectively, and are closely related to the Petersen graph. We will see two more hypohamiltonian graphs in Section 13.6.
+
+\begin{tcolorbox}\relax
+我们已注意到在 Petersen 图中任意九个顶点之间都有一条环路。设 \(X \smallsetminus  v\) 表示由 \(V\left( X\right)  \smallsetminus  \{ v\}\) 所诱导的 \(X\) 的子图。非哈密顿图 \(X\) 若对所有 \(v\) 而 \(X \smallsetminus  v\) 都是哈密顿的，则称为欠哈密顿(hypohamiltonian)。Petersen 图是唯一的最小欠哈密顿图；下一个最小的分别有 13 和 15 个顶点，且与 Petersen 图密切相关。我们将在第 13.6 节看到另外两个欠哈密顿图。
+\end{tcolorbox}
+
+So far, we have only scratched the surface of the many ways in which the Petersen graph is special. It will reappear in several of the remaining sections of this book. In particular, the Petersen graph is a distance-transitive graph (Section 4.5), a Moore graph (Section 5.8), and a strongly regular graph (Chapter 10).
+
+\begin{tcolorbox}\relax
+迄今为止，我们只是触及了 Petersen 图特殊性的冰山一角。它将在本书剩余若干章节中再次出现。特别地，Petersen 图是一个距离传递图(第 4.5 节)、一个 Moore 图(第 5.8 节)以及一个强正则图(第 10 章)。
+\end{tcolorbox}
+
+\section*{4.5 Distance-Transitive Graphs}
+
+\begin{tcolorbox}\relax
+\section*{4.5 距离传递图}
+\end{tcolorbox}
+
+A connected graph \(X\) is distance transitive if given any two ordered pairs of vertices \(\left( {u,{u}^{\prime }}\right)\) and \(\left( {v,{v}^{\prime }}\right)\) such that \(d\left( {u,{u}^{\prime }}\right)  = d\left( {v,{v}^{\prime }}\right)\) , there is an automorphism \(g\) of \(X\) such that \(\left( {v,{v}^{\prime }}\right)  = {\left( u,{u}^{\prime }\right) }^{g}\) . A distance-transitive graph is always at least 1-arc transitive. The complete graphs, the complete bipartite graphs with equal-sized parts, and the circuits are the cheapest examples available. A more interesting example is provided by the Petersen graph. It is not hard to see that this is distance transitive, since it is arc transitive and its complement, the line graph of \({K}_{5}\) , is also arc transitive.
+
+\begin{tcolorbox}\relax
+一个连通图 \(X\) 若满足:对任意两个有序顶点对 \(\left( {u,{u}^{\prime }}\right)\) 与 \(\left( {v,{v}^{\prime }}\right)\) ，若 \(d\left( {u,{u}^{\prime }}\right)  = d\left( {v,{v}^{\prime }}\right)\) ，则存在 \(X\) 的自同构 \(g\) 使得 \(\left( {v,{v}^{\prime }}\right)  = {\left( u,{u}^{\prime }\right) }^{g}\) 。距离传递图总至少为 1-弧传递。最简单的例子是完全图、两部分大小相等的完全二部图和回路。更有意思的例子是佩特森图。由于它是弧传递且其补图—— \({K}_{5}\) 的线图——也弧传递，因此不难看出它是距离传递的。
+\end{tcolorbox}
+
+Another family of examples is provided by the \(k\) -cubes described in Section 3.7. If \(d\left( {u,{u}^{\prime }}\right)  = d\left( {v,{v}^{\prime }}\right)  = i\) , then by adding \(u\) to the first pair and \(v\) to the second pair, we can assume that \(u = v = 0\) . Then \({u}^{\prime }\) and \({v}^{\prime }\) are simply different vectors with \(i\) nonzero coordinates that can be mapped to one another by \(\operatorname{Sym}\left( k\right)\) acting on coordinate positions.
+
+\begin{tcolorbox}\relax
+另一族例子来自第 3.7 节所述的 \(k\) -立方体。如果 \(d\left( {u,{u}^{\prime }}\right)  = d\left( {v,{v}^{\prime }}\right)  = i\) ，那么通过在第一对加上 \(u\) 、在第二对加上 \(v\) ，我们可以假设 \(u = v = 0\) 。然后 \({u}^{\prime }\) 和 \({v}^{\prime }\) 只是具有 \(i\) 个非零坐标的不同向量，可由作用在坐标位置上的 \(\operatorname{Sym}\left( k\right)\) 相互映射。
+\end{tcolorbox}
+
+Lemma 4.5.1 The graph \(J\left( {v,k,k - 1}\right)\) is distance transitive.
+
+\begin{tcolorbox}\relax
+引理 4.5.1 图 \(J\left( {v,k,k - 1}\right)\) 是距离传递的。
+\end{tcolorbox}
+
+Proof. The key is to prove that two vertices \(u\) and \(v\) have distance \(i\) in \(J\left( {v,k,k - 1}\right)\) if and only if \(\left| {u \cap  v}\right|  = k - i\) (viewing \(u\) and \(v\) as \(k\) -sets). We leave the details as an exercise.
+
+\begin{tcolorbox}\relax
+证明。关键在于证明:若将 \(u\) 与 \(v\) 视为 \(k\) -集，则它们在 \(J\left( {v,k,k - 1}\right)\) 中的距离为 \(i\) 当且仅当 \(\left| {u \cap  v}\right|  = k - i\) 。细节作为练习留给读者。
+\end{tcolorbox}
+
+Lemma 4.5.2 The graph \(J\left( {{2k} + 1,k + 1,0}\right)\) is distance transitive.
+
+\begin{tcolorbox}\relax
+引理 4.5.2 图 \(J\left( {{2k} + 1,k + 1,0}\right)\) 是距离传递的。
+\end{tcolorbox}
+
+There is an alternative definition of a distance-transitive graph that often proves easier to work with. If \(u\) is a vertex of \(X\) , then let \({X}_{i}\left( u\right)\) denote the set of vertices at distance \(i\) from \(u\) . The partition \(\left\{  {u,{X}_{1}\left( u\right) ,\ldots ,{X}_{d}\left( u\right) }\right\}\) is called the distance partition with respect to \(u\) . Figure 4.5 gives a drawing of the dodecahedron that displays the distance partition from a vertex.
+
+\begin{tcolorbox}\relax
+关于距离传递图还有另一种常用且更易处理的定义。若 \(u\) 是图 \(X\) 的一个顶点，则令 \({X}_{i}\left( u\right)\) 表示到 \(u\) 距离为 \(i\) 的顶点集合。分划 \(\left\{  {u,{X}_{1}\left( u\right) ,\ldots ,{X}_{d}\left( u\right) }\right\}\) 称为相对于 \(u\) 的距离分划。图 4.5 给出了展示从某一顶点出发的距离分划的十二面体示意图。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.6\textwidth]{images/84_397_990_746_400_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 4.5. The dodecahedron
+
+\begin{tcolorbox}\relax
+图 4.5 十二面体
+\end{tcolorbox}
+
+Suppose \(G\) acts distance transitively on \(X\) and \(u \in  V\left( X\right)\) . If \(v\) and \({v}^{\prime }\) are two vertices at distance \(i\) from \(u\) , there is an element of \(G\) that maps \(\left( {u,v}\right)\) to \(\left( {u,{v}^{\prime }}\right)\) , i.e., there is an element of \({G}_{u}\) that maps \(v\) to \({v}^{\prime }\) , and so \(G\) acts transitively on \({X}_{i}\left( u\right)\) . Therefore, the cells of the distance partition with respect to \(u\) are the orbits of \({G}_{u}\) . If \(X\) has diameter \(d\) , then it follows that \(G\) acts distance transitively on \(X\) if and only if it acts transitively and, for any vertex \(u\) in \(X\) , the vertex stabilizer \({G}_{u}\) has exactly \(d + 1\) orbits. In other words, the group \(G\) is transitive with rank \(d + 1\) .
+
+\begin{tcolorbox}\relax
+假设 \(G\) 在 \(X\) 和 \(u \in  V\left( X\right)\) 上按距离传递作用。如果 \(v\) 和 \({v}^{\prime }\) 是距离 \(i\) 于 \(u\) 的两顶点，则存在 \(G\) 的一个元素将 \(\left( {u,v}\right)\) 映为 \(\left( {u,{v}^{\prime }}\right)\) ，即存在 \({G}_{u}\) 的一个元素将 \(v\) 映为 \({v}^{\prime }\) ，因此 \(G\) 在 \({X}_{i}\left( u\right)\) 上作传递作用。所以，相对于 \(u\) 的距离划分的各格是 \({G}_{u}\) 的轨道。如果 \(X\) 的直径为 \(d\) ，则可得: \(G\) 在 \(X\) 上按距离传递当且仅当它作传递作用且对于任一顶点 \(u\) ，顶点稳定子 \({G}_{u}\) 恰有 \(d + 1\) 个轨道。换言之，群 \(G\) 是秩为 \(d + 1\) 的传递群。
+\end{tcolorbox}
+
+Since the cells of the distance partition are orbits of \({G}_{u}\) , every vertex in \({X}_{i}\left( u\right)\) is adjacent to the same number of other vertices, say \({a}_{i}\) , in \({X}_{i}\left( u\right)\) . Similarly, every vertex in \({X}_{i}\left( u\right)\) is adjacent to the same number, say \({b}_{i}\) , of vertices in \({X}_{i + 1}\left( u\right)\) and the same number, say \({c}_{i}\) , of vertices in \({X}_{i - 1}\left( u\right)\) . Equivalently, the graph induced by any cell is regular, and the graph induced by any pair of cells is semiregular. The graph \(X\) is regular, and its valency is given by \({b}_{0}\) , so if the diameter of \(X\) is \(d\) , we have
+
+\begin{tcolorbox}\relax
+由于距离划分的各格是 \({G}_{u}\) 的轨道， \({X}_{i}\left( u\right)\) 中的每个顶点在 \({X}_{i}\left( u\right)\) 中都与相同数目的其它顶点相邻，记为 \({a}_{i}\) 。类似地， \({X}_{i}\left( u\right)\) 中的每个顶点在 \({X}_{i + 1}\left( u\right)\) 中与相同数目的顶点相邻，记为 \({b}_{i}\) ，并且在 \({X}_{i - 1}\left( u\right)\) 中与相同数目的顶点相邻，记为 \({c}_{i}\) 。等价地，任一格所诱导的子图是正则的，任一对格所诱导的子图是半正则的。图 \(X\) 是正则的，其度数由 \({b}_{0}\) 给出，因此若 \(X\) 的直径为 \(d\) ，则有
+\end{tcolorbox}
+
+\[
+{c}_{i} + {a}_{i} + {b}_{i} = {b}_{0},\;i = 0,1,\ldots ,d.
+\]
+
+These numbers are called the parameters of the distance-transitive graph, and determine many of its properties. We can record these numbers in the \(3 \times  \left( {d + 1}\right)\) intersection array
+
+\begin{tcolorbox}\relax
+这些数字称为距离传递图的参数，并决定了它的许多性质。我们可以将这些数字记录在 \(3 \times  \left( {d + 1}\right)\) 交叉阵列中
+\end{tcolorbox}
+
+\[
+\left\{  \begin{matrix}  - & {c}_{1} & \ldots & {c}_{d - 1} & {c}_{d} \\  {a}_{0} & {a}_{1} & \ldots & {a}_{d - 1} & {a}_{d} \\  {b}_{0} & {b}_{1} & \ldots & {b}_{d - 1} &  -  \end{matrix}\right\}
+\]
+
+Since each column sums to the valency of the graph, it is necessary to give only two rows of the matrix to determine it entirely. It is customary to use the following abbreviated version of the intersection array:
+
+\begin{tcolorbox}\relax
+由于每列之和等于图的度数，仅需给出矩阵的两行即可完全确定它。通常使用下列简化版的交叉阵列:
+\end{document}

@@ -1,0 +1,572 @@
+\documentclass[10pt]{article}
+\usepackage[verbose, a4paper, hmargin=2.5cm, vmargin=2.5cm]{geometry}
+
+\usepackage{fontspec}
+\usepackage{ctex}
+\usepackage{paratype}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{esint}
+\usepackage{stmaryrd}
+
+\usepackage[mathbf=sym]{unicode-math}
+\setmainfont{STIX Two Text}
+\setmathfont{STIX Two Math}
+
+\setsansfont{Arial}
+\setmonofont{Courier New}
+
+\usepackage{makecell}
+\usepackage{wasysym}
+\usepackage{pifont}
+\usepackage[export]{adjustbox}
+\usepackage{graphicx}
+\usepackage{mdframed}
+\usepackage{booktabs,array,multirow}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan,}
+\urlstyle{same}
+\usepackage[most]{tcolorbox}
+\definecolor{mygray}{RGB}{240,240,240}
+\tcbset{
+  colback=mygray,
+  boxrule=0pt,
+}
+\graphicspath{ {./images/} }
+\newcommand{\HRule}{\begin{center}\rule{0.9\linewidth}{0.2mm}\end{center}}
+\newcommand{\customfootnote}[1]{
+  \let\thefootnote\relax\footnotetext{#1}
+}
+\newcommand{\lt}{\mathrel{<}}
+\newcommand{\gt}{\mathrel{>}}
+\newcommand*\circled[1]{\tikz[baseline=(char.base)]{\node[shape=circle,draw,inner sep=1.5pt] (char) {\small #1};}}
+\setcounter{MaxMatrixCols}{256}
+\begin{document}
+\section*{8. Chains and Antichains}
+
+\begin{tcolorbox}\relax
+\section*{8. 链与反链}
+\end{tcolorbox}
+
+Partial ordered sets provide a common frame for many combinatorial configurations. Formally, a partially ordered set (or poset, for short) is a set \(P\) together with a binary relation \(<\) between its elements which is transitive and antysymmetric: if \(x < y\) and \(y < z\) then \(x < z\) , but \(x < y\) and \(y < x\) cannot both hold. We write \(x \leq  y\) if \(x < y\) or \(x = y\) . Elements \(x\) and \(y\) are comparable if either \(x \leq  y\) or \(y \leq  x\) (or both) hold.
+
+\begin{tcolorbox}\relax
+偏序集为许多组合结构提供了一个通用框架。形式上，一个偏序集(简称为 poset)是一个集合 \(P\) ，其元素之间存在一个二元关系 \(<\) ，该关系是传递的且反对称的:如果 \(x < y\) 且 \(y < z\) ，那么 \(x < z\) ，但 \(x < y\) 和 \(y < x\) 不能同时成立。如果 \(x < y\) 或 \(x = y\) ，我们写作 \(x \leq  y\) 。如果 \(x \leq  y\) 或 \(y \leq  x\) (或两者)成立，则元素 \(x\) 和 \(y\) 是可比的。
+\end{tcolorbox}
+
+A chain in a poset \(P\) is a subset \(C \subseteq  P\) such that any two of its points are comparable. Dually, an antichain is a subset \(A \subseteq  P\) such that no two of its points are comparable. Observe that \(\left| {C \cap  A}\right|  \leq  1\) , i.e., every chain \(C\) and every antichain \(A\) can have at most one element in common (for two points in their intersection would be both comparable and incomparable).
+
+\begin{tcolorbox}\relax
+偏序集 \(P\) 中的链是一个子集 \(C \subseteq  P\) ，使得其任意两个点都是可比的。对偶地，反链是一个子集 \(A \subseteq  P\) ，使得其任意两个点都不可比。注意 \(\left| {C \cap  A}\right|  \leq  1\) ，即每个链 \(C\) 和每个反链 \(A\) 最多只能有一个公共元素(因为它们交集中的两个点既会是可比的又会是不可比的)。
+\end{tcolorbox}
+
+Here are some frequently encountered examples of posets: a family of sets is partially ordered by set inclusion; a set of positive integers is partially ordered by division; a set of vectors in \({\mathbb{R}}^{n}\) is partially ordered by \(\left( {{a}_{1},\ldots ,{a}_{n}}\right)  < \; \left( {{b}_{1},\ldots ,{b}_{n}}\right)\) iff \({a}_{i} \leq  {b}_{i}\) for all \(i\) , and \({a}_{i} < {b}_{i}\) for at least one \(i\) .
+
+\begin{tcolorbox}\relax
+以下是一些常见的偏序集示例:一族集合通过集合包含关系进行偏序排序；一组正整数通过整除关系进行偏序排序； \({\mathbb{R}}^{n}\) 中的一组向量通过 \(\left( {{a}_{1},\ldots ,{a}_{n}}\right)  < \; \left( {{b}_{1},\ldots ,{b}_{n}}\right)\) 进行偏序排序，当且仅当对于所有 \(i\) ， \({a}_{i} \leq  {b}_{i}\) 成立，并且对于至少一个 \(i\) ， \({a}_{i} < {b}_{i}\) 成立。
+\end{tcolorbox}
+
+Small posets may be visualized by drawings, known as Hasse diagrams: x is lower in the plane than \(y\) whenever \(x < y\) and there is no other point \(z \in  P\) for which both \(x < z\) and \(z < y\) . For example:
+
+\begin{tcolorbox}\relax
+小的偏序集可以通过称为哈斯图的图形来可视化:只要 \(x < y\) 且不存在其他点 \(z \in  P\) 使得 \(x < z\) 和 \(z < y\) 都成立，那么在平面中 x 就比 \(y\) 低。例如:
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.6\textwidth]{images/126_411_1549_719_370_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+\section*{8.1 Decomposition in chains and antichains}
+
+\begin{tcolorbox}\relax
+\section*{8.1 分解为链和反链}
+\end{tcolorbox}
+
+A decomposition of a poset is its partition into mutually disjoint chains or antichains. Given a poset \(P\) , our goal is to decompose it into as few chains (or antichains) as possible. One direction is easy: if a poset \(P\) has a chain (antichain) of size \(r\) then it cannot be partitioned into fewer than \(r\) antichains (chains). The reason here is simple: any two points of the same chain must lie in different members of a partition into antichains.
+
+\begin{tcolorbox}\relax
+偏序集的一种分解是将其划分为互不相交的链或反链。给定一个偏序集 \(P\) ，我们的目标是将其分解为尽可能少的链(或反链)。一个方向很容易:如果偏序集 \(P\) 有一个大小为 \(r\) 的链(反链)，那么它不能被划分为少于 \(r\) 个反链(链)。这里的原因很简单:同一链上的任意两点必定位于反链划分的不同成员中。
+\end{tcolorbox}
+
+Is this optimal? If \(P\) has no chain (or antichain) of size greater than \(r\) , is it then possible to partition \(P\) into \(r\) antichains (or chains, respectively)? One direction is straightforward (see Exercise 8.8 for an alternative proof):
+
+\begin{tcolorbox}\relax
+这是最优的吗？如果 \(P\) 没有大小大于 \(r\) 的链(或反链)，那么是否有可能将 \(P\) 划分为 \(r\) 个反链(或分别为链)呢？一个方向很直接(另一种证明见练习8.8):
+\end{tcolorbox}
+
+Theorem 8.1. Suppose that the largest chain in the poset \(P\) has size \(r\) . Then \(P\) can be partitioned into \(r\) antichains.
+
+\begin{tcolorbox}\relax
+定理8.1。假设偏序集 \(P\) 中最大链的大小为 \(r\) 。那么 \(P\) 可以被划分为 \(r\) 个反链。
+\end{tcolorbox}
+
+Proof. Let \({A}_{i}\) be the set of points \(x \in  P\) such that the longest chain, whose greatest element is \(x\) , has \(i\) points (including \(x\) ). Then, by the hypothesis, \({A}_{i} = \varnothing\) for \(i \geq  r + 1\) , and hence, \(P = {A}_{1} \cup  {A}_{2} \cup  \cdots  \cup  {A}_{r}\) is a partition of \(P\) into \(r\) mutually disjoint subsets (some of them may be also empty). Moreover, each \({A}_{i}\) is an antichain, since if \(x,y \in  {A}_{i}\) and \(x < y\) , then the longest chain \({x}_{1} < \ldots  < {x}_{i} = x\) ending in \(x\) could be prolonged to a longer chain \({x}_{1} < \ldots  < {x}_{i} < y\) , meaning that \(y \notin  {A}_{i}\) .
+
+\begin{tcolorbox}\relax
+证明。设 \({A}_{i}\) 是点 \(x \in  P\) 的集合，使得以 \(x\) 为最大元素的最长链有 \(i\) 个点(包括 \(x\) )。那么，根据假设，对于 \(i \geq  r + 1\) ， \({A}_{i} = \varnothing\) ，因此， \(P = {A}_{1} \cup  {A}_{2} \cup  \cdots  \cup  {A}_{r}\) 是将 \(P\) 划分为 \(r\) 个互不相交子集(其中一些可能为空)的划分。此外，每个 \({A}_{i}\) 都是一个反链，因为如果 \(x,y \in  {A}_{i}\) 且 \(x < y\) ，那么以 \(x\) 结尾的最长链 \({x}_{1} < \ldots  < {x}_{i} = x\) 可以延长为更长的链 \({x}_{1} < \ldots  < {x}_{i} < y\) ，这意味着 \(y \notin  {A}_{i}\) 。
+\end{tcolorbox}
+
+The dual result looks similar, but its proof is more involved. This result, uniformly known as Dilworth's Decomposition Theorem (Dilworth 1950) has played an important role in motivating research into posets. There are several elegant proofs; the one we present is due to F. Galvin.
+
+\begin{tcolorbox}\relax
+对偶结果看起来类似，但其证明更复杂。这个结果，通常被称为迪尔沃思分解定理(迪尔沃思，1950年)，在推动偏序集研究方面发挥了重要作用。有几个优雅的证明；我们给出的这个证明归功于F. 加尔文。
+\end{tcolorbox}
+
+Theorem 8.2 (Dilworth's theorem). Suppose that the largest antichain in the poset \(P\) has size \(r\) . Then \(P\) can be partitioned into \(r\) chains.
+
+\begin{tcolorbox}\relax
+定理8.2(迪尔沃思定理)。假设偏序集 \(P\) 中最大反链的大小为 \(r\) 。那么 \(P\) 可以被划分为 \(r\) 个链。
+\end{tcolorbox}
+
+Proof (due to Galvin 1994). We use induction on the cardinality of \(P\) . Let \(a\) be a maximal element of \(P\) , and let \(r\) be the size of a largest antichain in \({P}^{\prime } = P \smallsetminus  \{ a\}\) . Then \({P}^{\prime }\) is the union of \(r\) disjoint chains \({C}_{1},\ldots ,{C}_{r}\) . We have to show that \(P\) either contains an \(\left( {r + 1}\right)\) -element antichain or else is the union of \(r\) disjoint chains. Now, every \(r\) -element antichain in \({P}^{\prime }\) consists of one element from each \({C}_{i}\) . Let \({a}_{i}\) be the maximal element in \({C}_{i}\) which belongs to some \(r\) -element antichain in \({P}^{\prime }\) . It is easy to see that \(A = \left\{  {{a}_{1},\ldots ,{a}_{r}}\right\}\) is an antichain in \({P}^{\prime }\) . If \(A \cup  \{ a\}\) is an antichain in \(P\) , we are done: we have found an antichain of size \(r + 1)\) . Otherwise, we have \(a > {a}_{i}\) for some \(i\) . Then \(K = \{ a\}  \cup  \left\{  {x \in  {C}_{i} : x \leq  {a}_{i}}\right\}\) is a chain in \(P\) , and there are no \(r\) -element antichains in \(P \smallsetminus  K\) (since \({a}_{i}\) was the maximal element of \({C}_{i}\) participating in such an antichain), whence \(P \smallsetminus  K\) is the union of \(r - 1\) chains.
+
+\begin{tcolorbox}\relax
+证明(由加尔文于1994年给出)。我们对 \(P\) 的基数进行归纳。设 \(a\) 是 \(P\) 中的一个极大元， \(r\) 是 \({P}^{\prime } = P \smallsetminus  \{ a\}\) 中最大反链的大小。那么 \({P}^{\prime }\) 是 \(r\) 个不相交链 \({C}_{1},\ldots ,{C}_{r}\) 的并集。我们要证明 \(P\) 要么包含一个 \(\left( {r + 1}\right)\) 元反链，要么是 \(r\) 个不相交链的并集。现在， \({P}^{\prime }\) 中每个 \(r\) 元反链都由每个 \({C}_{i}\) 中的一个元素组成。设 \({a}_{i}\) 是 \({C}_{i}\) 中属于 \({P}^{\prime }\) 中某个 \(r\) 元反链的极大元。很容易看出 \(A = \left\{  {{a}_{1},\ldots ,{a}_{r}}\right\}\) 是 \({P}^{\prime }\) 中的一个反链。如果 \(A \cup  \{ a\}\) 是 \(P\) 中的一个反链，那就完成了:我们找到了一个大小为 \(r + 1)\) 的反链。否则，对于某个 \(i\) ，我们有 \(a > {a}_{i}\) 。那么 \(K = \{ a\}  \cup  \left\{  {x \in  {C}_{i} : x \leq  {a}_{i}}\right\}\) 是 \(P\) 中的一个链，并且 \(P \smallsetminus  K\) 中不存在 \(r\) 元反链(因为 \({a}_{i}\) 是参与这样一个反链的 \({C}_{i}\) 的极大元)，所以 \(P \smallsetminus  K\) 是 \(r - 1\) 个链的并集。
+\end{tcolorbox}
+
+To recognize the power of this theorem, let us show that it contains Hall's Marriage Theorem 5.1 as a special case!
+
+\begin{tcolorbox}\relax
+为了认识到这个定理的强大之处，让我们证明它包含霍尔婚姻定理5.1作为一个特殊情况！
+\end{tcolorbox}
+
+Suppose that \({S}_{1},\ldots ,{S}_{m}\) are sets satisfying Hall’s condition, i.e., \(\left| {S\left( I\right) }\right|  \geq \; \left| I\right|\) for all \(I \subseteq  \{ 1,\ldots ,m\}\) , where \(S\left( I\right)  \mathrel{\text{ := }} \mathop{\bigcup }\limits_{{i \in  I}}{S}_{i}\) . We construct a poset \(P\) as follows. The points of \(P\) are the elements of \(X \mathrel{\text{ := }} {S}_{1} \cup  \cdots  \cup  {S}_{m}\) and symbols \({y}_{1},\ldots ,{y}_{m}\) , with \(x < {y}_{i}\) if \(x \in  {S}_{i}\) , and no other comparabilities. It is clear that \(X\) is an antichain in \(P\) . We claim that there is no larger antichain. To show this, let \(A\) be an antichain, and set \(I \mathrel{\text{ := }} \left\{  {i : {y}_{i} \in  A}\right\}\) . Then \(A\) contains no point of \(S\left( I\right)\) , for if \(x \in  {S}_{i}\) then \(x\) is comparable with \({y}_{i}\) , and hence, \(A\) cannot contain both of these points. Hence, Hall’s condition implies that \(\left| A\right|  \leq  \left| I\right|  + \left| X\right|  - \left| {S\left( I\right) }\right|  \leq  \left| X\right|\) , as claimed.
+
+\begin{tcolorbox}\relax
+假设 \({S}_{1},\ldots ,{S}_{m}\) 是满足霍尔条件的集合，即对于所有 \(I \subseteq  \{ 1,\ldots ,m\}\) ， \(\left| {S\left( I\right) }\right|  \geq \; \left| I\right|\) ，其中 \(S\left( I\right)  \mathrel{\text{ := }} \mathop{\bigcup }\limits_{{i \in  I}}{S}_{i}\) 。我们如下构造一个偏序集 \(P\) 。 \(P\) 的点是 \(X \mathrel{\text{ := }} {S}_{1} \cup  \cdots  \cup  {S}_{m}\) 的元素和符号 \({y}_{1},\ldots ,{y}_{m}\) ，当 \(x \in  {S}_{i}\) 时， \(x < {y}_{i}\) ，并且没有其他可比性。显然 \(X\) 是 \(P\) 中的一个反链。我们声称不存在更大的反链。为了证明这一点，设 \(A\) 是一个反链，并设 \(I \mathrel{\text{ := }} \left\{  {i : {y}_{i} \in  A}\right\}\) 。那么 \(A\) 不包含 \(S\left( I\right)\) 中的点，因为如果 \(x \in  {S}_{i}\) ，那么 \(x\) 与 \({y}_{i}\) 是可比 的，因此， \(A\) 不能同时包含这两个点。因此，霍尔条件意味着 \(\left| A\right|  \leq  \left| I\right|  + \left| X\right|  - \left| {S\left( I\right) }\right|  \leq  \left| X\right|\) ，如所声称的。
+\end{tcolorbox}
+
+Now, Dilworth’s theorem implies that \(P\) can be partitioned into \(\left| X\right|\) chains. Since the antichain \(X\) is maximal, each of the chains in the partition must contain a point of \(X\) . Let the chain through \({y}_{i}\) be \(\left\{  {{x}_{i},{y}_{i}}\right\}\) . Then \(\left( {{x}_{1},\ldots ,{x}_{m}}\right)\) is a desired system of distinct representatives: for \({x}_{i} \in  {S}_{i}\) (since \({x}_{i} < {y}_{i}\) ) and \({x}_{i} \neq  {x}_{j}\) (since the chains are disjoint).
+
+\begin{tcolorbox}\relax
+现在，迪尔沃思定理意味着 \(P\) 可以被划分为 \(\left| X\right|\) 条链。由于反链 \(X\) 是极大的，划分中的每条链都必须包含 \(X\) 中的一个点。设通过 \({y}_{i}\) 的链为 \(\left\{  {{x}_{i},{y}_{i}}\right\}\) 。那么 \(\left( {{x}_{1},\ldots ,{x}_{m}}\right)\) 就是一个所需的相异代表系:对于 \({x}_{i} \in  {S}_{i}\) (因为 \({x}_{i} < {y}_{i}\) )以及 \({x}_{i} \neq  {x}_{j}\) (因为这些链是不相交的)。
+\end{tcolorbox}
+
+In general, Dilworth's theorem says nothing more about the chains, forming the partition, except that they are mutually disjoint. However, if we consider special posets then we can extract more information about the partition. To illustrate this, let us consider now the poset \({2}^{X}\) whose points are all subsets of an \(n\) -element set \(X\) partially ordered by set inclusion. De Bruijn, Tengbergen, and Kruyswijk (1952) have shown that \({2}^{X}\) can be partitioned into disjoint chains that are also "symmetric."
+
+\begin{tcolorbox}\relax
+一般来说，迪尔沃思定理对于构成划分的链并没有更多说明，只是它们相互不相交。然而，如果我们考虑特殊的偏序集，那么我们可以提取关于划分的更多信息。为了说明这一点，现在让我们考虑偏序集 \({2}^{X}\) ，其点是一个 \(n\) 元集 \(X\) 的所有子集，通过集合包含关系进行偏序排序。德布鲁因、滕伯格和克吕伊斯维克(1952年)已经表明 \({2}^{X}\) 可以被划分为不相交的链，并且这些链也是“对称的”。
+\end{tcolorbox}
+
+Let \(\mathcal{C} = \left\{  {{A}_{1},\ldots ,{A}_{k}}\right\}\) be a chain in \({2}^{X}\) , i.e., \({A}_{1} \subset  {A}_{2} \subset  \ldots  \subset  {A}_{k}\) . This chain is symmetric if \(\left| {A}_{1}\right|  + \left| {A}_{k}\right|  = n\) and \(\left| {A}_{i + 1}\right|  = \left| {A}_{i}\right|  + 1\) for all \(i = \; 1,\ldots ,k - 1\) . "Symmetric" here means symmetric positioned about the middle level \(\frac{n}{2}\) . Symmetric chains with \(k = n\) are maximal. Maximal chains are in one-to-one correspondence with the permutations of the underlying set: every permutation \(\left( {{x}_{1},\ldots ,{x}_{n}}\right)\) gives the maximal chain
+
+\begin{tcolorbox}\relax
+设 \(\mathcal{C} = \left\{  {{A}_{1},\ldots ,{A}_{k}}\right\}\) 是 \({2}^{X}\) 中的一条链，即 \({A}_{1} \subset  {A}_{2} \subset  \ldots  \subset  {A}_{k}\) 。如果对于所有的 \(i = \; 1,\ldots ,k - 1\) 都有 \(\left| {A}_{1}\right|  + \left| {A}_{k}\right|  = n\) 和 \(\left| {A}_{i + 1}\right|  = \left| {A}_{i}\right|  + 1\) ，那么这条链是对称的。这里的“对称”意味着关于中间层 \(\frac{n}{2}\) 对称定位。具有 \(k = n\) 的对称链是极大的。极大链与基础集的排列一一对应:每个排列 \(\left( {{x}_{1},\ldots ,{x}_{n}}\right)\) 给出极大链
+\end{tcolorbox}
+
+\[
+\left\{  {x}_{1}\right\}   \subset  \left\{  {{x}_{1},{x}_{2}}\right\}   \subset  \ldots  \subset  \left\{  {{x}_{1},\ldots ,{x}_{n}}\right\}  .
+\]
+
+Theorem 8.3. The family of all subsets of an \(n\) -element set can be partitioned into \(\left( \begin{matrix} n \\  \lfloor n/2\rfloor  \end{matrix}\right)\) mutually disjoint symmetric chains.
+
+\begin{tcolorbox}\relax
+定理8.3。一个 \(n\) 元集的所有子集的族可以被划分为 \(\left( \begin{matrix} n \\  \lfloor n/2\rfloor  \end{matrix}\right)\) 条相互不相交的对称链。
+\end{tcolorbox}
+
+Proof. Take an \(n\) -element set \(X\) , and assume for a moment that we already have some partition of \({2}^{X}\) into symmetric chains. Every such chain contains exactly one set from the middle level; hence there are \(\left( \begin{matrix} n \\  \left| {n/2}\right|  \end{matrix}\right)\) chains in that partition.
+
+\begin{tcolorbox}\relax
+证明。取一个 \(n\) 元集 \(X\) ，并且暂时假设我们已经有了 \({2}^{X}\) 到对称链的某种划分。每个这样的链恰好包含中间层的一个集合；因此在那个划分中有 \(\left( \begin{matrix} n \\  \left| {n/2}\right|  \end{matrix}\right)\) 条链。
+\end{tcolorbox}
+
+Let us now prove that such a partition is possible at all. We argue by the induction on \(n = \left| X\right|\) . Clearly the result holds for the one point set \(X\) . So, suppose that it is true for all sets with fewer points then \(n\) . Pick a point \(x \in  X\) , and let \(Y \mathrel{\text{ := }} X \smallsetminus  \{ x\}\) . By induction, we can partition \({2}^{Y}\) into symmetric chains \({\mathcal{C}}_{1},\ldots ,{\mathcal{C}}_{r}\) . Each of these chains over \(Y\)
+
+\begin{tcolorbox}\relax
+现在让我们证明这样的划分是完全可能的。我们通过对 \(n = \left| X\right|\) 进行归纳来论证。显然对于单点集 \(X\) 结果成立。所以，假设对于所有点数少于 \(n\) 的集合该结果都成立。选取一个点 \(x \in  X\) ，并且设 \(Y \mathrel{\text{ := }} X \smallsetminus  \{ x\}\) 。通过归纳，我们可以将 \({2}^{Y}\) 划分为对称链 \({\mathcal{C}}_{1},\ldots ,{\mathcal{C}}_{r}\) 。这些在 \(Y\) 上定义的每条链
+\end{tcolorbox}
+
+\[
+{\mathcal{C}}_{i} \mathrel{\text{ := }} {A}_{1} \subset  {A}_{2} \subset  \ldots  \subset  {A}_{k}
+\]
+
+produce the following two chains over the whole set \(X\) :
+
+\begin{tcolorbox}\relax
+在整个集合 \(X\) 上产生以下两条链:
+\end{tcolorbox}
+
+\[
+{\mathcal{C}}_{i}^{\prime } \mathrel{\text{ := }} {A}_{1} \subset  {A}_{2} \subset  \ldots  \subset  {A}_{k - 1} \subset  {A}_{k} \subset  {A}_{k} \cup  \{ x\}
+\]
+
+\[
+{\mathcal{C}}_{i}^{\prime \prime } \mathrel{\text{ := }} {A}_{1} \cup  \{ x\}  \subset  {A}_{2} \cup  \{ x\}  \subset  \ldots  \subset  {A}_{k - 1} \cup  \{ x\} .
+\]
+
+These chains are symmetric since
+
+\begin{tcolorbox}\relax
+这些链是对称的，因为
+\end{tcolorbox}
+
+\[
+\left| {A}_{1}\right|  + \left| {{A}_{k}\cup \{ x\} }\right|  = \left( {\left| {A}_{1}\right|  + \left| {A}_{k}\right| }\right)  + 1 = \left( {n - 1}\right)  + 1 = n
+\]
+
+and
+
+\begin{tcolorbox}\relax
+并且
+\end{tcolorbox}
+
+\[
+\left| {{A}_{1}\cup \{ x\} }\right|  + \left| {{A}_{k - 1}\cup \{ x\} }\right|  = \left( {\left| {A}_{1}\right|  + \left| {A}_{k - 1}\right| }\right)  + 2 = \left( {n - 2}\right)  + 2 = n.
+\]
+
+Is this a partition? It is indeed. If \(A \subseteq  Y\) then only \({\mathcal{C}}_{i}^{\prime }\) contains \(A\) where \({\mathcal{C}}_{i}\) is the chain in \({2}^{Y}\) containing \(A\) . If \(A = B \cup  \{ x\}\) where \(B \subseteq  Y\) then \(B \in  {\mathcal{C}}_{i}\) for some \(i\) . If \(B\) is the maximal element of \({\mathcal{C}}_{i}\) then \({\mathcal{C}}_{i}^{\prime }\) is the only chain containing \(A\) , otherwise \(A\) is contained only in \({\mathcal{C}}_{i}^{\prime \prime }\) .
+
+\begin{tcolorbox}\relax
+这是一个划分吗？确实是。如果 \(A \subseteq  Y\) ，那么只有 \({\mathcal{C}}_{i}^{\prime }\) 包含 \(A\) ，其中 \({\mathcal{C}}_{i}\) 是 \({2}^{Y}\) 中包含 \(A\) 的链。如果 \(A = B \cup  \{ x\}\) ，其中 \(B \subseteq  Y\) ，那么对于某个 \(i\) ，有 \(B \in  {\mathcal{C}}_{i}\) 。如果 \(B\) 是 \({\mathcal{C}}_{i}\) 的最大元素，那么 \({\mathcal{C}}_{i}^{\prime }\) 是包含 \(A\) 的唯一链，否则 \(A\) 仅包含于 \({\mathcal{C}}_{i}^{\prime \prime }\) 。
+\end{tcolorbox}
+
+\section*{8.2 Application: the memory allocation problem}
+
+\begin{tcolorbox}\relax
+<\#\#\# 8.2 应用:内存分配问题
+\end{tcolorbox}
+
+The following problem arises in information storage and retrieval. Suppose we have some list (a sequence) \(L = \left( {{a}_{1},{a}_{2},\ldots ,{a}_{m}}\right)\) of not necessarily distinct elements of some set \(X\) . We say that this list contains a subset \(A\) if it contains \(A\) as a subsequence of consecutive terms, that is, if
+
+\begin{tcolorbox}\relax
+在信息存储和检索中会出现以下问题。假设我们有某个集合 \(X\) 中不一定互不相同的元素组成的列表(一个序列) \(L = \left( {{a}_{1},{a}_{2},\ldots ,{a}_{m}}\right)\) 。如果这个列表包含 \(A\) 作为连续项的子序列，也就是说，如果
+\end{tcolorbox}
+
+\[
+A = \left\{  {{a}_{i},{a}_{i + 1},\ldots ,{a}_{i + \left| A\right|  - 1}}\right\}
+\]
+
+for some \(i\) . A sequence is universal for \(X\) if it contains all the subsets of \(X\) . For example, if \(X = \{ 1,2,3,4,5\}\) then the list
+
+\begin{tcolorbox}\relax
+对于某个 \(i\) 。如果一个序列包含 \(X\) 的所有子集，那么它对于 \(X\) 是通用的。例如，如果 \(X = \{ 1,2,3,4,5\}\) ，那么长度为 \(i\) 的列表
+\end{tcolorbox}
+
+\[
+L = \left( {1234512413524}\right)
+\]
+
+of length \(m = {13}\) is universal for \(X\) .
+
+\begin{tcolorbox}\relax
+长度为 \(m = {13}\) 的对于 \(X\) 是通用的。
+\end{tcolorbox}
+
+What is the length of a shortest universal sequence for an \(n\) -element set? Since any two sets of equal cardinality must start from different places of this string, the trivial lower bound for the length of universal sequence is \(\left( \begin{matrix} n \\  \lfloor n/2\rfloor  \end{matrix}\right)\) , which is about \(\sqrt{\frac{2}{\pi n}}{2}^{n}\) , according to Stirling’s formula (1.7). A trivial upper bound for the length of the shortest universal sequence is obtained by considering the sequence obtained simply by writing down each subset one after the other. Since there are \({2}^{n}\) subsets of average size \(n/2\) , the length of the resulting universal sequence is at most \(n{2}^{n - 1}\) . Using Dilworth’s theorem, we can obtain a universal sequence, which is \(n\) times (!) shorter than this trivial one.
+
+\begin{tcolorbox}\relax
+对于一个 \(n\) 元集，最短通用序列的长度是多少？由于任何两个具有相同基数的集合必须从这个字符串的不同位置开始，通用序列长度的平凡下界是 \(\left( \begin{matrix} n \\  \lfloor n/2\rfloor  \end{matrix}\right)\) ，根据斯特林公式(1.7)，这大约是 \(\sqrt{\frac{2}{\pi n}}{2}^{n}\) 。通过考虑简单地将每个子集一个接一个地写下来得到的序列，可以得到最短通用序列长度的平凡上界。由于平均大小为 \(n/2\) 的子集有 \({2}^{n}\) 个，所以得到的通用序列的长度至多为 \(n{2}^{n - 1}\) 。使用迪尔沃思定理，我们可以得到一个通用序列，它比这个平凡序列短 \(n\) 倍(！)。
+\end{tcolorbox}
+
+Theorem 8.4 (Lipski 1978). There is a universal sequence for \(\{ 1,\ldots ,n\}\) of length at most \(\frac{2}{\pi }{2}^{n}\) .
+
+\begin{tcolorbox}\relax
+定理8.4(利普斯基，1978年)。存在一个长度至多为 \(\frac{2}{\pi }{2}^{n}\) 的对于 \(\{ 1,\ldots ,n\}\) 的通用序列。
+\end{tcolorbox}
+
+Proof. We consider the case when \(n\) is even, say \(n = {2k}\) (the case of odd \(n\) is similar). Let \(S = \{ 1,\ldots ,k\}\) be the set of the first \(k\) elements and \(T = \; \{ k + 1,\ldots ,{2k}\}\) the set of the last \(k\) elements. By Theorem 8.3, both \(S\) and \(T\) have symmetric chain decompositions of their posets of subsets into \(m = \left( \begin{matrix} k \\  k/2 \end{matrix}\right)\) symmetric chains: \({2}^{S} = {\mathcal{C}}_{1} \cup  \cdots  \cup  {\mathcal{C}}_{m}\) and \({2}^{T} = {\mathcal{D}}_{1} \cup  \cdots  \cup  {\mathcal{D}}_{m}\) . Corresponding to the chain
+
+\begin{tcolorbox}\relax
+证明。我们考虑 \(n\) 为偶数的情况，比如说 \(n = {2k}\) ( \(n\) 为奇数的情况类似)。设 \(S = \{ 1,\ldots ,k\}\) 是前 \(k\) 个元素的集合， \(T = \; \{ k + 1,\ldots ,{2k}\}\) 是后 \(k\) 个元素的集合。根据定理8.3， \(S\) 和 \(T\) 的子集偏序集都有对称链分解，分解为 \(m = \left( \begin{matrix} k \\  k/2 \end{matrix}\right)\) 个对称链: \({2}^{S} = {\mathcal{C}}_{1} \cup  \cdots  \cup  {\mathcal{C}}_{m}\) 和 \({2}^{T} = {\mathcal{D}}_{1} \cup  \cdots  \cup  {\mathcal{D}}_{m}\) 。对应于链
+\end{tcolorbox}
+
+\[
+{\mathcal{C}}_{i} = \left\{  {{x}_{1},\ldots ,{x}_{j}}\right\}   \subset  \left\{  {{x}_{1},\ldots ,{x}_{j},{x}_{j + 1}}\right\}   \subset  \ldots  \subset  \left\{  {{x}_{1},\ldots ,{x}_{h}}\right\}  \;\left( {j + h = k}\right)
+\]
+
+we associate the sequence (not the set!) \({C}_{i} = \left( {{x}_{1},{x}_{2},\ldots {x}_{h}}\right)\) . Then every subset of \(S\) occurs as an initial part of one of the sequences \({C}_{1},\ldots ,{C}_{m}\) . Similarly let \({D}_{1},\ldots ,{D}_{m}\) be sequences corresponding to the chains \({\mathcal{D}}_{1},\ldots ,{\mathcal{D}}_{m}\) . If we let \({\bar{D}}_{i}\) denote the sequence obtained by writing \({D}_{i}\) in reverse order, then every subset of \(T\) occurs as a final part of one of the \({\bar{D}}_{i}\) . Next, consider the sequence
+
+\begin{tcolorbox}\relax
+我们关联序列(不是集合！) \({C}_{i} = \left( {{x}_{1},{x}_{2},\ldots {x}_{h}}\right)\) 。那么 \(S\) 的每个子集都作为序列 \({C}_{1},\ldots ,{C}_{m}\) 之一的初始部分出现。类似地，设 \({D}_{1},\ldots ,{D}_{m}\) 是对应于链 \({\mathcal{D}}_{1},\ldots ,{\mathcal{D}}_{m}\) 的序列。如果我们让 \({\bar{D}}_{i}\) 表示通过将 \({D}_{i}\) 倒序书写得到的序列，那么 \(T\) 的每个子集都作为 \({\bar{D}}_{i}\) 之一的最终部分出现。接下来，考虑序列
+\end{tcolorbox}
+
+\[
+L = {\bar{D}}_{1}{C}_{1}{\bar{D}}_{1}{C}_{2}\ldots {\bar{D}}_{1}{C}_{m}\ldots {\bar{D}}_{m}{C}_{1}{\bar{D}}_{m}{C}_{2}\ldots {\bar{D}}_{m}{C}_{m}.
+\]
+
+We claim that \(L\) is a universal sequence for the set \(\{ 1,\ldots ,n\}\) . Indeed, each of its subsets \(A\) can be written as \(A = E \cup  F\) where \(E \subseteq  S\) and \(F \subseteq  T\) . Now \(F\) occurs as the final part of some \({\bar{D}}_{f}\) and \(E\) occurs as the initial part of some \({C}_{e}\) ; hence, the whole set \(A\) occurs in the sequence \(L\) as the part of \({\bar{D}}_{f}{C}_{e}\) . Thus, the sequence \(L\) contains every subset of \(\{ 1,\ldots ,n\}\) . The length of the sequence \(L\) is at most \(k{m}^{2} = k{\left( \begin{matrix} k \\  k/2 \end{matrix}\right) }^{2}\) . Since, by Stirling’s formula, \(\left( \begin{matrix} k \\  k/2 \end{matrix}\right)  \sim  {2}^{k}\sqrt{\frac{2}{k\pi }}\) , the length of the sequence is \(k{m}^{2} \sim  k\frac{2}{k\pi } \cdot  {2}^{2k} = \frac{2}{\pi }{2}^{n}\) .
+
+\begin{tcolorbox}\relax
+我们声称 \(L\) 是集合 \(\{ 1,\ldots ,n\}\) 的通用序列。事实上，它的每个子集 \(A\) 都可以写成 \(A = E \cup  F\) ，其中 \(E \subseteq  S\) 和 \(F \subseteq  T\) 。现在 \(F\) 作为某个 \({\bar{D}}_{f}\) 的最后一部分出现，而 \(E\) 作为某个 \({C}_{e}\) 的初始部分出现；因此，整个集合 \(A\) 在序列 \(L\) 中作为 \({\bar{D}}_{f}{C}_{e}\) 的一部分出现。这样，序列 \(L\) 包含了 \(\{ 1,\ldots ,n\}\) 的每个子集。序列 \(L\) 的长度至多为 \(k{m}^{2} = k{\left( \begin{matrix} k \\  k/2 \end{matrix}\right) }^{2}\) 。由于根据斯特林公式， \(\left( \begin{matrix} k \\  k/2 \end{matrix}\right)  \sim  {2}^{k}\sqrt{\frac{2}{k\pi }}\) ，所以该序列的长度为 \(k{m}^{2} \sim  k\frac{2}{k\pi } \cdot  {2}^{2k} = \frac{2}{\pi }{2}^{n}\) 。
+\end{tcolorbox}
+
+\section*{8.3 Sperner's theorem}
+
+\begin{tcolorbox}\relax
+\section*{8.3 斯佩纳定理}
+\end{tcolorbox}
+
+A set system \(\mathcal{F}\) is an antichain (or Sperner system) if no set in it contains another: if \(A,B \in  \mathcal{F}\) and \(A \neq  B\) then \(A \nsubseteq  B\) . It is an antichain in the sense that this property is the other extreme from that of the chain in which every pair of sets is comparable.
+
+\begin{tcolorbox}\relax
+集合系统 \(\mathcal{F}\) 是一个反链(或斯佩纳系统)，如果其中没有一个集合包含另一个集合:即如果 \(A,B \in  \mathcal{F}\) 且 \(A \neq  B\) ，那么 \(A \nsubseteq  B\) 。从这个性质与链的性质相反(链中每对集合都是可比的)的意义上来说，它是一个反链。
+\end{tcolorbox}
+
+Simplest examples of antichains over \(\{ 1,\ldots ,n\}\) are the families of all sets of fixed cardinality \(k,k = 0,1,\ldots ,n\) . Each of these antichains has \(\left( \begin{array}{l} n \\  k \end{array}\right)\) members. Recognizing that the maximum of \(\left( \begin{array}{l} n \\  k \end{array}\right)\) is achieved for \(k = \lfloor n/2\rfloor\) , we conclude that there are antichains of size \(\left( \begin{matrix} n \\  \lfloor n/2\rfloor  \end{matrix}\right)\) . Are these antichains the largest ones?
+
+\begin{tcolorbox}\relax
+\(\{ 1,\ldots ,n\}\) 上反链的最简单例子是所有固定基数为 \(k,k = 0,1,\ldots ,n\) 的集合族。这些反链中的每一个都有 \(\left( \begin{array}{l} n \\  k \end{array}\right)\) 个成员。认识到 \(\left( \begin{array}{l} n \\  k \end{array}\right)\) 在 \(k = \lfloor n/2\rfloor\) 时取得最大值，我们得出存在大小为 \(\left( \begin{matrix} n \\  \lfloor n/2\rfloor  \end{matrix}\right)\) 的反链。这些反链是最大的吗？
+\end{tcolorbox}
+
+The positive answer to this question was found by Emanuel Sperner in 1928, and this result is known as Sperner's Theorem.
+
+\begin{tcolorbox}\relax
+1928年伊曼纽尔·斯佩纳找到了这个问题的肯定答案，这个结果被称为斯佩纳定理。
+\end{tcolorbox}
+
+Theorem 8.5 (Sperner 1928). Let \(\mathcal{F}\) be a family of subsets of an \(n\) element set. If \(\mathcal{F}\) is an antichain then \(\left| \mathcal{F}\right|  \leq  \left( \begin{matrix} n \\  \lfloor n/2\rfloor  \end{matrix}\right)\) .
+
+\begin{tcolorbox}\relax
+定理8.5(斯佩纳，1928年)。设 \(\mathcal{F}\) 是一个 \(n\) 元集合的子集族。如果 \(\mathcal{F}\) 是一个反链，那么 \(\left| \mathcal{F}\right|  \leq  \left( \begin{matrix} n \\  \lfloor n/2\rfloor  \end{matrix}\right)\) 。
+\end{tcolorbox}
+
+A considerably sharper result, Theorem 8.6 below, is due to Lubell (1966). The same result was discovered by Meshalkin (1963) and (not so explicitly) by Yamamoto (1954). Although Lubell's result is also a rather special case of an earlier result of Bollobás (see Theorem 8.8 below), inequality (8.1) has become known as the LYM inequality.
+
+\begin{tcolorbox}\relax
+下面的定理8.6是卢贝尔(1966年)得到的一个更精确得多的结果。梅沙尔金(1963年)以及(不太明确地)山本(1954年)也发现了同样的结果。尽管卢贝尔的结果也是博洛巴斯一个早期结果的相当特殊的情况(见下面的定理8.8)，但不等式(8.1)已被称为LYM不等式。
+\end{tcolorbox}
+
+Theorem 8.6 (LYM Inequality). Let \(\mathcal{F}\) be an antichain over a set \(X\) of \(n\) elements. Then
+
+\begin{tcolorbox}\relax
+定理8.6(LYM不等式)。设 \(\mathcal{F}\) 是一个在有 \(n\) 个元素的集合 \(X\) 上的反链。那么
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{A \in  \mathcal{F}}}{\left( \begin{matrix} n \\  \left| A\right|  \end{matrix}\right) }^{-1} \leq  1 \tag{8.1}
+\]
+
+Note that Sperner’s theorem follows from this bound: recognizing that \(\left( \begin{array}{l} n \\  k \end{array}\right)\) is maximized when \(k = \lfloor n/2\rfloor\) , we obtain
+
+\begin{tcolorbox}\relax
+注意斯佩纳定理可从这个界推出:认识到当 \(k = \lfloor n/2\rfloor\) 时 \(\left( \begin{array}{l} n \\  k \end{array}\right)\) 最大，我们得到
+\end{tcolorbox}
+
+\[
+\left| \mathcal{F}\right|  \cdot  {\left( \begin{matrix} n \\  \lfloor n/2\rfloor  \end{matrix}\right) }^{-1} \leq  \mathop{\sum }\limits_{{A \in  \mathcal{F}}}{\left( \begin{matrix} n \\  \left| A\right|  \end{matrix}\right) }^{-1} \leq  1.
+\]
+
+We will give an elegant proof of Theorem 8.6 due to Lubell (1966) together with one of its reformulations which is pregnant with further extensions.
+
+\begin{tcolorbox}\relax
+我们将给出卢贝尔(1966年)对定理8.6的一个优美证明以及它的一个重新表述，这个表述蕴含着进一步的推广。
+\end{tcolorbox}
+
+First proof. For each subset \(A\) , exactly \(\left| A\right| !\left( {n - \left| A\right| }\right)\) ! maximal chains over \(X\) contain \(A\) . Since none of the \(n\) ! maximal chains meet \(\mathcal{F}\) more than once, we have \(\mathop{\sum }\limits_{{A \in  \mathcal{F}}}\left| A\right| !\left( {n - \left| A\right| }\right) ! \leq  n\) !. Dividing this inequality by \(n\) ! we get the desired result.
+
+\begin{tcolorbox}\relax
+第一个证明。对于每个子集 \(A\) ，恰好有 \(\left| A\right| !\left( {n - \left| A\right| }\right)\) !个在 \(X\) 上的极大链包含 \(A\) 。由于 \(n\) !个极大链中没有一个与 \(\mathcal{F}\) 相交超过一次，我们有 \(\mathop{\sum }\limits_{{A \in  \mathcal{F}}}\left| A\right| !\left( {n - \left| A\right| }\right) ! \leq  n\) !。用 \(n\) !除这个不等式就得到了想要的结果。
+\end{tcolorbox}
+
+Second proof. The idea is to associate with each subset \(A \subseteq  X\) , a permutation on \(X\) , and count their number. For an \(a\) -element set \(A\) let us say that a permutation \(\left( {{x}_{1},{x}_{2},\ldots ,{x}_{n}}\right)\) of \(X\) contains \(A\) if \(\left\{  {{x}_{1},\ldots ,{x}_{a}}\right\}   = A\) . Note that \(A\) is contained in precisely \(a!\left( {n - a}\right)\) ! permutations. Now if \(\mathcal{F}\) is an antichain, then each of \(n\) ! permutations contains at most one \(A \in  \mathcal{F}\) . Consequently, \(\mathop{\sum }\limits_{{A \in  \mathcal{F}}}a!\left( {n - a}\right) ! \leq  n!\) , and the result follows. To recover the first proof, simply identify a permutation \(\left( {{x}_{1},{x}_{2},\ldots ,{x}_{n}}\right)\) with the maximal chain \(\left\{  {x}_{1}\right\}   \subset \; \left\{  {{x}_{1},{x}_{2}}\right\}   \subset  \ldots  \subset  \left\{  {{x}_{1},{x}_{2}\ldots ,{x}_{n}}\right\}   = X.\)
+
+\begin{tcolorbox}\relax
+第二个证明。思路是为每个子集 \(A \subseteq  X\) 关联一个 \(X\) 上的排列，并计算它们的数量。对于一个 \(a\) 元集 \(A\) ，我们称 \(X\) 的一个排列 \(\left( {{x}_{1},{x}_{2},\ldots ,{x}_{n}}\right)\) 包含 \(A\) ，如果 \(\left\{  {{x}_{1},\ldots ,{x}_{a}}\right\}   = A\) 。注意， \(A\) 恰好包含在 \(a!\left( {n - a}\right)\) !个排列中。现在，如果 \(\mathcal{F}\) 是一个反链，那么 \(n\) !个排列中的每一个最多包含一个 \(A \in  \mathcal{F}\) 。因此， \(\mathop{\sum }\limits_{{A \in  \mathcal{F}}}a!\left( {n - a}\right) ! \leq  n!\) ，结果随之而来。要恢复第一个证明，只需将排列 \(\left( {{x}_{1},{x}_{2},\ldots ,{x}_{n}}\right)\) 与最大链 \(\left\{  {x}_{1}\right\}   \subset \; \left\{  {{x}_{1},{x}_{2}}\right\}   \subset  \ldots  \subset  \left\{  {{x}_{1},{x}_{2}\ldots ,{x}_{n}}\right\}   = X.\) 等同起来
+\end{tcolorbox}
+
+\section*{8.4 The Bollobás theorem}
+
+\begin{tcolorbox}\relax
+\section*{8.4 博洛巴斯定理}
+\end{tcolorbox}
+
+The following theorem due to B. Bollobás is one of the cornerstones in extremal set theory. Its importance is reflected, among other things, by the list of different proofs published as well as the list of different generalizations. In particular, this theorem implies both Sperner's theorem and the LYM inequality.
+
+\begin{tcolorbox}\relax
+以下由B. 博洛巴斯提出的定理是极值集合论的基石之一。它的重要性体现在已发表的不同证明列表以及不同推广列表等方面。特别地，该定理蕴含了斯佩纳定理和LYM不等式。
+\end{tcolorbox}
+
+Theorem 8.7 (Bollobás' theorem). Let \({A}_{1},\ldots ,{A}_{m}\) be a-element sets and \({B}_{1},\ldots ,{B}_{m}\) be b-element sets such that \({A}_{i} \cap  {B}_{j} = \varnothing\) if and only if \(i = j\) . Then \(m \leq  \left( \begin{matrix} a + b \\  a \end{matrix}\right) .\)
+
+\begin{tcolorbox}\relax
+定理8.7(博洛巴斯定理)。设 \({A}_{1},\ldots ,{A}_{m}\) 为a元集， \({B}_{1},\ldots ,{B}_{m}\) 为b元集，使得当且仅当 \(i = j\) 时 \({A}_{i} \cap  {B}_{j} = \varnothing\) 。那么 \(m \leq  \left( \begin{matrix} a + b \\  a \end{matrix}\right) .\)
+\end{tcolorbox}
+
+This is a special case of the following result.
+
+\begin{tcolorbox}\relax
+这是以下结果的一个特殊情况。
+\end{tcolorbox}
+
+Theorem 8.8 (Bollobás 1965). Let \({A}_{1},\ldots ,{A}_{m}\) and \({B}_{1},\ldots ,{B}_{m}\) be two sequences of sets such that \({A}_{i} \cap  {B}_{j} = \varnothing\) if and only if \(i = j\) . Then
+
+\begin{tcolorbox}\relax
+定理8.8(博洛巴斯，1965年)。设 \({A}_{1},\ldots ,{A}_{m}\) 和 \({B}_{1},\ldots ,{B}_{m}\) 为两个集合序列，使得当且仅当 \(i = j\) 时 \({A}_{i} \cap  {B}_{j} = \varnothing\) 。那么
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = 1}}^{m}{\left( \begin{matrix} {a}_{i} + {b}_{i} \\  {a}_{i} \end{matrix}\right) }^{-1} \leq  1 \tag{8.2}
+\]
+
+where \({a}_{i} = \left| {A}_{i}\right|\) and \({b}_{i} = \left| {B}_{i}\right|\) .
+
+\begin{tcolorbox}\relax
+其中 \({a}_{i} = \left| {A}_{i}\right|\) 和 \({b}_{i} = \left| {B}_{i}\right|\) 。
+\end{tcolorbox}
+
+As we already mentioned, due to its importance, there are several different proofs of this theorem. We present two of them.
+
+\begin{tcolorbox}\relax
+正如我们已经提到的，由于其重要性，该定理有几种不同的证明。我们给出其中两种。
+\end{tcolorbox}
+
+First proof. Our goal is to prove that (8.2) holds for every family \(\mathcal{F} = \; \left\{  {\left( {{A}_{i},{B}_{i}}\right)  : i = 1,\ldots ,m}\right\}\) of pairs of sets such that \({A}_{i} \cap  {B}_{j} = \varnothing\) precisely when \(i = j\) . Let \(X\) be the union of all sets \({A}_{i} \cup  {B}_{i}\) . We argue by induction on \(n = \left| X\right|\) . For \(n = 1\) the claim is obvious, so assume it holds for \(n - 1\) and prove it for \(n\) . For every point \(x \in  X\) , consider the family of pairs
+
+\begin{tcolorbox}\relax
+第一种证明。我们的目标是证明对于每一个满足当且仅当 \(i = j\) 时 \({A}_{i} \cap  {B}_{j} = \varnothing\) 的集合对族 \(\mathcal{F} = \; \left\{  {\left( {{A}_{i},{B}_{i}}\right)  : i = 1,\ldots ,m}\right\}\) ，(8.2)式成立。设 \(X\) 为所有集合 \({A}_{i} \cup  {B}_{i}\) 的并集。我们通过对 \(n = \left| X\right|\) 进行归纳来论证。对于 \(n = 1\) ，结论显然成立，所以假设它对 \(n - 1\) 成立并证明对 \(n\) 成立。对于每一个点 \(x \in  X\) ，考虑集合对族
+\end{tcolorbox}
+
+\[
+{\mathcal{F}}_{x} \mathrel{\text{ := }} \left\{  {\left( {{A}_{i},{B}_{i}\smallsetminus \{ x\} }\right)  : x \notin  {A}_{i}}\right\}  .
+\]
+
+Since each of these families \({\mathcal{F}}_{x}\) has less than \(n\) points, we can apply the induction hypothesis for each of them, and sum the corresponding inequalities (8.2). The resulting sum counts \(n - {a}_{i} - {b}_{i}\) times the term \({\left( \begin{matrix} {a}_{i} + {b}_{i} \\  {a}_{i} \end{matrix}\right) }^{-1}\) , corresponding to points \(x \notin  {A}_{i} \cup  {B}_{i}\) , and \({b}_{i}\) times the term \({\left( \begin{matrix} {a}_{i} + {b}_{i} - 1 \\  {a}_{i} \end{matrix}\right) }^{-1}\) , corresponding to points \(x \in  {B}_{i}\) ; the total is \(\leq  n\) . Hence we obtain that
+
+\begin{tcolorbox}\relax
+由于这些族 \({\mathcal{F}}_{x}\) 中的每一个都有少于 \(n\) 个点，我们可以对它们每一个应用归纳假设，并对相应的不等式(8.2)求和。得到的和中，对应于点 \(x \notin  {A}_{i} \cup  {B}_{i}\) 的项 \({\left( \begin{matrix} {a}_{i} + {b}_{i} \\  {a}_{i} \end{matrix}\right) }^{-1}\) 被计算了 \(n - {a}_{i} - {b}_{i}\) 次，对应于点 \(x \in  {B}_{i}\) 的项 \({\left( \begin{matrix} {a}_{i} + {b}_{i} - 1 \\  {a}_{i} \end{matrix}\right) }^{-1}\) 被计算了 \({b}_{i}\) 次；总和为 \(\leq  n\) 。因此我们得到
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = 1}}^{m}\left( {n - {a}_{i} - {b}_{i}}\right) {\left( \begin{matrix} {a}_{i} + {b}_{i} \\  {a}_{i} \end{matrix}\right) }^{-1} + {b}_{i}{\left( \begin{matrix} {a}_{i} + {b}_{i} - 1 \\  {a}_{i} \end{matrix}\right) }^{-1} \leq  n.
+\]
+
+Since \(\left( \begin{matrix} k - 1 \\  l \end{matrix}\right)  = \frac{k - l}{k}\left( \begin{array}{l} k \\  l \end{array}\right)\) , the \(i\) -th term of this sum is equal to \(n \cdot  {\left( \begin{matrix} {a}_{i} + {b}_{i} \\  {a}_{i} \end{matrix}\right) }^{-1}\) . Dividing both sides by \(n\) we get the result.
+
+\begin{tcolorbox}\relax
+由于 \(\left( \begin{matrix} k - 1 \\  l \end{matrix}\right)  = \frac{k - l}{k}\left( \begin{array}{l} k \\  l \end{array}\right)\) ，这个和的第 \(i\) 项等于 \(n \cdot  {\left( \begin{matrix} {a}_{i} + {b}_{i} \\  {a}_{i} \end{matrix}\right) }^{-1}\) 。两边同时除以 \(n\) 我们得到结果。
+\end{tcolorbox}
+
+Second proof. Lubell's method of counting permutations. Let, as before, \(X\) be the union of all sets \({A}_{i} \cup  {B}_{i}\) . If \(A\) and \(B\) are disjoint subsets of \(X\) then we say that a permutation \(\left( {{x}_{1},{x}_{2},\ldots ,{x}_{n}}\right)\) of \(X\) separates the pair \(\left( {A,B}\right)\) if no element of \(B\) precedes an element of \(A\) , i.e., if \({x}_{k} \in  A\) and \({x}_{l} \in  B\) imply \(k < l\) .
+
+\begin{tcolorbox}\relax
+第二个证明。卢贝尔的排列计数方法。和之前一样，设 \(X\) 为所有集合 \({A}_{i} \cup  {B}_{i}\) 的并集。如果 \(A\) 和 \(B\) 是 \(X\) 的不相交子集，那么我们称 \(X\) 的一个排列 \(\left( {{x}_{1},{x}_{2},\ldots ,{x}_{n}}\right)\) 分离对 \(\left( {A,B}\right)\) ，如果 \(B\) 中没有元素先于 \(A\) 中的元素，即，如果 \({x}_{k} \in  A\) 且 \({x}_{l} \in  B\) 意味着 \(k < l\) 。
+\end{tcolorbox}
+
+Each of the \(n\) ! permutations can separate at most one of the pairs \(\left( {{A}_{i},{B}_{i}}\right)\) , \(i = 1,\ldots ,m\) . Indeed, suppose that \(\left( {{x}_{1},{x}_{2},\ldots ,{x}_{n}}\right)\) separates two pairs \(\left( {{A}_{i},{B}_{i}}\right)\) and \(\left( {{A}_{j},{B}_{j}}\right)\) with \(i \neq  j\) , and assume that \(\max \left\{  {k : {x}_{k} \in  {A}_{i}}\right\}   \leq \; \max \left\{  {k : {x}_{k} \in  {A}_{j}}\right\}\) . Since the permutation separates the pair \(\left( {{A}_{j},{B}_{j}}\right)\) ,
+
+\begin{tcolorbox}\relax
+\(n\) !个排列中的每一个最多只能分离 \(\left( {{A}_{i},{B}_{i}}\right)\) 、 \(i = 1,\ldots ,m\) 这两个对中的一个。事实上，假设 \(\left( {{x}_{1},{x}_{2},\ldots ,{x}_{n}}\right)\) 分离了两个对 \(\left( {{A}_{i},{B}_{i}}\right)\) 和 \(\left( {{A}_{j},{B}_{j}}\right)\) 且 \(i \neq  j\) ，并假设 \(\max \left\{  {k : {x}_{k} \in  {A}_{i}}\right\}   \leq \; \max \left\{  {k : {x}_{k} \in  {A}_{j}}\right\}\) 。由于该排列分离对 \(\left( {{A}_{j},{B}_{j}}\right)\) ，
+\end{tcolorbox}
+
+\[
+\min \left\{  {l : {x}_{l} \in  {B}_{j}}\right\}   > \max \left\{  {k : {x}_{k} \in  {A}_{j}}\right\}   \geq  \max \left\{  {k : {x}_{k} \in  {A}_{i}}\right\}
+\]
+
+which implies that \({A}_{i} \cap  {B}_{j} = \varnothing\) , contradicting the assumption.
+
+\begin{tcolorbox}\relax
+这意味着 \({A}_{i} \cap  {B}_{j} = \varnothing\) ，与假设矛盾。
+\end{tcolorbox}
+
+We now estimate the number of permutations separating one fixed pair. If \(\left| A\right|  = a\) and \(\left| B\right|  = b\) and \(A\) and \(B\) are disjoint then the pair \(\left( {A,B}\right)\) is separated by exactly
+
+\begin{tcolorbox}\relax
+我们现在估计分离一个固定对的排列数。如果 \(\left| A\right|  = a\) 、 \(\left| B\right|  = b\) 、 \(A\) 和 \(B\) 是不相交的，那么对 \(\left( {A,B}\right)\) 恰好被
+\end{tcolorbox}
+
+\[
+\left( \begin{matrix} n \\  a + b \end{matrix}\right) a!b!\left( {n - a - b}\right) ! = n!{\left( \begin{matrix} a + b \\  a \end{matrix}\right) }^{-1}
+\]
+
+permutations. Here \(\left( \begin{matrix} n \\  a + b \end{matrix}\right)\) counts the number of choices for the positions of \(A \cup  B\) in the permutation; having chosen these positions, \(A\) has to occupy the first \(a\) places, giving \(a\) ! choices for the order of \(A\) , and \(b\) ! choices for the order of \(B\) ; the remaining elements can be chosen in \(\left( {n - a - b}\right)\) ! ways.
+
+\begin{tcolorbox}\relax
+个排列分离。这里 \(\left( \begin{matrix} n \\  a + b \end{matrix}\right)\) 计算排列中 \(A \cup  B\) 位置的选择数；选择了这些位置后， \(A\) 必须占据前 \(a\) 个位置，给出 \(a\) !种 \(A\) 的顺序选择，以及 \(b\) !种 \(B\) 的顺序选择；其余元素可以用 \(\left( {n - a - b}\right)\) !种方式选择。
+\end{tcolorbox}
+
+Since no permutation can separate two different pairs \(\left( {{A}_{i},{B}_{i}}\right)\) , summing up over all \(m\) pairs we get all permutations at most once
+
+\begin{tcolorbox}\relax
+由于没有排列能分离两个不同的对 \(\left( {{A}_{i},{B}_{i}}\right)\) ，对所有 \(m\) 对求和，我们得到所有排列最多一次
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = 1}}^{m}n!{\left( \begin{matrix} {a}_{i} + {b}_{i} \\  {a}_{i} \end{matrix}\right) }^{-1} \leq  n!
+\]
+
+and the desired bound (8.2) follows.
+
+\begin{tcolorbox}\relax
+所需的界(8.2)由此得出。
+\end{tcolorbox}
+
+Tuza (1984) observed that Bollobás's theorem implies both Sperner's theorem and the LYM inequality. Let \({A}_{1},\ldots ,{A}_{m}\) be an antichain over a set \(X\) . Take the complements \({B}_{i} = X \smallsetminus  {A}_{i}\) and let \({a}_{i} = \left| {A}_{i}\right|\) for \(i = 1,\ldots ,m\) . Then \({b}_{i} = n - {a}_{i}\) and by (8.2)
+
+\begin{tcolorbox}\relax
+图扎(1984)观察到博洛巴斯定理蕴含斯佩纳定理和LYM不等式。设 \({A}_{1},\ldots ,{A}_{m}\) 是集合 \(X\) 上的一个反链。取补集 \({B}_{i} = X \smallsetminus  {A}_{i}\) ，并设 \({a}_{i} = \left| {A}_{i}\right|\) 对于 \(i = 1,\ldots ,m\) 。那么 \({b}_{i} = n - {a}_{i}\) ，根据(8.2)
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = 1}}^{m}{\left( \begin{matrix} n \\  \left| {A}_{i}\right|  \end{matrix}\right) }^{-1} = \mathop{\sum }\limits_{{i = 1}}^{m}{\left( \begin{matrix} {a}_{i} + {b}_{i} \\  {a}_{i} \end{matrix}\right) }^{-1} \leq  1.
+\]
+
+Due to its importance, the theorem of Bollobás was extended in several ways.
+
+\begin{tcolorbox}\relax
+由于其重要性，博洛巴斯定理在几个方面得到了扩展。
+\end{tcolorbox}
+
+Theorem 8.9 (Tuza 1985). Let \({A}_{1},\ldots ,{A}_{m}\) and \({B}_{1},\ldots ,{B}_{m}\) be collections of sets such that \({A}_{i} \cap  {B}_{i} = \varnothing\) and for all \(i \neq  j\) either \({A}_{i} \cap  {B}_{j} \neq  \varnothing\) or \({A}_{j} \cap  {B}_{i} \neq  \varnothing\) (or both) holds. Then for any real number \(0 < p < 1\) , we have
+
+\begin{tcolorbox}\relax
+定理8.9(图扎1985)。设 \({A}_{1},\ldots ,{A}_{m}\) 和 \({B}_{1},\ldots ,{B}_{m}\) 是集合的族，使得 \({A}_{i} \cap  {B}_{i} = \varnothing\) ，并且对于所有 \(i \neq  j\) ，要么 \({A}_{i} \cap  {B}_{j} \neq  \varnothing\) 成立，要么 \({A}_{j} \cap  {B}_{i} \neq  \varnothing\) 成立(或者两者都成立)。那么对于任何实数 \(0 < p < 1\) ，我们有
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = 1}}^{m}{p}^{\left| {A}_{i}\right| }{\left( 1 - p\right) }^{\left| {B}_{i}\right| } \leq  1
+\]
+
+Proof. Let \(X\) be the union of all sets \({A}_{i} \cup  {B}_{i}\) . Choose a subset \(\mathbf{Y} \subseteq  X\) at random in such a way that each element \(x \in  X\) is included in \(\mathbf{Y}\) independently and with the same probability \(p\) . Let \({E}_{i}\) be the event that \({A}_{i} \subseteq  Y \subseteq  X \smallsetminus \; {B}_{i}\) . Then for their probabilities we have \(\Pr \left\lbrack  {E}_{i}\right\rbrack   = {p}^{\left| {A}_{i}\right| }{\left( 1 - p\right) }^{\left| {B}_{i}\right| }\) for every \(i = 1,\ldots ,m\) (see Exercise 8.4). We claim that, for \(i \neq  j\) , the events \({E}_{i}\) and \({E}_{j}\) cannot occur at the same time. Indeed, otherwise we would have \({A}_{i} \cup  {A}_{j} \subseteq  Y \subseteq  X \smallsetminus  \left( {{B}_{i} \cup  {B}_{j}}\right)\) , implying \({A}_{i} \cap  {B}_{j} = {A}_{j} \cap  {B}_{i} = \varnothing\) , which contradicts our assumption.
+
+\begin{tcolorbox}\relax
+证明。设 \(X\) 为所有集合 \({A}_{i} \cup  {B}_{i}\) 的并集。以如下方式随机选择一个子集 \(\mathbf{Y} \subseteq  X\) :使得每个元素 \(x \in  X\) 独立地以相同概率 \(p\) 包含在 \(\mathbf{Y}\) 中。设 \({E}_{i}\) 为 \({A}_{i} \subseteq  Y \subseteq  X \smallsetminus \; {B}_{i}\) 成立的事件。那么对于它们的概率，对于每个 \(i = 1,\ldots ,m\) ，我们有 \(\Pr \left\lbrack  {E}_{i}\right\rbrack   = {p}^{\left| {A}_{i}\right| }{\left( 1 - p\right) }^{\left| {B}_{i}\right| }\) (见练习8.4)。我们断言，对于 \(i \neq  j\) ，事件 \({E}_{i}\) 和 \({E}_{j}\) 不能同时发生。确实，否则我们会有 \({A}_{i} \cup  {A}_{j} \subseteq  Y \subseteq  X \smallsetminus  \left( {{B}_{i} \cup  {B}_{j}}\right)\) ，这意味着 \({A}_{i} \cap  {B}_{j} = {A}_{j} \cap  {B}_{i} = \varnothing\) ，这与我们的假设相矛盾。
+\end{tcolorbox}
+
+Since the events \({E}_{1},\ldots ,{E}_{m}\) are mutually disjoint, we conclude that \(\Pr \left\lbrack  {E}_{1}\right\rbrack   + \cdots  + \Pr \left\lbrack  {E}_{m}\right\rbrack   = \Pr \left\lbrack  {{E}_{1} \cup  \cdots  \cup  {E}_{m}}\right\rbrack   \leq  1\) , as desired.
+
+\begin{tcolorbox}\relax
+由于事件 \({E}_{1},\ldots ,{E}_{m}\) 相互不交，我们如愿得出 \(\Pr \left\lbrack  {E}_{1}\right\rbrack   + \cdots  + \Pr \left\lbrack  {E}_{m}\right\rbrack   = \Pr \left\lbrack  {{E}_{1} \cup  \cdots  \cup  {E}_{m}}\right\rbrack   \leq  1\) 。
+\end{tcolorbox}
+
+The theorem of Bollobás also has other important extensions. We do not intend to give a complete account here; we only mention some of these results without proof. More information about Bollobás-type results can be found, for example, in a survey by Tuza (1994).
+
+\begin{tcolorbox}\relax
+博洛巴斯定理也有其他重要的推广。我们在此不打算给出完整的阐述；我们仅提及其中一些结果而不给出证明。例如，关于博洛巴斯型结果的更多信息可在图扎(1994年)的一篇综述中找到。
+\end{tcolorbox}
+
+A typical generalization of Bollobás's theorem is its following "skew version." This result was proved by Frankl (1982) by modifying an argument of Lovász (1977) and was also proved in an equivalent form by Kalai (1984).
+
+\begin{tcolorbox}\relax
+博洛巴斯定理的一个典型推广是其如下的“斜版本”。这个结果由弗兰克尔(1982年)通过修改洛瓦兹(1977年)的一个论证证明，并且也由卡莱(1984年)以等价形式证明。
+\end{tcolorbox}
+
+Theorem 8.10. Let \({A}_{1},\ldots ,{A}_{m}\) and \({B}_{1},\ldots ,{B}_{m}\) be finite sets such that \({A}_{i} \cap  {B}_{i} = \varnothing\) and \({A}_{i} \cap  {B}_{j} \neq  \varnothing\) if \(i < j\) . Also suppose that \(\left| {A}_{i}\right|  \leq  a\) and \(\left| {B}_{i}\right|  \leq  b\) . Then \(m \leq  \left( \begin{matrix} a + b \\  a \end{matrix}\right)\) .
+
+\begin{tcolorbox}\relax
+定理8.10。设 \({A}_{1},\ldots ,{A}_{m}\) 和 \({B}_{1},\ldots ,{B}_{m}\) 为有限集，使得若 \(i < j\) ，则 \({A}_{i} \cap  {B}_{i} = \varnothing\) 且 \({A}_{i} \cap  {B}_{j} \neq  \varnothing\) 。还假设 \(\left| {A}_{i}\right|  \leq  a\) 和 \(\left| {B}_{i}\right|  \leq  b\) 。那么 \(m \leq  \left( \begin{matrix} a + b \\  a \end{matrix}\right)\) 。
+\end{tcolorbox}
+
+We also have the following "threshold version" of Bollobás's theorem.
+
+\begin{tcolorbox}\relax
+我们还有博洛巴斯定理的如下“阈值版本”。
+\end{tcolorbox}
+
+Theorem 8.11 (Füredi 1984). Let \({A}_{1},\ldots ,{A}_{m}\) be a collection of a-sets and \({B}_{1},\ldots ,{B}_{m}\) be a collection of \(b\) -sets such that \(\left| {{A}_{i} \cap  {B}_{i}}\right|  \leq  s\) and \(\left| {{A}_{i} \cap  {B}_{j}}\right|  > s\) for every \(i \neq  j\) . Then \(m \leq  \left( \begin{matrix} a + b - {2s} \\  a - s \end{matrix}\right)\) .
+
+\begin{tcolorbox}\relax
+定理8.11(富雷迪1984年)。设 \({A}_{1},\ldots ,{A}_{m}\) 是一个由a集组成的族， \({B}_{1},\ldots ,{B}_{m}\) 是一个由 \(b\) 集组成的族，使得对于每个 \(i \neq  j\) ， \(\left| {{A}_{i} \cap  {B}_{i}}\right|  \leq  s\) 且 \(\left| {{A}_{i} \cap  {B}_{j}}\right|  > s\) 。那么 \(m \leq  \left( \begin{matrix} a + b - {2s} \\  a - s \end{matrix}\right)\) 。
+\end{tcolorbox}
+
+\section*{8.5 Strong systems of distinct representatives}
+
+\begin{tcolorbox}\relax
+\section*{8.5 相异代表系的强系统}
+\end{tcolorbox}
+
+Recall that a system of distinct representatives for the sets \({S}_{1},{S}_{2},\ldots ,{S}_{k}\) is a \(k\) -tuple \(\left( {{x}_{1},{x}_{2},\ldots ,{x}_{k}}\right)\) where the elements \({x}_{i}\) are distinct and \({x}_{i} \in  {S}_{i}\) for all \(i = 1,2,\ldots ,k\) . Such a system is strong if we additionally have \({x}_{i} \notin  {S}_{j}\) for all \(i \neq  j\) .
+\end{document}

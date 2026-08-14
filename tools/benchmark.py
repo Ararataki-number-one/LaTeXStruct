@@ -20,7 +20,8 @@ def main():
         pass
     args = sys.argv[1:]
     compile_check = "--compile" in args
-    reports = run_all(compile_check=compile_check)
+    include_holdout = "--holdout" in args
+    reports = run_all(compile_check=compile_check, include_holdout=include_holdout)
     md = render_markdown(reports)
     (BENCHMARK_DIR / "report.md").write_text(md, encoding="utf-8")
     print(md)

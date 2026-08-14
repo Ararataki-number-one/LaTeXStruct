@@ -1,0 +1,898 @@
+\documentclass[10pt]{article}
+\usepackage[verbose, a4paper, hmargin=2.5cm, vmargin=2.5cm]{geometry}
+
+\usepackage{fontspec}
+\usepackage{ctex}
+\usepackage{paratype}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{esint}
+\usepackage{stmaryrd}
+
+\usepackage[mathbf=sym]{unicode-math}
+\setmainfont{STIX Two Text}
+\setmathfont{STIX Two Math}
+
+\setsansfont{Arial}
+\setmonofont{Courier New}
+
+\usepackage{makecell}
+\usepackage{wasysym}
+\usepackage{pifont}
+\usepackage[export]{adjustbox}
+\usepackage{graphicx}
+\usepackage{mdframed}
+\usepackage{booktabs,array,multirow}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan,}
+\urlstyle{same}
+\usepackage[most]{tcolorbox}
+\definecolor{mygray}{RGB}{240,240,240}
+\tcbset{
+  colback=mygray,
+  boxrule=0pt,
+}
+\graphicspath{ {./images/} }
+\newcommand{\HRule}{\begin{center}\rule{0.9\linewidth}{0.2mm}\end{center}}
+\newcommand{\customfootnote}[1]{
+  \let\thefootnote\relax\footnotetext{#1}
+}
+\newcommand{\lt}{\mathrel{<}}
+\newcommand{\gt}{\mathrel{>}}
+\newcommand*\circled[1]{\tikz[baseline=(char.base)]{\node[shape=circle,draw,inner sep=1.5pt] (char) {\small #1};}}
+\setcounter{MaxMatrixCols}{256}
+\begin{document}
+\section*{2 Groups}
+
+\begin{tcolorbox}\relax
+\section*{2 群}
+\end{tcolorbox}
+
+The automorphism group of a graph is very naturally viewed as a group of permutations of its vertices, and so we now present some basic information about permutation groups. This includes some simple but very useful counting results, which we will use to show that the proportion of graphs on \(n\) vertices that have nontrivial automorphism group tends to zero as \(n\) tends to infinity. (This is often expressed by the expression "almost all graphs are asymmetric.") For a group theorist this result might be a disappointment, but we take its lesson to be that interesting interactions between groups and graphs should be looked for where the automorphism groups are large. Consequently, we also take the time here to develop some of the basic properties of transitive groups.
+
+\begin{tcolorbox}\relax
+图的自同构群很自然地被视为其顶点的置换群，因此我们现在介绍一些关于置换群的基本知识。这里包括一些简单但非常有用的计数结果，我们将用它们说明当 \(n\) 趋于无限时，在 \(n\) 个顶点的图中具有非平凡自同构群的比例趋于零。(这通常表述为“几乎所有图都是无对称的”。)对群论学者而言，这一结果或许让人失望，但我们认为其教训是:应在自同构群较大处寻找群与图之间有趣的相互作用。因此，我们也在此花时间发展传递群的一些基本性质。
+\end{tcolorbox}
+
+\section*{2.1 Permutation Groups}
+
+\begin{tcolorbox}\relax
+\section*{2.1 置换群}
+\end{tcolorbox}
+
+The set of all permutations of a set \(V\) is denoted by \(\operatorname{Sym}\left( V\right)\) , or just \(\operatorname{Sym}\left( n\right)\) when \(\left| V\right|  = n\) . A permutation group on \(V\) is a subgroup of \(\operatorname{Sym}\left( V\right)\) . If \(X\) is a graph with vertex set \(V\) , then we can view each automorphism as a permutation of \(V\) , and so \(\operatorname{Aut}\left( X\right)\) is a permutation group.
+
+\begin{tcolorbox}\relax
+集合 \(V\) 的所有置换的集合记作 \(\operatorname{Sym}\left( V\right)\) ，或在 \(\left| V\right|  = n\) 时简记为 \(\operatorname{Sym}\left( n\right)\) 。作用在 \(V\) 上的置换群是 \(\operatorname{Sym}\left( V\right)\) 的子群。如果图 \(X\) 的顶点集为 \(V\) ，则每个自同构都可视为 \(V\) 的一个置换，因此 \(\operatorname{Aut}\left( X\right)\) 是一个置换群。
+\end{tcolorbox}
+
+A permutation representation of a group \(G\) is a homomorphism from \(G\) into \(\operatorname{Sym}\left( V\right)\) for some set \(V\) . A permutation representation is also referred to as an action of \(G\) on the set \(V\) , in which case we say that \(G\) acts on \(V\) . A representation is faithful if its kernel is the identity group.
+
+\begin{tcolorbox}\relax
+群 \(G\) 的一个置换表示是从 \(G\) 到某个集合 \(V\) 上的对称群 \(\operatorname{Sym}\left( V\right)\) 的同态。置换表示也称为 \(G\) 在集合 \(V\) 上的作用，在此情形我们说 \(G\) 在 \(V\) 上作用。若同态的核为平凡群，则该表示为忠实表示。
+\end{tcolorbox}
+
+A group \(G\) acting on a set \(V\) induces a number of other actions. If \(S\) is a subset of \(V\) , then for any element \(g \in  G\) , the translate \({S}^{g}\) is again a subset of \(V\) . Thus each element of \(G\) determines a permutation of the subsets of \(V\) , and so we have an action of \(G\) on the power set \({2}^{V}\) . We can be more precise than this by noting that \(\left| {S}^{g}\right|  = \left| S\right|\) . Thus for any fixed \(k\) , the action of \(G\) on \(V\) induces an action of \(G\) on the \(k\) -subsets of \(V\) . Similarly, the action of \(G\) on \(V\) induces an action of \(G\) on the ordered \(k\) -tuples of elements of \(V\) .
+
+\begin{tcolorbox}\relax
+群 \(G\) 在集合 \(V\) 上作用会诱导出若干其他作用。若 \(S\) 是 \(V\) 的子集，则对任一元素 \(g \in  G\) ，它的平移 \({S}^{g}\) 仍是 \(V\) 的子集。因此 \(G\) 的每个元素都决定了 \(V\) 的子集的一个置换，于是我们得到 \(G\) 在幂集 \({2}^{V}\) 上的作用。我们可以更精确地说明这一点: \(\left| {S}^{g}\right|  = \left| S\right|\) 。因此对任一固定的 \(k\) ， \(G\) 在 \(V\) 上的作用会诱导出 \(G\) 在 \(V\) 的 \(k\) -元子集上的作用。同样， \(G\) 在 \(V\) 上的作用还诱导出 \(G\) 在 \(V\) 的有序 \(k\) -元组上的作用。
+\end{tcolorbox}
+
+Suppose \(G\) is a permutation group on the set \(V\) . A subset \(S\) of \(V\) is \(G\) - invariant if \({s}^{g} \in  S\) for all points \(s\) of \(S\) and elements \(g\) of \(G\) . If \(S\) is invariant under \(G\) , then each element \(g \in  G\) permutes the elements of \(S\) . Let \(g \upharpoonright  S\) denote the restriction of the permutation \(g\) to \(S\) . Then the mapping
+
+\begin{tcolorbox}\relax
+设 \(G\) 是作用在集合 \(V\) 上的置换群。若对 \(V\) 中的任意点 \(s\) 和任意 \(G\) 的元素 \(g\) 都有 \({s}^{g} \in  S\) ，则子集 \(S\) 是 \(G\) -不变的。若 \(S\) 在 \(G\) 下不变，则每个元素 \(g \in  G\) 都置换 \(S\) 的元素。记 \(g \upharpoonright  S\) 为置换 \(g\) 在 \(S\) 上的限制。则映射
+\end{tcolorbox}
+
+\[
+g \mapsto  g \mid  S
+\]
+
+is a homomorphism from \(G\) into \(\operatorname{Sym}\left( S\right)\) , and the image of \(G\) under this homomorphism is a permutation group on \(S\) , which we denote by \(G \upharpoonright  S\) . (It would be more usual to use \({G}^{S}\) .)
+
+\begin{tcolorbox}\relax
+是从 \(G\) 到 \(\operatorname{Sym}\left( S\right)\) 的一个同态，该同态的像是作用在 \(S\) 上的一个置换群，我们记为 \(G \upharpoonright  S\) 。(通常更常用记作 \({G}^{S}\) 。)
+\end{tcolorbox}
+
+A permutation group \(G\) on \(V\) is transitive if given any two points \(x\) and \(y\) from \(V\) there is an element \(g \in  G\) such that \({x}^{g} = y\) . A \(G\) -invariant subset \(S\) of \(V\) is an orbit of \(G\) if \(G \upharpoonright  S\) is transitive on \(S\) . For any \(x \in  V\) , it is straightforward to check that the set
+
+\begin{tcolorbox}\relax
+作用在 \(V\) 上的置换群 \(G\) 若满足:对任意两点 \(x\) 和 \(y\) (来自 \(V\) )存在某个元素 \(g \in  G\) 使得 \({x}^{g} = y\) ，则称为传递的。若 \(G \upharpoonright  S\) 在子集 \(S\) 上传递，则称该 \(S\) 为 \(G\) 的一个轨道。对任意 \(x \in  V\) ，易检验集合
+\end{tcolorbox}
+
+\[
+{x}^{G} \mathrel{\text{ := }} \left\{  {{x}^{g} : g \in  G}\right\}
+\]
+
+is an orbit of \(G\) . Now, if \(y \in  {x}^{G}\) , then \({y}^{G} = {x}^{G}\) , and if \(y \notin  {x}^{G}\) , then \({y}^{G} \cap  {x}^{G} = \varnothing\) , so each point lies in a unique orbit of \(G\) , and the orbits of \(G\) partition \(V\) . Any \(G\) -invariant subset of \(V\) is a union of orbits of \(G\) (and in fact, we could define an orbit to be a minimal \(G\) -invariant subset of \(V\) ).
+
+\begin{tcolorbox}\relax
+是 \(G\) 的一个轨道。现在，若 \(y \in  {x}^{G}\) ，则 \({y}^{G} = {x}^{G}\) ，若 \(y \notin  {x}^{G}\) ，则 \({y}^{G} \cap  {x}^{G} = \varnothing\) ，因此每个点属于 \(G\) 的唯一一个轨道，且 \(G\) 的各轨道构成对 \(V\) 的划分。任何 \(V\) 上的 \(G\) -不变子集都是若干轨道的并(实际上，我们也可以把轨道定义为 \(V\) 上的最小的 \(G\) -不变子集)。
+\end{tcolorbox}
+
+\section*{2.2 Counting}
+
+\begin{tcolorbox}\relax
+\section*{2.2 计数}
+\end{tcolorbox}
+
+Let \(G\) be a permutation group on \(V\) . For any \(x \in  V\) the stabilizer \({G}_{x}\) of \(x\) is the set of all permutations \(g \in  G\) such that \({x}^{g} = x\) . It is easy to see that \({G}_{x}\) is a subgroup of \(G\) . If \({x}_{1},\ldots ,{x}_{r}\) are distinct elements of \(V\) , then
+
+\begin{tcolorbox}\relax
+设 \(G\) 为在 \(V\) 上的置换群。对任意 \(x \in  V\) ，元素 \(x\) 的稳定子 \({G}_{x}\) 是所有满足 \({x}^{g} = x\) 的置换 \(g \in  G\) 的集合。显然 \({G}_{x}\) 是 \(G\) 的一个子群。如果 \({x}_{1},\ldots ,{x}_{r}\) 是 \(V\) 中的不同元素，那么
+\end{tcolorbox}
+
+\[
+{G}_{{x}_{1},\ldots ,{x}_{r}} \mathrel{\text{ := }} \mathop{\bigcap }\limits_{{i = 1}}^{r}{G}_{{x}_{i}}
+\]
+
+Thus this intersection is the subgroup of \(G\) formed by the elements that fix \({x}_{i}\) for all \(i\) ; to emphasize this it is called the pointwise stabilizer of \(\left\{  {{x}_{1},\ldots ,{x}_{r}}\right\}\) . If \(S\) is a subset of \(V\) , then the stabilizer \({G}_{S}\) of \(S\) is the set of all permutations \(g\) such that \({S}^{g} = S\) . Because here we are not insisting that every element of \(S\) be fixed this is sometimes called the setwise stabilizer of \(S\) . If \(S = \left\{  {{x}_{1},\ldots ,{x}_{r}}\right\}\) , then \({G}_{{x}_{1},\ldots ,{x}_{r}}\) is a subgroup of \({G}_{S}\) .
+
+\begin{tcolorbox}\relax
+因此，此交是由在所有 \(i\) 下固定 \({x}_{i}\) 的元素组成的 \(G\) 的子群；为强调这一点，它称为 \(\left\{  {{x}_{1},\ldots ,{x}_{r}}\right\}\) 的逐点稳定子。如果 \(S\) 是 \(V\) 的子集，那么 \(S\) 的稳定子 \({G}_{S}\) 是所有满足 \({S}^{g} = S\) 的置换 \(g\) 的集合。因为此处我们并不要求 \(S\) 的每个元素都被固定，所以有时称之为 \(S\) 的集合稳定子。如果 \(S = \left\{  {{x}_{1},\ldots ,{x}_{r}}\right\}\) ，则 \({G}_{{x}_{1},\ldots ,{x}_{r}}\) 是 \({G}_{S}\) 的一个子群。
+\end{tcolorbox}
+
+Lemma 2.2.1 Let \(G\) be a permutation group acting on \(V\) and let \(S\) be an orbit of \(G\) . If \(x\) and \(y\) are elements of \(S\) , the set of permutations in \(G\) that map \(x\) to \(y\) is a right coset of \({G}_{x}\) . Conversely, all elements in a right coset of \({G}_{x}\) map \(x\) to the same point in \(S\) .
+
+\begin{tcolorbox}\relax
+引理 2.2.1 设 \(G\) 为在 \(V\) 上作用的置换群，令 \(S\) 为 \(G\) 的一个轨道。如果 \(x\) 与 \(y\) 是 \(S\) 的元素，则将 \(x\) 映到 \(y\) 的 \(G\) 中的置换集合是 \({G}_{x}\) 的一个右陪集。反之， \({G}_{x}\) 的任何右陪集中的所有元素都把 \(x\) 映到 \(S\) 中的同一点。
+\end{tcolorbox}
+
+Proof. Since \(G\) is transitive on \(S\) , it contains an element, \(g\) say, such that \({x}^{g} = y\) . Now suppose that \(h \in  G\) and \({x}^{h} = y\) . Then \({x}^{g} = {x}^{h}\) , whence \({x}^{h{g}^{-1}} = x\) . Therefore, \(h{g}^{-1} \in  {G}_{x}\) and \(h \in  {G}_{x}g\) . Consequently, all elements mapping \(x\) to \(y\) belong to the coset \({G}_{x}g\) .
+
+\begin{tcolorbox}\relax
+证。由于 \(G\) 在 \(S\) 上传递，它包含一个元素，记为 \(g\) ，使得 \({x}^{g} = y\) 。现在假设 \(h \in  G\) 与 \({x}^{h} = y\) 。则 \({x}^{g} = {x}^{h}\) ，于是 \({x}^{h{g}^{-1}} = x\) 。因此， \(h{g}^{-1} \in  {G}_{x}\) 与 \(h \in  {G}_{x}g\) 。于是，所有把 \(x\) 映到 \(y\) 的元素都属于陪集 \({G}_{x}g\) 。
+\end{tcolorbox}
+
+For the converse we must show that every element of \({G}_{x}g\) maps \(x\) to the same point. Every element of \({G}_{x}g\) has the form \({hg}\) for some element \(h \in  {G}_{x}\) . Since \({x}^{hg} = {\left( {x}^{h}\right) }^{g} = {x}^{g}\) , it follows that all the elements of \({G}_{x}g\) map \(x\) to \({x}^{g}\) .
+
+\begin{tcolorbox}\relax
+反过来我们必须证明 \({G}_{x}g\) 的每个元素都把 \(x\) 映到同一点。 \({G}_{x}g\) 的每个元素都可写成某个元素 \(h \in  {G}_{x}\) 的形式 \({hg}\) 。由于 \({x}^{hg} = {\left( {x}^{h}\right) }^{g} = {x}^{g}\) ，因此 \({G}_{x}g\) 的所有元素都把 \(x\) 映到 \({x}^{g}\) 。
+\end{tcolorbox}
+
+There is a simple but very useful consequence of this, known as the orbit-stabilizer lemma.
+
+\begin{tcolorbox}\relax
+这有一个简单但非常有用的推论，称为轨道-稳定子引理。
+\end{tcolorbox}
+
+Lemma 2.2.2 (Orbit-stabilizer) Let \(G\) be a permutation group acting on \(V\) and let \(x\) be a point in \(V\) . Then
+
+\begin{tcolorbox}\relax
+引理 2.2.2(轨道-稳定子)设 \(G\) 为在 \(V\) 上作用的置换群，令 \(x\) 为 \(V\) 中的一点。则
+\end{tcolorbox}
+
+\[
+\left| {G}_{x}\right| \left| {x}^{G}\right|  = \left| G\right|
+\]
+
+Proof. By the previous lemma, the points of the orbit \({x}^{G}\) correspond bijectively with the right cosets of \({G}_{x}\) . Hence the elements of \(G\) can be partitioned into \(\left| {x}^{G}\right|\) cosets, each containing \(\left| {G}_{x}\right|\) elements of \(G\) .
+
+\begin{tcolorbox}\relax
+证。由前一引理，轨道 \({x}^{G}\) 的点与 \({G}_{x}\) 的右陪集一一对应。因此 \(G\) 的元素可划分为 \(\left| {x}^{G}\right|\) 个陪集，每个陪集包含 \(\left| {G}_{x}\right|\) 个 \(G\) 的元素。
+\end{tcolorbox}
+
+In view of the above it is natural to wonder how \({G}_{x}\) and \({G}_{y}\) are related if \(x\) and \(y\) are distinct points in an orbit of \(G\) . To answer this we first need some more terminology. An element of the group \(G\) that can be written in the form \({g}^{-1}{hg}\) is said to be conjugate to \(h\) , and the set of all elements of \(G\) conjugate to \(h\) is the conjugacy class of \(h\) . Given any element \(g \in  G\) , the mapping \({\tau }_{g} : h \mapsto  {g}^{-1}{hg}\) is a permutation of the elements of \(G\) . The set of all such mappings forms a group isomorphic to \(G\) with the conjugacy classes of \(G\) as its orbits. If \(H \subseteq  G\) and \(g \in  G\) , then \({g}^{-1}{Hg}\) is defined to be the subset
+
+\begin{tcolorbox}\relax
+鉴于以上内容，自然会想知道当 \(x\) 与 \(y\) 是 \(G\) 的同一轨道中的不同点时， \({G}_{x}\) 与 \({G}_{y}\) 有何关联。为了解答，我们首先需要一些术语。若 \(h\) 能写成 \({g}^{-1}{hg}\) 的形式，则称其与 \(h\) 共轭，所有与 \(h\) 共轭的 \(G\) 中元素的集合称为 \(h\) 的共轭类。给定任一元素 \(g \in  G\) ，映射 \({\tau }_{g} : h \mapsto  {g}^{-1}{hg}\) 在 \(G\) 的元素间是一个置换。所有此类映射的集合构成一个与 \(G\) 同构的群，其轨道为 \(G\) 的共轭类。若 \(H \subseteq  G\) 与 \(g \in  G\) ，则定义 \({g}^{-1}{Hg}\) 为该子集
+\end{tcolorbox}
+
+\[
+\left\{  {{g}^{-1}{hg} : h \in  H}\right\}  \text{ . }
+\]
+
+If \(H\) is a subgroup of \(G\) , then \({g}^{-1}{Hg}\) is a subgroup of \(G\) isomorphic to \(H\) , and we say that \({g}^{-1}{Hg}\) is conjugate to \(H\) . Our next result shows that the stabilizers of two points in the same orbit of a group are conjugate.
+
+\begin{tcolorbox}\relax
+若 \(H\) 是 \(G\) 的一个子群，则存在与 \(H\) 同构的 \(G\) 的子群 \({g}^{-1}{Hg}\) ，我们称 \({g}^{-1}{Hg}\) 与 \(H\) 共轭。下一个结果表明，群在同一轨道上两点的稳定子是共轭的。
+\end{tcolorbox}
+
+Lemma 2.2.3 Let \(G\) be a permutation group on the set \(V\) and let \(x\) be a point in \(V\) . If \(g \in  G\) , then \({g}^{-1}{G}_{x}g = {G}_{{x}^{g}}\) .
+
+\begin{tcolorbox}\relax
+引理 2.2.3 设 \(G\) 是作用在集合 \(V\) 上的置换群，且令 \(x\) 为 \(V\) 中的一点。若 \(g \in  G\) ，则 \({g}^{-1}{G}_{x}g = {G}_{{x}^{g}}\) 。
+\end{tcolorbox}
+
+Proof. Suppose that \({x}^{g} = y\) . First we show that every element of \({g}^{-1}{G}_{x}g\) fixes \(y\) . Let \(h \in  {G}_{x}\) . Then
+
+\begin{tcolorbox}\relax
+证明。假设 \({x}^{g} = y\) 。首先我们证明 \({g}^{-1}{G}_{x}g\) 的每个元素都固定 \(y\) 。令 \(h \in  {G}_{x}\) 。于是
+\end{tcolorbox}
+
+\[
+{y}^{{g}^{-1}{hg}} = {x}^{hg} = {x}^{g} = y,
+\]
+
+and therefore \({g}^{-1}{hg} \in  {G}_{y}\) . On the other hand, if \(h \in  {G}_{y}\) , then \({gh}{g}^{-1}\) fixes \(x\) , whence we see that \({g}^{-1}{G}_{x}g = {G}_{y}\) .
+
+\begin{tcolorbox}\relax
+因此 \({g}^{-1}{hg} \in  {G}_{y}\) 。另一方面，若 \(h \in  {G}_{y}\) ，则 \({gh}{g}^{-1}\) 固定 \(x\) ，由此可见 \({g}^{-1}{G}_{x}g = {G}_{y}\) 。
+\end{tcolorbox}
+
+If \(g\) is a permutation of \(V\) , then \(\operatorname{fix}\left( g\right)\) denotes the set of points in \(V\) fixed by \(g\) . The following lemma is traditionally (and wrongly) attributed to Burnside; in fact, it is due to Cauchy and Frobenius.
+
+\begin{tcolorbox}\relax
+若 \(g\) 是 \(V\) 的一个置换，则 \(\operatorname{fix}\left( g\right)\) 表示 \(g\) 在 \(V\) 中固定的点的集合。下列引理传统上(但错误地)归于 Burnside；实际上它出自 Cauchy 与 Frobenius。
+\end{tcolorbox}
+
+Lemma 2.2.4 ("Burnside") Let \(G\) be a permutation group on the set \(V\) . Then the number of orbits of \(G\) on \(V\) is equal to the average number of points fixed by an element of \(G\) .
+
+\begin{tcolorbox}\relax
+引理 2.2.4(“Burnside”)设 \(G\) 是作用在集合 \(V\) 上的置换群。则 \(G\) 在 \(V\) 上的轨道数等于 \(G\) 元素所固定点数的平均值。
+\end{tcolorbox}
+
+Proof. We count in two ways the pairs \(\left( {g,x}\right)\) where \(g \in  G\) and \(x\) is a point in \(V\) fixed by \(g\) . Summing over the elements of \(G\) we find that the number of such pairs is
+
+\begin{tcolorbox}\relax
+证明。我们以两种方式计数对 \(\left( {g,x}\right)\) ，其中 \(g \in  G\) 与 \(x\) 是 \(V\) 中被 \(g\) 固定的点。对 \(G\) 的元素求和得出此类对的数为
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{g \in  G}}\left| {\operatorname{fix}\left( g\right) }\right|
+\]
+
+which, of course, is \(\left| G\right|\) times the average number of points fixed by an element of \(G\) . Next we must sum over the points of \(V\) , and to do this we first note that the number of elements of \(G\) that fix \(x\) is \(\left| {G}_{x}\right|\) . Hence the number of pairs is
+
+\begin{tcolorbox}\relax
+当然，这等于 \(\left| G\right|\) 乘以 \(G\) 的元素所固定点数的平均值。接下来我们必须对 \(V\) 的点求和，为此首先注意到固定 \(x\) 的 \(G\) 中元素的数目为 \(\left| {G}_{x}\right|\) 。因此对的数为
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{x \in  V}}\left| {G}_{x}\right|
+\]
+
+Now, \(\left| {G}_{x}\right|\) is constant as \(x\) ranges over an orbit, so the contribution to this sum from the elements in the orbit \({x}^{G}\) is \(\left| {x}^{G}\right| \left| {G}_{x}\right|  = \left| G\right|\) . Hence the total sum is equal to \(\left| G\right|\) times the number of orbits, and the result is proved. \(□\)
+
+\begin{tcolorbox}\relax
+现在，随着 \(x\) 在某一轨道上变化， \(\left| {G}_{x}\right|\) 保持不变，因此来自轨道 \({x}^{G}\) 中元素的对和为 \(\left| {x}^{G}\right| \left| {G}_{x}\right|  = \left| G\right|\) 。故总和等于 \(\left| G\right|\) 乘以轨道数，由此证毕。 \(□\)
+\end{tcolorbox}
+
+\section*{2.3 Asymmetric Graphs}
+
+\begin{tcolorbox}\relax
+\section*{2.3 非对称图}
+\end{tcolorbox}
+
+A graph is asymmetric if its automorphism group is the identity group. In this section we will prove that almost all graphs are asymmetric, i.e., the proportion of graphs on \(n\) vertices that are asymmetric goes to 1 as \(n \rightarrow  \infty\) . Our main tool will be Burnside’s lemma.
+
+\begin{tcolorbox}\relax
+如果一个图的自同构群为恒等群，则称该图为非对称图。本节我们将证明几乎所有的图都是非对称的，即在 \(n \rightarrow  \infty\) 趋于无限时，关于 \(n\) 个顶点的图中非对称图的比例趋于 1。我们的主要工具是伯恩赛德引理。
+\end{tcolorbox}
+
+Let \(V\) be a set of size \(n\) and consider all the distinct graphs with vertex set \(V\) . If we let \({K}_{V}\) denote a fixed copy of the complete graph on the vertex set \(V\) , then there is a one-to-one correspondence between graphs with vertex set \(V\) and subsets of \(E\left( {K}_{V}\right)\) . Since \({K}_{V}\) has \(\left( \begin{array}{l} n \\  2 \end{array}\right)\) edges, the total number of different graphs is
+
+\begin{tcolorbox}\relax
+设 \(V\) 是一个大小为 \(n\) 的集合，考虑所有顶点集为 \(V\) 的不同图。若令 \({K}_{V}\) 表示顶点集 \(V\) 上固定的一份完全图，则顶点集为 \(V\) 的图与 \(E\left( {K}_{V}\right)\) 的子集之间存在一一对应。由于 \({K}_{V}\) 有 \(\left( \begin{array}{l} n \\  2 \end{array}\right)\) 条边，不同图的总数为
+\end{tcolorbox}
+
+\[
+{2}^{\left( \begin{matrix} n \\  2 \end{matrix}\right) }\text{ . }
+\]
+
+Given a graph \(X\) , the set of graphs isomorphic to \(X\) is called the isomorphism class of \(X\) . The isomorphism classes partition the set of graphs with vertex set \(V\) . Two such graphs \(X\) and \(Y\) are isomorphic if there is a permutation of \(\operatorname{Sym}\left( V\right)\) that maps the edge set of \(X\) onto the edge set of \(Y\) . Therefore, an isomorphism class is an orbit of \(\operatorname{Sym}\left( V\right)\) in its action on subsets of \(E\left( {K}_{V}\right)\) .
+
+\begin{tcolorbox}\relax
+给定图 \(X\) ，与其同构的图的集合称为 \(X\) 的同构类。这些同构类把顶点集为 \(V\) 的所有图划分开来。若两个此类图 \(X\) 与 \(Y\) 同构，则存在一个作用于 \(\operatorname{Sym}\left( V\right)\) 的置换将 \(X\) 的边集映到 \(Y\) 的边集。因此，一个同构类就是 \(\operatorname{Sym}\left( V\right)\) 在其对 \(E\left( {K}_{V}\right)\) 子集作用下的一个轨道。
+\end{tcolorbox}
+
+Lemma 2.3.1 The size of the isomorphism class containing \(X\) is
+
+\begin{tcolorbox}\relax
+引理 2.3.1 含有 \(X\) 的同构类的大小为
+\end{tcolorbox}
+
+\[
+\frac{n!}{\left| \operatorname{Aut}\left( X\right) \right| }\text{ . }
+\]
+
+Proof. This follows from the orbit-stabilizer lemma. We leave the details as an exercise.
+
+\begin{tcolorbox}\relax
+证明。此结论由轨道-稳定子引理得到。细节留作习题。
+\end{tcolorbox}
+
+Now we will count the number of isomorphism classes, using Burnside's lemma. This means that we must find the average number of subsets of \(E\left( {K}_{V}\right)\) fixed by the elements of \(\operatorname{Sym}\left( V\right)\) . Now, if a permutation \(g\) has \(r\) orbits in its action on \(E\left( {K}_{V}\right)\) , then it fixes \({2}^{r}\) subsets in its action on the power set of \(E\left( {K}_{V}\right)\) . For any \(g \in  \operatorname{Sym}\left( V\right)\) , let \({\operatorname{orb}}_{2}\left( g\right)\) denote the number of orbits of \(g\) in its action on \(E\left( {K}_{V}\right)\) . Then Burnside’s lemma yields that the number of isomorphism classes of graphs with vertex set \(V\) is equal to
+
+\begin{tcolorbox}\relax
+现在我们用伯恩赛德引理来计数同构类的个数。为此须求出被 \(\operatorname{Sym}\left( V\right)\) 的元素固定的子集的平均数。若置换 \(g\) 在其对 \(E\left( {K}_{V}\right)\) 的作用中有 \(r\) 个轨道，则它在对 \(E\left( {K}_{V}\right)\) 的幂集作用中固定 \({2}^{r}\) 个子集。对任意 \(g \in  \operatorname{Sym}\left( V\right)\) ，令 \({\operatorname{orb}}_{2}\left( g\right)\) 表示置换 \(g\) 在其对 \(E\left( {K}_{V}\right)\) 的作用中的轨道数。由伯恩赛德引理可得，顶点集为 \(V\) 的图的同构类数等于
+\end{tcolorbox}
+
+\[
+\frac{1}{n!}\mathop{\sum }\limits_{{g \in  \operatorname{Sym}\left( V\right) }}{2}^{{\operatorname{orb}}_{2}\left( g\right) }. \tag{2.1}
+\]
+
+If all graphs were asymmetric, then every isomorphism class would contain \(n\) ! graphs and there would be exactly
+
+\begin{tcolorbox}\relax
+若所有图都非对称，则每个同构类包含 \(n\) ! 个图，且恰有
+\end{tcolorbox}
+
+\[
+\frac{{2}^{\left( \begin{matrix} n \\  2 \end{matrix}\right) }}{n!}
+\]
+
+isomorphism classes. Our next result shows that in fact, the number of isomorphism classes of graphs on \(n\) vertices is quite close to this, and we will deduce from this that almost all graphs are asymmetric. Recall that \(o\left( 1\right)\) is shorthand for a function that tends to 0 as \(n \rightarrow  \infty\) .
+
+\begin{tcolorbox}\relax
+个同构类。下一结果表明，事实上关于 \(n\) 个顶点的图的同构类数与此相差不大，我们将由此推断几乎所有图都是非对称的。回忆 \(o\left( 1\right)\) 是趋于 0 的函数的记号，当 \(n \rightarrow  \infty\) 时。
+\end{tcolorbox}
+
+Lemma 2.3.2 The number of isomorphism classes of graphs on \(n\) vertices is at most
+
+\begin{tcolorbox}\relax
+引理 2.3.2 关于 \(n\) 个顶点的图的同构类数至多为
+\end{tcolorbox}
+
+\[
+\left( {1 + o\left( 1\right) }\right) \frac{{2}^{\left( \begin{matrix} n \\  2 \end{matrix}\right) }}{n!}
+\]
+
+Proof. We will leave some details to the reader. The support of a permutation is the set of points that it does not fix. We claim that among all permutations \(g \in  \operatorname{Sym}\left( V\right)\) with support of size an even integer \({2r}\) , the maximum value of \({\operatorname{orb}}_{2}\left( g\right)\) is realized by the permutation with exactly \(r\) cycles of length 2.
+
+\begin{tcolorbox}\relax
+证明。部分细节留给读者。置换的支集是其不动点的集合。我们声称，在所有支集大小为偶数整数 \({2r}\) 的置换 \(g \in  \operatorname{Sym}\left( V\right)\) 中， \({\operatorname{orb}}_{2}\left( g\right)\) 的最大值由恰有 \(r\) 个长度为 2 的循环的置换达到。
+\end{tcolorbox}
+
+Suppose \(g \in  \operatorname{Sym}\left( V\right)\) is such a permutation with \(r\) cycles of length two and \(n - {2r}\) fixed points. Since \({g}^{2} = e\) , all its orbits on pairs of elements from \(V\) have length one or two. There are two ways in which an edge \(\{ x,y\}  \in \; E\left( {K}_{V}\right)\) can be not fixed by \(g\) . Either both \(x\) and \(y\) are in the support of \(g\) , but \({x}^{g} \neq  y\) , or \(x\) is in the support of \(g\) and \(y\) is a fixed point of \(g\) . There are \({2r}\left( {r - 1}\right)\) edges in the former category, and \({2r}\left( {n - {2r}}\right)\) is the latter category. Therefore the number of orbits of length 2 is \(r\left( {r - 1}\right)  + r\left( {n - {2r}}\right)  = r\left( {n - r - 1}\right)\) , and the total number of orbits of \(g\) on \(E\left( {K}_{V}\right)\) is
+
+\begin{tcolorbox}\relax
+假设 \(g \in  \operatorname{Sym}\left( V\right)\) 是这样一个置换，具有 \(r\) 个长度为二的循环和 \(n - {2r}\) 个不动点。由于 \({g}^{2} = e\) ，它在从 \(V\) 中取两元素的对上的轨道长度只可能为一或二。一个边 \(\{ x,y\}  \in \; E\left( {K}_{V}\right)\) 未被 \(g\) 固定有两种情况。要么 \(x\) 和 \(y\) 都在 \(g\) 的支撑上，但 \({x}^{g} \neq  y\) ，要么 \(x\) 在 \(g\) 的支撑上而 \(y\) 是 \(g\) 的不动点。前者有 \({2r}\left( {r - 1}\right)\) 条边，后者属于 \({2r}\left( {n - {2r}}\right)\) 。因此长度为2的轨道数为 \(r\left( {r - 1}\right)  + r\left( {n - {2r}}\right)  = r\left( {n - r - 1}\right)\) ，且 \(g\) 在 \(E\left( {K}_{V}\right)\) 上的轨道总数为
+\end{tcolorbox}
+
+\[
+{\operatorname{orb}}_{2}\left( g\right)  = \left( \begin{array}{l} n \\  2 \end{array}\right)  - r\left( {n - r - 1}\right)
+\]
+
+Now we are going to partition the permutations of \(\operatorname{Sym}\left( V\right)\) into 3 classes and make rough estimates for the contribution that each class makes to the sum (2.1) above.
+
+\begin{tcolorbox}\relax
+现在我们将把 \(\operatorname{Sym}\left( V\right)\) 的置换分成三类，并对每一类对上面和 (2.1) 的贡献做粗略估计。
+\end{tcolorbox}
+
+Fix an even integer \(m \leq  n - 2\) , and divide the permutations into three classes as follows: \({\mathcal{C}}_{1} = \{ e\} ,{\mathcal{C}}_{2}\) contains the nonidentity permutations with support of size at most \(m\) , and \({\mathcal{C}}_{3}\) contains the remaining permutations. We may estimate the sizes of these classes as follows:
+
+\begin{tcolorbox}\relax
+固定一个偶数 \(m \leq  n - 2\) ，并按如下方式将置换分为三类: \({\mathcal{C}}_{1} = \{ e\} ,{\mathcal{C}}_{2}\) 包含支撑大小不超过 \(m\) 的非恒等置换， \({\mathcal{C}}_{3}\) 包含其余置换。我们可以如下估计这些类的大小:
+\end{tcolorbox}
+
+\[
+\left| {\mathcal{C}}_{1}\right|  = 1,\;\left| {\mathcal{C}}_{2}\right|  \leq  \left( \begin{matrix} n \\  m \end{matrix}\right) m! < {n}^{m},\;\left| {\mathcal{C}}_{3}\right|  < n! < {n}^{n}.
+\]
+
+An element \(g \in  {\mathcal{C}}_{2}\) has the maximum number of orbits on pairs if it is a single 2-cycle, in which case it has \(\left( \begin{array}{l} n \\  2 \end{array}\right)  - \left( {n - 2}\right)\) such orbits. An element \(g \in  {\mathcal{C}}_{3}\) has support of size at least \(m\) and so has the maximum number of orbits on pairs if it has \(m/2\) 2-cycles, in which case it has
+
+\begin{tcolorbox}\relax
+一个元素 \(g \in  {\mathcal{C}}_{2}\) 在对上的轨道数最多当它是单个2-循环时，这时它有 \(\left( \begin{array}{l} n \\  2 \end{array}\right)  - \left( {n - 2}\right)\) 个此类轨道。一个元素 \(g \in  {\mathcal{C}}_{3}\) 的支撑大小至少为 \(m\) ，因此当它有 \(m/2\) 个2-循环时，在对上具有最多的轨道，在这种情况下它有
+\end{tcolorbox}
+
+\[
+\left( \begin{array}{l} n \\  2 \end{array}\right)  - \frac{m}{2}\left( {n - \frac{m}{2} - 1}\right)  \leq  \left( \begin{array}{l} n \\  2 \end{array}\right)  - \frac{nm}{4}
+\]
+
+such orbits.
+
+\begin{tcolorbox}\relax
+这样的轨道。
+\end{tcolorbox}
+
+Therefore,
+
+\begin{tcolorbox}\relax
+因此，
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{g \in  \operatorname{Sym}\left( V\right) }}{2}^{{\operatorname{orb}}_{2}\left( g\right) } \leq  {2}^{\left( \begin{matrix} n \\  2 \end{matrix}\right) } + {n}^{m}{2}^{\left( \begin{matrix} n \\  2 \end{matrix}\right)  - \left( {n - 2}\right) } + {n}^{n}{2}^{\left( \begin{matrix} n \\  2 \end{matrix}\right)  - {nm}/4}
+\]
+
+\[
+= {2}^{\left( \begin{matrix} n \\  2 \end{matrix}\right) }\left( {1 + {n}^{m}{2}^{-\left( {n - 2}\right) } + {n}^{n}{2}^{-{nm}/4}}\right) .
+\]
+
+The sum of the last two terms can be shown to be \(o\left( 1\right)\) by expressing it as
+
+\begin{tcolorbox}\relax
+将最后两项之和表示为……可以显示其为 \(o\left( 1\right)\) 。
+\end{tcolorbox}
+
+\[
+{2}^{m\log n - n + 2} + {2}^{n\log n - {nm}/4}
+\]
+
+and taking \(m = \lfloor c\log n\rfloor\) for \(c > 4\) .
+
+\begin{tcolorbox}\relax
+并取 \(m = \lfloor c\log n\rfloor\) 为 \(c > 4\) 。
+\end{tcolorbox}
+
+Corollary 2.3.3 Almost all graphs are asymmetric.
+
+\begin{tcolorbox}\relax
+推论 2.3.3 几乎所有图都是非对称的。
+\end{tcolorbox}
+
+Proof. Suppose that the proportion of isomorphism classes of graphs on \(V\) that are asymmetric is \(\mu\) . Each isomorphism class of a graph that is not asymmetric contains at most \(n!/2\) graphs, whence the average size of an isomorphism class is at most
+
+\begin{tcolorbox}\relax
+证明。设在 \(V\) 个顶点上的图的同构类中非对称者所占比例为 \(\mu\) 。每个非非对称的图的同构类至多包含 \(n!/2\) 个图，因此同构类的平均大小至多为
+\end{tcolorbox}
+
+\[
+n!\left( {\mu  + \frac{\left( 1 - \mu \right) }{2}}\right)  = \frac{n!}{2}\left( {1 + \mu }\right) .
+\]
+
+Consequently,
+
+\begin{tcolorbox}\relax
+因此，
+\end{tcolorbox}
+
+\[
+\frac{n!}{2}\left( {1 + \mu }\right) \left( {1 + o\left( 1\right) }\right) \frac{{2}^{\left( \begin{matrix} n \\  2 \end{matrix}\right) }}{n!} > {2}^{\left( \begin{matrix} n \\  2 \end{matrix}\right) },
+\]
+
+from which it follows that \(\mu\) tends to 1 as \(n\) tends to infinity. Since the proportion of asymmetric graphs on \(V\) is at least as large as the proportion of isomorphism classes (why?), it follows that the proportion of graphs on \(n\) vertices that are asymmetric goes to 1 as \(n\) tends to \(\infty\) .
+
+\begin{tcolorbox}\relax
+由此可得当 \(n\) 趋于无穷大时 \(\mu\) 趋于1。由于在 \(V\) 顶点上的非对称图的比例至少不小于同构类的比例(为什么？)，所以在顶点数为 \(n\) 时的图中非对称图的比例在 \(n\) 趋于 \(\infty\) 时趋于1。
+\end{tcolorbox}
+
+Although the last result assures us that most graphs are asymmetric, it is surprisingly difficult to find examples of graphs that are obviously asymmetric. We describe a construction that does yield such examples. Let \(T\) be a tree with no vertices of valency two, and with at least one vertex of valency greater than two. Assume that it has exactly \(m\) end-vertices. We construct a Halin graph by drawing \(T\) in the plane, and then drawing a cycle of length \(m\) through its end-vertices, so as to form a planar graph. An example is shown in Figure 2.1.
+
+\begin{tcolorbox}\relax
+尽管上述结果保证大多数图都是非对称的，但找到明显非对称的图例出人意料地困难。我们描述一个能产生此类例子的构造。令 \(T\) 为一棵没有度为二的顶点且至少有一个度大于二的树。假设它恰好有 \(m\) 个端点。我们通过将 \(T\) 画在平面上，然后在其端点之间画一条长度为 \(m\) 的环，使之成为一个平面图，从而构造一个 Halin 图。图 2.1 给出一个例子。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.4\textwidth]{images/42_536_767_468_469_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 2.1. A Halin graph
+
+\begin{tcolorbox}\relax
+图 2.1 一幅 Halin 图
+\end{tcolorbox}
+
+Halin graphs have a number of interesting properties; in particular, it is comparatively easy to construct cubic Halin graphs with no nonidentity automorphisms. They all have the property that if we delete any two vertices, then the resulting graph is connected, but if we delete any edge, then we can find a pair of vertices whose deletion will disconnect the graph. (To use language from Section 3.4, they are 3-connected, but any proper subgraph is at most 2-connected.)
+
+\begin{tcolorbox}\relax
+Halin 图具有许多有趣的性质；尤其是，相对容易构造没有非平凡自同构的三次 Halin 图。它们都有这样的性质:删去任意两个顶点后所得的图仍然是连通的，但若删去任意一条边，则可以找到一对顶点，删去它们将使图不连通。(用第 3.4 节的术语，它们是 3-连通的，但任何真子图的连通性至多为 2。)
+\end{tcolorbox}
+
+\section*{2.4 Orbits on Pairs}
+
+\begin{tcolorbox}\relax
+\section*{2.4 对偶上的轨道}
+\end{tcolorbox}
+
+Let \(G\) be a transitive permutation group acting on the set \(V\) . Then \(G\) acts on the set of ordered pairs \(V \times  V\) , and in this section we study its orbits on this set. It is so common to study \(G\) acting on both \(V\) and \(V \times  V\) that the orbits of \(G\) on \(V \times  V\) are often given the special name orbitals.
+
+\begin{tcolorbox}\relax
+设 \(G\) 是在集合 \(V\) 上作用的传递置换群。于是 \(G\) 在有序对的集合 \(V \times  V\) 上也作用，本节研究其在该集合上的轨道。由于研究 \(G\) 在 \(V\) 和 \(V \times  V\) 上的作用极为常见，故 \(G\) 在 \(V \times  V\) 上的轨道常被称作轨道子或轨位(orbitals)。
+\end{tcolorbox}
+
+Since \(G\) is transitive, the set
+
+\begin{tcolorbox}\relax
+由于 \(G\) 是传递的，集合
+\end{tcolorbox}
+
+\[
+\{ \left( {x,x}\right)  : x \in  V\}
+\]
+
+is an orbital of \(G\) , known as the diagonal orbital. If \(\Omega  \subseteq  V \times  V\) , we define its transpose \({\Omega }^{T}\) to be
+
+\begin{tcolorbox}\relax
+是 \(G\) 的一个轨道，称为对角轨道。如果 \(\Omega  \subseteq  V \times  V\) ，我们将其转置定义为 \({\Omega }^{T}\)
+\end{tcolorbox}
+
+\[
+\{ \left( {y,x}\right)  : \left( {x,y}\right)  \in  \Omega \} .
+\]
+
+It is a routine exercise to show that \({\Omega }^{T}\) is \(G\) -invariant if and only if \(\Omega\) is. Since orbits are either equal or disjoint, it follows that if \(\Omega\) is an orbital of \(G\) , either \(\Omega  = {\Omega }^{T}\) or \(\Omega  \cap  {\Omega }^{T} = \varnothing\) . If \(\Omega  = {\Omega }^{T}\) , we call it a symmetric orbital.
+
+\begin{tcolorbox}\relax
+用例行练习可证明:当且仅当 \(\Omega\) 是不变的， \({\Omega }^{T}\) 才是 \(G\) -不变的。由于轨道要么相等要么不相交，若 \(\Omega\) 是 \(G\) 的一个轨道，则要么 \(\Omega  = {\Omega }^{T}\) 要么 \(\Omega  \cap  {\Omega }^{T} = \varnothing\) 。若为 \(\Omega  = {\Omega }^{T}\) ，则称其为对称轨道。
+\end{tcolorbox}
+
+Lemma 2.4.1 Let \(G\) be a group acting transitively on the set \(V\) , and let \(x\) be a point of \(V\) . Then there is a one-to-one correspondence between the orbits of \(G\) on \(V \times  V\) and the orbits of \({G}_{x}\) on \(V\) .
+
+\begin{tcolorbox}\relax
+引理 2.4.1 设 \(G\) 是在集合 \(V\) 上传递作用的群，且取 \(x\) 为 \(V\) 中的一点。则 \(G\) 在 \(V \times  V\) 上的轨道与 \({G}_{x}\) 在 \(V\) 上的轨道之间存在一一对应。
+\end{tcolorbox}
+
+Proof. Let \(\Omega\) be an orbit of \(G\) on \(V \times  V\) , and let \({Y}_{\Omega }\) denote the set \(\{ y : \left( {x,y}\right)  \in  \Omega \}\) . We claim that the set \({Y}_{\Omega }\) is an orbit of \({G}_{x}\) acting on \(V\) . If \(y\) and \({y}^{\prime }\) belong to \({Y}_{\Omega }\) , then \(\left( {x,y}\right)\) and \(\left( {x,{y}^{\prime }}\right)\) lie in \(\Omega\) and there is a permutation \(g\) such that
+
+\begin{tcolorbox}\relax
+证明。令 \(\Omega\) 为 \(G\) 在 \(V \times  V\) 上的一个轨道，且令 \({Y}_{\Omega }\) 表示集合 \(\{ y : \left( {x,y}\right)  \in  \Omega \}\) 。我们声称集合 \({Y}_{\Omega }\) 是 \({G}_{x}\) 在 \(V\) 上的一个轨道。若 \(y\) 和 \({y}^{\prime }\) 属于 \({Y}_{\Omega }\) ，则 \(\left( {x,y}\right)\) 和 \(\left( {x,{y}^{\prime }}\right)\) 落在 \(\Omega\) 中，且存在置换 \(g\) 使得
+\end{tcolorbox}
+
+\[
+{\left( x,y\right) }^{g} = \left( {x,{y}^{\prime }}\right) .
+\]
+
+This implies that \(g \in  {G}_{x}\) and \({y}^{g} = {y}^{\prime }\) , and thus \(y\) and \({y}^{\prime }\) are in the same orbit of \({G}_{x}\) . Conversely, if \(\left( {x,y}\right)  \in  \Omega\) and \({y}^{\prime } = {y}^{g}\) for some \(g \in  {G}_{x}\) , then \(\left( {x,{y}^{\prime }}\right)  \in  \Omega\) . Thus \({Y}_{\Omega }\) is an orbit of \({G}_{x}\) . Since \(V\) is partitioned by the sets \({Y}_{\Omega }\) , where \(\Omega\) ranges over the orbits of \(G\) on \(V \times  V\) , the lemma follows.
+
+\begin{tcolorbox}\relax
+由此可得 \(g \in  {G}_{x}\) 与 \({y}^{g} = {y}^{\prime }\) ，从而 \(y\) 与 \({y}^{\prime }\) 属于 \({G}_{x}\) 的同一轨道。反之，若存在某个 \(g \in  {G}_{x}\) 使得 \(\left( {x,y}\right)  \in  \Omega\) 与 \({y}^{\prime } = {y}^{g}\) ，则 \(\left( {x,{y}^{\prime }}\right)  \in  \Omega\) 。因此 \({Y}_{\Omega }\) 是 \({G}_{x}\) 的一个轨道。由于 \(V\) 被集合 \({Y}_{\Omega }\) 划分，其中 \(\Omega\) 在 \(G\) 在 \(V \times  V\) 上的轨道上取遍，故引理得证。
+\end{tcolorbox}
+
+This lemma shows that for any \(x \in  V\) , each orbit \(\Omega\) of \(G\) on \(V \times  V\) is associated with a unique orbit of \({G}_{x}\) . The number of orbits of \({G}_{x}\) on \(V\) is called the rank of the group \(G\) . If \(\Omega\) is symmetric, the corresponding orbit of \({G}_{x}\) is said to be self-paired. Each orbit \(\Omega\) of \(G\) on \(V \times  V\) may be viewed as a directed graph with vertex set \(V\) and arc set \(\Omega\) . When \(\Omega\) is symmetric this directed graph is a graph: \(\left( {x,y}\right)\) is an arc if and only if \(\left( {y,x}\right)\) is. If \(\Omega\) is not symmetric, then the directed graph has the property that if \(\left( {x,y}\right)\) is an arc, then \(\left( {y,x}\right)\) is not an arc. Such directed graphs are often known as oriented graphs (see Section 8.3).
+
+\begin{tcolorbox}\relax
+该引理表明，对于任意 \(x \in  V\) ， \(G\) 在 \(V \times  V\) 上的每个轨道 \(\Omega\) 都对应着 \({G}_{x}\) 在 \(V\) 上的一个唯一轨道。 \({G}_{x}\) 在 \(V\) 上轨道的数目称为群 \(G\) 的秩。如果 \(\Omega\) 是对称的，则相应的 \({G}_{x}\) 的轨道称为自配对。 \(G\) 在 \(V \times  V\) 上的每个轨道 \(\Omega\) 可被视为顶点集为 \(V\) 、弧集为 \(\Omega\) 的有向图。当 \(\Omega\) 为对称时，该有向图为一简单图:当且仅当 \(\left( {x,y}\right)\) 是弧时 \(\left( {y,x}\right)\) 也是弧。若 \(\Omega\) 非对称，则该有向图具有性质:若 \(\left( {x,y}\right)\) 为弧，则 \(\left( {y,x}\right)\) 不是弧。这类有向图通常称为有向定向图(参见第 8.3 节)。
+\end{tcolorbox}
+
+Lemma 2.4.2 Let \(G\) be a transitive permutation group on \(V\) and let \(\Omega\) be an orbit of \(G\) on \(V \times  V\) . Suppose \(\left( {x,y}\right)  \in  \Omega\) . Then \(\Omega\) is symmetric if and only if there is a permutation \(g\) in \(G\) such that \({x}^{g} = y\) and \({y}^{g} = x\) .
+
+\begin{tcolorbox}\relax
+引理 2.4.2 设 \(G\) 为作用在 \(V\) 上的传递置换群，令 \(\Omega\) 为 \(G\) 在 \(V \times  V\) 上的一个轨道。假设 \(\left( {x,y}\right)  \in  \Omega\) 。当且仅当存在 \(G\) 中的置换 \(g\) 使得 \({x}^{g} = y\) 和 \({y}^{g} = x\) 时， \(\Omega\) 为对称轨道。
+\end{tcolorbox}
+
+Proof. If \(\left( {x,y}\right)\) and \(\left( {y,x}\right)\) both lie in \(\Omega\) , then there is a permutation \(g \in \; G\) such that \({\left( x,y\right) }^{g} = \left( {{x}^{g},{y}^{g}}\right)  = \left( {y,x}\right)\) . Conversely, suppose there is a permutation \(g\) swapping \(x\) and \(y\) . Since \({\left( x,y\right) }^{g} = \left( {y,x}\right)  \in  \Omega\) , it follows that \(\Omega  \cap  {\Omega }^{T} \neq  \varnothing\) , and so \(\Omega  = {\Omega }^{T}\) .
+
+\begin{tcolorbox}\relax
+证明。若 \(\left( {x,y}\right)\) 与 \(\left( {y,x}\right)\) 均位于 \(\Omega\) 中，则存在置换 \(g \in \; G\) 使得 \({\left( x,y\right) }^{g} = \left( {{x}^{g},{y}^{g}}\right)  = \left( {y,x}\right)\) 。反之，假设存在置换 \(g\) 交换 \(x\) 与 \(y\) 。由于 \({\left( x,y\right) }^{g} = \left( {y,x}\right)  \in  \Omega\) ，由此可得 \(\Omega  \cap  {\Omega }^{T} \neq  \varnothing\) ，因而 \(\Omega  = {\Omega }^{T}\) 。
+\end{tcolorbox}
+
+If a permutation \(g\) swaps \(x\) and \(y\) , then \(\left( {xy}\right)\) is a cycle in \(g\) . It follows that \(g\) has even order (and so \(G\) itself must have even order). A permutation group \(G\) on \(V\) is generously transitive if for any two distinct elements \(x\) and \(y\) from \(V\) there is a permutation that swaps them. All orbits of \(G\) on \(V \times  V\) are symmetric if and only if \(G\) is generously transitive.
+
+\begin{tcolorbox}\relax
+若置换 \(g\) 交换 \(x\) 与 \(y\) ，则 \(\left( {xy}\right)\) 在 \(g\) 中为一个循环。由此 \(g\) 的阶为偶数(因此 \(G\) 本身的阶亦为偶数)。置换群 \(G\) 在 \(V\) 上称为慷慨传递的，若对任意来自 \(V\) 的两个不同元素 \(x\) 和 \(y\) 存在交换它们的置换。 \(G\) 在 \(V \times  V\) 上的所有轨道皆为对称当且仅当 \(G\) 是慷慨传递的。
+\end{tcolorbox}
+
+We have seen that each orbital of a transitive permutation group \(G\) on \(V\) gives rise to a graph or an oriented graph. It is clear that \(G\) acts as a transitive group of automorphisms of each of these graphs. Similarly, the union of any set of orbitals is a directed graph (or graph) on which \(G\) acts transitively. We consider one example. Let \(V\) be the set of all 35 triples from a fixed set of seven points. The symmetric group Sym(7) acts on \(V\) as a transitive permutation group \(G\) , and it is not hard to show that \(G\) is generously transitive. Fix a particular triple \(x\) and consider the orbits of \({G}_{x}\) on \(V\) . There are four orbits, namely \(x\) itself, the triples that meet \(x\) in 2 points, the triples that meet \(x\) in 1 point, and those disjoint from \(x\) . Hence these correspond to four orbitals, the first being the diagonal orbital, with the remaining three yielding the graphs \(J\left( {7,3,2}\right) ,J\left( {7,3,1}\right)\) , and \(J\left( {7,3,0}\right)\) . It is clear that \(G\) is a subgroup of the automorphism group of each of these graphs, but although it can be shown that \(G\) is the full automorphism group of \(J\left( {7,3,2}\right)\) and \(J\left( {7,3,0}\right)\) , it is not the full automorphism group of \(J\left( {7,3,1}\right)\) !
+
+\begin{tcolorbox}\relax
+我们已经看到，传递置换群 \(G\) 在 \(V\) 上的每个轨道对应一个无向图或有向图。显然， \(G\) 在这些图上作为传递的自同构群作用。同样，任意若干轨道的并是一个有向图(或图)，在其上 \(G\) 亦传递地作用。举一例:令 \(V\) 为固定七点集合上所有 35 个三元组的集合。对称群 Sym(7) 在 \(V\) 上以传递置换群 \(G\) 作用，不难证明 \(G\) 是慷慨传递的。取定某一三元组 \(x\) ，考察 \({G}_{x}\) 在 \(V\) 上的轨道。有四个轨道，分别为 \(x\) 本身、与 \(x\) 相交两点的三元组、与 \(x\) 相交一点的三元组，以及与 \(x\) 不相交的三元组。因此它们对应四个轨道联通分量，第一者为对角轨道，剩下三者产生图 \(J\left( {7,3,2}\right) ,J\left( {7,3,1}\right)\) 与 \(J\left( {7,3,0}\right)\) 。显然 \(G\) 是这些图每个自同构群的子群，但虽然可以证明 \(G\) 是 \(J\left( {7,3,2}\right)\) 和 \(J\left( {7,3,0}\right)\) 的全部自同构群， \(J\left( {7,3,1}\right)\) 的全部自同构群却不是 \(G\) ！
+\end{tcolorbox}
+
+Lemma 2.4.3 The automorphism group of \(J\left( {7,3,1}\right)\) contains a group isomorphic to \(\operatorname{Sym}\left( 8\right)\) .
+
+\begin{tcolorbox}\relax
+引理 2.4.3 \(J\left( {7,3,1}\right)\) 的自同构群包含一个与 \(\operatorname{Sym}\left( 8\right)\) 同构的群。
+\end{tcolorbox}
+
+Proof. There are 35 partitions of the set \(\{ 0,1,\ldots ,7\}\) into two sets of size four. Let \(X\) be the graph with these partitions as vertices, where two partitions are adjacent if and only if the intersection of a 4-set from one with a 4-set from the other is a set of size two. Clearly, \(\operatorname{Aut}\left( X\right)\) contains a subgroup isomorphic to \(\operatorname{Sym}\left( 8\right)\) . However, \(X\) is isomorphic to \(J\left( {7,3,1}\right)\) . To see this, observe that a partition of \(\{ 0,1,\ldots ,7\}\) into two sets of size four is determined by the 4-set in it that contains 0, and this 4-set in turn is determined by its nonzero elements. Hence the partitions correspond to the triples from \(\{ 1,2,\ldots ,7\}\) and two partitions are adjacent in \(X\) if and only if the corresponding triples have exactly one element in common.
+
+\begin{tcolorbox}\relax
+证明。将集合 \(\{ 0,1,\ldots ,7\}\) 划分为两个各含四个元素的子集的划分共有 35 个。令 \(X\) 为以这些划分为顶点的图，当且仅当一划分中某四元集与另一划分中某四元集的交为两个元素时，两划分相邻。显然， \(\operatorname{Aut}\left( X\right)\) 包含一个与 \(\operatorname{Sym}\left( 8\right)\) 同构的子群。然而， \(X\) 与 \(J\left( {7,3,1}\right)\) 同构。证明如次:注意到将 \(\{ 0,1,\ldots ,7\}\) 划分为两个各含四元素的集合，由其中含 0 的那一四元集决定，而该四元集又由其非零元素决定。因此这些划分对应于来自 \(\{ 1,2,\ldots ,7\}\) 的三元组，且在 \(X\) 中两划分相邻当且仅当对应的三元组恰好有一个公共元素。
+\end{tcolorbox}
+
+\section*{2.5 Primitivity}
+
+\begin{tcolorbox}\relax
+\section*{2.5 原始性}
+\end{tcolorbox}
+
+Let \(G\) be a transitive group on \(V\) . A nonempty subset \(S\) of \(V\) is a block of imprimitivity for \(G\) if for any element \(g\) of \(G\) , either \({S}^{g} = S\) or \(S \cap  {S}^{g} = \varnothing\) . Because \(G\) is transitive, it is clear that the translates of \(S\) form a partition of \(V\) . This set of distinct translates is called a system of imprimitivity for G.
+
+\begin{tcolorbox}\relax
+设 \(G\) 为在 \(V\) 上的传递群。非空子集 \(S\) 若对任意元素 \(g\) ∈ \(G\) ，要么 \({S}^{g} = S\) ，要么 \(S \cap  {S}^{g} = \varnothing\) ，则称为 \(G\) 的不完全性块。由于 \(G\) 传递，很明显 \(S\) 的像构成了 \(V\) 的一个划分。这个不同像的集合称为 G 的不完全性系统。
+\end{tcolorbox}
+
+An example of a system of imprimitivity is readily provided by the cube \(Q\) shown in Figure 2.2. It is straightforward to see that \(\operatorname{Aut}\left( Q\right)\) acts transitively on \(Q\) (see Section 3.1 for more details).
+
+\begin{tcolorbox}\relax
+不完全性系统的一个例子由图 2.2 所示的立方体 \(Q\) 给出。显然 \(\operatorname{Aut}\left( Q\right)\) 在 \(Q\) 上传递作用(详见第 3.1 节)。
+\end{tcolorbox}
+
+For each vertex \(x\) there is a unique vertex \({x}^{\prime }\) at distance three from it; all other vertices in \(Q\) are at distance at most two. If \(S = \left\{  {x,{x}^{\prime }}\right\}\) and \(g \in  \operatorname{Aut}\left( Q\right)\) , then either \({S}^{g} = S\) or \(S \cap  {S}^{g} = \varnothing\) , so \(S\) is a block of imprimitivity. There are four disjoint sets of the form \({S}^{g}\) , as \(g\) ranges over the elements of \(\operatorname{Aut}\left( Q\right)\) , and these sets are permuted among themselves by \(\operatorname{Aut}\left( Q\right)\) .
+
+\begin{tcolorbox}\relax
+对于每个顶点 \(x\) ，有且只有一个顶点 \({x}^{\prime }\) 与之距离三； \(Q\) 中的所有其他顶点的距离至多为二。如果 \(S = \left\{  {x,{x}^{\prime }}\right\}\) 与 \(g \in  \operatorname{Aut}\left( Q\right)\) ，则要么 \({S}^{g} = S\) ，要么 \(S \cap  {S}^{g} = \varnothing\) ，因此 \(S\) 是一个不完全性块。随着 \(g\) 在 \(\operatorname{Aut}\left( Q\right)\) 的元素间取遍，存在四个形如 \({S}^{g}\) 的互不相交的集合，这些集合被 \(\operatorname{Aut}\left( Q\right)\) 相互置换。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.3\textwidth]{images/45_602_204_331_328_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Figure 2.2. The cube \(Q\)
+
+\begin{tcolorbox}\relax
+图 2.2. 立方体 \(Q\)
+\end{tcolorbox}
+
+The partition of \(V\) into singletons is a system of imprimitivity as is the partition of \(V\) into one cell containing all of \(V\) . Any other system of imprimitivity is said to be nontrivial. A group with no nontrivial systems of imprimitivity is primitive; otherwise, it is imprimitive. There are two interesting characterizations of primitive permutation groups. We give one now; the second is in the next section.
+
+\begin{tcolorbox}\relax
+将 \(V\) 划分为单点集是一个不完全性系统，将 \(V\) 划分为包含全部 \(V\) 的一个单元也是如此。任何其他的不完全性系统称为非平凡的。没有非平凡不完全性系统的群称为原始群；否则称为不原始群。关于原始置换群有两条有趣的刻画。我们现在给出一条；另一条在下一节。
+\end{tcolorbox}
+
+Lemma 2.5.1 Let \(G\) be a transitive permutation group on \(V\) and let \(x\) be a point in \(V\) . Then \(G\) is primitive if and only if \({G}_{x}\) is a maximal subgroup of \(G\) .
+
+\begin{tcolorbox}\relax
+引理 2.5.1 设 \(G\) 为在 \(V\) 上的传递置换群，且令 \(x\) 为 \(V\) 中的一点。则 \(G\) 原始当且仅当 \({G}_{x}\) 为 \(G\) 的极大子群。
+\end{tcolorbox}
+
+Proof. In fact, we shall be proving the contrapositive statement, namely that \(G\) has a nontrivial system of imprimitivity if and only if \({G}_{x}\) is not a maximal subgroup of \(G\) . First some notation: We write \(H \leq  G\) if \(H\) is a subgroup of \(G\) , and \(H < G\) if \(H\) is a proper subgroup of \(G\) .
+
+\begin{tcolorbox}\relax
+证明。事实上，我们将证明其逆否命题，即 \(G\) 存在非平凡不完全性系统当且仅当 \({G}_{x}\) 不是 \(G\) 的极大子群。先作些约定:若 \(H\) 为 \(G\) 的子群则记为 \(H \leq  G\) ，若 \(H\) 为 \(G\) 的真子群则记为 \(H < G\) 。
+\end{tcolorbox}
+
+Suppose first that \(G\) has a nontrivial system of imprimitivity and that \(B\) is a block of imprimitivity that contains \(x\) . Then we will show that \({G}_{x} < {G}_{B} < G\) and therefore that \({G}_{x}\) is not maximal. If \(g \in  {G}_{x}\) , then \(B \cap  {B}^{g}\) is nonempty (for it contains \(x\) ) and hence \(B = {B}^{g}\) . Thus \({G}_{x} \leq  {G}_{B}\) . To show that the inclusion is proper we find an element in \({G}_{B}\) that is not in \({G}_{x}\) . Let \(y \neq  x\) be another element of \(B\) . Since \(G\) is transitive it contains an element \(h\) such that \({x}^{h} = y\) . But then \(B = {B}^{h}\) , yet \(h \notin  {G}_{x}\) , and hence \({G}_{x} < {G}_{B}.\)
+
+\begin{tcolorbox}\relax
+首先假设 \(G\) 存在非平凡不完全性系统，且 \(B\) 是包含 \(x\) 的一个不完全性块。我们将证明 \({G}_{x} < {G}_{B} < G\) ，因而 \({G}_{x}\) 不是极大的。若 \(g \in  {G}_{x}\) ，则 \(B \cap  {B}^{g}\) 非空(因为它含有 \(x\) )，因此 \(B = {B}^{g}\) 。于是 \({G}_{x} \leq  {G}_{B}\) 。为证明包含是严格的，我们找一个在 \({G}_{B}\) 中但不在 \({G}_{x}\) 的元素。令 \(y \neq  x\) 为 \(B\) 的另一个元素。由 \(G\) 的传递性可得元素 \(h\) 使得 \({x}^{h} = y\) 。但随后 \(B = {B}^{h}\) ，然而 \(h \notin  {G}_{x}\) ，故 \({G}_{x} < {G}_{B}.\) 。
+\end{tcolorbox}
+
+Conversely, suppose that there is a subgroup \(H\) such that \({G}_{x} < H < G\) . We shall show that the orbits of \(H\) form a nontrivial system of imprimitivity. Let \(B\) be the orbit of \(H\) containing \(x\) and let \(g \in  G\) . To show that \(B\) is a block of imprimitivity it is necessary to show that either \(B = {B}^{g}\) or \(B \cap  {B}^{g} = \varnothing\) . Suppose that \(y \in  B \cap  {B}^{g}\) . Then because \(y \in  B\) there is an element \(h \in  H\) such that \(y = {x}^{h}\) . Moreover, because \(y \in  {B}^{g}\) there is some element \({h}^{\prime } \in  H\) such that \(y = {x}^{{h}^{\prime }g}\) . Then \({x}^{{h}^{\prime }g{h}^{-1}} = x\) , and so \({h}^{\prime }g{h}^{-1} \in  {G}_{x} < H\) . Therefore, \(g \in  H\) , and because \(B\) is an orbit of \(H\) we have \(B = {B}^{g}\) . Because \({G}_{x} < H\) , the block \(B\) does not consist of \(x\) alone, and because \(H < G\) , it does not consist of the whole of \(V\) , and hence it is a nontrivial block of imprimitivity.
+
+\begin{tcolorbox}\relax
+反过来，假设存在子群 \(H\) 使得 \({G}_{x} < H < G\) 。我们将证明 \(H\) 的轨道构成一个非平凡的不变块系统。设 \(B\) 为包含 \(x\) 的 \(H\) 轨道，且设 \(g \in  G\) 。要证明 \(B\) 是不变块，须证明要么 \(B = {B}^{g}\) 要么 \(B \cap  {B}^{g} = \varnothing\) 。假设 \(y \in  B \cap  {B}^{g}\) 。因 \(y \in  B\) ，存在元素 \(h \in  H\) 使得 \(y = {x}^{h}\) 。此外，因 \(y \in  {B}^{g}\) ，存在某元素 \({h}^{\prime } \in  H\) 使得 \(y = {x}^{{h}^{\prime }g}\) 。于是 \({x}^{{h}^{\prime }g{h}^{-1}} = x\) ，因而 \({h}^{\prime }g{h}^{-1} \in  {G}_{x} < H\) 。因此， \(g \in  H\) ，且由于 \(B\) 是 \(H\) 的一个轨道，我们有 \(B = {B}^{g}\) 。因为 \({G}_{x} < H\) ，块 \(B\) 不只包含 \(x\) ，且因为 \(H < G\) ，它也不包含整个 \(V\) ，因此它是一个非平凡的不变块。
+\end{tcolorbox}
+
+\section*{2.6 Primitivity and Connectivity}
+
+\begin{tcolorbox}\relax
+\section*{2.6 原始性与连通性}
+\end{tcolorbox}
+
+Our second characterization of primitive permutation groups uses the orbits of \(G\) on \(V \times  V\) , and requires some preparation. A path in a directed graph \(D\) is a sequence \({u}_{0},\ldots ,{u}_{r}\) of distinct vertices such that \(\left( {{u}_{i - 1},{u}_{i}}\right)\) is an arc of \(D\) for \(i = 1,\ldots ,r\) . A weak path is a sequence \({u}_{0},\ldots ,{u}_{r}\) of distinct vertices such that for \(i = 1,\ldots ,r\) , either \(\left( {{u}_{i - 1},{u}_{i}}\right)\) or \(\left( {{u}_{i},{u}_{i - 1}}\right)\) is an arc. (We will use this terminology in this section only.) A directed graph is strongly connected if any two vertices can be joined by a path and is weakly connected if any two vertices can be joined by a weak path. A directed graph is weakly connected if and only if its "underlying" undirected graph is connected. (This is often used as a definition of weak connectivity.) A strong component of a directed graph is an induced subgraph that is maximal, subject to being strongly connected. Since a vertex is strongly connected, it follows that each vertex lies in a strong component, and therefore the strong components of \(D\) partition its vertices.
+
+\begin{tcolorbox}\relax
+我们的第二个对原始置换群的刻画利用了 \(G\) 在 \(V \times  V\) 上的轨道，并需作些准备。 有向图 \(D\) 中的一条路径是由一列互不相同的顶点 \({u}_{0},\ldots ,{u}_{r}\) 组成，且对于 \(i = 1,\ldots ,r\) ， \(\left( {{u}_{i - 1},{u}_{i}}\right)\) 是 \(D\) 的一条弧。 弱路径是由一列互不相同的顶点 \({u}_{0},\ldots ,{u}_{r}\) 组成，且对于 \(i = 1,\ldots ,r\) ，要么 \(\left( {{u}_{i - 1},{u}_{i}}\right)\) 要么 \(\left( {{u}_{i},{u}_{i - 1}}\right)\) 是弧。(本节仅采用此术语。) 若任意两点都可由一条路径连通，则该有向图称为强连通；若任意两点都可由一条弱路径连通，则称为弱连通。 有向图弱连通当且仅当其“底层”无向图连通。(这常被用作弱连通性的定义。) 有向图的强分量是满足强连通且极大的诱导子图。由于每个顶点都是强连通的，故每个顶点都属于某个强分量，因此 \(D\) 的强分量划分了其顶点。
+\end{tcolorbox}
+
+The in-valency of a vertex in a directed graph is the number of arcs ending on the vertex, the out-valency is defined analogously.
+
+\begin{tcolorbox}\relax
+有向图中某顶点的入度为以该顶点为终点的弧的数目，出度按类比定义。
+\end{tcolorbox}
+
+Lemma 2.6.1 Let \(D\) be a directed graph such that the in-valency and out-valency of any vertex are equal. Then \(D\) is strongly connected if and only if it is weakly connected.
+
+\begin{tcolorbox}\relax
+引理 2.6.1 设 \(D\) 为一有向图，且任一顶点的入度与出度相等。则 \(D\) 在当且仅当其弱连通时为强连通。
+\end{tcolorbox}
+
+Proof. The difficulty is to show that if \(D\) is weakly connected, then it is strongly connected. Assume by way of contradiction that \(D\) is weakly, but not strongly, connected and let \({D}_{1},\ldots ,{D}_{r}\) be the strong components of \(D\) . If there is an arc starting in \({D}_{1}\) and ending in \({D}_{2}\) , then any arc joining \({D}_{1}\) to \({D}_{2}\) must start in \({D}_{1}\) . Hence we may define a directed graph \({D}^{\prime }\) with the strong components of \(D\) as its vertices, and such that there is an arc from \({D}_{i}\) to \({D}_{j}\) in \({D}^{\prime }\) if and only if there is an arc in \(D\) starting in \({D}_{i}\) and ending in \({D}_{j}\) . This directed graph cannot contain any cycles. (Why?) It follows that there is a strong component, \({D}_{1}\) say, such that any arc that ends on a vertex in it must start at a vertex in it. Since \(D\) is weakly connected, there is at least one arc that starts in \({D}_{1}\) and ends on a vertex not in \({D}_{1}\) . Consequently the number of arcs in \({D}_{1}\) is less than the sum of the out-valencies of the vertices in it. But on the other hand, each arc that ends in \({D}_{1}\) must start in it, and therefore the number of arcs in \({D}_{1}\) is equal to the sum of the in-valencies of its vertices. By our hypothesis on \(D\) , though, the sum of the in-valencies of the vertices in \({D}_{1}\) equals the sum of the out-valencies. Thus we have the contradiction we want.
+
+\begin{tcolorbox}\relax
+证明。关键在于证明若 \(D\) 弱连通则必为强连通。为此取反设 \(D\) 弱连通但非强连通，记 \({D}_{1},\ldots ,{D}_{r}\) 为 \(D\) 的强分量。若存在一条弧始于 \({D}_{1}\) 而终于 \({D}_{2}\) ，则任何将 \({D}_{1}\) 与 \({D}_{2}\) 连接的弧必始于 \({D}_{1}\) 。因此可以定义一有向图 \({D}^{\prime }\) ，其顶点为 \(D\) 的强分量，且当且仅当在 \(D\) 中存在一条从 \({D}_{i}\) 开始并终止于 \({D}_{j}\) 的弧时， \({D}^{\prime }\) 中才有从 \({D}_{i}\) 指向 \({D}_{j}\) 的弧。该有向图不可能含有任何圈。(为何？)由此存在一个强分量(记为 \({D}_{1}\) )，使得凡是终止于其内顶点的弧都必须起自其内顶点。既然 \(D\) 弱连通，必有至少一条弧始于 \({D}_{1}\) 而终止于不在 \({D}_{1}\) 中的顶点。因此 \({D}_{1}\) 内的弧数小于其内顶点出度之和。但另一方面，每一条以 \({D}_{1}\) 内顶点为终点的弧必起自其内，因此 \({D}_{1}\) 内的弧数等于其内顶点入度之和。依据对 \(D\) 的假设， \({D}_{1}\) 内顶点入度之和等于出度之和。由此得到矛盾。
+\end{tcolorbox}
+
+What does this lemma have to do with permutation groups? Let \(G\) act transitively on \(V\) and let \(\Omega\) be an orbit of \(G\) on \(V \times  V\) that is not symmetric. Then \(\Omega\) is an oriented graph, and \(G\) acts transitively on its vertices. Hence each point in \(V\) has the same out-valency in \(\Omega\) and the same in-valency. As the in- and out-valencies sum to the number of arcs in \(\Omega\) , the in- and out-valencies of any point of \(V\) in \(\Omega\) are the same. Hence \(\Omega\) is weakly connected if and only if it is strongly connected, and so we will refer to weakly or strongly connected orbits as connected orbits.
+
+\begin{tcolorbox}\relax
+这个引理与置换群有什么关系？令 \(G\) 在 \(V\) 上传递地作用，令 \(\Omega\) 为 \(G\) 在 \(V \times  V\) 上的一个非对称轨道。则 \(\Omega\) 是一个有向图，且 \(G\) 在其顶点上传递地作用。因此 \(V\) 中的每个点在 \(\Omega\) 中具有相同的出度和相同的入度。由于入度与出度之和等于 \(\Omega\) 中的弧数，故 \(V\) 中任一点在 \(\Omega\) 中的入度与出度相等。因此 \(\Omega\) 弱连通当且仅当强连通，于是我们将弱连通或强连通的轨道统称为连通轨道。
+\end{tcolorbox}
+
+Lemma 2.6.2 Let \(G\) be a transitive permutation group on \(V\) . Then \(G\) is primitive if and only if each nondiagonal orbit is connected.
+
+\begin{tcolorbox}\relax
+引理 2.6.2 令 \(G\) 为在 \(V\) 上的传递置换群。则 \(G\) 当且仅当每个非对角轨道都是连通的时为原始的。
+\end{tcolorbox}
+
+Proof. Suppose that \(G\) is imprimitive, and that \({B}_{1},\ldots ,{B}_{r}\) is a system of imprimitivity. Assume further that \(x\) and \(y\) are distinct points in \({B}_{1}\) and \(\Omega\) is the orbit of \(G\) (on \(V \times  V\) ) that contains \(\left( {x,y}\right)\) . If \(g \in  G\) , then \({x}^{g}\) and \({y}^{g}\) must lie in the same block; otherwise \({B}^{g}\) contains points from two distinct blocks. Therefore, each arc of \(\Omega\) joins vertices in the same block, and so \(\Omega\) is not connected.
+
+\begin{tcolorbox}\relax
+证明。若 \(G\) 是非原始的，且 \({B}_{1},\ldots ,{B}_{r}\) 是一组不变分块。进一步设 \(x\) 与 \(y\) 是 \({B}_{1}\) 中的不同点，且 \(\Omega\) 是包含 \(\left( {x,y}\right)\) 的 \(G\) (在 \(V \times  V\) 上)的轨道。若 \(g \in  G\) ，则 \({x}^{g}\) 与 \({y}^{g}\) 必须位于同一分块；否则 \({B}^{g}\) 将包含来自两个不同分块的点。因此， \(\Omega\) 的每条弧连接的顶点都在同一分块内，故 \(\Omega\) 非连通。
+\end{tcolorbox}
+
+Now suppose conversely that \(\Omega\) is a nondiagonal orbit that is not connected, and let \(B\) be the point set of some component of \(\Omega\) . If \(g \in  G\) , then \(B\) and \({B}^{g}\) are either equal or disjoint. Therefore, \(B\) is a nontrivial block and \(G\) is imprimitive.
+
+\begin{tcolorbox}\relax
+反之，设存在一个非对角轨道 \(\Omega\) 非连通，并令 \(B\) 为某一连通分量的点集。若 \(g \in  G\) ，则 \(B\) 与 \({B}^{g}\) 要么相等要么不相交。因此 \(B\) 是一个非平凡分块，且 \(G\) 是非原始的。
+\end{tcolorbox}
+
+\section*{Exercises}
+
+\begin{tcolorbox}\relax
+\section*{练习}
+\end{tcolorbox}
+
+1. Show that the size of the isomorphism class containing \(X\) is
+
+\begin{tcolorbox}\relax
+1. 证明包含 \(X\) 的同构类的大小为
+\end{tcolorbox}
+
+\[
+\frac{n!}{\left| \operatorname{Aut}\left( X\right) \right| }\text{ . }
+\]
+
+2. Prove that \(\left| {\operatorname{Aut}\left( {C}_{n}\right) }\right|  = {2n}\) . (You may assume that \({2n}\) is a lower bound on \(\left| {\operatorname{Aut}\left( {C}_{n}\right) }\right|\) .)
+
+\begin{tcolorbox}\relax
+2. 证明 \(\left| {\operatorname{Aut}\left( {C}_{n}\right) }\right|  = {2n}\) 。(你可以假定 \({2n}\) 是 \(\left| {\operatorname{Aut}\left( {C}_{n}\right) }\right|\) 的下界。)
+\end{tcolorbox}
+
+3. If \(G\) is a transitive permutation group on the set \(V\) , show that there is an element of \(G\) with no fixed points. (What if \(G\) has more than one orbit, but no fixed points?)
+
+\begin{tcolorbox}\relax
+3. 若 \(G\) 是作用在集合 \(V\) 上的传递置换群，证明存在一个在所有点上都无不动点的元素。(若 \(G\) 有多于一个轨道但没有不动点，该如何？)
+\end{tcolorbox}
+
+4. If \(g\) is a permutation of a set of \(n\) points with support of size \(s\) , show that \({\operatorname{orb}}_{2}\left( g\right)\) is maximal when all nontrivial cycles of \(g\) are transpositions.
+
+\begin{tcolorbox}\relax
+4. 若 \(g\) 是作用在 \(n\) 个点上的置换且支集大小为 \(s\) ，证明当 \(g\) 的所有非平凡圈均为互换时 \({\operatorname{orb}}_{2}\left( g\right)\) 取到最大值。
+\end{tcolorbox}
+
+5. The goal of this exercise is to prove Frobenius's lemma, which asserts that if the order of the group \(G\) is divisible by the prime \(p\) , then \(G\) contains an element of order \(p\) . Let \(\Omega\) denote the set of all ordered \(p\) -tuples \(\left( {{x}_{1},\ldots ,{x}_{p}}\right)\) of elements of \(G\) such that \({x}_{1}\cdots {x}_{p} = e\) . Let \(\pi\) denote the permutation of \({G}^{p}\) that maps \(\left( {{x}_{1},{x}_{2},\ldots ,{x}_{p}}\right)\) to \(\left( {{x}_{2},\ldots ,{x}_{p},{x}_{1}}\right)\) . Show that \(\pi\) fixes \(\Omega\) as a set. Using the facts that \(\pi\) fixes \(\left( {e,\ldots ,e}\right)\) and \(\left| \Omega \right|  = {\left| G\right| }^{p - 1}\) , deduce that \(\pi\) must fix at least \(p\) elements of \(\Omega\) and hence Frobenius’s lemma holds.
+
+\begin{tcolorbox}\relax
+5. 本题旨在证明 Frobenius 引理:若群 \(G\) 的阶被素数 \(p\) 整除，则 \(G\) 含有一个阶为 \(p\) 的元素。令 \(\Omega\) 表示所有有序 \(p\) 元组 \(\left( {{x}_{1},\ldots ,{x}_{p}}\right)\) (其分量均来自 \(G\) 且满足 \({x}_{1}\cdots {x}_{p} = e\) )的集合。令 \(\pi\) 表示作用在 \({G}^{p}\) 上将 \(\left( {{x}_{1},{x}_{2},\ldots ,{x}_{p}}\right)\) 映为 \(\left( {{x}_{2},\ldots ,{x}_{p},{x}_{1}}\right)\) 的置换。证明 \(\pi\) 把 \(\Omega\) 整体不动。利用 \(\pi\) 固定 \(\left( {e,\ldots ,e}\right)\) 和 \(\left| \Omega \right|  = {\left| G\right| }^{p - 1}\) 的事实，推断 \(\pi\) 至少固定 \(p\) 个 \(\Omega\) 的元素，从而得出 Frobenius 引理成立。
+\end{tcolorbox}
+
+6. Construct a cubic planar graph on 12 vertices with trivial automorphism group, and provide a proof that it has no nonidentity automorphism.
+
+\begin{tcolorbox}\relax
+6. 构造一个在 12 个顶点上的三次平面图，其自同构群平凡，并证明其不存在非恒等自同构。
+\end{tcolorbox}
+
+7. Decide whether the cube is a Halin graph.
+
+\begin{tcolorbox}\relax
+7. 判断立方体图是否为 Halin 图。
+\end{tcolorbox}
+
+8. Let \(X\) be a self-complementary graph with more than one vertex. Show that there is a permutation \(g\) of \(V\left( X\right)\) such that:
+
+\begin{tcolorbox}\relax
+8. 设 \(X\) 是一个顶点数大于 1 的自补图。证明存在一个作用在 \(V\left( X\right)\) 上的置换 \(g\) ，使得:
+\end{tcolorbox}
+
+(a) \(\{ x,y\}  \in  E\left( X\right)\) if and only if \(\left\{  {{x}^{g},{y}^{g}}\right\}   \in  E\left( \bar{X}\right)\) ,
+
+\begin{tcolorbox}\relax
+(a) 当且仅当 \(\{ x,y\}  \in  E\left( X\right)\) 时 \(\left\{  {{x}^{g},{y}^{g}}\right\}   \in  E\left( \bar{X}\right)\) ，
+\end{tcolorbox}
+
+(b) \({g}^{2} \in  \operatorname{Aut}\left( X\right)\) but \({g}^{2} \neq  e\) ,
+
+\begin{tcolorbox}\relax
+(b) \({g}^{2} \in  \operatorname{Aut}\left( X\right)\) 但 \({g}^{2} \neq  e\) ，
+\end{tcolorbox}
+
+(c) the orbits of \(g\) on \(V\left( X\right)\) induce self-complementary subgraphs of \(X\) .
+
+\begin{tcolorbox}\relax
+(c) \(g\) 在 \(V\left( X\right)\) 上的轨道诱导出 \(X\) 的自补子图。
+\end{tcolorbox}
+
+9. If \(G\) is a permutation group on \(V\) , show that the number of orbits of \(G\) on \(V \times  V\) is equal to
+
+\begin{tcolorbox}\relax
+9. 若 \(G\) 是作用在 \(V\) 上的置换群，证明 \(G\) 在 \(V \times  V\) 上的轨道数等于
+\end{tcolorbox}
+
+\[
+\frac{1}{\left| G\right| }\mathop{\sum }\limits_{{g \in  G}}{\left| \operatorname{fix}\left( g\right) \right| }^{2}
+\]
+
+and derive a similar formula for the number of orbits of \(G\) on the set of pairs of distinct elements from \(V\) .
+
+\begin{tcolorbox}\relax
+并推导出类似的公式，用于计算 \(G\) 在由 \(V\) 中两个不同元素构成的有序对集合上的轨道数。
+\end{tcolorbox}
+
+10. If \(H\) and \(K\) are subsets of a group \(G\) , then \({HK}\) denotes the subset
+
+\begin{tcolorbox}\relax
+10. 若 \(H\) 和 \(K\) 是群 \(G\) 的子集，则 \({HK}\) 表示子集
+\end{tcolorbox}
+
+\[
+\{ {hk} : h \in  H,k \in  K\} .
+\]
+
+If \(H\) and \(K\) are subgroups and \(g \in  G\) , then \({HgK}\) is called a double coset. The double coset \({HgK}\) is a union of right cosets of \(H\) and a union of left cosets of \(K\) , and \(G\) is partitioned by the distinct double cosets \({HgK}\) , as \(g\) varies over the elements of \(G\) . Now (finally) suppose that \(G\) is a transitive permutation group on \(V\) and \(H \leq  G\) . Show that each orbit of \(H\) on \(V\) corresponds to a double coset of the form \({G}_{x}{gH}\) . Also show that the orbit of \({G}_{x}\) corresponding to the double coset \({G}_{x}g{G}_{x}\) is self-paired if and only if \({G}_{x}g{G}_{x} = {G}_{x}{g}^{-1}{G}_{x}\) .
+
+\begin{tcolorbox}\relax
+如果 \(H\) 与 \(K\) 是子群且 \(g \in  G\) ，则 \({HgK}\) 称为双陪集。双陪集 \({HgK}\) 是 \(H\) 的右陪集的并，也是 \(K\) 的左陪集的并，且当 \(g\) 在 \(G\) 的元素间变化时， \(G\) 被不同的双陪集 \({HgK}\) 划分。现在(终于)假设 \(G\) 在 \(V\) 与 \(H \leq  G\) 上是传递置换群。证明 \(H\) 在 \(V\) 上的每个轨道对应形如 \({G}_{x}{gH}\) 的双陪集。还要证明，与双陪集 \({G}_{x}g{G}_{x}\) 对应的 \({G}_{x}\) 的轨道当且仅当 \({G}_{x}g{G}_{x} = {G}_{x}{g}^{-1}{G}_{x}\) 时为自配对。
+\end{tcolorbox}
+
+11. Let \(G\) be a transitive permutation group on \(V\) . Show that it has a symmetric nondiagonal orbit on \(V \times  V\) if and only if \(\left| G\right|\) is even.
+
+\begin{tcolorbox}\relax
+11. 设 \(G\) 为在 \(V\) 上的传递置换群。证明当且仅当 \(\left| G\right|\) 为偶数时，它在 \(V \times  V\) 上存在一个对称的非对角轨道。
+\end{tcolorbox}
+
+12. Show that the only primitive permutation group on \(V\) that contains a transposition is \(\operatorname{Sym}\left( V\right)\) .
+
+\begin{tcolorbox}\relax
+12. 证明:在 \(V\) 上包含一对换(transposition)的唯一原始置换群是 \(\operatorname{Sym}\left( V\right)\) 。
+\end{tcolorbox}
+
+13. Let \(X\) be a graph such that \(\operatorname{Aut}\left( X\right)\) acts transitively on \(V\left( X\right)\) and let \(B\) be a block of imprimitivity for \(\operatorname{Aut}\left( X\right)\) . Show that the subgraph of \(X\) induced by \(B\) is regular.
+
+\begin{tcolorbox}\relax
+13. 设 \(X\) 为一图，且 \(\operatorname{Aut}\left( X\right)\) 在 \(V\left( X\right)\) 上传递，令 \(B\) 为 \(\operatorname{Aut}\left( X\right)\) 的一个不变块。证明由 \(B\) 所诱导的子图是正则的。
+\end{tcolorbox}
+
+14. Let \(G\) be a generously transitive permutation group on \(V\) and let \(B\) be a block for \(G\) . Show that \(G \upharpoonright  B\) and the permutation group induced by \(G\) on the translates of \(B\) are both generously transitive.
+
+\begin{tcolorbox}\relax
+14. 设 \(G\) 为在 \(V\) 上慷慨传递的置换群，且 \(B\) 为 \(G\) 的一个块。证明 \(G \upharpoonright  B\) 与 \(G\) 在 \(B\) 的平移上所诱导的置换群均为慷慨传递。
+\end{tcolorbox}
+
+15. Let \(G\) be a transitive permutation group on \(V\) such that for each element \(v\) in \(V\) there is an element of \(G\) with order two that has \(v\) as its only fixed point. (Thus \(\left| V\right|\) must be odd.) Show that \(G\) is generously transitive.
+
+\begin{tcolorbox}\relax
+15. 设 \(G\) 为在 \(V\) 上的传递置换群，且对 \(V\) 中的每个元素 \(v\) 存在 \(G\) 中的一个二阶元，其唯一不动点为 \(v\) 。(因此 \(\left| V\right|\) 必为奇数。)证明 \(G\) 是慷慨传递的。
+\end{tcolorbox}
+
+16. Let \(X\) be a nonempty graph that is not connected. If \(\operatorname{Aut}\left( X\right)\) is transitive, show that it is imprimitive.
+
+\begin{tcolorbox}\relax
+16. 设 \(X\) 为非空且不连通的图。若 \(\operatorname{Aut}\left( X\right)\) 为传递的，证明其是不原始的(即存在不变块)。
+\end{tcolorbox}
+
+17. Show that \(\operatorname{Aut}\left( {J\left( {{4n} - 1,{2n} - 1,n - 1}\right) }\right)\) contains a subgroup isomorphic to \(\operatorname{Sym}\left( {4n}\right)\) . Show further that \(\omega \left( {J\left( {{4n} - 1,{2n} - 1,n - 1}\right) }\right)  \leq  {4n} - 1\) , and characterize the cases where equality holds.
+
+\begin{tcolorbox}\relax
+17. 证明 \(\operatorname{Aut}\left( {J\left( {{4n} - 1,{2n} - 1,n - 1}\right) }\right)\) 包含一个同构于 \(\operatorname{Sym}\left( {4n}\right)\) 的子群。进一步证明 \(\omega \left( {J\left( {{4n} - 1,{2n} - 1,n - 1}\right) }\right)  \leq  {4n} - 1\) ，并描述等号成立的情形。
+\end{tcolorbox}
+
+\section*{Notes}
+
+\begin{tcolorbox}\relax
+\section*{Notes}
+\end{tcolorbox}
+
+The standard reference for permutation groups is Wielandt's classic [5]. We also highly recommend Cameron [1]. For combinatorialists these are the best starting points. However, almost every book on finite group theory contains enough information on permutation groups to cover our modest needs. Neumann [3] gives an interesting history of Burnside's lemma.
+
+\begin{tcolorbox}\relax
+置换群的标准参考是Wielandt的经典著作[5]。我们也强烈推荐Cameron[1]。对组合学家而言，这些是最好的入门读物。不过，几乎所有关于有限群论的书都包含足够的置换群内容以满足我们的有限需求。Neumann[3] 给出了关于Burnside引理的有趣历史。
+\end{tcolorbox}
+
+The result of Exercise 15 is due to Shult. Exercise 17 is worth some thought, even if you do not attempt to solve it, because it appears quite obvious that \(\operatorname{Aut}\left( {J\left( {{4n} - 1,{2n} - 1,n - 1}\right) }\right)\) should be \(\operatorname{Sym}\left( {{4n} - 1}\right)\) . The second part will be easier if you know something about Hadamard matrices.
+
+\begin{tcolorbox}\relax
+练习15的结果归功于Shult。练习17即便不尝试解答也值得思考，因为看起来很明显 \(\operatorname{Aut}\left( {J\left( {{4n} - 1,{2n} - 1,n - 1}\right) }\right)\) 应为 \(\operatorname{Sym}\left( {{4n} - 1}\right)\) 。如果你对Hadamard矩阵有些了解，第二部分会更容易。
+\end{tcolorbox}
+
+Call a graph minimal asymmetric if it is asymmetric, but any proper induced subgraph with at least two vertices has a nontrivial automorphism. Sabidussi and Nešetřil [2] conjecture that there are finitely many isomorphism classes of minimal asymmetric graphs. In [4], Sabidussi verifies this for all graphs that contain an induced path of length at least 5, finding that there are only two such graphs. In [2], Sabidussi and Nešetřil show that there are exactly seven minimal asymmetric graphs in which the longest induced path has length four.
+
+\begin{tcolorbox}\relax
+如果一个图是非对称的，但任何具有至少两个顶点的真诱导子图都有非平凡自同构，则称其为极小非对称图。Sabidussi和Nešetřil[2] 猜想极小非对称图的同构类是有限的。在[4]中，Sabidussi 验证了所有包含长度至少为5的诱导路径的图均满足该猜想，并发现此类图只有两个。在[2]中，Sabidussi和Nešetřil证明在最长诱导路径长度为4的情况下恰有七个极小非对称图。
+\end{tcolorbox}
+
+\section*{References}
+
+\begin{tcolorbox}\relax
+\section*{参考文献}
+\end{tcolorbox}
+
+[1] P. J. CAMERON, Permutation Groups, Cambridge University Press, Cambridge, 1999.
+
+\begin{tcolorbox}\relax
+[1] P. J. CAMERON, 排列群, 剑桥大学出版社, 剑桥, 1999.
+\end{tcolorbox}
+
+[2] J. Nešetřil AND G. SabIDUSSI, Minimal asymmetric graphs of induced length 4, Graphs Combin., 8 (1992), 343-359.
+
+\begin{tcolorbox}\relax
+[2] J. Nešetřil AND G. SabIDUSSI, 诱导长度为4的最小非对称图, Graphs Combin., 8 (1992), 343-359.
+\end{tcolorbox}
+
+[3] P. M. NeuMANN, A lemma that is not Burnside's, Math. Sci., 4 (1979), 133-141.
+
+\begin{tcolorbox}\relax
+[3] P. M. NeuMANN, 不是伯恩赛德引理的一个引理, Math. Sci., 4 (1979), 133-141.
+\end{tcolorbox}
+
+[4] G. SABIDUSSI, Clumps, minimal asymmetric graphs, and involutions, J. Combin. Theory Ser. B, 53 (1991), 40-79.
+
+\begin{tcolorbox}\relax
+[4] G. SABIDUSSI, 团块、最小非对称图与反演, J. Combin. Theory Ser. B, 53 (1991), 40-79.
+\end{tcolorbox}
+
+[5] H. WIELANDT, Finite Permutation Groups, Academic Press, New York, 1964.
+
+\begin{tcolorbox}\relax
+[5] H. WIELANDT, 有限排列群, Academic Press, 纽约, 1964.
+\end{tcolorbox}
+
+\end{document}

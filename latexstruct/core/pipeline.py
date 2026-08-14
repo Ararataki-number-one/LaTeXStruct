@@ -31,7 +31,7 @@ from .report import build_report
 from .review import run_review
 from .rules import RuleConfig, build_rule_decisions
 from .scanner import scan
-from .verify import check_braces, check_env_balance, known_issues
+from .verify import check_braces, compare_env_balance, known_issues
 
 DOC_CLASS_RE = re.compile(r"\\documentclass(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
 
@@ -277,7 +277,7 @@ def run_pipeline(
 
     verification = {
         "content_invariant": content_invariant(doc.text.split("\n"), out, applied),
-        "env_balance": check_env_balance(result_text),
+        "env_balance": compare_env_balance(doc.text, result_text),
         "braces": check_braces(result_text),
         "invariants": check_invariants(doc.text, result_text),
         "known_issues": known_issues(result_text),

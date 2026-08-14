@@ -1,0 +1,170 @@
+{
+ "name": "godsil_8",
+ "sample": "../../tests/samples/godsil_8.tex",
+ "pack": "bilingual",
+ "mode": "rule",
+ "labels": [
+  {
+   "needle": "Lemma 8.1.1 Let \\(X\\) and \\(Y\\) be directed graphs on the sa",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 84
+  },
+  {
+   "needle": "Lemma 8.1.2 Let \\(X\\) be a directed graph with adjacency mat",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 165
+  },
+  {
+   "needle": "Proof. This is easily proved by induction on \\(r\\) , as you ",
+   "kind": "proof",
+   "line": 171
+  },
+  {
+   "needle": "Corollary 8.1.3 Let \\(X\\) be a graph with e edges and \\(t\\) ",
+   "kind": "theorem-like",
+   "env": "corollary",
+   "line": 183
+  },
+  {
+   "needle": "Theorem 8.2.1 Let \\(X\\) be a graph with \\(n\\) vertices and \\",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 219
+  },
+  {
+   "needle": "Proof. We shall show that the null space of \\(B\\) has dimens",
+   "kind": "proof",
+   "line": 225
+  },
+  {
+   "needle": "Lemma 8.2.2 Let \\(B\\) be the incidence matrix of the graph \\",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 237
+  },
+  {
+   "needle": "Lemma 8.2.3 Let \\(B\\) be the incidence matrix of the graph \\",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 249
+  },
+  {
+   "needle": "Lemma 8.2.4 If \\(C\\) and \\(D\\) are matrices such that \\({CD}",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 261
+  },
+  {
+   "needle": "Proof. If",
+   "kind": "proof",
+   "line": 267
+  },
+  {
+   "needle": "Lemma 8.2.5 Let \\(X\\) be a regular graph of valency \\(k\\) wi",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 299
+  },
+  {
+   "needle": "Proof. Substituting \\(C = {x}^{-1}{B}^{T}\\) and \\(D = B\\) in",
+   "kind": "proof",
+   "line": 309
+  },
+  {
+   "needle": "Theorem 8.3.1 Let \\(X\\) be a graph with \\(n\\) vertices and \\",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 410
+  },
+  {
+   "needle": "Proof. We shall show that the null space of \\(D\\) has dimens",
+   "kind": "proof",
+   "line": 416
+  },
+  {
+   "needle": "Lemma 8.3.2 If \\(\\sigma\\) is an orientation of \\(X\\) and \\(D",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 428
+  },
+  {
+   "needle": "Lemma 8.3.3 Let \\(X\\) and \\(Y\\) be dual plane graphs, and le",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 451
+  },
+  {
+   "needle": "Proof. If \\(u\\) is an edge of \\(X\\) and \\(F\\) is a face, the",
+   "kind": "proof",
+   "line": 457
+  },
+  {
+   "needle": "Lemma 8.4.1 Let \\(A\\) be a real symmetric matrix. If \\(u\\) a",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 485
+  },
+  {
+   "needle": "Proof. Suppose that \\({Au} = {\\lambda u}\\) and \\({Av} = {\\ta",
+   "kind": "proof",
+   "line": 491
+  },
+  {
+   "needle": "Lemma 8.4.2 The eigenvalues of a real symmetric matrix \\(A\\)",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 497
+  },
+  {
+   "needle": "Proof. Let \\(u\\) be an eigenvector of \\(A\\) with eigenvalue ",
+   "kind": "proof",
+   "line": 503
+  },
+  {
+   "needle": "Lemma 8.4.3 Let \\(A\\) be a real symmetric \\(n \\times  n\\) ma",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 515
+  },
+  {
+   "needle": "Proof. For any two vectors \\(u\\) and \\(v\\) , we have",
+   "kind": "proof",
+   "line": 521
+  },
+  {
+   "needle": "Lemma 8.4.4 Let \\(A\\) be an \\(n \\times  n\\) real symmetric m",
+   "kind": "theorem-like",
+   "env": "lemma",
+   "line": 543
+  },
+  {
+   "needle": "Proof. Let \\(R\\) be a matrix whose columns form an orthonorm",
+   "kind": "proof",
+   "line": 549
+  },
+  {
+   "needle": "Theorem 8.4.5 Let \\(A\\) be a real symmetric \\(n \\times  n\\) ",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 565
+  },
+  {
+   "needle": "Proof. Let \\(\\left\\{  {{u}_{1},\\ldots ,{u}_{m}}\\right\\}\\) be",
+   "kind": "proof",
+   "line": 571
+  },
+  {
+   "needle": "Corollary 8.4.6 If \\(A\\) is an \\(n \\times  n\\) real symmetri",
+   "kind": "theorem-like",
+   "env": "corollary",
+   "line": 577
+  },
+  {
+   "needle": "Proof. Let \\(L\\) be the matrix whose rows are an orthonormal",
+   "kind": "proof",
+   "line": 583
+  }
+ ]
+}

@@ -1,0 +1,19 @@
+{
+ "name": "godsil_1_8",
+ "sample": "../../tests/samples/godsil_1_8.tex",
+ "pack": "bilingual",
+ "mode": "rule",
+ "labels": [
+  {
+   "needle": "Theorem 1.8.1 (Euler) If a connected plane graph has \\(n\\) v",
+   "kind": "theorem-like",
+   "env": "theorem",
+   "line": 89
+  },
+  {
+   "needle": "\\section*{Exercises}",
+   "kind": "exercise-section",
+   "line": 217
+  }
+ ]
+}

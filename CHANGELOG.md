@@ -3,6 +3,11 @@
 本项目采用「tag 即发布」的自动化流程：`git tag vX.Y.Z && git push` 触发 CI
 （ruff → 全量测试 → PyInstaller → Inno Setup → 安装器冒烟测试 → 签名 → GitHub Release）。
 
+## v0.6.2（2025-08）
+- Benchmark 扩充：14 金标集 / 200 标签（真实书稿 10 组开发 + 2 组 hold-out），
+  汇总 P/R/F1 + 正文零改动率/引用保持率/编译成功率；行号锚定标签；
+- 基线对比环境平衡（部分输入原文不平衡时按"不新增不平衡"门禁）。
+
 ## v0.6.1（2025-08）
 - Compile CI：TinyTeX + Benchmark --compile 前后编译对比门禁（报告编译列真实数据）；
 - Lint 门禁升级（F+E741+W605）；pyproject 动态版本核实。

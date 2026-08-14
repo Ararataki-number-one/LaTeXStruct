@@ -1,0 +1,1523 @@
+\documentclass[10pt]{article}
+\usepackage[verbose, a4paper, hmargin=2.5cm, vmargin=2.5cm]{geometry}
+
+\usepackage{fontspec}
+\usepackage{ctex}
+\usepackage{paratype}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{esint}
+\usepackage{stmaryrd}
+
+\usepackage[mathbf=sym]{unicode-math}
+\setmainfont{STIX Two Text}
+\setmathfont{STIX Two Math}
+
+\setsansfont{Arial}
+\setmonofont{Courier New}
+
+\usepackage{makecell}
+\usepackage{wasysym}
+\usepackage{pifont}
+\usepackage[export]{adjustbox}
+\usepackage{graphicx}
+\usepackage{mdframed}
+\usepackage{booktabs,array,multirow}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan,}
+\urlstyle{same}
+\usepackage[most]{tcolorbox}
+\definecolor{mygray}{RGB}{240,240,240}
+\tcbset{
+  colback=mygray,
+  boxrule=0pt,
+}
+\graphicspath{ {./images/} }
+\newcommand{\HRule}{\begin{center}\rule{0.9\linewidth}{0.2mm}\end{center}}
+\newcommand{\customfootnote}[1]{
+  \let\thefootnote\relax\footnotetext{#1}
+}
+\newcommand{\lt}{\mathrel{<}}
+\newcommand{\gt}{\mathrel{>}}
+\newcommand*\circled[1]{\tikz[baseline=(char.base)]{\node[shape=circle,draw,inner sep=1.5pt] (char) {\small #1};}}
+\setcounter{MaxMatrixCols}{256}
+\begin{document}
+\section*{1. Counting}
+
+\begin{tcolorbox}\relax
+\section*{1. 计数}
+\end{tcolorbox}
+
+\section*{1.1 The binomial theorem}
+
+\begin{tcolorbox}\relax
+\section*{1.1 二项式定理}
+\end{tcolorbox}
+
+Given a set of \(n\) elements, how many of its subsets have exactly \(k\) elements? This number (of \(k\) -element subsets of an \(n\) -element set) is usually denoted by \(\left( \begin{array}{l} n \\  k \end{array}\right)\) and is called the binomial coefficient. Put otherwise, \(\left( \begin{array}{l} n \\  k \end{array}\right)\) is the number of possibilities to choose \(k\) distinct objects from a collection on \(n\) distinct objects.
+
+\begin{tcolorbox}\relax
+给定一个有 \(n\) 个元素的集合，它有多少个子集恰好包含 \(k\) 个元素？这个数(一个有 \(n\) 个元素的集合中 \(k\) 元子集的数量)通常用 \(\left( \begin{array}{l} n \\  k \end{array}\right)\) 表示，称为二项式系数。换句话说， \(\left( \begin{array}{l} n \\  k \end{array}\right)\) 是从 \(n\) 个不同对象的集合中选择 \(k\) 个不同对象的可能性数量。
+\end{tcolorbox}
+
+The following identity was proved by Sir Isaac Newton in about 1666, and is known as the Binomial theorem.
+
+\begin{tcolorbox}\relax
+以下恒等式由艾萨克·牛顿爵士在1666年左右证明，被称为二项式定理。
+\end{tcolorbox}
+
+Binomial Theorem. Let \(n\) be a positive integer. Then for all \(x\) and \(y\) ,
+
+\begin{tcolorbox}\relax
+二项式定理。设 \(n\) 为正整数。那么对于所有的 \(x\) 和 \(y\) ，
+\end{tcolorbox}
+
+\[
+{\left( x + y\right) }^{n} = \mathop{\sum }\limits_{{k = 0}}^{n}\left( \begin{array}{l} n \\  k \end{array}\right) {x}^{k}{y}^{n - k}.
+\]
+
+Proof. If we multiply the terms
+
+\begin{tcolorbox}\relax
+证明。如果我们将这些项相乘
+\end{tcolorbox}
+
+\[
+{\left( x + y\right) }^{n} = \underset{n - \text{ times }}{\underbrace{\left( {x + y}\right)  \cdot  \left( {x + y}\right)  \cdot  \ldots  \cdot  \left( {x + y}\right) }},
+\]
+
+then, for every \(k = 0,1,\ldots ,n\) , there are exactly \(\left( \begin{array}{l} n \\  k \end{array}\right)\) possibilities to obtain the term \({x}^{k}{y}^{n - k}\) . Why? We obtain the term \({x}^{k}{y}^{n - k}\) precisely if from \(n\) possibilities (terms \(x + y\) ) we choose the first number \(x\) exactly \(k\) times.
+
+\begin{tcolorbox}\relax
+那么，对于每个 \(k = 0,1,\ldots ,n\) ，恰好有 \(\left( \begin{array}{l} n \\  k \end{array}\right)\) 种可能性得到项 \({x}^{k}{y}^{n - k}\) 。为什么呢？当且仅当从 \(n\) 种可能性(项 \(x + y\) )中我们恰好选择第一个数 \(x\)  \(k\) 次时，我们得到项 \({x}^{k}{y}^{n - k}\) 。
+\end{tcolorbox}
+
+Note that this theorem just generalizes the known equality:
+
+\begin{tcolorbox}\relax
+注意，这个定理只是推广了已知的等式:
+\end{tcolorbox}
+
+\[
+{\left( x + y\right) }^{2} = \left( \begin{array}{l} 2 \\  0 \end{array}\right) {x}^{0}{y}^{2} + \left( \begin{array}{l} 2 \\  1 \end{array}\right) {x}^{1}{y}^{1} + \left( \begin{array}{l} 2 \\  2 \end{array}\right) {x}^{2}{y}^{0} = {x}^{2} + {2xy} + {y}^{2}.
+\]
+
+Be it so simple, the binomial theorem has many applications.
+
+\begin{tcolorbox}\relax
+尽管很简单，二项式定理有许多应用。
+\end{tcolorbox}
+
+Example 1.1 (Parity of powers). To give a typical example, let us show the following property of integers: If \(n,k\) are natural numbers, then \({n}^{k}\) is odd iff \(n\) is odd.
+
+\begin{tcolorbox}\relax
+例1.1(幂的奇偶性)。举一个典型的例子，让我们展示整数的以下性质:如果 \(n,k\) 是自然数，那么 \({n}^{k}\) 是奇数当且仅当 \(n\) 是奇数。
+\end{tcolorbox}
+
+One direction \(\left(  \Rightarrow  \right)\) is trivial: If \(n = {2m}\) is even, then \({n}^{k} = {2}^{k}\left( {m}^{k}\right)\) must be also even. To show the other direction \(\left(  \Leftarrow  \right)\) , assume that \(n\) is odd, that is, has the form \(n = {2m} + 1\) for a natural number \(m\) . The binomial theorem with \(x = {2m}\) and \(y = 1\) yields:
+
+\begin{tcolorbox}\relax
+一个方向 \(\left(  \Rightarrow  \right)\) 是平凡的:如果 \(n = {2m}\) 是偶数，那么 \({n}^{k} = {2}^{k}\left( {m}^{k}\right)\) 也一定是偶数。为了证明另一个方向 \(\left(  \Leftarrow  \right)\) ，假设 \(n\) 是奇数，即具有形式 \(n = {2m} + 1\) ，其中 \(m\) 是自然数。用 \(x = {2m}\) 和 \(y = 1\) 的二项式定理可得:
+\end{tcolorbox}
+
+\[
+{n}^{k} = {\left( 2m + 1\right) }^{k} = 1 + {\left( 2m\right) }^{1}\left( \begin{array}{l} k \\  1 \end{array}\right)  + {\left( 2m\right) }^{2}\left( \begin{array}{l} k \\  2 \end{array}\right)  + \cdots  + {\left( 2m\right) }^{k}\left( \begin{array}{l} k \\  k \end{array}\right) .
+\]
+
+That is, the number \({n}^{k}\) has the form " 1 plus an even number", and must be odd.
+
+\begin{tcolorbox}\relax
+也就是说，数 \({n}^{k}\) 具有“1加一个偶数”的形式，一定是奇数。.
+\end{tcolorbox}
+
+The factorial of \(n\) is the product \(n! \mathrel{\text{ := }} n\left( {n - 1}\right) \cdots 2 \cdot  1\) . This is extended to all non-negative integers by letting \(0! = 1\) . The \(k\) -th factorial of \(n\) is the product of the first \(k\) terms:
+
+\begin{tcolorbox}\relax
+\(n\) 的阶乘是乘积 \(n! \mathrel{\text{ := }} n\left( {n - 1}\right) \cdots 2 \cdot  1\) 。通过令 \(0! = 1\) ，这扩展到所有非负整数。 \(n\) 的第 \(k\) 个阶乘是前 \(k\) 项的乘积:
+\end{tcolorbox}
+
+\[
+{\left( n\right) }_{k} \mathrel{\text{ := }} \frac{n!}{\left( {n - k}\right) !} = n\left( {n - 1}\right) \cdots \left( {n - k + 1}\right) .
+\]
+
+Note that \(\left( \begin{array}{l} n \\  0 \end{array}\right)  = 1\) (the empty set) and \(\left( \begin{array}{l} n \\  n \end{array}\right)  = 1\) (the whole set). In general, binomial coefficients can be written as quotients of factorials:
+
+\begin{tcolorbox}\relax
+注意 \(\left( \begin{array}{l} n \\  0 \end{array}\right)  = 1\) (空集)和 \(\left( \begin{array}{l} n \\  n \end{array}\right)  = 1\) (全集)。一般来说，二项式系数可以写成阶乘的商:
+\end{tcolorbox}
+
+Proposition 1.2.
+
+\begin{tcolorbox}\relax
+命题1.2。
+\end{tcolorbox}
+
+\[
+\left( \begin{array}{l} n \\  k \end{array}\right)  = \frac{{\left( n\right) }_{k}}{k!} = \frac{n!}{k!\left( {n - k}\right) !}.
+\]
+
+Proof. Observe that \({\left( n\right) }_{k}\) is the number of (ordered!) strings \(\left( {{x}_{1},{x}_{2},\ldots ,{x}_{k}}\right)\) consisting of \(k\) different elements of a fixed \(n\) -element set: there are \(n\) possibilities to choose the first element \({x}_{1}\) ; after that there are still \(n - 1\) possibilities to choose the next element \({x}_{2}\) , etc. Another way to produce such strings is to choose a \(k\) -element set and then arrange its elements in an arbitrary order. Since each of \(\left( \begin{array}{l} n \\  k \end{array}\right) k\) -element subsets produces exactly \({\left( k\right) }_{k} = k\) ! such strings, we conclude that \({\left( n\right) }_{k} = \left( \begin{array}{l} n \\  k \end{array}\right) k!\) .
+
+\begin{tcolorbox}\relax
+证明。观察到 \({\left( n\right) }_{k}\) 是由固定的 \(n\) 元集合中的 \(k\) 个不同元素组成(有序！)的字符串 \(\left( {{x}_{1},{x}_{2},\ldots ,{x}_{k}}\right)\) 的数量:有 \(n\) 种可能性选择第一个元素 \({x}_{1}\) ；之后仍有 \(n - 1\) 种可能性选择下一个元素 \({x}_{2}\) ，等等。产生这样的字符串的另一种方法是选择一个 \(k\) 元集合，然后以任意顺序排列其元素。由于每个 \(\left( \begin{array}{l} n \\  k \end{array}\right) k\) 元子集恰好产生 \({\left( k\right) }_{k} = k\) ! 个这样的字符串，我们得出 \({\left( n\right) }_{k} = \left( \begin{array}{l} n \\  k \end{array}\right) k!\) 。
+\end{tcolorbox}
+
+There are a lot of useful equalities concerning binomial coefficients. In most situations, using their combinatorial nature (instead of algebraic, as given by the previous proposition) we obtain the desired result fairly easily. For example, if we observe that each subset is uniquely determined by its complement, then we immediately obtain the equality
+
+\begin{tcolorbox}\relax
+有许多关于二项式系数的有用等式。在大多数情况下，利用它们的组合性质(而不是如前一个命题所给出的代数性质)，我们相当容易地就能得到所需结果。例如，如果我们注意到每个子集都由其补集唯一确定，那么我们立即得到等式
+\end{tcolorbox}
+
+\[
+\left( \begin{matrix} n \\  n - k \end{matrix}\right)  = \left( \begin{array}{l} n \\  k \end{array}\right) . \tag{1.1}
+\]
+
+By this equality, for every fixed \(n\) , the value of the binomial coefficient \(\left( \begin{array}{l} n \\  k \end{array}\right)\) increases till the middle and then decreases. By the binomial theorem, the sum of all these \(n + 1\) coefficients is equal to the total number \({2}^{n}\) of all subsets of an \(n\) -element set:
+
+\begin{tcolorbox}\relax
+根据这个等式，对于每一个固定的 \(n\) ，二项式系数 \(\left( \begin{array}{l} n \\  k \end{array}\right)\) 的值先增大到中间值然后减小。根据二项式定理，所有这些 \(n + 1\) 系数的和等于一个 \(n\) 元集合的所有子集的总数 \({2}^{n}\) :
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{k = 0}}^{n}\left( \begin{array}{l} n \\  k \end{array}\right)  = \mathop{\sum }\limits_{{k = 0}}^{n}\left( \begin{array}{l} n \\  k \end{array}\right) {1}^{k}{1}^{n - k} = {\left( 1 + 1\right) }^{n} = {2}^{n}.
+\]
+
+In a similar (combinatorial) way other useful identities can be established (see Exercises for more examples).
+
+\begin{tcolorbox}\relax
+以类似的(组合的)方式可以建立其他有用的恒等式(更多例子见练习)。
+\end{tcolorbox}
+
+Proposition 1.3 (Pascal Triangle). For every integers \(n \geq  k \geq  1\) , we have
+
+\begin{tcolorbox}\relax
+命题1.3(帕斯卡三角形)。对于每一个整数 \(n \geq  k \geq  1\) ，我们有
+\end{tcolorbox}
+
+\[
+\left( \begin{array}{l} n \\  k \end{array}\right)  = \left( \begin{array}{l} n - 1 \\  k - 1 \end{array}\right)  + \left( \begin{matrix} n - 1 \\  k \end{matrix}\right)
+\]
+
+Proof. The first term \(\left( \begin{array}{l} n - 1 \\  k - 1 \end{array}\right)\) is the number of \(k\) -sets containing a fixed element, and the second term \(\left( \begin{matrix} n - 1 \\  k \end{matrix}\right)\) is the number of \(k\) -sets avoiding this element; their sum is the whole number \(\left( \begin{array}{l} n \\  k \end{array}\right)\) of \(k\) -sets.
+
+\begin{tcolorbox}\relax
+证明。第一项 \(\left( \begin{array}{l} n - 1 \\  k - 1 \end{array}\right)\) 是包含一个固定元素的 \(k\) 集的数量，第二项 \(\left( \begin{matrix} n - 1 \\  k \end{matrix}\right)\) 是不包含这个元素的 \(k\) 集的数量；它们的和就是 \(k\) 集的总数 \(\left( \begin{array}{l} n \\  k \end{array}\right)\) 。
+\end{tcolorbox}
+
+For growing \(n\) and \(k\) , exact values of binomial coefficients \(\left( \begin{array}{l} n \\  k \end{array}\right)\) are hard to compute. In applications, however, we are often interested only in their rate of growth, so that (even rough) estimates suffice. Such estimates can be obtained, using the Taylor series of the exponential and logarithmic functions:
+
+\begin{tcolorbox}\relax
+对于不断增大的 \(n\) 和 \(k\) ，二项式系数 \(\left( \begin{array}{l} n \\  k \end{array}\right)\) 的确切值很难计算。然而，在应用中，我们通常只对它们的增长速度感兴趣，所以(即使是粗略的)估计就足够了。利用指数函数和对数函数的泰勒级数可以得到这样的估计:
+\end{tcolorbox}
+
+\[
+{\mathrm{e}}^{t} = 1 + t + \frac{{t}^{2}}{2!} + \frac{{t}^{3}}{3!} + \cdots \;\text{ for all }t \in  \mathbb{R} \tag{1.2}
+\]
+
+and
+
+\begin{tcolorbox}\relax
+以及
+\end{tcolorbox}
+
+\[
+\ln \left( {1 + t}\right)  = t - \frac{{t}^{2}}{2} + \frac{{t}^{3}}{3} - \frac{{t}^{4}}{4} + \cdots \;\text{ for } - 1 < t \leq  1. \tag{1.3}
+\]
+
+This, in particular, implies some useful estimates:
+
+\begin{tcolorbox}\relax
+这特别意味着一些有用的估计:
+\end{tcolorbox}
+
+\[
+1 + t < {\mathrm{e}}^{t}\;\text{ for all }t \neq  0, \tag{1.4}
+\]
+
+\[
+1 - t > {\mathrm{e}}^{-t - {t}^{2}/2}\;\text{ for all }0 < t < 1. \tag{1.5}
+\]
+
+Proposition 1.4.
+
+\begin{tcolorbox}\relax
+命题1.4。
+\end{tcolorbox}
+
+\[
+{\left( \frac{n}{k}\right) }^{k} \leq  \left( \begin{array}{l} n \\  k \end{array}\right) \;\text{ and }\;\mathop{\sum }\limits_{{i = 0}}^{k}\left( \begin{array}{l} n \\  i \end{array}\right)  \leq  {\left( \frac{\mathrm{e}n}{k}\right) }^{k}. \tag{1.6}
+\]
+
+Proof. Lower bound:
+
+\begin{tcolorbox}\relax
+证明。下界:
+\end{tcolorbox}
+
+\[
+{\left( \frac{n}{k}\right) }^{k} = \frac{n}{k} \cdot  \frac{n}{k}\cdots \frac{n}{k} \leq  \frac{n}{k} \cdot  \frac{n - 1}{k - 1}\cdots \frac{n - k + 1}{1} = \left( \begin{array}{l} n \\  k \end{array}\right) .
+\]
+
+Upper bound: for \(0 < t \leq  1\) the inequality
+
+\begin{tcolorbox}\relax
+上界:对于 \(0 < t \leq  1\) ，不等式
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = 0}}^{k}\left( \begin{array}{l} n \\  i \end{array}\right)  \leq  \mathop{\sum }\limits_{{i = 0}}^{k}\left( \begin{array}{l} n \\  i \end{array}\right) \frac{{t}^{i}}{{t}^{k}} = \frac{{\left( 1 + t\right) }^{n}}{{t}^{k}}
+\]
+
+follows from the binomial theorem. Now substitute \(t = k/n\) and use (1.4).
+
+\begin{tcolorbox}\relax
+由二项式定理可得。现在代入 \(t = k/n\) 并使用(1.4)。
+\end{tcolorbox}
+
+Tighter (asymptotic) estimates can be obtained using the famous Stirling formula for the factorial:
+
+\begin{tcolorbox}\relax
+使用著名的阶乘斯特林公式可以得到更精确的(渐近)估计:
+\end{tcolorbox}
+
+\[
+n! = {\left( \frac{n}{\mathrm{e}}\right) }^{n}\sqrt{2\pi n}{\mathrm{e}}^{{\alpha }_{n}}, \tag{1.7}
+\]
+
+where \(1/\left( {{12n} + 1}\right)  < {\alpha }_{n} < 1/{12n}\) . This leads, for example, to the following elementary but very useful asymptotic formula for the \(k\) -th factorial:
+
+\begin{tcolorbox}\relax
+其中 \(1/\left( {{12n} + 1}\right)  < {\alpha }_{n} < 1/{12n}\) 。例如，这就得到了关于第 \(k\) 个阶乘的以下基本但非常有用的渐近公式:
+\end{tcolorbox}
+
+\[
+{\left( n\right) }_{k} = {n}^{k}{\mathrm{e}}^{-\frac{{k}^{2}}{2n} - \frac{{k}^{3}}{6{n}^{2}} + o\left( 1\right) }\text{ valid for }k = o\left( {n}^{3/4}\right) , \tag{1.8}
+\]
+
+and hence, for binomial coefficients:
+
+\begin{tcolorbox}\relax
+因此，对于二项式系数:
+\end{tcolorbox}
+
+\[
+\left( \begin{array}{l} n \\  k \end{array}\right)  = \frac{{n}^{k}{\mathrm{e}}^{-\frac{{k}^{2}}{2n} - \frac{{k}^{3}}{6{n}^{2}}}}{k!}\left( {1 + o\left( 1\right) }\right) . \tag{1.9}
+\]
+
+\section*{1.2 Selection with repetitions}
+
+\begin{tcolorbox}\relax
+\section*{1.2 可重复选择}
+\end{tcolorbox}
+
+In the previous section we considered the number of ways to choose \(r\) distinct elements from an \(n\) -element set. It is natural to ask what happens if we can choose the same element repeatedly. In other words, we may ask how many integer solutions does the equation \({x}_{1} + \cdots  + {x}_{n} = r\) have under the condition that \({x}_{i} \geq  0\) for all \(i = 1,\ldots ,n\) . (Look at \({x}_{i}\) as the number of times the \(i\) - th element was chosen.) The following more entertaining formulation of this problem was suggested by Lovász, Pelikán, and Vesztergombi (1977).
+
+\begin{tcolorbox}\relax
+在上一节中，我们考虑了从一个 \(n\) 元集合中选择 \(r\) 个不同元素的方法数。很自然地会问，如果我们可以重复选择同一个元素会发生什么。换句话说，我们可能会问，在 \({x}_{i} \geq  0\) 对所有 \(i = 1,\ldots ,n\) 都成立的条件下，方程 \({x}_{1} + \cdots  + {x}_{n} = r\) 有多少个整数解。(将 \({x}_{i}\) 看作第 \(i\) 个元素被选择的次数。)Lovász、Pelikán和Vesztergombi(1977)提出了这个问题的一个更有趣的表述。
+\end{tcolorbox}
+
+Suppose we have \(r\) sweets (of the same sort), which we want to distribute to \(n\) children. In how many ways can we do this? Letting \({x}_{i}\) denote the number of sweets we give to the \(i\) -th child, this question is equivalent to that stated above.
+
+\begin{tcolorbox}\relax
+假设我们有 \(r\) 颗(同一种类的)糖果，我们想把它们分给 \(n\) 个孩子。我们有多少种分法呢？设 \({x}_{i}\) 表示我们给第 \(i\) 个孩子的糖果数，这个问题与上面提到的问题等价。
+\end{tcolorbox}
+
+The answer depends on how many sweets we have and how fair we are. If we are fair but have only \(r \leq  n\) sweets, then it is natural to allow no repetitions and give each child no more than one sweet (each \({x}_{i}\) is 0 or 1 ). In this case the answer is easy: we just choose those \(r\) (out of \(n\) ) children who will get a sweet, and we already know that this can be done in \(\left( \begin{array}{l} n \\  r \end{array}\right)\) ways.
+
+\begin{tcolorbox}\relax
+答案取决于我们有多少糖果以及我们有多公平。如果我们公平但只有 \(r \leq  n\) 颗糖果，那么自然不允许重复，每个孩子最多只能得到一颗糖果(每个 \({x}_{i}\) 是0或1)。在这种情况下答案很简单:我们只需从 \(n\) 个孩子中选择 \(r\) 个会得到糖果的孩子，我们已经知道这可以用 \(\left( \begin{array}{l} n \\  r \end{array}\right)\) 种方法完成。
+\end{tcolorbox}
+
+Suppose now that we have enough sweets, i.e., that \(r \geq  n\) . Let us first be fair, that is, we want every child gets at least one sweet. We lay out the sweets in a single row of length \(r\) (it does not matter in which order, they all are alike), and let the first child pick them up from the left to right. After a while we stop him/her and let the second child pick up sweets, etc. The distribution of sweets is determined by specifying the place (between consecutive sweets) of where to start with a new child. There are \(r - 1\) such places, and we have to select \(n - 1\) of them (the first child always starts at the beginning, so we have no choice here). For example, if we have \(r = 9\) sweets and \(n = 6\) children, a typical situation looks like this:
+
+\begin{tcolorbox}\relax
+现在假设我们有足够的糖果，即 \(r \geq  n\) \textbackslash geq \(r\) 。让我们首先做到公平，也就是说，我们希望每个孩子至少得到一颗糖果。我们把糖果排成一排，长度为 \(r\) (它们的顺序无关紧要，因为它们都一样)，让第一个孩子从左到右拿。过一会儿我们拦住他/她，让第二个孩子拿糖果，等等。糖果的分配方式由指定新孩子开始拿糖果的位置(在相邻糖果之间)来决定。有 \(r - 1\) 个这样的位置，我们必须从中选择 \(n - 1\) 个(第一个孩子总是从开头开始拿，所以这里我们没有选择)。例如，如果我们有 \(r = 9\) 颗糖果和 \(n = 6\) 个孩子，一种典型的情况是这样的:
+\end{tcolorbox}
+
+\begin{center}
+\adjustbox{max width=\textwidth}{
+\begin{tabular}{|c|}
+\hline
+□ 人 □ □ □ 人 □ 人 □ □ 人 □ 人 □ \\
+\cline{1-1}
+\hline
+\end{tabular}
+}
+\end{center}
+
+\begin{tcolorbox}\relax
+
+\begin{center}
+\adjustbox{max width=\textwidth}{
+\begin{tabular}{|c|}
+\hline
+□ 人 □ □ □ 人 □ 人 □ □ 人 □ 人 □ \\
+\cline{1-1}
+\hline
+\end{tabular}
+}
+\end{center}
+
+\end{tcolorbox}
+
+Thus, we have to select an \(\left( {n - 1}\right)\) -element subset from an \(\left( {r - 1}\right)\) -element set. The number of possibilities to do so is \(\left( \begin{matrix} r - 1 \\  n - 1 \end{matrix}\right)\) . If we are unfair, we have more possibilities:
+
+\begin{tcolorbox}\relax
+因此，我们必须从一个 \(\left( {r - 1}\right)\) 元集合中选择一个 \(\left( {n - 1}\right)\) 元子集。这样做的可能性数量是 \(\left( \begin{matrix} r - 1 \\  n - 1 \end{matrix}\right)\) 。如果我们不公平，我们就有更多可能性:
+\end{tcolorbox}
+
+Proposition 1.5. The number of integer solutions to the equation
+
+\begin{tcolorbox}\relax
+命题1.5。方程的整数解的数量
+\end{tcolorbox}
+
+\[
+{x}_{1} + \cdots  + {x}_{n} = r
+\]
+
+under the condition that \({x}_{i} \geq  0\) for all \(i = 1,\ldots ,n\) , is \(\left( \begin{matrix} n + r - 1 \\  r \end{matrix}\right)\) .
+
+\begin{tcolorbox}\relax
+在对于所有 \(i = 1,\ldots ,n\) 都有 \({x}_{i} \geq  0\) 的条件下，是 \(\left( \begin{matrix} n + r - 1 \\  r \end{matrix}\right)\) 。
+\end{tcolorbox}
+
+Proof. In this situation we are unfair and allow that some of the children may be left without a sweet. With the following trick we can reduce the problem of counting the number of such distributions to the problem we just solved: we borrow one sweet from each child, and then distribute the whole amount of \(n + r\) sweets to the children so that each child gets at least one sweet. This way every child gets back the sweet we borrowed from him/her, and the lucky ones get some more. This "more" is exactly \(r\) sweets distributed to \(n\) children. We already know that the number of ways to distribute \(n + r\) sweets to \(n\) children in a fair way is \(\left( \begin{matrix} n + r - 1 \\  n - 1 \end{matrix}\right)\) , which by (1.1) equals \(\left( \begin{matrix} n + r - 1 \\  r \end{matrix}\right)\) .
+
+\begin{tcolorbox}\relax
+证明。在这种情况下，我们不公平，并且允许有些孩子可能得不到糖果。通过以下技巧，我们可以将计算这种分配方式数量的问题简化为我们刚刚解决的问题:我们从每个孩子那里借一颗糖果，然后将总共 \(n + r\) 颗糖果分发给孩子们，使得每个孩子至少得到一颗糖果。这样每个孩子都拿回了我们从他/她那里借的糖果，而幸运的孩子还会得到更多。这个“更多”恰好是分发给 \(n\) 个孩子的 \(r\) 颗糖果。我们已经知道以公平方式将 \(n + r\) 颗糖果分发给 \(n\) 个孩子的方法数量是 \(\left( \begin{matrix} n + r - 1 \\  n - 1 \end{matrix}\right)\) ，根据(1.1)它等于 \(\left( \begin{matrix} n + r - 1 \\  r \end{matrix}\right)\) 。
+\end{tcolorbox}
+
+\section*{1.3 Partitions}
+
+\begin{tcolorbox}\relax
+\section*{1.3 划分}
+\end{tcolorbox}
+
+A partition of \(n\) objects is a collection of its mutually disjoint subsets, called blocks, whose union gives the whole set. Let \(S\left( {n;{k}_{1},{k}_{2},\ldots ,{k}_{n}}\right)\) denote the number of all partitions of \(n\) objects with \({k}_{i}i\) -element blocks \((i = 1,\ldots ,n\) ; \(\left. {{k}_{1} + 2{k}_{2} + \ldots  + n{k}_{n} = n}\right)\) . That is,
+
+\begin{tcolorbox}\relax
+\(n\) 个对象的一个划分是其互不相交子集的一个集合，这些子集称为块，它们的并集构成整个集合。设 \(S\left( {n;{k}_{1},{k}_{2},\ldots ,{k}_{n}}\right)\) 表示 \(n\) 个对象具有 \({k}_{i}i\) 元块 \((i = 1,\ldots ,n\) 的所有划分的数量； \(\left. {{k}_{1} + 2{k}_{2} + \ldots  + n{k}_{n} = n}\right)\) 。也就是说，
+\end{tcolorbox}
+
+\[
+{k}_{i} = \text{ the number of }i\text{ -element blocks in a partition. }
+\]
+
+Proposition 1.6.
+
+\begin{tcolorbox}\relax
+命题1.6。
+\end{tcolorbox}
+
+\[
+S\left( {n;{k}_{1},{k}_{2},\ldots ,{k}_{n}}\right)  = \frac{n!}{{k}_{1}!\cdots {k}_{n}!{\left( 1!\right) }^{{k}_{1}}\cdots {\left( n!\right) }^{{k}_{n}}}.
+\]
+
+Proof. If we consider any arrangement (i.e., a permutation) of the \(n\) objects we can get such a partition by taking the first \({k}_{1}\) elements as 1-element blocks, the next \(2{k}_{2}\) elements as 2-element blocks, etc. Since we have \(n\) ! possible arrangements, it remains to show that we get any given partition exactly
+
+\begin{tcolorbox}\relax
+证明。如果我们考虑 \(n\) 个对象的任何排列(即置换)，我们可以通过将前 \({k}_{1}\) 个元素作为1元块，接下来的 \(2{k}_{2}\) 个元素作为2元块等等来得到这样一个划分。由于我们有 \(n\) !种可能的排列，还需要证明我们得到任何给定划分的次数恰好是
+\end{tcolorbox}
+
+\[
+{k}_{1}!\cdots {k}_{n}!{\left( 1!\right) }^{{k}_{1}}\cdots {\left( n!\right) }^{{k}_{n}}
+\]
+
+times. Indeed, we can construct an arrangement of the objects by putting the 1-element blocks first, then the 2-element blocks, etc. However, there are \({k}_{i}\) ! possible ways to order the \(i\) -element blocks and \({\left( i!\right) }^{{k}_{i}}\) possible ways to order the elements in the \(i\) -element blocks.
+
+\begin{tcolorbox}\relax
+次。确实，我们可以通过先放置1元块，然后是2元块等等来构造对象的一个排列。然而，有 \({k}_{i}\) !种方法对 \(i\) 元块进行排序，并且有 \({\left( i!\right) }^{{k}_{i}}\) 种方法对 \(i\) 元块中的元素进行排序。
+\end{tcolorbox}
+
+\section*{1.4 Double counting}
+
+\begin{tcolorbox}\relax
+\section*{1.4 双重计数}
+\end{tcolorbox}
+
+The double counting principle states the following "obvious" fact: if the elements of a set are counted in two different ways, the answers are the same.
+
+\begin{tcolorbox}\relax
+双重计数原理陈述了以下这个“显而易见”的事实:如果用两种不同的方式对一个集合的元素进行计数，结果是相同的。
+\end{tcolorbox}
+
+In terms of matrices the principle is as follows. Let \(M\) be an \(n \times  m\) matrix with entries 0 and 1 . Let \({r}_{i}\) be the number of \(1\mathrm{\;s}\) in the \(i\) -th row, and \({c}_{j}\) be the number of \(1\mathrm{\;s}\) in the \(j\) -th column. Then
+
+\begin{tcolorbox}\relax
+用矩阵来表述该原理如下。设 \(M\) 是一个元素为0和1的 \(n \times  m\) 矩阵。设 \({r}_{i}\) 是第 \(i\) 行中 \(1\mathrm{\;s}\) 的数量， \({c}_{j}\) 是第 \(j\) 列中 \(1\mathrm{\;s}\) 的数量。那么
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = 1}}^{n}{r}_{i} = \mathop{\sum }\limits_{{j = 1}}^{m}{c}_{j} = \text{ the total number of }1\mathrm{\;s}\text{ in }M.
+\]
+
+The next example is a standard demonstration of double counting. Suppose a finite number of people meet at a party and some shake hands. Assume that no person shakes his or her own hand and furthermore no two people shake hands more than once.
+
+\begin{tcolorbox}\relax
+下一个例子是双重计数的一个标准演示。假设有有限数量的人在聚会上碰面，有些人握手。假设没有人会和自己握手，而且任意两个人之间不会握手超过一次。
+\end{tcolorbox}
+
+Handshaking Lemma. At a party, the number of guests who shake hands an odd number of times is even.
+
+\begin{tcolorbox}\relax
+握手引理。在一个聚会上，握手次数为奇数的客人数量是偶数。
+\end{tcolorbox}
+
+Proof. Let \({P}_{1},\ldots ,{P}_{n}\) be the persons. We apply double counting to the set of ordered pairs \(\left( {{P}_{i},{P}_{j}}\right)\) for which \({P}_{i}\) and \({P}_{j}\) shake hands with each other at the party. Let \({x}_{i}\) be the number of times that \({P}_{i}\) shakes hands, and \(y\) the total number of handshakes that occur. On one hand, the number of pairs is \(\mathop{\sum }\limits_{{i = 1}}^{n}{x}_{i}\) , since for each \({P}_{i}\) the number of choices of \({P}_{j}\) is equal to \({x}_{i}\) . On the other hand, each handshake gives rise to two pairs \(\left( {{P}_{i},{P}_{j}}\right)\) and \(\left( {{P}_{j},{P}_{i}}\right)\) ; so the total is \({2y}\) . Thus \(\mathop{\sum }\limits_{{i = 1}}^{n}{x}_{i} = {2y}\) . But, if the sum of \(n\) numbers is even, then evenly many of the numbers are odd. (Because if we add an odd number of odd numbers and any number of even numbers, the sum will be always odd).
+
+\begin{tcolorbox}\relax
+证明。设 \({P}_{1},\ldots ,{P}_{n}\) 是这些人。我们对有序对 \(\left( {{P}_{i},{P}_{j}}\right)\) 的集合进行双重计数，其中 \({P}_{i}\) 和 \({P}_{j}\) 在聚会上相互握手。设 \({x}_{i}\) 是 \({P}_{i}\) 握手的次数， \(y\) 是总共发生的握手次数。一方面，有序对的数量是 \(\mathop{\sum }\limits_{{i = 1}}^{n}{x}_{i}\) ，因为对于每个 \({P}_{i}\) ， \({P}_{j}\) 的选择数量等于 \({x}_{i}\) 。另一方面，每次握手会产生两个有序对 \(\left( {{P}_{i},{P}_{j}}\right)\) 和 \(\left( {{P}_{j},{P}_{i}}\right)\) ；所以总数是 \({2y}\) 。因此 \(\mathop{\sum }\limits_{{i = 1}}^{n}{x}_{i} = {2y}\) 。但是，如果 \(n\) 这些数的和是偶数，那么其中奇数的数量是偶数。(因为如果我们将奇数个奇数和任意数量的偶数相加，和总是奇数)。
+\end{tcolorbox}
+
+This lemma is also a direct consequence of the following general identity, whose special version for graphs was already proved by Euler. For a point \(x\) , its degree or replication number \(d\left( x\right)\) in a family \(\mathcal{F}\) is the number of members of \(\mathcal{F}\) containing \(x\) .
+
+\begin{tcolorbox}\relax
+这个引理也是以下一般恒等式的直接推论，其关于图的特殊版本已经由欧拉证明。对于一个点 \(x\) ，它在族 \(\mathcal{F}\) 中的度或重复数 \(d\left( x\right)\) 是 \(\mathcal{F}\) 中包含 \(x\) 的成员数量。
+\end{tcolorbox}
+
+Proposition 1.7. Let \(\mathcal{F}\) be a family of subsets of some set \(X\) . Then
+
+\begin{tcolorbox}\relax
+命题1.7。设 \(\mathcal{F}\) 是某个集合 \(X\) 的子集族。那么
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{x \in  X}}d\left( x\right)  = \mathop{\sum }\limits_{{A \in  \mathcal{F}}}\left| A\right| \tag{1.10}
+\]
+
+Proof. Consider the incidence matrix \(M = \left( {m}_{x,A}\right)\) of \(\mathcal{F}\) . That is, \(M\) is a 0-1 matrix with \(\left| X\right|\) rows labeled by points \(x \in  X\) and with \(\left| \mathcal{F}\right|\) columns labeled by sets \(A \in  \mathcal{F}\) such that \({m}_{x,A} = 1\) if and only if \(x \in  A\) . Observe that \(d\left( x\right)\) is exactly the number of 1s in the \(x\) -th row, and \(\left| A\right|\) is the number of 1s in the \(A\) -th column.
+
+\begin{tcolorbox}\relax
+证明。考虑 \(\mathcal{F}\) 的关联矩阵 \(M = \left( {m}_{x,A}\right)\) 。也就是说， \(M\) 是一个0 - 1矩阵，其 \(\left| X\right|\) 行由点 \(x \in  X\) 标记， \(\left| \mathcal{F}\right|\) 列由集合 \(A \in  \mathcal{F}\) 标记，使得当且仅当 \(x \in  A\) 时 \({m}_{x,A} = 1\) 。注意 \(d\left( x\right)\) 恰好是第 \(x\) 行中1的数量， \(\left| A\right|\) 是第 \(A\) 列中1的数量。
+\end{tcolorbox}
+
+Graphs are families of 2-element sets, and the degree of a vertex \(x\) is the number of edges incident to \(x\) , i.e., the number of vertices in its neighborhood. Proposition 1.7 immediately implies
+
+\begin{tcolorbox}\relax
+图是二元集的族，并且一个顶点 \(x\) 的度是与 \(x\) 关联的边的数量，即其邻域中的顶点数量。命题1.7立即推出
+\end{tcolorbox}
+
+Theorem 1.8 (Euler 1736). In every graph the sum of degrees of its vertices is two times the number of its edges, and hence, is even.
+
+\begin{tcolorbox}\relax
+定理1.8(欧拉，1736年)。在每一个图中，其顶点度的和是其边数量的两倍，因此是偶数。
+\end{tcolorbox}
+
+The following identities can be proved in a similar manner (we leave their proofs as exercises):
+
+\begin{tcolorbox}\relax
+以下恒等式可以用类似的方式证明(我们将证明留作练习):
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{x \in  Y}}d\left( x\right)  = \mathop{\sum }\limits_{{A \in  \mathcal{F}}}\left| {Y \cap  A}\right| \text{ for any }Y \subseteq  X. \tag{1.11}
+\]
+
+\[
+\mathop{\sum }\limits_{{x \in  \mathcal{X}}}d{\left( x\right) }^{2} = \mathop{\sum }\limits_{{A \in  \mathcal{F}}}\mathop{\sum }\limits_{{x \in  A}}d\left( x\right)  = \mathop{\sum }\limits_{{A \in  \mathcal{F}}}\mathop{\sum }\limits_{{B \in  \mathcal{F}}}\left| {A \cap  B}\right| . \tag{1.12}
+\]
+
+Turán’s number \(T\left( {n,k,l}\right) \left( {l \leq  k \leq  n}\right)\) is the smallest number of \(l\) -element subsets of an \(n\) -element set \(X\) such that every \(k\) -element subset of \(X\) contains at least one of these sets.
+
+\begin{tcolorbox}\relax
+图兰数 \(T\left( {n,k,l}\right) \left( {l \leq  k \leq  n}\right)\) 是一个 \(n\) 元集合 \(X\) 中 \(l\) 元子集的最小数量，使得 \(X\) 的每个 \(k\) 元子集都至少包含其中一个集合。
+\end{tcolorbox}
+
+Proposition 1.9. For all positive integers \(l \leq  k \leq  n\) ,
+
+\begin{tcolorbox}\relax
+命题1.9。对于所有正整数 \(l \leq  k \leq  n\) ，
+\end{tcolorbox}
+
+\[
+T\left( {n,k,l}\right)  \geq  \left( \begin{array}{l} n \\  l \end{array}\right) /\left( \begin{array}{l} k \\  l \end{array}\right) .
+\]
+
+Proof. Let \(\mathcal{F}\) be a smallest \(l\) -uniform family over \(X\) such that every \(k\) -subset of \(X\) contains at least one member of \(\mathcal{F}\) . Take a 0-1 matrix \(M = \left( {m}_{A,B}\right)\) whose rows are labeled by sets \(A\) in \(\mathcal{F}\) , columns by \(k\) -element subsets \(B\) of \(X\) , and \({m}_{A,B} = 1\) if and only if \(A \subseteq  B\) .
+
+\begin{tcolorbox}\relax
+证明。设 \(\mathcal{F}\) 是 \(X\) 上最小的 \(l\) 一致族，使得 \(X\) 的每个 \(k\) 子集都至少包含 \(\mathcal{F}\) 的一个成员。取一个0 - 1矩阵 \(M = \left( {m}_{A,B}\right)\) ，其行由 \(\mathcal{F}\) 中的集合 \(A\) 标记，列由 \(X\) 的 \(k\) 元子集 \(B\) 标记，并且当且仅当 \(A \subseteq  B\) 时 \({m}_{A,B} = 1\) 。
+\end{tcolorbox}
+
+Let \({r}_{A}\) be the number of 1s in the \(A\) -th row and \({c}_{B}\) be the number of 1s in the \(B\) -th column. Then, \({c}_{B} \geq  1\) for every \(B\) , since \(B\) must contain at least one member of \(\mathcal{F}\) . On the other hand, \({r}_{A}\) is precisely the number of \(k\) -element subsets \(B\) containing a fixed \(l\) -element set \(A\) ; so \({r}_{A} = \left( \begin{matrix} n - l \\  k - l \end{matrix}\right)\) for every \(A \in  \mathcal{F}\) . By the double counting principle,
+
+\begin{tcolorbox}\relax
+设 \({r}_{A}\) 是第 \(A\) 行中1的数量， \({c}_{B}\) 是第 \(B\) 列中1的数量。那么，对于每个 \(B\) ， \({c}_{B} \geq  1\) ，因为 \(B\) 必须至少包含 \(\mathcal{F}\) 的一个成员。另一方面， \({r}_{A}\) 恰好是包含固定 \(l\) 元集 \(A\) 的 \(k\) 元子集 \(B\) 的数量；所以对于每个 \(A \in  \mathcal{F}\) ， \({r}_{A} = \left( \begin{matrix} n - l \\  k - l \end{matrix}\right)\) 。根据双重计数原理，
+\end{tcolorbox}
+
+\[
+\left| \mathcal{F}\right|  \cdot  \left( \begin{array}{l} n - l \\  k - l \end{array}\right)  = \mathop{\sum }\limits_{{A \in  \mathcal{F}}}{r}_{A} = \mathop{\sum }\limits_{B}{c}_{B} \geq  \left( \begin{array}{l} n \\  k \end{array}\right) ,
+\]
+
+which yields
+
+\begin{tcolorbox}\relax
+由此得出
+\end{tcolorbox}
+
+\[
+T\left( {n,k,l}\right)  = \left| \mathcal{F}\right|  \geq  \left( \begin{array}{l} n \\  k \end{array}\right) /\left( \begin{array}{l} n - l \\  k - l \end{array}\right)  = \left( \begin{array}{l} n \\  l \end{array}\right) /\left( \begin{array}{l} k \\  l \end{array}\right) ,
+\]
+
+where the last equality is another property of binomial coefficients (see Exercise 1.12).
+
+\begin{tcolorbox}\relax
+其中最后一个等式是二项式系数的另一个性质(见练习1.12)。
+\end{tcolorbox}
+
+Our next application of double counting is from number theory: How many numbers divide at least one of the first \(n\) numbers \(1,2,\ldots ,n\) ? If \(t\left( n\right)\) is the number of divisors of \(n\) , then the behavior of this function is rather nonuniform: \(t\left( p\right)  = 2\) for every prime number, whereas \(t\left( {2}^{m}\right)  = m + 1\) . It is therefore interesting that the average number
+
+\begin{tcolorbox}\relax
+我们双重计数的下一个应用来自数论:前 \(n\) 个数 \(1,2,\ldots ,n\) 中至少有一个能整除的数有多少个？如果 \(t\left( n\right)\) 是 \(n\) 的因数个数，那么这个函数的行为相当不均匀:对于每个质数， \(t\left( p\right)  = 2\) ，而 \(t\left( {2}^{m}\right)  = m + 1\) 。因此，有趣的是平均因数个数
+\end{tcolorbox}
+
+\[
+\tau \left( n\right)  = \frac{t\left( 1\right)  + t\left( 2\right)  + \cdots  + t\left( n\right) }{n}
+\]
+
+of divisors is quite stable: It is about \(\ln n\) .
+
+\begin{tcolorbox}\relax
+相当稳定:大约是 \(\ln n\) 。
+\end{tcolorbox}
+
+Proposition 1.10. \(\left| {\tau \left( n\right)  - \ln n}\right|  \leq  1\) .
+
+\begin{tcolorbox}\relax
+命题1.10。 \(\left| {\tau \left( n\right)  - \ln n}\right|  \leq  1\) 。
+\end{tcolorbox}
+
+Proof. To apply the double counting principle, consider the \(0 - {1n} \times  n\) matrix \(M = \left( {m}_{ij}\right)\) with \({m}_{ij} = 1\) iff \(j\) is divisible by \(i\) :
+
+\begin{tcolorbox}\relax
+证明。为了应用双重计数原理，考虑 \(0 - {1n} \times  n\) 矩阵 \(M = \left( {m}_{ij}\right)\) ，当且仅当 \(j\) 能被 \(i\) 整除时 \({m}_{ij} = 1\) :
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.4\textwidth]{images/29_550_1100_439_403_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+The number of \(1\mathrm{\;s}\) in the \(j\) -th column is exactly the number \(t\left( j\right)\) of divisors of \(j\) . So, summing over columns we see that the total number of 1s in the matrix is \({T}_{n} = t\left( 1\right)  + \cdots  + t\left( n\right)\) .
+
+\begin{tcolorbox}\relax
+第 \(j\) 列中 \(1\mathrm{\;s}\) 的数量恰好是 \(j\) 的因数个数 \(t\left( j\right)\) 。所以，对列求和我们看到矩阵中1的总数是 \({T}_{n} = t\left( 1\right)  + \cdots  + t\left( n\right)\) 。
+\end{tcolorbox}
+
+On the other hand, the number of 1s in the \(i\) -th row is the number of multipliers \(i,{2i},{3i},\ldots ,{ri}\) of \(i\) such that \({ri} \leq  n\) . Hence, we have exactly \(\lfloor n/i\rfloor\) ones in the \(i\) -th row. Summing over rows, we obtain that \({T}_{n} = \mathop{\sum }\limits_{{i = 1}}^{n}\lfloor n/i\rfloor\) . Since \(x - 1 < \lfloor x\rfloor  \leq  x\) for every real number \(x\) , we obtain that
+
+\begin{tcolorbox}\relax
+另一方面，第 \(i\) 行中1的数量是 \(i\) 的倍数 \(i,{2i},{3i},\ldots ,{ri}\) 的数量，使得 \({ri} \leq  n\) 。因此，第 \(i\) 行中恰好有 \(\lfloor n/i\rfloor\) 个1。对行求和，我们得到 \({T}_{n} = \mathop{\sum }\limits_{{i = 1}}^{n}\lfloor n/i\rfloor\) 。由于对于每个实数 \(x\) ， \(x - 1 < \lfloor x\rfloor  \leq  x\) ，我们得到
+\end{tcolorbox}
+
+\[
+{H}_{n} - 1 \leq  \tau \left( n\right)  = \frac{1}{n}{T}_{n} \leq  {H}_{n}
+\]
+
+where
+
+\begin{tcolorbox}\relax
+其中
+\end{tcolorbox}
+
+\[
+{H}_{n} = 1 + \frac{1}{2} + \frac{1}{3} + \cdots  + \frac{1}{n} = \ln n + {\gamma }_{n},\;0 \leq  {\gamma }_{n} \leq  1 \tag{1.13}
+\]
+
+is the \(n\) -th harmonic number.
+
+\begin{tcolorbox}\relax
+是第 \(n\) 个调和数。
+\end{tcolorbox}
+
+\section*{1.5 The averaging principle}
+
+\begin{tcolorbox}\relax
+\section*{1.5 平均原理}
+\end{tcolorbox}
+
+Suppose we have a set of \(m\) objects, the \(i\) -th of which has "size" \({l}_{i}\) , and we would like to know if at least one of the objects is large, i.e., has size \({l}_{i} \geq  t\) for some given \(t\) . In this situation we can try to consider the average size \(\bar{l} = \sum {l}_{i}/m\) and try to prove that \(\bar{l} \geq  t\) . This would immediately yield the result, because we have the following
+
+\begin{tcolorbox}\relax
+假设我们有一组 \(m\) 对象，其中第 \(i\) 个对象的“大小”为 \({l}_{i}\) ，我们想知道这些对象中是否至少有一个足够大，即对于某个给定的 \(t\) ，其大小为 \({l}_{i} \geq  t\) 。在这种情况下，我们可以尝试考虑平均大小 \(\bar{l} = \sum {l}_{i}/m\) ，并尝试证明 \(\bar{l} \geq  t\) 。这将立即得出结果，因为我们有以下内容
+\end{tcolorbox}
+
+Averaging Principle. Every set of numbers must contain a number at least as large \(\left(  \geq  \right)\) as the average and a number at least as small \(\left(  \leq  \right)\) as the average.
+
+\begin{tcolorbox}\relax
+平均原理。每一组数中必定包含一个至少与平均值一样大 \(\left(  \geq  \right)\) 的数和一个至少与平均值一样小 \(\left(  \leq  \right)\) 的数。
+\end{tcolorbox}
+
+This principle is a prototype of a very powerful technique - the probabilistic method - which we will study in Part 4. The concept is very simple, but the applications can be surprisingly subtle. We will use this principle quite often.
+
+\begin{tcolorbox}\relax
+这个原理是一种非常强大的技术——概率方法——的原型，我们将在第4部分中学习。这个概念非常简单，但应用起来可能会出奇地微妙。我们会经常使用这个原理。
+\end{tcolorbox}
+
+To demonstrate the principle, let us prove the following sufficient condition that a graph is disconnected.
+
+\begin{tcolorbox}\relax
+为了说明这个原理，让我们证明一个图不连通的充分条件。
+\end{tcolorbox}
+
+A (connected) component in a graph is a set of its vertices such that there is a path between any two of them. A graph is connected if it consists of one component; otherwise it is disconnected.
+
+\begin{tcolorbox}\relax
+图中的一个(连通)分量是其顶点的一个集合，使得其中任意两个顶点之间都有一条路径。如果一个图由一个分量组成，那么它是连通的；否则它是不连通的。
+\end{tcolorbox}
+
+Proposition 1.11. Every graph on \(n\) vertices with fewer than \(n - 1\) edges is disconnected.
+
+\begin{tcolorbox}\relax
+命题1.11。每个具有 \(n\) 个顶点且边数少于 \(n - 1\) 条的图都是不连通的。
+\end{tcolorbox}
+
+Proof. Induction by \(n\) . When \(n = 1\) , the claim is vacuously satisfied, since no graph has a negative number of edges.
+
+\begin{tcolorbox}\relax
+证明。对 \(n\) 进行归纳。当 \(n = 1\) 时，该断言显然成立，因为没有图的边数为负数。
+\end{tcolorbox}
+
+When \(n = 2\) , a graph with less than 1 edge is evidently disconnected.
+
+\begin{tcolorbox}\relax
+当 \(n = 2\) 时，边数少于1条的图显然是不连通的。
+\end{tcolorbox}
+
+Suppose now that the result has been established for graphs on \(n\) vertices, and take a graph \(G = \left( {V,E}\right)\) on \(\left| V\right|  = n + 1\) vertices such that \(\left| E\right|  \leq  n - 1\) . By Euler's theorem (Theorem 1.8), the average degree of its vertices is
+
+\begin{tcolorbox}\relax
+现在假设对于具有 \(n\) 个顶点的图该结果已经成立，取一个具有 \(\left| V\right|  = n + 1\) 个顶点的图 \(G = \left( {V,E}\right)\) ，使得 \(\left| E\right|  \leq  n - 1\) 。根据欧拉定理(定理1.8)，其顶点的平均度数为
+\end{tcolorbox}
+
+\[
+\frac{1}{\left| V\right| }\mathop{\sum }\limits_{{x \in  V}}d\left( x\right)  = \frac{2\left| E\right| }{\left| V\right| } \leq  \frac{2\left( {n - 1}\right) }{n + 1} < 2.
+\]
+
+By the averaging principle, some vertex \(x\) has degree 0 or 1 . If \(d\left( x\right)  = 0,x\) is a component disjoint from the rest of \(G\) , so \(G\) is disconnected. If \(d\left( x\right)  = 1\) , suppose the unique neighbor of \(x\) is \(y\) . Then, the graph \(H\) obtained from \(G\) by deleting \(x\) and its incident edge has \(\left| V\right|  - 1 = n\) vertices and \(\left| E\right|  - 1 \leq \; \left( {n - 1}\right)  - 1 = n - 2\) edges; by the induction hypothesis, \(H\) is disconnected. The restoration of an edge joining a vertex \(y\) in one component to a vertex \(x\) which is outside of a second component cannot reconnect the graph. Hence, \(G\) is also disconnected.
+
+\begin{tcolorbox}\relax
+根据平均原理，某个顶点 \(x\) 的度数为0或1。如果 \(d\left( x\right)  = 0,x\) 是与 \(G\) 的其余部分不相交的一个分量，那么 \(G\) 是不连通的。如果 \(d\left( x\right)  = 1\) ，假设 \(x\) 的唯一邻点是 \(y\) 。那么，从 \(G\) 中删除 \(x\) 及其关联边后得到的图 \(H\) 有 \(\left| V\right|  - 1 = n\) 个顶点和 \(\left| E\right|  - 1 \leq \; \left( {n - 1}\right)  - 1 = n - 2\) 条边；根据归纳假设， \(H\) 是不连通的。将一个分量中的顶点 \(y\) 与另一个分量之外的顶点 \(x\) 连接起来的边的恢复并不能使图重新连通。因此， \(G\) 也是不连通的。
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.4\textwidth]{images/31_529_179_482_306_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Fig. 1.1 A convex function.
+
+\begin{tcolorbox}\relax
+图1.1 一个凸函数。
+\end{tcolorbox}
+
+We mention one important inequality, which is especially useful when dealing with averages.
+
+\begin{tcolorbox}\relax
+我们提及一个重要的不等式，它在处理平均值时特别有用。
+\end{tcolorbox}
+
+A real-valued function \(f\left( x\right)\) is convex if
+
+\begin{tcolorbox}\relax
+一个实值函数 \(f\left( x\right)\) 是凸函数，如果
+\end{tcolorbox}
+
+\[
+f\left( {{\lambda a} + \left( {1 - \lambda }\right) b}\right)  \leq  {\lambda f}\left( a\right)  + \left( {1 - \lambda }\right) f\left( b\right) ,
+\]
+
+for any \(0 \leq  \lambda  \leq  1\) . From a geometrical point of view, the convexity of \(f\) means that if we draw a line \(l\) through points \(\left( {a,f\left( a\right) }\right)\) and \(\left( {b,f\left( b\right) }\right)\) , then the graph of the curve \(f\left( z\right)\) must lie below that of \(l\left( z\right)\) for \(z \in  \left\lbrack  {a,b}\right\rbrack\) . Thus, for a function \(f\) to be convex it is sufficient that its second derivative is nonnegative.
+
+\begin{tcolorbox}\relax
+对于任意 \(0 \leq  \lambda  \leq  1\) 。从几何角度来看， \(f\) 的凸性意味着如果我们通过点 \(\left( {a,f\left( a\right) }\right)\) 和 \(\left( {b,f\left( b\right) }\right)\) 画一条线 \(l\) ，那么对于 \(z \in  \left\lbrack  {a,b}\right\rbrack\) ，曲线 \(f\left( z\right)\) 的图像必定位于 \(l\left( z\right)\) 的图像下方。因此，对于一个函数 \(f\) 要成为凸函数，其二阶导数非负就足够了。
+\end{tcolorbox}
+
+Proposition 1.12 (Jensen’s Inequality). If \(0 \leq  {\lambda }_{i} \leq  1,\mathop{\sum }\limits_{{i = 1}}^{n}{\lambda }_{i} = 1\) and \(f\) is convex, then
+
+\begin{tcolorbox}\relax
+命题1.12(詹森不等式)。如果 \(0 \leq  {\lambda }_{i} \leq  1,\mathop{\sum }\limits_{{i = 1}}^{n}{\lambda }_{i} = 1\) 且 \(f\) 是凸函数，那么
+\end{tcolorbox}
+
+\[
+f\left( {\mathop{\sum }\limits_{{i = 1}}^{n}{\lambda }_{i}{x}_{i}}\right)  \leq  \mathop{\sum }\limits_{{i = 1}}^{n}{\lambda }_{i}f\left( {x}_{i}\right) . \tag{1.14}
+\]
+
+Proof. Easy induction on the number of summands \(n\) . For \(n = 2\) this is true, so assume the inequality holds for the number of summands up to \(n\) , and prove it for \(n + 1\) . For this it is enough to replace the sum of the first two terms in \({\lambda }_{1}{x}_{1} + {\lambda }_{2}{x}_{2} + \ldots  + {\lambda }_{n + 1}{x}_{n + 1}\) by the term
+
+\begin{tcolorbox}\relax
+证明。对求和项的数量 \(n\) 进行简单归纳。对于 \(n = 2\) 这是成立的，所以假设对于求和项数量达到 \(n\) 时不等式成立，并证明对于 \(n + 1\) 时也成立。为此，只需将 \({\lambda }_{1}{x}_{1} + {\lambda }_{2}{x}_{2} + \ldots  + {\lambda }_{n + 1}{x}_{n + 1}\) 中前两项的和替换为该项
+\end{tcolorbox}
+
+\[
+\left( {{\lambda }_{1} + {\lambda }_{2}}\right) \left( {\frac{{\lambda }_{1}}{{\lambda }_{1} + {\lambda }_{2}}{x}_{1} + \frac{{\lambda }_{2}}{{\lambda }_{1} + {\lambda }_{2}}{x}_{2}}\right) ,
+\]
+
+and apply the induction hypothesis.
+
+\begin{tcolorbox}\relax
+然后应用归纳假设。
+\end{tcolorbox}
+
+If \({a}_{1},\ldots ,{a}_{n}\) are non-negative then, taking \(f\left( x\right)  = {x}^{2}\) and \({\lambda }_{i} = 1/n\) , we obtain a useful inequality (which is also an easy consequence of the Cauchy-Schwarz inequality):
+
+\begin{tcolorbox}\relax
+如果 \({a}_{1},\ldots ,{a}_{n}\) 是非负的，那么，取 \(f\left( x\right)  = {x}^{2}\) 和 \({\lambda }_{i} = 1/n\) ，我们得到一个有用的不等式(这也是柯西 - 施瓦茨不等式的一个简单推论):
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = 1}}^{n}{a}_{i}^{2} \geq  \frac{1}{n}{\left( \mathop{\sum }\limits_{{i = 1}}^{n}{a}_{i}\right) }^{2}. \tag{1.15}
+\]
+
+Jensen's inequality (1.14) yields the following useful inequality between the arithmetic and geometric means: for any be non-negative numbers \({a}_{1},\ldots ,{a}_{n}\) ,
+
+\begin{tcolorbox}\relax
+詹森不等式(1.14)在算术平均值和几何平均值之间给出了以下有用的不等式:对于任意非负数字 \({a}_{1},\ldots ,{a}_{n}\) ，
+\end{tcolorbox}
+
+\[
+\frac{1}{n}\mathop{\sum }\limits_{{i = 1}}^{n}{a}_{i} \geq  {\left( \mathop{\prod }\limits_{{i = 1}}^{n}{a}_{i}\right) }^{1/n} \tag{1.16}
+\]
+
+To show this, apply Jensen’s inequality with \(f\left( x\right)  = {2}^{x},{\lambda }_{1} = \ldots  = {\lambda }_{n} = 1/n\) and \({x}_{i} = {\log }_{2}{a}_{i}\) , for all \(i = 1,\ldots ,n\) . Then
+
+\begin{tcolorbox}\relax
+为了证明这一点，对所有 \(i = 1,\ldots ,n\) 应用 \(f\left( x\right)  = {2}^{x},{\lambda }_{1} = \ldots  = {\lambda }_{n} = 1/n\) 和 \({x}_{i} = {\log }_{2}{a}_{i}\) 的詹森不等式。那么
+\end{tcolorbox}
+
+\[
+\frac{1}{n}\mathop{\sum }\limits_{{i = 1}}^{n}{a}_{i} = \mathop{\sum }\limits_{{i = 1}}^{n}{\lambda }_{i}f\left( {x}_{i}\right)  \geq  f\left( {\mathop{\sum }\limits_{{i = 1}}^{n}{\lambda }_{i}{x}_{i}}\right)  = {2}^{\left( {\mathop{\sum }\limits_{{i = 1}}^{n}{x}_{i}}\right) /n} = {\left( \mathop{\prod }\limits_{{i = 1}}^{n}{a}_{i}\right) }^{1/n}.
+\]
+
+\section*{1.6 The inclusion-exclusion principle}
+
+\begin{tcolorbox}\relax
+\section*{1.6 容斥原理}
+\end{tcolorbox}
+
+The principle of inclusion and exclusion (sieve of Eratosthenes) is a powerful tool in the theory of enumeration as well as in number theory. This principle relates the cardinality of the union of certain sets to the cardinalities of intersections of some of them, these latter cardinalities often being easier to handle.
+
+\begin{tcolorbox}\relax
+容斥原理(埃拉托斯特尼筛法)在枚举理论以及数论中都是一个强大的工具。该原理将某些集合的并集的基数与其中一些集合的交集的基数联系起来，而后者的基数通常更容易处理。
+\end{tcolorbox}
+
+For any two sets \(A\) and \(B\) we have
+
+\begin{tcolorbox}\relax
+对于任意两个集合 \(A\) 和 \(B\) ，我们有
+\end{tcolorbox}
+
+\[
+\left| {A \cup  B}\right|  = \left| A\right|  + \left| B\right|  - \left| {A \cap  B}\right| .
+\]
+
+In general, given \(n\) subsets \({A}_{1},\ldots ,{A}_{n}\) of a set \(X\) , we want to calculate the number \(\left| {{A}_{1} \cup  \cdots  \cup  {A}_{n}}\right|\) of points in their union. As the first approximation of this number we can take the sum
+
+\begin{tcolorbox}\relax
+一般来说，给定集合 \(X\) 的 \(n\) 个子集 \({A}_{1},\ldots ,{A}_{n}\) ，我们想要计算它们并集中的点数 \(\left| {{A}_{1} \cup  \cdots  \cup  {A}_{n}}\right|\) 。作为这个数的第一个近似值，我们可以取和
+\end{tcolorbox}
+
+\[
+\left| {A}_{1}\right|  + \cdots  + \left| {A}_{n}\right| \tag{1.17}
+\]
+
+However, in general, this number is too large since if, say, \({A}_{i} \cap  {A}_{j} \neq  \varnothing\) then each point of \({A}_{i} \cap  {A}_{j}\) is counted two times in (1.17): once in \(\left| {A}_{i}\right|\) and once in \(\left| {A}_{j}\right|\) . We can try to correct the situation by subtracting from (1.17) the sum
+
+\begin{tcolorbox}\relax
+然而，一般来说，这个数太大了，因为比如说，如果 \({A}_{i} \cap  {A}_{j} \neq  \varnothing\) ，那么 \({A}_{i} \cap  {A}_{j}\) 中的每个点在(1.17)中都被计算了两次:一次在 \(\left| {A}_{i}\right|\) 中，一次在 \(\left| {A}_{j}\right|\) 中。我们可以尝试通过从(1.17)中减去和来纠正这种情况
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{1 \leq  i < j \leq  n}}\left| {{A}_{i} \cap  {A}_{j}}\right| \tag{1.18}
+\]
+
+But then we get a number which is too small since each of the points in \({A}_{i} \cap  {A}_{j} \cap  {A}_{k} \neq  \varnothing\) is counted three times in (1.18): once in \(\left| {{A}_{i} \cap  {A}_{j}}\right|\) , once in \(\left| {{A}_{j} \cap  {A}_{k}}\right|\) , and once in \(\left| {{A}_{i} \cap  {A}_{k}}\right|\) . We can therefore try to correct the situation by adding the sum
+
+\begin{tcolorbox}\relax
+但这样我们得到的数又太小了，因为 \({A}_{i} \cap  {A}_{j} \cap  {A}_{k} \neq  \varnothing\) 中的每个点在(1.18)中都被计算了三次:一次在 \(\left| {{A}_{i} \cap  {A}_{j}}\right|\) 中，一次在 \(\left| {{A}_{j} \cap  {A}_{k}}\right|\) 中，一次在 \(\left| {{A}_{i} \cap  {A}_{k}}\right|\) 中。因此我们可以尝试通过加上和来纠正这种情况
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{1 \leq  i < j < k \leq  n}}\left| {{A}_{i} \cap  {A}_{j} \cap  {A}_{k}}\right|
+\]
+
+but again we will get a too large number, etc. Nevertheless, it turns out that after \(n\) steps we will get the correct result. This result is known as the inclusion-exclusion principle. The following notation will be handy: if \(I\) is a subset of the index set \(\{ 1,\ldots ,n\}\) , we set
+
+\begin{tcolorbox}\relax
+但我们又会得到一个太大的数，等等。然而，事实证明，经过 \(n\) 步后我们会得到正确的结果。这个结果被称为容斥原理。以下符号会很方便:如果 \(I\) 是索引集 \(\{ 1,\ldots ,n\}\) 的一个子集，我们设
+\end{tcolorbox}
+
+\[
+{A}_{I} \mathrel{\text{ := }} \mathop{\bigcap }\limits_{{i \in  I}}{A}_{i}
+\]
+
+with the convention that \({A}_{\varnothing } = X\) .
+
+\begin{tcolorbox}\relax
+约定 \({A}_{\varnothing } = X\) 。
+\end{tcolorbox}
+
+Proposition 1.13 (Inclusion-Exclusion Principle). Let \({A}_{1},\ldots ,{A}_{n}\) be subsets of \(X\) . Then the number of elements of \(X\) which lie in none of the subsets \({A}_{i}\) is
+
+\begin{tcolorbox}\relax
+命题1.13(容斥原理)。设 \({A}_{1},\ldots ,{A}_{n}\) 是 \(X\) 的子集。那么 \(X\) 中不属于任何子集 \({A}_{i}\) 的元素个数是
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{I \subseteq  \{ 1,\ldots ,n\} }}{\left( -1\right) }^{\left| I\right| }\left| {A}_{I}\right| \tag{1.19}
+\]
+
+Proof. The sum is a linear combination of cardinalities of sets \({A}_{I}\) with coefficients +1 and -1 . We can re-write this sum as
+
+\begin{tcolorbox}\relax
+证明。这个和是集合 \({A}_{I}\) 的基数的线性组合，系数为 +1 和 -1。我们可以将这个和重写为
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{I}{\left( -1\right) }^{\left| I\right| }\left| {A}_{I}\right|  = \mathop{\sum }\limits_{I}\mathop{\sum }\limits_{{x \in  {A}_{I}}}{\left( -1\right) }^{\left| I\right| } = \mathop{\sum }\limits_{x}\mathop{\sum }\limits_{{I : x \in  {A}_{I}}}{\left( -1\right) }^{\left| I\right| }.
+\]
+
+We calculate, for each point of \(X\) , its contribution to the sum, that is, the sum of the coefficients of the sets \({A}_{I}\) which contain it.
+
+\begin{tcolorbox}\relax
+我们计算 \(X\) 中的每个点对这个和的贡献，也就是说，包含它的集合 \({A}_{I}\) 的系数之和。
+\end{tcolorbox}
+
+First suppose that \(x \in  X\) lies in none of the sets \({A}_{i}\) . Then the only term in the sum to which \(x\) contributes is that with \(I = \varnothing\) ; and this contribution is 1 .
+
+\begin{tcolorbox}\relax
+首先假设 \(x \in  X\) 不属于任何集合 \({A}_{i}\) 。那么 \(x\) 对和的唯一贡献项是 \(I = \varnothing\) 的那一项；这个贡献是1。
+\end{tcolorbox}
+
+Otherwise, the set \(J \mathrel{\text{ := }} \left\{  {i : x \in  {A}_{i}}\right\}\) is non-empty; and \(x \in  {A}_{I}\) precisely when \(I \subseteq  J\) . Thus, the contribution of \(x\) is
+
+\begin{tcolorbox}\relax
+否则，集合 \(J \mathrel{\text{ := }} \left\{  {i : x \in  {A}_{i}}\right\}\) 是非空的；并且当 \(I \subseteq  J\) 时 \(x \in  {A}_{I}\) 恰好成立。因此， \(x\) 的贡献是
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{I \subseteq  J}}{\left( -1\right) }^{\left| I\right| } = \mathop{\sum }\limits_{{i = 0}}^{\left| J\right| }\left( \begin{matrix} \left| J\right| \\  i \end{matrix}\right) {\left( -1\right) }^{i} = {\left( 1 - 1\right) }^{\left| J\right| } = 0
+\]
+
+by the binomial theorem.
+
+\begin{tcolorbox}\relax
+根据二项式定理。
+\end{tcolorbox}
+
+Thus, points lying in no set \({A}_{i}\) contribute 1 to the sum, while points in some \({A}_{i}\) contribute 0 ; so the overall sum is the number of points lying in none of the sets, as claimed.
+
+\begin{tcolorbox}\relax
+因此，不属于任何集合 \({A}_{i}\) 的点对和的贡献是1，而属于某些 \({A}_{i}\) 的点的贡献是0；所以总的和就是不属于任何集合的点的个数，如所声称的那样。
+\end{tcolorbox}
+
+For some applications the following form of the inclusion-exclusion principle is more convenient.
+
+\begin{tcolorbox}\relax
+对于某些应用，容斥原理的以下形式更方便。
+\end{tcolorbox}
+
+Proposition 1.14. Let \({A}_{1},\ldots ,{A}_{n}\) be a sequence of (not necessarily distinct) sets. Then
+
+\begin{tcolorbox}\relax
+命题1.14。设 \({A}_{1},\ldots ,{A}_{n}\) 为一个(不一定不同的)集合序列。那么
+\end{tcolorbox}
+
+\[
+\left| {{A}_{1} \cup  \cdots  \cup  {A}_{n}}\right|  = \mathop{\sum }\limits_{{\varnothing  \neq  I \subseteq  \{ 1,\ldots ,n\} }}{\left( -1\right) }^{\left| I\right|  + 1}\left| {A}_{I}\right| . \tag{1.20}
+\]
+
+Proof. The left-hand of (1.20) is \(\left| {A}_{\varnothing }\right|\) minus the number of elements of \(X = \; {A}_{\varnothing }\) which lie in none of the subsets \({A}_{i}\) . By Proposition 1.13 this number is
+
+\begin{tcolorbox}\relax
+证明。(1.20)式的左边是 \(\left| {A}_{\varnothing }\right|\) 减去 \(X = \; {A}_{\varnothing }\) 中不属于任何子集 \({A}_{i}\) 的元素个数。根据命题1.13，这个数是
+\end{tcolorbox}
+
+\[
+\left| {A}_{\varnothing }\right|  - \mathop{\sum }\limits_{{I \subseteq  \{ 1,\ldots ,n\} }}{\left( -1\right) }^{\left| I\right| }\left| {A}_{I}\right|  = \mathop{\sum }\limits_{{\varnothing  \neq  I \subseteq  \{ 1,\ldots ,n\} }}{\left( -1\right) }^{\left| I\right|  + 1}\left| {A}_{I}\right| ,
+\]
+
+as desired.
+
+\begin{tcolorbox}\relax
+正如所期望的。
+\end{tcolorbox}
+
+Suppose we would like to know, given a set of indices \(I\) , how many elements belong to all the sets \({A}_{i}\) with \(i \in  I\) and do not belong to any of the remaining sets. Proposition 1.13 (which corresponds to the case when \(I = \varnothing\) ) can be generalized for this situation.
+
+\begin{tcolorbox}\relax
+假设我们想知道，给定一组索引 \(I\) ，有多少元素属于所有满足 \(i \in  I\) 的集合 \({A}_{i}\) ，并且不属于其余任何集合。命题1.13(对应于 \(I = \varnothing\) 的情况)可以针对这种情况进行推广。
+\end{tcolorbox}
+
+Proposition 1.15. Let \({A}_{1},\ldots ,{A}_{n}\) be sets, and \(I\) a subset of the index set \(\{ 1,\ldots ,n\}\) . Then the number of elements which belong to \({A}_{i}\) for all \(i \in  I\) and for no other values is
+
+\begin{tcolorbox}\relax
+命题1.15。设 \({A}_{1},\ldots ,{A}_{n}\) 为集合， \(I\) 为索引集 \(\{ 1,\ldots ,n\}\) 的一个子集。那么属于所有 \(i \in  I\) 时的 \({A}_{i}\) 且不属于其他值的元素个数是
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{J \supseteq  I}}{\left( -1\right) }^{\left| J \smallsetminus  I\right| }\left| {A}_{J}\right| \tag{1.21}
+\]
+
+Proof. Consider the set \(X \mathrel{\text{ := }} \mathop{\bigcap }\limits_{{i \in  I}}{A}_{i}\) and its subsets \({B}_{k} \mathrel{\text{ := }} X \cap  {A}_{k}\) , for all \(k \in  N \smallsetminus  I\) , where \(N \mathrel{\text{ := }} \{ 1,\ldots ,n\}\) . The proposition asks us to calculate the number of elements of \(X\) lying in none of \({B}_{k}\) . By Proposition 1.13, this number is
+
+\begin{tcolorbox}\relax
+证明。考虑集合 \(X \mathrel{\text{ := }} \mathop{\bigcap }\limits_{{i \in  I}}{A}_{i}\) 及其子集 \({B}_{k} \mathrel{\text{ := }} X \cap  {A}_{k}\) ，对于所有 \(k \in  N \smallsetminus  I\) ，其中 \(N \mathrel{\text{ := }} \{ 1,\ldots ,n\}\) 。该命题要求我们计算 \(X\) 中不属于任何 \({B}_{k}\) 的元素个数。根据命题1.13，这个数是
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{K \subseteq  N \smallsetminus  I}}{\left( -1\right) }^{\left| K\right| }\left| {\mathop{\bigcap }\limits_{{k \in  K}}{B}_{k}}\right|  = \mathop{\sum }\limits_{{K \subseteq  N \smallsetminus  I}}{\left( -1\right) }^{\left| K\right| }\left| {\mathop{\bigcap }\limits_{{i \in  K \cup  I}}{A}_{i}}\right|
+\]
+
+\[
+= \mathop{\sum }\limits_{{J \supseteq  I}}{\left( -1\right) }^{\left| J \smallsetminus  I\right| }\left| {A}_{J}\right|
+\]
+
+What is the probability that if \(n\) people randomly search a dark closet to retrieve their hats, no person will pick his own hat? Using the principle of inclusion and exclusion it can be shown that this probability is very close to \({\mathrm{e}}^{-1} = {0.3678}\ldots\)
+
+\begin{tcolorbox}\relax
+如果 \(n\) 个人随机在一个黑暗的壁橱里找他们的帽子，没有一个人会拿到自己帽子的概率是多少？使用容斥原理可以证明这个概率非常接近 \({\mathrm{e}}^{-1} = {0.3678}\ldots\)
+\end{tcolorbox}
+
+This question can be formalized as follows. A permutation is a bijective mapping \(f\) of the set \(\{ 1,\ldots ,n\}\) into itself. We say that \(f\) fixes a point \(i\) if \(f\left( i\right)  = i\) . A derangement is a permutation which fixes none of the points. We have exactly \(n\) ! permutations. How many of them are derangements?
+
+\begin{tcolorbox}\relax
+这个问题可以形式化为如下。一个排列是集合 \(\{ 1,\ldots ,n\}\) 到自身的双射映射 \(f\) 。如果 \(f\left( i\right)  = i\) ，我们就说 \(f\) 固定一个点 \(i\) 。一个错排是一个不固定任何点的排列。我们总共有 \(n\) !个排列。其中有多少个是错排呢？
+\end{tcolorbox}
+
+Proposition 1.16. The number of derangements of \(\{ 1,\ldots ,n\}\) is equal to
+
+\begin{tcolorbox}\relax
+命题1.16。 \(\{ 1,\ldots ,n\}\) 的错排数等于
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = 0}}^{n}{\left( -1\right) }^{i}\left( \begin{matrix} n \\  i \end{matrix}\right) \left( {n - i}\right) ! = n!\mathop{\sum }\limits_{{i = 0}}^{n}\frac{{\left( -1\right) }^{i}}{i!}. \tag{1.22}
+\]
+
+The sum \(\mathop{\sum }\limits_{{i = 0}}^{n}\frac{{\left( -1\right) }^{i}}{i!}\) is the initial part of the Taylor expansion of \({\mathrm{e}}^{-1}\) ; so about an \({\mathrm{e}}^{-1}\) fraction of all permutations are derangements.
+
+\begin{tcolorbox}\relax
+和 \(\mathop{\sum }\limits_{{i = 0}}^{n}\frac{{\left( -1\right) }^{i}}{i!}\) 是 \({\mathrm{e}}^{-1}\) 的泰勒展开式的起始部分；所以大约所有排列的 \({\mathrm{e}}^{-1}\) 部分是错排。
+\end{tcolorbox}
+
+Proof. We are going to apply the inclusion-exclusion formula (1.19). Let \(X\) be the set of all permutations, and \({A}_{i}\) the set of permutations fixing the point \(i\) ; so \(\left| {A}_{i}\right|  = \left( {n - 1}\right)\) !, and more generally, \(\left| {A}_{I}\right|  = \left( {n - \left| I\right| }\right)\) !, since permutations in \({A}_{I}\) fix every point in \(I\) and permute the remaining points arbitrarily. A permutation is a derangement if and only if it lies in none of the sets \({A}_{i}\) ; so by (1.19), the number of derangements is
+
+\begin{tcolorbox}\relax
+证明。我们将应用容斥公式(1.19)。设 \(X\) 为所有排列的集合， \({A}_{i}\) 为固定点 \(i\) 的排列的集合；所以 \(\left| {A}_{i}\right|  = \left( {n - 1}\right)\) !，更一般地， \(\left| {A}_{I}\right|  = \left( {n - \left| I\right| }\right)\) !，因为 \({A}_{I}\) 中的排列固定 \(I\) 中的每个点并任意排列其余的点。一个排列是错排当且仅当它不属于任何集合 \({A}_{i}\) ；所以根据(1.19)，错排的数量是
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{I \subseteq  \{ 1,\ldots ,n\} }}{\left( -1\right) }^{\left| I\right| }\left( {n - \left| I\right| }\right) ! = \mathop{\sum }\limits_{{i = 0}}^{n}{\left( -1\right) }^{i}\left( \begin{matrix} n \\  i \end{matrix}\right) \left( {n - i}\right) !
+\]
+
+putting \(i = \left| I\right|\) .
+
+\begin{tcolorbox}\relax
+令 \(i = \left| I\right|\) 。
+\end{tcolorbox}
+
+\section*{Exercises}
+
+\begin{tcolorbox}\relax
+\section*{练习}
+\end{tcolorbox}
+
+1.1. In how many ways can we distribute \(k\) balls to \(n\) boxes so that each box has at most one ball?
+
+\begin{tcolorbox}\relax
+1.1. 我们有多少种方法可以将 \(k\) 个球分配到 \(n\) 个盒子中，使得每个盒子最多有一个球？
+\end{tcolorbox}
+
+1.2. Show that for every \(k\) the product of any \(k\) consecutive natural numbers is divisible by \(k!\) . Hint: Consider \(\left( \begin{matrix} n + k \\  k \end{matrix}\right)\) .
+
+\begin{tcolorbox}\relax
+1.2. 证明对于任意的 \(k\) ，任意 \(k\) 个连续自然数的乘积都能被 \(k!\) 整除。提示:考虑 \(\left( \begin{matrix} n + k \\  k \end{matrix}\right)\) 。
+\end{tcolorbox}
+
+1.3. Show that the number of pairs \(\left( {A,B}\right)\) of distinct subsets of \(\{ 1,\ldots ,n\}\) with \(A \subset  B\) is \({3}^{n} - {2}^{n}\) . Hint: Use the binomial theorem to evaluate \(\mathop{\sum }\limits_{{k = 0}}^{n}\left( \begin{array}{l} n \\  k \end{array}\right) \left( {{2}^{k} - 1}\right)\) .
+
+\begin{tcolorbox}\relax
+1.3. 证明 \(\{ 1,\ldots ,n\}\) 的不同子集对 \(\left( {A,B}\right)\) (满足 \(A \subset  B\) )的数量是 \({3}^{n} - {2}^{n}\) 。提示:使用二项式定理来计算 \(\mathop{\sum }\limits_{{k = 0}}^{n}\left( \begin{array}{l} n \\  k \end{array}\right) \left( {{2}^{k} - 1}\right)\) 。
+\end{tcolorbox}
+
+1.4. Show that
+
+\begin{tcolorbox}\relax
+1.4. 证明
+\end{tcolorbox}
+
+\[
+\left( \begin{array}{l} n \\  k \end{array}\right)  = \frac{n}{k}\left( \begin{array}{l} n - 1 \\  k - 1 \end{array}\right) .
+\]
+
+Hint: Count in two ways the number of pairs \(\left( {x,M}\right)\) , where \(M\) is a \(k\) -element subset of \(\{ 1,\ldots ,n\}\) and \(x \in  M\) .
+
+\begin{tcolorbox}\relax
+提示:通过两种方式计算 \(\left( {x,M}\right)\) 对的数量，其中 \(M\) 是 \(\{ 1,\ldots ,n\}\) 的一个 \(k\) 元子集且 \(x \in  M\) 。
+\end{tcolorbox}
+
+1.5. Prove that
+
+\begin{tcolorbox}\relax
+1.5. 证明
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{k = 1}}^{n}k\left( \begin{array}{l} n \\  k \end{array}\right)  = n{2}^{n - 1}
+\]
+
+Hint: Count in two ways the number of pairs \(\left( {x,M}\right)\) with \(x \in  M \subseteq  \{ 1,\ldots ,n\}\) .
+
+\begin{tcolorbox}\relax
+提示:通过两种方式计算满足 \(x \in  M \subseteq  \{ 1,\ldots ,n\}\) 的 \(\left( {x,M}\right)\) 对的数量。
+\end{tcolorbox}
+
+1.6. There is a set of \({2n}\) people: \(n\) male and \(n\) female. A good party is a set with the same number of male and female. How many possibilities are there to build such a good party?
+
+\begin{tcolorbox}\relax
+1.6. 有一组 \({2n}\) 个人: \(n\) 个男性和 \(n\) 个女性。一个好的派对是一个男性和女性数量相同的集合。有多少种方式可以组织这样一个好的派对？
+\end{tcolorbox}
+
+1.7. Use Proposition 1.3 to show that
+
+\begin{tcolorbox}\relax
+1.7. 使用命题1.3证明
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = 0}}^{r}\left( \begin{matrix} n + i - 1 \\  i \end{matrix}\right)  = \left( \begin{matrix} n + r \\  r \end{matrix}\right)
+\]
+
+1.8. Let \(0 \leq  a \leq  m \leq  n\) be integers. Use Proposition 1.3 to show that
+
+\begin{tcolorbox}\relax
+1.8. 设 \(0 \leq  a \leq  m \leq  n\) 为整数。使用命题1.3证明
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = m}}^{n}\left( \begin{array}{l} i \\  a \end{array}\right)  = \left( \begin{array}{l} n + 1 \\  a + 1 \end{array}\right)  - \left( \begin{matrix} m \\  a + 1 \end{matrix}\right) .
+\]
+
+1.9. Prove the Cauchy-Vandermonde identity:
+
+\begin{tcolorbox}\relax
+1.9. 证明柯西 - 范德蒙德恒等式:
+\end{tcolorbox}
+
+\[
+\left( \begin{matrix} p + q \\  k \end{matrix}\right)  = \mathop{\sum }\limits_{{i = 0}}^{k}\left( \begin{array}{l} p \\  i \end{array}\right) \left( \begin{matrix} q \\  k - i \end{matrix}\right) .
+\]
+
+Hint: Take a set of \(p + q\) people ( \(p\) male and \(q\) female) and make a set of \(k\) people (with \(i\) male and \(k - i\) female).
+
+\begin{tcolorbox}\relax
+提示:取一组 \(p + q\) 个人( \(p\) 个男性和 \(q\) 个女性)，并组成一组 \(k\) 个人(其中 \(i\) 个男性和 \(k - i\) 个女性)。
+\end{tcolorbox}
+
+1.10. Show that
+
+\begin{tcolorbox}\relax
+1.10. 证明
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{k = 0}}^{n}{\left( \begin{array}{l} n \\  k \end{array}\right) }^{2} = \left( \begin{matrix} {2n} \\  n \end{matrix}\right)
+\]
+
+Hint: Exercise 1.9 and Eq. (1.1).
+
+\begin{tcolorbox}\relax
+提示:练习1.9和式(1.1)。
+\end{tcolorbox}
+
+1.11. Prove the following analogy of the binomial theorem for factorials:
+
+\begin{tcolorbox}\relax
+1.11. 证明以下关于阶乘的二项式定理的类似形式:
+\end{tcolorbox}
+
+\[
+{\left( x + y\right) }_{n} = \mathop{\sum }\limits_{{k = 0}}^{n}\left( \begin{array}{l} n \\  k \end{array}\right) {\left( x\right) }_{k}{\left( y\right) }_{n - k}.
+\]
+
+Hint: Divide both sides by \(n!\) , and use the Cauchy-Vandermonde identity.
+
+\begin{tcolorbox}\relax
+提示:将两边同时除以 \(n!\) ，并使用柯西 - 范德蒙德恒等式。
+\end{tcolorbox}
+
+1.12. Let \(0 \leq  l \leq  k \leq  n\) . Show that
+
+\begin{tcolorbox}\relax
+1.12. 设 \(0 \leq  l \leq  k \leq  n\) 。证明
+\end{tcolorbox}
+
+\[
+\left( \begin{array}{l} n \\  k \end{array}\right) \left( \begin{array}{l} k \\  l \end{array}\right)  = \left( \begin{array}{l} n \\  l \end{array}\right) \left( \begin{array}{l} n - l \\  k - l \end{array}\right) .
+\]
+
+Hint: Count in two ways the number of all pairs \(\left( {L,K}\right)\) of subsets of \(\{ 1,\ldots ,n\}\) such that \(L \subseteq  K,\left| L\right|  = l\) and \(\left| K\right|  = k\) .
+
+\begin{tcolorbox}\relax
+提示:通过两种方式计算 \(\{ 1,\ldots ,n\}\) 的所有子集对 \(\left( {L,K}\right)\) 的数量，使得 \(L \subseteq  K,\left| L\right|  = l\) 且 \(\left| K\right|  = k\) 。
+\end{tcolorbox}
+
+1.13. Use combinatorics (not algebra) to prove that, for \(0 \leq  k \leq  n\) ,
+
+\begin{tcolorbox}\relax
+1.13. 用组合数学(而非代数)证明，对于 \(0 \leq  k \leq  n\) ，
+\end{tcolorbox}
+
+\[
+\left( \begin{array}{l} n \\  2 \end{array}\right)  = \left( \begin{array}{l} k \\  2 \end{array}\right)  + k\left( {n - k}\right)  + \left( \begin{matrix} n - k \\  2 \end{matrix}\right) .
+\]
+
+Hint: \(\left( \begin{array}{l} n \\  2 \end{array}\right)\) is the number of edges in a complete graph on \(n\) vertices.
+
+\begin{tcolorbox}\relax
+提示: \(\left( \begin{array}{l} n \\  2 \end{array}\right)\) 是 \(n\) 个顶点的完全图中的边数。
+\end{tcolorbox}
+
+1.14. One of Euclid's theorems says that, if a prime number divides a product \(a \cdot  b\) of two integers, then \(p\) must divide at least one of these integers. Use this to show that:
+
+\begin{tcolorbox}\relax
+1.14. 欧几里得定理之一表明，如果一个质数整除两个整数的乘积 \(a \cdot  b\) ，那么 \(p\) 必定至少整除其中一个整数。用此证明:
+\end{tcolorbox}
+
+(i) If \(1 \leq  k < p\) , then \(\left( \begin{array}{l} p \\  k \end{array}\right)  \equiv  0{\;\operatorname{mod}\;p}\) .
+
+\begin{tcolorbox}\relax
+(i) 如果 \(1 \leq  k < p\) ，那么 \(\left( \begin{array}{l} p \\  k \end{array}\right)  \equiv  0{\;\operatorname{mod}\;p}\) 。
+\end{tcolorbox}
+
+(ii) If \(1 \leq  k \leq  n < p\) , then \(\left( \begin{array}{l} n \\  k \end{array}\right)  \text{ ≢ } 0{\;\operatorname{mod}\;p}\) .
+
+\begin{tcolorbox}\relax
+(ii) 如果 \(1 \leq  k \leq  n < p\) ，那么 \(\left( \begin{array}{l} n \\  k \end{array}\right)  \text{ ≢ } 0{\;\operatorname{mod}\;p}\) 。
+\end{tcolorbox}
+
+Hint: (i) Let \(x = n\left( {n - 1}\right) \cdots \left( {n - k + 1}\right)\) . Note that \(x = a \cdot  b\) with \(a = \left( \begin{array}{l} n \\  k \end{array}\right)\) and \(b = k\) !.
+
+\begin{tcolorbox}\relax
+提示:(i) 设 \(x = n\left( {n - 1}\right) \cdots \left( {n - k + 1}\right)\) 。注意 \(x = a \cdot  b\) ，其中 \(a = \left( \begin{array}{l} n \\  k \end{array}\right)\) 且 \(b = k\) ！
+\end{tcolorbox}
+
+1.15. Prove Fermat’s Little theorem: if \(p\) is a prime and if \(a\) is a natural number, then \({a}^{p} \equiv  a{\;\operatorname{mod}\;p}\) . In particular, if \(p\) does not divide \(a\) , then \({a}^{p - 1} \equiv \; 1{\;\operatorname{mod}\;p}\) . Hint: Apply the induction on \(a\) . For the induction step, use the binomial theorem to show that \({\left( a + 1\right) }^{p} \equiv  {a}^{p} + 1{\;\operatorname{mod}\;p}\) .
+
+\begin{tcolorbox}\relax
+1.15. 证明费马小定理:如果 \(p\) 是质数且 \(a\) 是自然数，那么 \({a}^{p} \equiv  a{\;\operatorname{mod}\;p}\) 。特别地，如果 \(p\) 不整除 \(a\) ，那么 \({a}^{p - 1} \equiv \; 1{\;\operatorname{mod}\;p}\) 。提示:对 \(a\) 进行归纳。对于归纳步骤，用二项式定理证明 \({\left( a + 1\right) }^{p} \equiv  {a}^{p} + 1{\;\operatorname{mod}\;p}\) 。
+\end{tcolorbox}
+
+1.16. Let \(0 < \alpha  < 1\) be a real number, and \({\alpha n}\) be an integer. Using Stirling’s formula show that
+
+\begin{tcolorbox}\relax
+1.16. 设 \(0 < \alpha  < 1\) 是实数且 \({\alpha n}\) 是整数。用斯特林公式证明
+\end{tcolorbox}
+
+\[
+\left( \begin{matrix} n \\  {\alpha n} \end{matrix}\right)  = \frac{1 + o\left( 1\right) }{\sqrt{{2\pi \alpha }\left( {1 - \alpha }\right) n}} \cdot  {2}^{n \cdot  H\left( \alpha \right) },
+\]
+
+where \(H\left( \alpha \right)  =  - \alpha {\log }_{2}\alpha  - \left( {1 - \alpha }\right) {\log }_{2}\left( {1 - \alpha }\right)\) is the binary entropy function. Hint: \(H\left( \alpha \right)  = {\log }_{2}h\left( \alpha \right)\) , where \(h\left( \alpha \right)  = {\alpha }^{-\alpha }{\left( 1 - \alpha \right) }^{-\left( {1 - \alpha }\right) }\) .
+
+\begin{tcolorbox}\relax
+其中 \(H\left( \alpha \right)  =  - \alpha {\log }_{2}\alpha  - \left( {1 - \alpha }\right) {\log }_{2}\left( {1 - \alpha }\right)\) 是二元熵函数。提示: \(H\left( \alpha \right)  = {\log }_{2}h\left( \alpha \right)\) ，其中 \(h\left( \alpha \right)  = {\alpha }^{-\alpha }{\left( 1 - \alpha \right) }^{-\left( {1 - \alpha }\right) }\) 。
+\end{tcolorbox}
+
+1.17. Prove that, for \(s \leq  n/2\) ,
+
+\begin{tcolorbox}\relax
+1.17. 证明，对于 \(s \leq  n/2\) ，
+\end{tcolorbox}
+
+(1) \(\mathop{\sum }\limits_{{k = 0}}^{s}\left( \begin{array}{l} n \\  k \end{array}\right)  \leq  \left( \begin{array}{l} n \\  s \end{array}\right) \left( {1 + \frac{s}{n - {2s} + 1}}\right)\) ;
+
+(2) \(\;\mathop{\sum }\limits_{{k = 0}}^{s}\left( \begin{array}{l} n \\  k \end{array}\right)  \leq  {2}^{n \cdot  H\left( {s/n}\right) }\) .
+
+Hint: To (1): observe that \(\left( \begin{matrix} n \\  k - 1 \end{matrix}\right) /\left( \begin{array}{l} n \\  k \end{array}\right)  = k/\left( {n - k + 1}\right)\) does not exceed \(\alpha  \mathrel{\text{ := }} s/\left( {n - s + 1}\right)\) , and use the identity \(\mathop{\sum }\limits_{{i = 0}}^{\infty }{\alpha }^{i} = 1/\left( {1 - \alpha }\right)\) .
+
+\begin{tcolorbox}\relax
+提示:对于(1):观察到 \(\left( \begin{matrix} n \\  k - 1 \end{matrix}\right) /\left( \begin{array}{l} n \\  k \end{array}\right)  = k/\left( {n - k + 1}\right)\) 不超过 \(\alpha  \mathrel{\text{ := }} s/\left( {n - s + 1}\right)\) ，并使用恒等式 \(\mathop{\sum }\limits_{{i = 0}}^{\infty }{\alpha }^{i} = 1/\left( {1 - \alpha }\right)\) 。
+\end{tcolorbox}
+
+To (2): set \(p = s/n\) and apply the binomial theorem to show that
+
+\begin{tcolorbox}\relax
+对于(2):设 \(p = s/n\) 并应用二项式定理证明
+\end{tcolorbox}
+
+\[
+{p}^{s}{\left( 1 - p\right) }^{n - s}\mathop{\sum }\limits_{{k = 0}}^{s}\left( \begin{array}{l} n \\  k \end{array}\right)  \leq  1.
+\]
+
+See also Corollary 22.9 for another proof.
+
+\begin{tcolorbox}\relax
+另一种证明见推论22.9。
+\end{tcolorbox}
+
+1.18. Prove the following estimates: If \(k \leq  k + x < n\) and \(y < k \leq  n\) , then
+
+\begin{tcolorbox}\relax
+1.18. 证明以下估计:如果 \(k \leq  k + x < n\) 和 \(y < k \leq  n\) ，那么
+\end{tcolorbox}
+
+\[
+{\left( \frac{n - k - x}{n - x}\right) }^{x} \leq  \left( \begin{matrix} n - x \\  k \end{matrix}\right) {\left( \begin{array}{l} n \\  k \end{array}\right) }^{-1} \leq  {\left( \frac{n - k}{n}\right) }^{x} \leq  {\mathrm{e}}^{-\left( {k/n}\right) x} \tag{1.23}
+\]
+
+and
+
+\begin{tcolorbox}\relax
+并且
+\end{tcolorbox}
+
+\[
+{\left( \frac{k - y}{n - y}\right) }^{y} \leq  \left( \begin{array}{l} n - y \\  k - y \end{array}\right) {\left( \begin{array}{l} n \\  k \end{array}\right) }^{-1} \leq  {\left( \frac{k}{n}\right) }^{y}.
+\]
+
+1.19. Prove that if \(1 \leq  k \leq  n/2\) , then
+
+\begin{tcolorbox}\relax
+1.19. 证明如果 \(1 \leq  k \leq  n/2\) ，那么
+\end{tcolorbox}
+
+\[
+\left( \begin{array}{l} n \\  k \end{array}\right)  \geq  \gamma  \cdot  {\left( \frac{n\mathrm{e}}{k}\right) }^{k},\text{ where }\gamma  = \frac{1}{\sqrt{2\pi k}}{\mathrm{e}}^{-{k}^{2}/n - 1/\left( {6k}\right) }. \tag{1.24}
+\]
+
+Hint: Use Stirling's formula to show that
+
+\begin{tcolorbox}\relax
+提示:使用斯特林公式证明
+\end{tcolorbox}
+
+\[
+\left( \begin{array}{l} n \\  k \end{array}\right)  \geq  \frac{1}{\sqrt{2\pi }{\mathrm{e}}^{1/\left( {6k}\right) }}{\left( \frac{n}{k}\right) }^{k}{\left( \frac{n}{n - k}\right) }^{n - k}{\left( \frac{n}{k\left( {n - k}\right) }\right) }^{1/2},
+\]
+
+and apply the estimate \(\ln \left( {1 + t}\right)  \geq  t - {t}^{2}/2\) valid for all \(t \geq  0\) .
+
+\begin{tcolorbox}\relax
+并应用对所有 \(t \geq  0\) 都有效的估计 \(\ln \left( {1 + t}\right)  \geq  t - {t}^{2}/2\) 。
+\end{tcolorbox}
+
+1.20. In how many ways can we choose a subset \(S \subseteq  \{ 1,2,\ldots ,n\}\) such that \(\left| S\right|  = k\) and no two elements of \(S\) precede each other, i.e., \(x \neq  y + 1\) for all \(x,y \in  S\) ? Hint: If \(S = \left\{  {{a}_{1},\ldots ,{a}_{k}}\right\}\) is such a subset with \({a}_{1} < {a}_{2} < \ldots  < {a}_{k}\) , then \({a}_{1} < {a}_{2} - 1 < \ldots  < {a}_{k} - \left( {k - 1}\right) .\)
+
+\begin{tcolorbox}\relax
+1.20. 我们有多少种方法可以选择一个子集 \(S \subseteq  \{ 1,2,\ldots ,n\}\) ，使得 \(\left| S\right|  = k\) 且 \(S\) 的任意两个元素都不相邻，即对于所有 \(x,y \in  S\) 都有 \(x \neq  y + 1\) ？提示:如果 \(S = \left\{  {{a}_{1},\ldots ,{a}_{k}}\right\}\) 是这样一个满足 \({a}_{1} < {a}_{2} < \ldots  < {a}_{k}\) 的子集，那么 \({a}_{1} < {a}_{2} - 1 < \ldots  < {a}_{k} - \left( {k - 1}\right) .\)
+\end{tcolorbox}
+
+1.21. Let \(k \geq  {2n}\) . In how many ways can we distribute \(k\) sweets to \(n\) children, if each child is supposed to get at least 2 of them?
+
+\begin{tcolorbox}\relax
+1.21. 设 \(k \geq  {2n}\) 。我们有多少种方法可以将 \(k\) 颗糖果分给 \(n\) 个孩子，前提是每个孩子至少得到2颗？
+\end{tcolorbox}
+
+1.22. Let \(\mathcal{F} = \left\{  {{A}_{1},\ldots ,{A}_{m}}\right\}\) be a family of subsets of a finite set \(X\) . For \(x \in  X\) , let \(d\left( x\right)\) be the number of members of \(\mathcal{F}\) containing \(x\) . Show that \(\mathop{\sum }\limits_{{i,j = 1}}^{m}\left| {{A}_{i} \cap  {A}_{j}}\right|  = \mathop{\sum }\limits_{{x \in  X}}d{\left( x\right) }^{2}.\)
+
+\begin{tcolorbox}\relax
+1.22. 设 \(\mathcal{F} = \left\{  {{A}_{1},\ldots ,{A}_{m}}\right\}\) 是有限集 \(X\) 的子集族。对于 \(x \in  X\) ，设 \(d\left( x\right)\) 是 \(\mathcal{F}\) 中包含 \(x\) 的成员数量。证明 \(\mathop{\sum }\limits_{{i,j = 1}}^{m}\left| {{A}_{i} \cap  {A}_{j}}\right|  = \mathop{\sum }\limits_{{x \in  X}}d{\left( x\right) }^{2}.\)
+\end{tcolorbox}
+
+1.23. Bell’s number \({B}_{n}\) is the number of all possible partitions of an \(n\) - element set \(X\) (we assume that \({B}_{0} = 1\) ). Prove that \({B}_{n + 1} = \mathop{\sum }\limits_{{i = 0}}^{n}\left( \begin{matrix} n \\  i \end{matrix}\right) {B}_{i}\) . Hint: For every subset \(A \subseteq  X\) there are precisely \({B}_{\left| X \smallsetminus  A\right| }\) partitions of \(X\) containing \(A\) as one of its blocks.
+
+\begin{tcolorbox}\relax
+1.23. 贝尔数 \({B}_{n}\) 是 \(n\) 元集 \(X\) 的所有可能划分的数量(我们假设 \({B}_{0} = 1\) )。证明 \({B}_{n + 1} = \mathop{\sum }\limits_{{i = 0}}^{n}\left( \begin{matrix} n \\  i \end{matrix}\right) {B}_{i}\) 。提示:对于每个子集 \(A \subseteq  X\) ，恰好有 \({B}_{\left| X \smallsetminus  A\right| }\) 个 \(X\) 的划分以 \(A\) 作为其一个块。
+\end{tcolorbox}
+
+1.24. Let \(\left| N\right|  = n\) and \(\left| X\right|  = x\) . Show that there are \({x}^{n}\) mappings from \(N\) to \(X\) , and that \(S\left( {n,k}\right) x\left( {x - 1}\right) \cdots \left( {x - k + 1}\right)\) of these mappings have a range of cardinality \(k\) ; here \(S\left( {n,k}\right)\) is the Stirling number (the number of partitions of an \(n\) -element set into exactly \(k\) blocks). Hint: We have \(x\left( {x - 1}\right) \cdots \left( {x - k + 1}\right)\) possibilities to choose a sequence of \(k\) elements in \(X\) , and we can specify \(S\left( {n,k}\right)\) ways in which elements of \(N\) are mapped onto these chosen elements.
+
+\begin{tcolorbox}\relax
+1.24. 设 \(\left| N\right|  = n\) 和 \(\left| X\right|  = x\) 。证明从 \(N\) 到 \(X\) 有 \({x}^{n}\) 个映射，并且这些映射中有 \(S\left( {n,k}\right) x\left( {x - 1}\right) \cdots \left( {x - k + 1}\right)\) 个的像集基数为 \(k\) ；这里 \(S\left( {n,k}\right)\) 是斯特林数(将 \(n\) 元集恰好划分为 \(k\) 个块的划分数量)。提示:我们有 \(x\left( {x - 1}\right) \cdots \left( {x - k + 1}\right)\) 种方法在 \(X\) 中选择一个 \(k\) 元素的序列，并且我们可以指定 \(S\left( {n,k}\right)\) 种 \(N\) 的元素映射到这些所选元素的方式。
+\end{tcolorbox}
+
+1.25. Let \(\mathcal{F}\) be a family of subsets of an \(n\) -element set \(X\) with the property that any two members of \(\mathcal{F}\) meet, i.e., \(A \cap  B \neq  \varnothing\) for all \(A,B \in  \mathcal{F}\) . Suppose also that no other subset of \(X\) meets all of the members of \(\mathcal{F}\) . Prove that \(\left| \mathcal{F}\right|  = {2}^{n - 1}\) . Hint: Consider sets and their complements.
+
+\begin{tcolorbox}\relax
+1.25. 设 \(\mathcal{F}\) 是 \(n\) 元集合 \(X\) 的子集族，具有任意两个 \(\mathcal{F}\) 中的成员都相交的性质，即对于所有 \(A,B \in  \mathcal{F}\) ， \(A \cap  B \neq  \varnothing\) 。还假设 \(X\) 的其他子集都不与 \(\mathcal{F}\) 的所有成员相交。证明 \(\left| \mathcal{F}\right|  = {2}^{n - 1}\) 。提示:考虑集合及其补集。
+\end{tcolorbox}
+
+1.26. Let \(\mathcal{F}\) be a family of \(k\) -element subsets of an \(n\) -element set \(X\) such that every \(l\) -element subset of \(X\) is contained in at least one member of \(\mathcal{F}\) . Show that \(\left| \mathcal{F}\right|  \geq  \left( \begin{matrix} n \\  l \end{matrix}\right) /\left( \begin{matrix} k \\  l \end{matrix}\right)\) . Hint: Argue as in the proof of Proposition 1.9.
+
+\begin{tcolorbox}\relax
+1.26. 设 \(\mathcal{F}\) 是 \(n\) 元集合 \(X\) 的 \(k\) 元子集族，使得 \(X\) 的每个 \(l\) 元子集都包含在 \(\mathcal{F}\) 的至少一个成员中。证明 \(\left| \mathcal{F}\right|  \geq  \left( \begin{matrix} n \\  l \end{matrix}\right) /\left( \begin{matrix} k \\  l \end{matrix}\right)\) 。提示:如命题1.9的证明那样论证。
+\end{tcolorbox}
+
+1.27. (Sperner 1928). Let \(\mathcal{F}\) be a family of \(k\) -element subsets of \(\{ 1,\ldots ,n\}\) . Its shadow is the family of all those \(\left( {k - 1}\right)\) -element subsets which lie entirely in at least one member of \(\mathcal{F}\) . Show that the shadow contains at least \(k\left| \mathcal{F}\right| /\left( {n - k + 1}\right)\) sets. Hint: Argue as in the proof of Proposition 1.9.
+
+\begin{tcolorbox}\relax
+1.27. (斯佩纳，1928年)。设 \(\mathcal{F}\) 是 \(\{ 1,\ldots ,n\}\) 的 \(k\) 元子集族。它的影子是所有那些完全包含在 \(\mathcal{F}\) 的至少一个成员中的 \(\left( {k - 1}\right)\) 元子集族。证明影子包含至少 \(k\left| \mathcal{F}\right| /\left( {n - k + 1}\right)\) 个集合。提示:如命题1.9的证明那样论证。
+\end{tcolorbox}
+
+1.28. (Counting in bipartite graphs). Let \(G = \left( {A \cup  B,E}\right)\) be a bipartite graph, \(d\) be a minimum degree of a vertex in \(A\) and \(D\) the maximum degree of a vertex in \(B\) . Assume that \(\left| A\right| d \geq  \left| B\right| D\) . Show that then, for every subset \({A}_{0} \subseteq  A\) of density \(\alpha  \mathrel{\text{ := }} \left| {A}_{0}\right| /\left| A\right|\) , there is a subset \({B}_{0} \subseteq  B\) such that: (i) \(\left| {B}_{0}\right|  \geq  \alpha \left| B\right| /2\) ,(ii) every vertex of \({B}_{0}\) has at least \({\alpha D}/2\) neighbors in \({A}_{0}\) , and (iii) at least half of the edges leaving \({A}_{0}\) go to \({B}_{0}\) . Hint: Let \({B}_{0}\) consist of all vertices in \(B\) having \(> {\alpha D}/2\) neighbors in \({A}_{0}\) .
+
+\begin{tcolorbox}\relax
+1.28. (二分图中的计数)。设 \(G = \left( {A \cup  B,E}\right)\) 是一个二分图， \(d\) 是 \(A\) 中顶点的最小度， \(D\) 是 \(B\) 中顶点的最大度。假设 \(\left| A\right| d \geq  \left| B\right| D\) 。证明那么对于密度为 \(\alpha  \mathrel{\text{ := }} \left| {A}_{0}\right| /\left| A\right|\) 的每个子集 \({A}_{0} \subseteq  A\) ，存在一个子集 \({B}_{0} \subseteq  B\) ，使得:(i) \(\left| {B}_{0}\right|  \geq  \alpha \left| B\right| /2\) ，(ii) \({B}_{0}\) 的每个顶点在 \({A}_{0}\) 中至少有 \({\alpha D}/2\) 个邻居，并且(iii) 离开 \({A}_{0}\) 的至少一半边连接到 \({B}_{0}\) 。提示:设 \({B}_{0}\) 由 \(B\) 中在 \({A}_{0}\) 中有 \(> {\alpha D}/2\) 个邻居的所有顶点组成。
+\end{tcolorbox}
+
+1.29. Let \({a}_{1},\ldots ,{a}_{n}\) be nonnegative numbers. Define
+
+\begin{tcolorbox}\relax
+1.29. 设 \({a}_{1},\ldots ,{a}_{n}\) 是非负数字。定义
+\end{tcolorbox}
+
+\[
+f\left( t\right)  = {\left( \frac{{a}_{1}^{t} + \cdots  + {a}_{n}^{t}}{n}\right) }^{1/t}.
+\]
+
+Use Jensen’s inequality to show that \(s \leq  t\) implies \(f\left( s\right)  \leq  f\left( t\right)\) .
+
+\begin{tcolorbox}\relax
+使用詹森不等式证明 \(s \leq  t\) 意味着 \(f\left( s\right)  \leq  f\left( t\right)\) 。
+\end{tcolorbox}
+
+1.30. (Quine 1988). The famous Fermat's Last Theorem states that if \(n > 2\) , then \({x}^{n} + {y}^{n} = {z}^{n}\) has no solutions in nonzero integers \(x,y\) and \(z\) . This theorem can be stated in terms of sorting objects into a row of bins, some of which are red, some blue, and the rest unpainted. The theorem amounts to saying that when there are more than two objects, the following statement is never true: The number of ways of sorting them that shun both colors is equal to the number of ways that shun neither. Show that this statement is equivalent to Fermat’s equation \({x}^{n} + {y}^{n} = {z}^{n}\) . Hint: Let \(n\) be the number of objects, \(z\) the number of bins, \(x\) the number of bins that are not red and \(y\) the number of bins that are not blue. There are \({z}^{n}\) ways of sorting the objects into bins; \({x}^{n}\) of these ways shun red and \({y}^{n}\) of them shun blue.
+
+\begin{tcolorbox}\relax
+1.30.(奎因，1988年)。著名的费马大定理指出，如果 \(n > 2\) ，那么 \({x}^{n} + {y}^{n} = {z}^{n}\) 在非零整数 \(x,y\) 和 \(z\) 中没有解。该定理可以用将物体放入一排箱子的方式来表述，其中一些箱子是红色的，一些是蓝色的，其余的未涂色。该定理相当于说，当物体数量超过两个时，以下陈述永远不成立:避开两种颜色的排列方式的数量等于不避开任何一种颜色的排列方式的数量。证明这个陈述等同于费马方程 \({x}^{n} + {y}^{n} = {z}^{n}\) 。提示:设 \(n\) 为物体的数量， \(z\) 为箱子的数量， \(x\) 为非红色箱子的数量， \(y\) 为非蓝色箱子的数量。有 \({z}^{n}\) 种将物体放入箱子的方式；其中 \({x}^{n}\) 种方式避开红色， \({y}^{n}\) 种方式避开蓝色。
+\end{tcolorbox}
+
+1.31. Use the principle of inclusion and exclusion to determine the number of ways in which three women and their three spouses may be seated around a round table under each of the following two restrictions:
+
+\begin{tcolorbox}\relax
+1.31. 使用容斥原理来确定在以下两种限制下，三名女性及其三名配偶可以围坐在圆桌旁的方式数量:
+\end{tcolorbox}
+
+(i) no woman sits beside her spouse (on either side);
+
+\begin{tcolorbox}\relax
+(i) 没有女性坐在其配偶旁边(两侧皆不可以)；
+\end{tcolorbox}
+
+(ii) no two women may sit opposite one another at the table (i.e., with two people between them on either side).
+
+\begin{tcolorbox}\relax
+(ii) 没有两名女性可以在桌子上相对而坐(即两侧中间都隔两个人)。
+\end{tcolorbox}
+
+Hint: To (i): two seatings are equivalent if one can be rotated into the other; so the underlying set consists of all circular permutations,5! in number. Let \({A}_{i}\left( {i = 1,2,3}\right)\) be the subset of permutations in which the members of the \(i\) -th couple sit side by side. Show that \(\left| {A}_{i}\right|  = 2 \cdot  4!,\left| {{A}_{i} \cap  {A}_{j}}\right|  = {2}^{2} \cdot  3!,\left| {{A}_{1} \cap  {A}_{2} \cap  {A}_{3}}\right|  = {2}^{3} \cdot  2!\) and apply the inclusion-exclusion formula. To (ii): distinguish two cases, according to whether there exist two women sitting side by side or not.
+
+\begin{tcolorbox}\relax
+提示:对于(i):如果一种座位安排可以通过旋转变成另一种，那么这两种座位安排是等效的；所以基础集合由所有的圆形排列组成，数量为5!。设 \({A}_{i}\left( {i = 1,2,3}\right)\) 是第 \(i\) 对夫妇坐在一起的排列子集。证明 \(\left| {A}_{i}\right|  = 2 \cdot  4!,\left| {{A}_{i} \cap  {A}_{j}}\right|  = {2}^{2} \cdot  3!,\left| {{A}_{1} \cap  {A}_{2} \cap  {A}_{3}}\right|  = {2}^{3} \cdot  2!\) 并应用容斥公式。对于(ii):根据是否存在两名女性坐在一起区分两种情况。
+\end{tcolorbox}
+
+1.32. Let \(m \geq  n\) . A function \(f : \left\lbrack  m\right\rbrack   \rightarrow  \left\lbrack  n\right\rbrack\) is a surjection (or a mapping of \(\left\lbrack  m\right\rbrack\) onto \(\left\lbrack  n\right\rbrack  )\) if \(f\) maps at least one element of \(\left\lbrack  m\right\rbrack\) to each element of \(\left\lbrack  n\right\rbrack\) . Prove that the number of such functions is \(\mathop{\sum }\limits_{{k = 0}}^{{n - 1}}{\left( -1\right) }^{k}\left( \begin{array}{l} n \\  k \end{array}\right) {\left( n - k\right) }^{m}\) . Hint: Let \({A}_{i} = \{ f : f\left( j\right)  \neq  i\) for all \(j\}\) and apply the inclusion-exclusion formula.
+
+\begin{tcolorbox}\relax
+1.32. 设 \(m \geq  n\) 。函数 \(f : \left\lbrack  m\right\rbrack   \rightarrow  \left\lbrack  n\right\rbrack\) 是一个满射(或从 \(\left\lbrack  m\right\rbrack\) 到 \(\left\lbrack  n\right\rbrack  )\) 的映射)，如果 \(f\) 将 \(\left\lbrack  m\right\rbrack\) 中的至少一个元素映射到 \(\left\lbrack  n\right\rbrack\) 中的每个元素。证明这样的函数数量是 \(\mathop{\sum }\limits_{{k = 0}}^{{n - 1}}{\left( -1\right) }^{k}\left( \begin{array}{l} n \\  k \end{array}\right) {\left( n - k\right) }^{m}\) 。提示:设 \({A}_{i} = \{ f : f\left( j\right)  \neq  i\) 对于所有 \(j\}\) 并应用容斥公式。
+\end{tcolorbox}
+
+1.33. Let \(n\) and \(k \geq  l\) be positive integers. How many different integer solutions are there to the equation \({x}_{1} + {x}_{2} + \cdots  + {x}_{n} = k\) , with all \(0 \leq  {x}_{i} < l\) ? Hint: Consider the universum \(X = {X}_{n,k}\) of all solutions with all \({x}_{i} \geq  0\) , let \({A}_{i}\) be the set of all solutions with \({x}_{i} \geq  l\) , and apply the inclusion-exclusion formula (1.19). Observe that \(\left| {A}_{i}\right|  = \left| {X}_{n,k - l}\right|\) , where the size of \({X}_{n,k}\) is given by Proposition 1.5.
+
+\begin{tcolorbox}\relax
+1.33. 设 \(n\) 和 \(k \geq  l\) 为正整数。对于方程 \({x}_{1} + {x}_{2} + \cdots  + {x}_{n} = k\) ，在所有 \(0 \leq  {x}_{i} < l\) 的情况下，有多少不同的整数解？提示:考虑所有 \({x}_{i} \geq  0\) 的所有解的全集 \(X = {X}_{n,k}\) ，设 \({A}_{i}\) 为所有 \({x}_{i} \geq  l\) 的解的集合，并应用容斥公式(1.19)。注意 \(\left| {A}_{i}\right|  = \left| {X}_{n,k - l}\right|\) ，其中 \({X}_{n,k}\) 的大小由命题1.5给出。
+\end{tcolorbox}
+
+1.34. Let \(r \geq  5\) . How many ways are there to color the vertices with \(r\) colors in the following graphs such that adjacent vertices get different colors?
+
+\begin{tcolorbox}\relax
+1.34. 设 \(r \geq  5\) 。在以下图中用 \(r\) 种颜色给顶点着色，使得相邻顶点颜色不同，有多少种方法？
+\end{tcolorbox}
+
+\begin{center}
+\includegraphics[max width=0.4\textwidth]{images/39_523_1628_497_129_0.jpg}
+\end{center}
+\hspace*{3em} 
+
+Hint: For the first graph, the universe \(X\) is the set of all \({r}^{4}\) ways to color the vertices. Associate with each edge \(e\) the set \({A}_{e}\) of all colorings, which assign the same color to its ends, and apply the inclusion-exclusion formula (1.19).
+
+\begin{tcolorbox}\relax
+提示:对于第一个图，全集 \(X\) 是给顶点着色的所有 \({r}^{4}\) 种方法的集合。对于每条边 \(e\) ，关联所有给其两端赋予相同颜色的着色的集合 \({A}_{e}\) ，并应用容斥公式(1.19)。
+\end{tcolorbox}
+
+1.35. Say that a permutation \(\pi\) on \(\left\lbrack  {2n}\right\rbrack\) has property \(P\) if for some \(i \in  \left\lbrack  {2n}\right\rbrack\) , \(\left| {\pi \left( i\right)  - \pi \left( {i + 1}\right) }\right|  = n\) , where \(i + 1\) is taken modulo 2. Show that, for each \(n\) , there are more permutations with property \(P\) than without it. Hint: Consider the sets \({A}_{i} = \left\{  {\pi  : \left| {\pi \left( i\right)  - \pi \left( {i + 1}\right) }\right|  = n}\right\}\) . Show that \(\left| {A}_{i}\right|  = {2n}\left( {{2n} - 2}\right)\) ! and \({A}_{i} \cap  {A}_{i + 1} = \varnothing\) .
+
+\begin{tcolorbox}\relax
+1.35. 称 \(\left\lbrack  {2n}\right\rbrack\) 上的一个置换 \(\pi\) 具有性质 \(P\) ，如果对于某个 \(i \in  \left\lbrack  {2n}\right\rbrack\) ， \(\left| {\pi \left( i\right)  - \pi \left( {i + 1}\right) }\right|  = n\) ，其中 \(i + 1\) 取模2。证明，对于每个 \(n\) ，具有性质 \(P\) 的置换比不具有该性质的置换更多。提示:考虑集合 \({A}_{i} = \left\{  {\pi  : \left| {\pi \left( i\right)  - \pi \left( {i + 1}\right) }\right|  = n}\right\}\) 。证明 \(\left| {A}_{i}\right|  = {2n}\left( {{2n} - 2}\right)\) ! 且 \({A}_{i} \cap  {A}_{i + 1} = \varnothing\) 。
+\end{tcolorbox}
+
+1.36. Prove that for any two sets \(I \subseteq  J\) ,
+
+\begin{tcolorbox}\relax
+1.3６. 证明对于任意两个集合 \(I \subseteq  J\) ，
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{I \subseteq  K \subseteq  J}}{\left( -1\right) }^{\left| K \smallsetminus  I\right| } = \left\{  \begin{array}{ll} 1, & \text{ if }I = J \\  0, & \text{ if }I \neq  J. \end{array}\right.
+\]
+
+1.37. Prove the following Bonferroni inequalities for each even \(k \geq  2\) :
+
+\begin{tcolorbox}\relax
+1.37. 对于每个偶数 \(k \geq  2\) ，证明以下邦费罗尼不等式:
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{\nu  = 1}}^{k}{\left( -1\right) }^{\nu  + 1}\mathop{\sum }\limits_{{\left| I\right|  = \nu }}\left| {A}_{I}\right|  \leq  \left| {\mathop{\bigcup }\limits_{{i = 1}}^{n}{A}_{i}}\right|  \leq  \mathop{\sum }\limits_{{\nu  = 1}}^{{k + 1}}{\left( -1\right) }^{\nu  + 1}\mathop{\sum }\limits_{{\left| I\right|  = \nu }}\left| {A}_{I}\right|
+\]
+
+where \({A}_{I} \mathrel{\text{ := }} \mathop{\bigcap }\limits_{{i \in  I}}{A}_{i}\) . What about an odd \(k\) ?
+
+\begin{tcolorbox}\relax
+其中 \({A}_{I} \mathrel{\text{ := }} \mathop{\bigcap }\limits_{{i \in  I}}{A}_{i}\) 。奇数 \(k\) 的情况呢？
+\end{tcolorbox}
+
+1.38. Let \(M\) be an \(n \times  n\) boolean matrix (with entries 0 and 1). A covering of \(M\) is a set \({R}_{1},\ldots ,{R}_{t}\) of rank-1 boolean matrices such that every 1-entry of \(M\) is a 1-entry in at least one of these matrices, and every 0-entry of \(M\) is a 0-entry in all these matrices. That is, \(M\) must be an entry-wise Or \(M = \mathop{\bigvee }\limits_{{i = 1}}^{t}{R}_{i}\) of the \({R}_{i}\) ’s. Let \(t\left( A\right)\) be the smallest number of the \({R}_{i}\) ’s in such a covering of \(M\) . For a boolean matrix \(B \leq  M\) (again, inequality is entry-wise), let \({w}_{M}\left( B\right)\) denote the largest possible number of 1-entries in \(B\) that can be covered by some all-1 submatrix \(R\) of \(M\) . (Note that \(R\) need not be a submatrix of \(B\) .) Set
+
+\begin{tcolorbox}\relax
+1.38. 设 \(M\) 是一个 \(n \times  n\) 布尔矩阵(元素为0和1)。 \(M\) 的一个覆盖是一组秩为1的布尔矩阵 \({R}_{1},\ldots ,{R}_{t}\) ，使得 \(M\) 的每个1元素是这些矩阵中至少一个的1元素，并且 \(M\) 的每个0元素是所有这些矩阵中的0元素。也就是说， \(M\) 必须是 \({R}_{i}\) 的按元素或 \(M = \mathop{\bigvee }\limits_{{i = 1}}^{t}{R}_{i}\) 。设 \(t\left( A\right)\) 是 \(M\) 的这样一个覆盖中 \({R}_{i}\) 的最小数量。对于一个布尔矩阵 \(B \leq  M\) (同样，不等式是按元素的)，设 \({w}_{M}\left( B\right)\) 表示 \(B\) 中可以被 \(M\) 的某个全1子矩阵 \(R\) 覆盖的1元素的最大可能数量。(注意 \(R\) 不一定是 \(B\) 的子矩阵。)设
+\end{tcolorbox}
+
+\[
+\mu \left( M\right)  = \mathop{\max }\limits_{{B \leq  M}}\frac{\left| B\right| }{{w}_{M}\left( B\right) },
+\]
+
+where \(\left| B\right|\) is the number of 1 s in \(B\) . Prove that
+
+\begin{tcolorbox}\relax
+其中 \(\left| B\right|\) 是 \(B\) 中1的数量。证明
+\end{tcolorbox}
+
+\[
+\mu \left( M\right)  \leq  t\left( M\right)  \leq  \mu \left( M\right)  \cdot  \ln \left| M\right|  + 1.
+\]
+
+Hint: For the upper bound, consider a greedy covering \({R}_{1},\ldots ,{R}_{t}\) of \(M\) by all-1 submatrices: in the \(i\) -th step choose an all-1 submatrix \({R}_{i} \leq  M\) covering the largest number of all yet uncovered \(1\mathrm{\;s}\) in \(M\) . Let \({B}_{i} \leq  M\) be the submatrix containing all 1-entries of \(M\) that are left uncovered after the \(i\) -th step. Observe that \(\left| {B}_{i}\right| /{w}_{A}\left( {B}_{i}\right)  \leq  \mu \left( A\right)\) for all \(i\) .
+
+\begin{tcolorbox}\relax
+提示:对于上界，考虑用全1子矩阵对 \(M\) 进行贪心覆盖 \({R}_{1},\ldots ,{R}_{t}\) :在第 \(i\) 步中，选择一个覆盖 \(M\) 中所有尚未被覆盖的 \(1\mathrm{\;s}\) 数量最多的全1子矩阵 \({R}_{i} \leq  M\) 。设 \({B}_{i} \leq  M\) 是在第 \(i\) 步之后包含 \(M\) 中所有未被覆盖的1元素的子矩阵。注意对于所有的 \(i\) ，都有 \(\left| {B}_{i}\right| /{w}_{A}\left( {B}_{i}\right)  \leq  \mu \left( A\right)\) 。
+\end{tcolorbox}
+
+1.39. For a boolean matrix \(M\) and an integer \(k \geq  1\) , let \({t}_{k}\left( M\right)\) denote the smallest number \(t\) of rank-1 boolean matrices \({R}_{1},\ldots ,{R}_{t}\) in a covering of \(M\) with a restriction that \(\mathop{\sum }\limits_{{i = 1}}^{t}{R}_{i} \leq  {kJ}\) , where \(J\) is an all-1 matrix. That is, we now require that no 1-entry of \(M\) is covered more than \(k\) times. Prove that then
+
+\begin{tcolorbox}\relax
+1.39. 对于一个布尔矩阵 \(M\) 和一个整数 \(k \geq  1\) ，设 \({t}_{k}\left( M\right)\) 表示用秩为1的布尔矩阵 \({R}_{1},\ldots ,{R}_{t}\) 覆盖 \(M\) 时，满足 \(\mathop{\sum }\limits_{{i = 1}}^{t}{R}_{i} \leq  {kJ}\) (其中 \(J\) 是一个全1矩阵)的最小数量 \(t\) 。也就是说，我们现在要求 \(M\) 的任何一个1元素被覆盖的次数不超过 \(k\) 次。证明此时
+\end{tcolorbox}
+
+\[
+\mathop{\sum }\limits_{{i = 1}}^{k}\left( \begin{array}{l} t \\  i \end{array}\right)  \geq  \operatorname{rk}\left( M\right)
+\]
+
+Hint: For a subset \(I \subseteq  \{ 1,\ldots ,t\}\) , let \({R}_{I}\) be a \(\left( {0,1}\right)\) matrix with \({R}_{I}\left\lbrack  {x,y}\right\rbrack   = 1\) iff \({R}_{i}\left\lbrack  {x,y}\right\rbrack   =\) 1 for all \(i \in  I\) . Use the inclusion-exclusion principle to write \(M\) as
+
+\begin{tcolorbox}\relax
+提示:对于一个子集 \(I \subseteq  \{ 1,\ldots ,t\}\) ，设 \({R}_{I}\) 是一个 \(\left( {0,1}\right)\) 矩阵，当且仅当对于所有的 \(i \in  I\) ， \({R}_{i}\left\lbrack  {x,y}\right\rbrack   =\) 为1时， \({R}_{I}\left\lbrack  {x,y}\right\rbrack   = 1\) 为1。使用容斥原理将 \(M\) 写成
+\end{tcolorbox}
+
+\[
+M = \mathop{\sum }\limits_{{I \neq  \varnothing }}{\left( -1\right) }^{\left| I\right|  + 1}{R}_{I}
+\]
+
+1.40. The determinant \(\det \left( A\right)\) of an \(n \times  n\) matrix \(A = \left( {a}_{ij}\right)\) is a sum of \(n\) ! signed products \(\pm  {a}_{1{i}_{1}}{a}_{2{i}_{2}}\cdots {a}_{n{i}_{n}}\) , where \(\left( {{i}_{1},{i}_{2},\ldots ,{i}_{n}}\right)\) is a permutation of \(\left( {1,2,\ldots ,n}\right)\) , the sign being +1 or -1, according to whether the number of inversions of \(\left( {{i}_{1},{i}_{2},\ldots ,{i}_{n}}\right)\) is even or odd. An inversion occurs when \({i}_{r} > {i}_{s}\) but \(r < s\) . Prove the following: let \(A\) be a matrix of even order \(n\) with 0s on the diagonal and arbitrary entries from \(\{  + 1, - 1\}\) elsewhere. Then \(\det \left( A\right)  \neq  0\) . Hint: Observe that for such matrices, \(\det \left( A\right)\) is congruent modulo 2 to the number of derangements on \(n\) points, and show that for even \(n\) , the sum (1.22) is odd.
+
+\begin{tcolorbox}\relax
+1.40. 一个 \(n \times  n\) 矩阵 \(A = \left( {a}_{ij}\right)\) 的行列式 \(\det \left( A\right)\) 是 \(n\) !个带符号乘积 \(\pm  {a}_{1{i}_{1}}{a}_{2{i}_{2}}\cdots {a}_{n{i}_{n}}\) 的和，其中 \(\left( {{i}_{1},{i}_{2},\ldots ,{i}_{n}}\right)\) 是 \(\left( {1,2,\ldots ,n}\right)\) 的一个排列，根据 \(\left( {{i}_{1},{i}_{2},\ldots ,{i}_{n}}\right)\) 的逆序数是偶数还是奇数，符号为 +1 或 -1。当 \({i}_{r} > {i}_{s}\) 但 \(r < s\) 时会出现一个逆序。证明以下内容:设 \(A\) 是一个偶数阶 \(n\) 的矩阵，对角线上为0，其他位置为 \(\{  + 1, - 1\}\) 中的任意元素。那么 \(\det \left( A\right)  \neq  0\) 。提示:观察到对于这样的矩阵， \(\det \left( A\right)\) 在模2意义下与 \(n\) 个点上的错排数同余，并证明对于偶数 \(n\) ，和式(1.22)是奇数。
+\end{tcolorbox}
+
+\end{document}
