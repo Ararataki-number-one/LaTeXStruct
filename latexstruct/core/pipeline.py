@@ -165,6 +165,7 @@ def run_pipeline(
     review_client=None,
     template: str = None,
     compile_check: bool = False,
+    pack=None,
 ) -> PipelineResult:
     template_notes: List[dict] = []
     template_applied = False
@@ -187,7 +188,7 @@ def run_pipeline(
                 )
 
     doc = parse_latex(text)
-    scan_res = scan(doc)
+    scan_res = scan(doc, pack)
     ctx = _build_context(doc)
     ambiguous: List[dict] = []
     ai_notes: List[dict] = []
@@ -197,7 +198,7 @@ def run_pipeline(
 
     if mode == "ai":
         deterministic_kinds = {"bilingual-title", "exercise-section"}
-        rule_decisions, ambiguous = build_rule_decisions(doc, scan_res, rule_config, kinds=deterministic_kinds)
+        rule_decisions, ambiguous = build_rule_decisions(doc, scan_res, rule_config, kinds=deterministic_kinds, pack=pack)
         ai_candidates = [c for c in scan_res.candidates if c.kind in AI_KINDS]
         client = ai_client or LLMClient((ai_config or AIConfig()).decide)
         try:
@@ -208,13 +209,13 @@ def run_pipeline(
             ambiguous += ai_amb
             ai_usage["decide"] = usage
         except LLMError as e:
-            fallback, amb2 = build_rule_decisions(doc, scan_res, rule_config, kinds=AI_KINDS)
+            fallback, amb2 = build_rule_decisions(doc, scan_res, rule_config, kinds=AI_KINDS, pack=pack)
             decisions = rule_decisions + fallback
             ambiguous += amb2
             ai_degraded = True
             ai_notes.append({"candidate_id": "-", "line": 1, "reason": f"AI 不可用，已降级为规则决策：{e}"})
     else:
-        decisions, ambiguous = build_rule_decisions(doc, scan_res, rule_config)
+        decisions, ambiguous = build_rule_decisions(doc, scan_res, rule_config, pack=pack)
 
     pre = build_preamble_decision(doc, ctx)
     if pre is not None:

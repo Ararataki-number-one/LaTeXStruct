@@ -1,0 +1,17 @@
+{
+  "name": "chinese",
+  "title_patterns": {
+    "definition": ["定义"],
+    "theorem": ["定理"],
+    "lemma": ["引理"],
+    "proposition": ["命题"],
+    "corollary": ["推论"],
+    "remark": ["注", "注记"],
+    "example": ["例"]
+  },
+  "proof_starts": [
+    "证明\\s*[:：]\\s*",
+    "证明\\s*$",
+    "证明如下\\s*[:：]?\\s*"
+  ]
+}

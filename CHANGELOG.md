@@ -3,6 +3,11 @@
 本项目采用「tag 即发布」的自动化流程：`git tag vX.Y.Z && git push` 触发 CI
 （ruff → 全量测试 → PyInstaller → Inno Setup → 安装器冒烟测试 → 签名 → GitHub Release）。
 
+## v0.5.4（2025-08）
+- Rule Pack 配置化：内置 bilingual/english/chinese/academic-paper 规则包 +
+  用户自定义 JSON（标题关键词映射/证明起始与续段词/习题关键词/双语开关），
+  全链路 pack 参数贯通；default 包与旧行为完全一致。
+
 ## v0.5.3（2025-08）
 - 多文件 LaTeX 项目支持：main.tex 发现、\input/\include 依赖图（缺失/循环检测）、
   带标记展开→流水线→拆分回文件→副本导出；CLI tools/process_project.py。

@@ -23,7 +23,7 @@ jobs:
         shell: pwsh
         run: |
           $fail = 0
-          foreach ($t in @('test_parser','test_scanner','test_patch','test_pipeline','test_ai','test_template','test_store','test_server','test_updater','test_ocr','test_legalize','test_version','test_invariants','test_texparse','test_project')) {
+          foreach ($t in @('test_parser','test_scanner','test_patch','test_pipeline','test_ai','test_template','test_store','test_server','test_updater','test_ocr','test_legalize','test_version','test_invariants','test_texparse','test_project','test_ruleset')) {
             python "tests/$t.py"
             if ($LASTEXITCODE -ne 0) { $fail++ }
           }

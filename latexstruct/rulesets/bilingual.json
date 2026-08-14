@@ -1,0 +1,12 @@
+{
+  "name": "bilingual",
+  "title_patterns": {
+    "definition": ["Definition", "定义"],
+    "theorem": ["Theorem", "定理"],
+    "lemma": ["Lemma", "引理"],
+    "proposition": ["Proposition", "命题"],
+    "corollary": ["Corollary", "推论"],
+    "remark": ["Remark", "注", "注记"],
+    "example": ["Example", "例"]
+  }
+}

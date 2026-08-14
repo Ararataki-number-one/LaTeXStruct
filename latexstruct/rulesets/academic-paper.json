@@ -1,0 +1,16 @@
+{
+  "name": "academic-paper",
+  "title_patterns": {
+    "definition": ["Definition", "定义"],
+    "theorem": ["Theorem", "定理"],
+    "lemma": ["Lemma", "引理"],
+    "proposition": ["Proposition", "命题", "Fact"],
+    "corollary": ["Corollary", "推论"],
+    "remark": ["Remark", "注", "注记", "Observation"],
+    "example": ["Example", "例"],
+    "conjecture": ["Conjecture", "猜想"],
+    "problem": ["Problem", "问题"],
+    "claim": ["Claim"]
+  },
+  "bilingual_titles": false
+}

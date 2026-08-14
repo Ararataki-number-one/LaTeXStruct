@@ -30,8 +30,8 @@ from .scanner import (
 )
 
 
-def _extend_proof_body(doc: Document, c) -> int:
-    """规则模式启发式：证明环境覆盖整段证明。
+def _extend_proof_body(doc: Document, c, proof_re=None, continue_re=None) -> int:
+    """规则模式启发式：证明环境覆盖整段证明（正则可由 Rule Pack 定制）。
 
     停点（此前停止）：下一个定理类标题 / 节标题 / 另一证明起始语 /
     叙述性重启段（如 "There is another interesting..."）。
@@ -39,6 +39,8 @@ def _extend_proof_body(doc: Document, c) -> int:
     并入：显示公式、环境块（align 等）、盒子（中文译文）、
     以连接词 / 小写字母 / 公式开头的续段。
     """
+    proof_re = proof_re or PROOF_RE
+    continue_re = continue_re or PROOF_CONTINUE_RE
     end = c.span.end_line
     blocks = doc.blocks
     idx = next(
@@ -71,11 +73,11 @@ def _extend_proof_body(doc: Document, c) -> int:
         if any(mk in b.text for mk in PROOF_END_MARKERS):
             end = b.span.end_line
             break
-        if _match_title(first) or PROOF_RE.match(first) or SECTION_START_RE.match(first):
+        if _match_title(first) or proof_re.match(first) or SECTION_START_RE.match(first):
             break
         stripped = first.lstrip()
         if (
-            PROOF_CONTINUE_RE.match(stripped)
+            continue_re.match(stripped)
             or stripped[:1].islower()
             or stripped.startswith(("\\(", "$", "\\[", "\\begin"))
         ):
@@ -95,9 +97,17 @@ def build_rule_decisions(
     scan_res: ScanResult,
     config: RuleConfig = None,
     kinds: set = None,
+    pack=None,
 ) -> Tuple[List[Decision], List[dict]]:
     """kinds: 仅处理指定候选类型（None = 全部）。AI 模式下用于确定性部分。"""
     cfg = config or RuleConfig()
+    proof_re, continue_re = PROOF_RE, PROOF_CONTINUE_RE
+    if pack is not None:
+        from .ruleset import load_pack
+
+        rp = load_pack(pack)
+        proof_re = rp.proof_re or proof_re
+        continue_re = rp.continue_re or continue_re
     decisions: List[Decision] = []
     ambiguous: List[dict] = []
     kinds = kinds or {"theorem-like", "proof", "exercise-section", "bilingual-title", "scope-fix"}
@@ -173,7 +183,7 @@ def build_rule_decisions(
             arg = c.payload.get("proof_arg", "")
             remainder = c.title_text[len(strip):].strip() if strip else ""
             keep = not strip or not remainder
-            body_end = _extend_proof_body(doc, c)  # 整段证明（多段/公式/译文框）
+            body_end = _extend_proof_body(doc, c, proof_re=proof_re, continue_re=continue_re)  # 整段证明
             decisions.append(
                 Decision(
                     candidate_id=c.id,

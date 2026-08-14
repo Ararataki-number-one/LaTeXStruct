@@ -119,7 +119,14 @@ class ScanResult:
 # ---------------------------------------------------------------------------
 
 
-def scan(doc: Document) -> ScanResult:
+def scan(doc: Document, pack=None) -> ScanResult:
+    from .ruleset import load_pack
+
+    rp = load_pack(pack)
+    title_res = rp.title_res
+    proof_re = rp.proof_re or PROOF_RE
+    exercise_re = rp.exercise_re or EXERCISE_KEYWORDS
+
     candidates: List[Candidate] = []
     skipped: List[dict] = []
     cid = 1
@@ -130,6 +137,14 @@ def scan(doc: Document) -> ScanResult:
         cid += 1
         candidates.append(c)
         return c
+
+    def match_title(first):
+        for env, pat in title_res:
+            m = pat.match(first)
+            if m:
+                num = m.group(1) if m.groups() else None
+                return env, num, m.group(0)
+        return None
 
     # 盒子索引（一次构建，全程复用）
     box_ranges = [r for r in doc.env_ranges if r[0] in BOX_ENVS]
@@ -148,25 +163,25 @@ def scan(doc: Document) -> ScanResult:
             continue
         if envs & BOX_ENVS:
             # 盒子内的标题行：多为英文条目的中文翻译辅助文本，按设计硬排除但记录跳过
-            if _match_title(first):
+            if match_title(first):
                 skipped.append(
                     {"line": b.span.start_line, "kind": "box-title",
                      "reason": "位于 tcolorbox/mdframed 内（疑似英文条目的中文翻译，保守不动）"}
                 )
             continue
-        m = _match_title(first)
+        m = match_title(first)
         if m:
-            kind_text, num, prefix = m
+            kind_env, num, prefix = m
             add(
                 kind="theorem-like",
                 rule_id="bare-title",
                 block_id=b.id,
                 span=b.span,
                 title_text=first,
-                env_hint=EN_MAP[kind_text],
+                env_hint=kind_env,
                 confidence=0.85 if num else 0.7,
                 payload={
-                    "keyword": kind_text,
+                    "keyword": kind_env,
                     "number": num,
                     "title_prefix": prefix,
                     "in_env": tuple(envs),
@@ -175,7 +190,7 @@ def scan(doc: Document) -> ScanResult:
                 },
             )
             continue
-        if PROOF_RE.match(first):
+        if proof_re.match(first):
             strip, arg = _proof_strip(first)
             add(
                 kind="proof",
@@ -199,7 +214,7 @@ def scan(doc: Document) -> ScanResult:
     non_box_sections = [s for s in doc.sections if not _section_in_box(doc, s, box_ivs)]
     total_lines = doc.text.count("\n") + 1
     for i, s in enumerate(non_box_sections):
-        if not EXERCISE_KEYWORDS.search(s.title):
+        if not exercise_re.search(s.title):
             continue
         end_line = (
             non_box_sections[i + 1].span.start_line - 1
@@ -232,8 +247,10 @@ def scan(doc: Document) -> ScanResult:
                 },
             )
 
-    # 双语标题（英文 \section* + 仅含中文翻译标题的 tcolorbox）
+    # 双语标题（英文 \section* + 仅含中文翻译标题的 tcolorbox；学术论文包可关闭）
     for s in doc.sections:
+        if not rp.bilingual_titles:
+            break
         if not s.starred:
             continue
         box = _translation_box_after(doc, s, boxes_by_start)
