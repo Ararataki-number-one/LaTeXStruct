@@ -94,7 +94,7 @@ def test_pipeline_invariants_pass():
 def test_compile_latex_ok_and_broken():
     c = compile_latex(SIMPLE, timeout=120, extra_files={"figures/plot.png": _tiny_png()})
     if not c["available"]:
-        print("xelatex 不可用，跳过编译测试")
+        print("xelatex not available, skip compile test")
         return
     assert c["ok"] is True and c["pages"] == 1, c
     broken = SIMPLE.replace("\\end{document}", "\\begin{broken}")
