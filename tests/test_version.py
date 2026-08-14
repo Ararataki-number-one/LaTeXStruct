@@ -42,7 +42,7 @@ def test_ci_installs_texlive_distribution_packages():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, ".github", "workflows", "build.yml"), encoding="utf-8") as f:
         workflow = f.read()
-    assert "install amsmath amsfonts amscls geometry tcolorbox graphics" in workflow
+    assert "install xetex amsmath amsfonts amscls geometry tcolorbox graphics" in workflow
     assert "install amsmath amssymb amsthm" not in workflow
     assert "kpsewhich.exe" in workflow
     assert "amsthm.sty" in workflow and "amssymb.sty" in workflow

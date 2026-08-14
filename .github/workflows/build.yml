@@ -70,13 +70,12 @@ jobs:
           Add-Content $env:GITHUB_PATH $bin
           # amssymb.sty 属于 amsfonts，amsthm.sty 属于 amscls；这里必须使用
           # TeX Live 的发行包名，而不是 .sty 文件名。
-          & $tlmgr.FullName install amsmath amsfonts amscls geometry tcolorbox graphics
+          & $tlmgr.FullName install xetex amsmath amsfonts amscls geometry tcolorbox graphics
           if ($LASTEXITCODE -ne 0) { Write-Error "TinyTeX 依赖安装失败"; exit 1 }
           $kpsewhich = Join-Path $bin 'kpsewhich.exe'
           $xelatex = Join-Path $bin 'xelatex.exe'
-          if (-not (Test-Path $kpsewhich) -or -not (Test-Path $xelatex)) {
-            Write-Error "TinyTeX 缺少 kpsewhich 或 xelatex"; exit 1
-          }
+          if (-not (Test-Path $kpsewhich)) { Write-Error "TinyTeX 缺少 kpsewhich"; exit 1 }
+          if (-not (Test-Path $xelatex)) { Write-Error "TinyTeX 缺少 xelatex"; exit 1 }
           foreach ($file in @('amsmath.sty', 'amssymb.sty', 'amsthm.sty', 'tcolorbox.sty')) {
             $resolved = & $kpsewhich $file
             if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($resolved)) {
