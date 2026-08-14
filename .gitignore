@@ -12,6 +12,7 @@ debug_tpl.txt
 spot.txt
 jobs.json
 job.log
+tests/ls-*/
 
 # 书稿语料不入库（用户私有材料）
 corpus/
