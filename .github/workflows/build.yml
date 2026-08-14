@@ -57,12 +57,15 @@ jobs:
       - name: PyInstaller 构建单文件 exe
         run: python -m PyInstaller packaging/LaTeXStruct.spec --noconfirm --distpath dist --workpath build
       - name: 代码签名 exe（配置了证书 secrets 时）
-        if: ${{ secrets.WINDOWS_CERT_BASE64 != '' }}
         env:
           WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         shell: pwsh
         run: |
+          if ([string]::IsNullOrEmpty($env:WINDOWS_CERT_BASE64)) {
+            Write-Host "未配置签名证书，跳过签名"
+            exit 0
+          }
           $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
           $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1).FullName
@@ -75,12 +78,15 @@ jobs:
           iscc "/DAppVersion=$env:APP_VERSION" packaging/installer.iss
           Get-ChildItem dist
       - name: 代码签名安装器（配置了证书 secrets 时）
-        if: ${{ secrets.WINDOWS_CERT_BASE64 != '' }}
         env:
           WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         shell: pwsh
         run: |
+          if ([string]::IsNullOrEmpty($env:WINDOWS_CERT_BASE64)) {
+            Write-Host "未配置签名证书，跳过签名"
+            exit 0
+          }
           $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
           $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1).FullName
