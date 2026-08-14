@@ -164,6 +164,7 @@ def run_pipeline(
     ai_client=None,
     review_client=None,
     template: str = None,
+    compile_check: bool = False,
 ) -> PipelineResult:
     template_notes: List[dict] = []
     template_applied = False
@@ -267,15 +268,27 @@ def run_pipeline(
             ai_notes.append({"candidate_id": "-", "line": 1, "reason": f"AI 复查失败，沿用初次结果：{e}"})
 
     result_text = "\n".join(out)
+    from .invariants import check_invariants
+
     verification = {
         "content_invariant": content_invariant(doc.text.split("\n"), out, applied),
         "env_balance": check_env_balance(result_text),
         "braces": check_braces(result_text),
+        "invariants": check_invariants(doc.text, result_text),
         "known_issues": known_issues(result_text),
         "ai_degraded": ai_degraded,
         "ai_usage": ai_usage,
     }
-    ok = verification["content_invariant"] and verification["env_balance"]["ok"]
+    if compile_check:
+        from .compilecheck import compile_latex
+
+        verification["compile_before"] = compile_latex(doc.text)
+        verification["compile_after"] = compile_latex(result_text)
+    ok = (
+        verification["content_invariant"]
+        and verification["env_balance"]["ok"]
+        and verification["invariants"]["ok"]
+    )
     final_text = result_text if ok else doc.text
     export_text = final_text.replace("\n", doc.newline)
     report_md = build_report(

@@ -137,11 +137,31 @@ def build_report(
     eb = verification.get("env_balance", {})
     br = verification.get("braces", {})
     ki = verification.get("known_issues", [])
+    inv = verification.get("invariants", {})
     L.append(f"- 内容不变校验：{'通过（与原文逐字符一致）' if ci else '失败（已自动回退）'}")
     L.append(
         f"- 环境配平：{'通过' if eb.get('ok') else '失败 ' + str(eb.get('unbalanced_begins')) + '/' + str(eb.get('unbalanced_ends'))}"
     )
     L.append(f"- 花括号配平：{'通过' if br.get('ok') else '提示（' + str(br.get('depth')) + '）'}（仅参考）")
+    if inv:
+        names = {"math": "数学公式 token", "labels": "\\label 集合", "refs": "\\ref 集合",
+                 "cites": "\\cite 集合", "images": "图片路径集合"}
+        L.append("- 多层不变量校验（整理前后必须完全一致）：")
+        for key, label in names.items():
+            d = inv.get(key)
+            if d:
+                status = "一致" if d["equal"] else f"不一致（{d['before_count']}→{d['after_count']}）"
+                L.append(f"  - {label}：{status}")
+    cb = verification.get("compile_before")
+    ca = verification.get("compile_after")
+    if cb and ca and cb.get("available"):
+        L.append("- 编译校验（xelatex）：")
+        L.append(
+            f"  - 整理前：{'成功 ' + str(cb.get('pages')) + ' 页' if cb.get('ok') else '失败 ' + '; '.join(cb.get('errors', [])[:2])}"
+        )
+        L.append(
+            f"  - 整理后：{'成功 ' + str(ca.get('pages')) + ' 页' if ca.get('ok') else '失败 ' + '; '.join(ca.get('errors', [])[:2])}"
+        )
     if ki:
         L.append("")
         L.append("### 已知问题（原书既有，未做修改，仅供参考）")

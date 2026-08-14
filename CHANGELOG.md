@@ -3,6 +3,12 @@
 本项目采用「tag 即发布」的自动化流程：`git tag vX.Y.Z && git push` 触发 CI
 （ruff → 全量测试 → PyInstaller → Inno Setup → 安装器冒烟测试 → 签名 → GitHub Release）。
 
+## v0.5.1（2025-08）
+- 多层内容不变量校验：数学公式 token 多重集、`\label`/`\ref`/`\cite`/图片路径集合，
+  整理前后必须完全一致（纳入 ok 判定）；
+- 编译校验（可选，本机有 xelatex 时）：整理前后各编译一次对比页数与错误；
+- 汇报展示五类不变量与编译对比；test_invariants 套件（含真实 xelatex 编译测试）。
+
 ## v0.5.0（2025-08）
 
 ### 修复（P0）
