@@ -97,10 +97,17 @@ jobs:
             } catch {}
           }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          # 单文件 exe 有引导父子进程：全部结束，避免锁文件导致卸载残留
+          Get-Process LaTeXStruct -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 2
           if (-not $ok) { Write-Error "安装版健康检查失败"; exit 1 }
           Start-Process -FilePath "$dir\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
-          Start-Sleep -Seconds 3
-          if (Test-Path "$dir\LaTeXStruct.exe") { Write-Error "静默卸载后残留文件"; exit 1 }
+          $gone = $false
+          foreach ($i in 1..10) {
+            Start-Sleep -Seconds 2
+            if (-not (Test-Path "$dir\LaTeXStruct.exe")) { $gone = $true; break }
+          }
+          if (-not $gone) { Write-Error "静默卸载后残留文件"; exit 1 }
           Write-Host "安装器冒烟测试通过（安装→运行→卸载）"
       - name: 代码签名安装器（配置了证书 secrets 时）
         env:
