@@ -49,6 +49,7 @@ class AIConfig:
     batch_size: int = 30
     context_lines: int = 6
     review_max_rounds: int = 2
+    review_batch: int = 25  # 复查分块大小（整本书时避免单次调用超上下文）
 
 
 class LLMClient:

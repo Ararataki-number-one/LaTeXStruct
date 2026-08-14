@@ -29,37 +29,25 @@ git tag v0.2.1; git push origin v0.2.1
 # 3) 已安装客户端下次启动自动提示更新
 ```
 
-## 当前状态（M1 MVP 完成）
+## 当前状态（五轮持续优化完成）
 
-- [x] 设计定稿（v0.3）
-- [x] LaTeX 轻量解析器（`core/parser.py`，纯标准库，等长屏蔽 + 精确行号偏移）
-- [x] 规则扫描引擎（`core/scanner.py`：候选识别 + 硬排除）
-- [x] 补丁模型 + 内容不变校验（`core/patch.py`：可逆编辑日志 + 逆序撤销比对）
-- [x] 机器校验（`core/verify.py`：环境/花括号配平）
-- [x] 规则模式决策（`core/rules.py`：无 Key 降级路径）
-- [x] AI 决策引擎（`core/ai.py`：OpenAI 兼容，纯 urllib，角色独立配置，坐标白名单校验）
-- [x] AI 复查引擎（`core/review.py`：wrong-env/wrong-range/should-remove/missed-extra 自动修正）
-- [x] 提示词管理（`core/prompts.py`：母提示词 v3 + 决策/复查 Schema）
-- [x] 流水线编排（`core/pipeline.py`：rule/ai 双模式，AI 不可用自动降级，失败自动回退原文）
-- [x] 极简汇报（`core/report.py`）
-- [x] 项目存储（`store.py`：本地磁盘，无数据库）
-- [x] 应用配置（`config.py`：三角色模型，Key 仅存本机）
-- [x] FastAPI 本地服务 + 无构建步骤 Web 界面（`server/`：项目/处理/审阅 diff/汇报/设置）
-- [x] 启动器（`python -m latexstruct`：pywebview 窗口 / `--server` 浏览器模式）
-- [x] 合成测试集全量通过（55 个测试：解析 10 / 扫描 11 / 补丁 13 / 流水线 6 / AI 7 / 模板 4 / 存储 2 / 服务 2）
-- [x] **真实书稿打磨**：Godsil《代数图论》与 Jukna《极值组合学》两份双语书稿（各 3 万余行）
-      端到端跑通（各 1–6 秒），合计 1900+ 个补丁全部通过内容不变校验；
-      新增：`\begin{tcolorbox}\relax` 双语盒识别、编号提取进可选参数（`\begin{theorem}[1.7.2]`）、
-      Proof 起始语剥离、习题节盒内译文不改写、扫描性能修复（>600s → 0.04s）；
-      xelatex 编译自检：67 页 PDF，错误仅来自原书既有数学内容，与结构化插入无关
-- [x] **整段证明**：proof 环境覆盖同一证明的全部段落/显示公式/中文译文框
-      （续段连接词启发式 + □/证毕结束符 + 定理标题/节标题停点 + 叙述重启停点；
-      两本书 603 个证明全部整段包裹，最长 111 行）
-- [x] **ElegantBook 模板转换**：`documentclass` 换 elegantbook、章标题转 `\chapter*` + 章计数器、
-      删除原书手工目录并插入 `\tableofcontents`（配合已生成的 addcontentsline 自动成目）、
-      移除与 elegantbook 冲突的包/宏（geometry/ctex/tcolorbox[most]/\circled）；客户端可选开关；
-      **编译验证**：诊断编译（仅注释原书既有 matrix 行）654 页全部通过 exit 0，
-      已知问题（`\left(` 内嵌 matrix，TeX Live 2026 内核 bug）自动列入汇报不修改内容
+- [x] 合成测试集全量通过（71 个测试：解析 10 / 扫描 11 / 补丁 13 / 流水线 7 / AI 9 / 模板 4 / 存储 2 / 服务 2 / 更新 3 / OCR 5 / 合法化 4）
+- [x] **真实书稿打磨**：Godsil《代数图论》与 Jukna《极值组合学》双语书稿端到端跑通；
+      `\begin{tcolorbox}\relax` 双语盒、编号提取进可选参数、Proof 起始语剥离、
+      习题节盒内译文不改写、扫描性能修复（>600s → 0.04s）
+- [x] **整段证明**：proof 覆盖同一证明的全部段落/公式/中文译文框
+- [x] **ElegantBook 模板转换**：换文档类 + 章结构 + 删旧目录加 `\tableofcontents`；
+      诊断编译 654 页全部通过
+- [x] **OCR 转写**：PDF/图片 → 视觉模型逐页转写（模型可选；DeepSeek chat 不支持图片，
+      需 qwen-vl/glm-4v 等视觉模型，界面与报错均有提示）
+- [x] **AI 全链路**：真实 DeepSeek 实测——决策 + deepseek-reasoner 复查 +
+      span 段落边界合法化（wrong-range 10→1、复查 token -36%）+ 漏报抽查 + 复查分块（整书规模）
+- [x] **安装版 + 主动更新**：Inno Setup 中文安装器（本地 E2E 验证）+ GitHub Releases 自动检查更新 +
+      CI 全自动发布（tag 触发：ruff → 测试 → 构建 → Release）
+- [x] 质量门禁：CI ruff（F 规则）+ 版本一致性校验 + 11 套件全量测试
+
+核心保证：只改结构不改内容（撤销全部编辑后与原文逐字符一致的机器校验，失败自动回退）、
+AI 只做决策不生成正文、歧义项一律保守保留并列入汇报。
 
 ## 目录结构
 

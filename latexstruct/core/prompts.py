@@ -215,6 +215,8 @@ def build_review_user(
         parts.extend(_numbered(result_lines, lo, hi, mark=tuple(range(bs, be + 1))))
     if ambiguous:
         parts.append("\n### 歧义/跳过清单（供 missed-extra 判断）")
-        for a in ambiguous:
+        for a in ambiguous[:50]:
             parts.append(f"- 第 {a.get('line')} 行: {a.get('reason')}")
+        if len(ambiguous) > 50:
+            parts.append(f"- ……共 {len(ambiguous)} 项（其余省略，仅需复核此清单中的条目）")
     return "\n".join(parts)

@@ -113,21 +113,28 @@ def run_review(
         if not to_review and not ambiguous:
             break
         result_lines = out
-        user = build_review_user(result_lines, build_summaries(to_review), ambiguous,
-                                 ai_config.context_lines)
-        obj, usage = client.chat_json(system, user)
-        usage_total["model"] = getattr(client, "cfg", None) and client.cfg.model or ""
-        for k, v in usage.items():
-            if isinstance(v, (int, float)):
-                usage_total[k] = usage_total.get(k, 0) + v
-        total = len(result_lines)
-        findings, invalid = parse_findings(obj, {d.candidate_id for d in decisions}, total)
-        all_findings.extend(findings)
-        invalid_all.extend(invalid)
-        actionable = [f for f in findings if f["verdict"] != "ok"]
+        round_findings: List[dict] = []
+        batch_size = max(1, ai_config.review_batch)
+        batches = [to_review[i : i + batch_size] for i in range(0, len(to_review), batch_size)]
+        if not batches and ambiguous:
+            batches = [[]]  # 无 AI 补丁但有漏报清单时，仍发一次复核
+        for batch in batches:
+            user = build_review_user(result_lines, build_summaries(batch), ambiguous,
+                                     ai_config.context_lines)
+            obj, usage = client.chat_json(system, user)
+            usage_total["model"] = getattr(client, "cfg", None) and client.cfg.model or ""
+            for k, v in usage.items():
+                if isinstance(v, (int, float)):
+                    usage_total[k] = usage_total.get(k, 0) + v
+            total = len(result_lines)
+            findings, invalid = parse_findings(obj, {d.candidate_id for d in decisions}, total)
+            round_findings.extend(findings)
+            invalid_all.extend(invalid)
+        all_findings.extend(round_findings)
+        actionable = [f for f in round_findings if f["verdict"] != "ok"]
         if not actionable:
             break
-        decisions = apply_findings(decisions, findings, total)
+        decisions = apply_findings(decisions, round_findings, total)
         out, applied, rejected, dropped = apply_fn(decisions)
         for d, reason in dropped:
             ambiguous.append({"candidate_id": d.candidate_id, "line": 1, "reason": reason})

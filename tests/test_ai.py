@@ -217,6 +217,21 @@ def test_review_missed_extra_from_ai_none():
     assert out.verification["content_invariant"] is True
 
 
+def test_review_batching():
+    # review_batch=2 时，5 个 AI 补丁（4 wrap + 1 move-boundary）应分 3 次复查调用
+    text = read_sample("basic_book.tex")
+    doc = parse_latex(text)
+    res = scan(doc)
+    fake_decide = FakeClient(build_fake_decide_response(doc, res))
+    fake_review = FakeClient([{"findings": []}, {"findings": []}, {"findings": []}])
+    cfg = AIConfig(decide=RoleConfig(api_key="t"), review=RoleConfig(api_key="t"),
+                   review_enabled=True, review_batch=2)
+    out = run_pipeline(text, mode="ai", ai_config=cfg, ai_client=fake_decide, review_client=fake_review)
+    assert out.ok, out.report_md
+    # decide 1 次 + review 分块 3 次
+    assert fake_decide.calls and len(fake_review.calls) == 3
+
+
 def test_prompt_builders():
     text = read_sample("basic_book.tex")
     doc = parse_latex(text)
