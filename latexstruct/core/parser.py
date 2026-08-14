@@ -13,7 +13,8 @@
 
 已知限制（MVP）
 --------------
-- 节标题含嵌套花括号（如 ``\\section{a \\textit{b}}``）时标题截断，仅取第一层；
+- 节标题/可选参数解析已升级为平衡括号扫描（`core/texparse.py`），支持嵌套花括号与
+  数学区内的花括号（`\\section{A \\textit{b} for $K_{r,s}$}` 完整保留）；
 - 环境名不支持花括号内的复杂嵌套；
 - ``$$`` 显示公式不嵌套；``\\[``/``$$`` 内部出现闭合符会提前截断。
 """
@@ -30,9 +31,6 @@ PROTECTED_ENVS = {"verbatim", "verbatim*", "lstlisting", "minted", "comment"}
 SECTION_LEVEL = {"chapter": 0, "section": 1, "subsection": 2, "subsubsection": 3}
 
 ENV_RE = re.compile(r"\\(begin|end)\s*\{([^{}]*)\}")
-SECTION_RE = re.compile(
-    r"\\(chapter|section|subsection|subsubsection)\s*(\*?)\s*(?:\[[^\]]*\])?\s*\{([^{}]*)\}"
-)
 INLINE_VERB_RE = re.compile(r"\\verb\*?([^a-zA-Z\s\\])")
 
 
@@ -254,18 +252,20 @@ def find_display_spans(masked: str) -> List[Tuple[int, int]]:
 
 
 def _build_sections(masked: str, starts: List[int]) -> List[SectionNode]:
+    from .texparse import find_commands
+
     nodes = []
     stack = []
-    for m in SECTION_RE.finditer(masked):
-        cmd, star, title = m.group(1), m.group(2), m.group(3)
+    for pc in find_commands(masked, tuple(SECTION_LEVEL.keys())):
+        cmd = pc.name
         level = SECTION_LEVEL[cmd]
-        l1, l2 = line_span(starts, m.start(), m.end())
+        l1, l2 = line_span(starts, pc.start, pc.end)
         node = SectionNode(
             cmd=cmd,
-            title=title.strip(),
-            starred=bool(star),
+            title=pc.required[0].strip(),
+            starred=pc.star,
             level=level,
-            span=Span(l1, l2, m.start(), m.end()),
+            span=Span(l1, l2, pc.start, pc.end),
         )
         while stack and stack[-1].level >= level:
             stack.pop()

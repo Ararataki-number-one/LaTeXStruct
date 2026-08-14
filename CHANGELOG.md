@@ -3,6 +3,10 @@
 本项目采用「tag 即发布」的自动化流程：`git tag vX.Y.Z && git push` 触发 CI
 （ruff → 全量测试 → PyInstaller → Inno Setup → 安装器冒烟测试 → 签名 → GitHub Release）。
 
+## v0.5.2（2025-08）
+- 平衡括号解析器（core/texparse.py）：节标题支持嵌套花括号与数学内花括号、
+  可选参数嵌套；双语翻译框识别同步升级；真实书稿回归零差异。
+
 ## v0.5.1（2025-08）
 - 多层内容不变量校验：数学公式 token 多重集、`\label`/`\ref`/`\cite`/图片路径集合，
   整理前后必须完全一致（纳入 ok 判定）；

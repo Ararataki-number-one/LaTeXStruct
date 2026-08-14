@@ -92,8 +92,6 @@ PROOF_END_MARKERS = ("□", "证毕")
 
 EXERCISE_KEYWORDS = re.compile(r"exercises?|problems?|练习|习题|问题集", re.I)
 BARE_NUM_RE = re.compile(r"^\s*\d+\.")
-# 真实书稿常见 \begin{tcolorbox}\relax —— 允许盒内前导 \relax
-BOX_INNER_SECTION_RE = re.compile(r"^\s*(?:\\relax\s*)?\\section\*\{([^{}]*)\}\s*$")
 
 
 @dataclass
@@ -366,13 +364,15 @@ def offset_to_line(doc: Document, off: int) -> int:
 
 def _translation_box_after(doc: Document, s, boxes_by_start: Dict[int, List[tuple]]):
     r"""节标题后紧跟的、仅含中文 \section* 的 tcolorbox（允许中间夹 1–2 行）。"""
+    from .texparse import interior_section_command
+
     for box_line in (s.span.end_line + 1, s.span.end_line + 2, s.span.end_line + 3):
         for rng in boxes_by_start.get(box_line, []):
             name, bs, be, es, ee = rng
             interior = doc.masked[be:es].strip()
-            m = BOX_INNER_SECTION_RE.match(interior)
-            if m:
-                return rng, m.group(1)
+            hit = interior_section_command(interior)
+            if hit:
+                return rng, hit[0]
     return None
 
 
