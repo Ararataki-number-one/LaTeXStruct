@@ -3,6 +3,12 @@
 本项目采用「tag 即发布」的自动化流程：`git tag vX.Y.Z && git push` 触发 CI
 （ruff → 全量测试 → PyInstaller → Inno Setup → 安装器冒烟测试 → 签名 → GitHub Release）。
 
+## v0.8.0（2025-08）
+- **系统凭据管理器（keyring）**：开启后 API Key 写入 Windows 凭据管理器
+  （advapi32 CredWrite/CredRead/CredDelete，零依赖），config.json 只存 `__keyring__`
+  占位符不再落明文；关闭时自动清理系统凭据；非 Windows 平台自动回退原明文行为；
+  设置页开关 + 「已配置(系统凭据)」来源标识；后端可注入测试（FakeBackend 6 例）。
+
 ## v0.7.1（2025-08）
 - Monaco 三栏审阅工作台：决策树（按章节分组）+ 双向 Diff 编辑器（行号居中定位）+
   检视器（单项拒绝/同类批量拒绝/全部重置），三栏联动；

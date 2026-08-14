@@ -44,9 +44,12 @@ git tag v0.2.1; git push origin v0.2.1
       span 段落边界合法化（wrong-range 10→1、复查 token -36%）+ 漏报抽查 + 复查分块（整书规模）
 - [x] **安装版 + 主动更新**：Inno Setup 中文安装器（本地 E2E 验证）+ GitHub Releases 自动检查更新 +
       CI 全自动发布（tag 触发：ruff → 测试 → 构建 → Release）
-- [x] 质量门禁：CI ruff（F 规则）+ 版本一致性校验 + 11 套件全量测试
-- [x] **审阅式界面**：决策清单（章节/环境/置信度/原因）+ 过滤器 + 单项拒绝恢复原文 +
-  diff 行号跳转；Benchmark 金标评测（全 100%）；Rule Pack 配置化；多文件项目支持
+- [x] 质量门禁：CI ruff（F+E741+W605）+ 版本一致性校验 + 18 套件 119 测试全绿 + 编译对比门禁
+- [x] **审阅式界面**：Monaco 三栏审阅工作台（决策树分组 + 双向 diff 定位 + 检视器：
+  拒绝此项 / 拒绝同类其余 / 全部重置）；Benchmark 金标评测（全 100%）；Rule Pack 配置化；
+  多文件项目支持；OCR 逐页验证（页面预览 + 低置信度标注 + 单页重试）
+- [x] **系统凭据管理器（keyring）**：设置页一键开启后 API Key 存 Windows 凭据管理器，
+  `config.json` 不再存明文（仅占位符），不可用平台自动回退原行为
 
 核心保证：只改结构不改内容（撤销全部编辑后与原文逐字符一致的机器校验，失败自动回退）、
 AI 只做决策不生成正文、歧义项一律保守保留并列入汇报。
@@ -60,7 +63,8 @@ latexstruct/
 │   ├── __init__.py               # 版本号 + 更新源
 │   ├── __main__.py               # 启动器（windowed 兼容修复）
 │   ├── updater.py                # 主动更新（GitHub Releases）
-│   ├── config.py                 # 应用配置（三角色模型/复查开关）
+│   ├── config.py                 # 应用配置（三角色模型/复查开关/keyring）
+│   ├── keystore.py               # Windows 凭据管理器密钥存储（可注入后端）
 │   ├── store.py                  # 项目存储（本地磁盘）
 │   ├── core/                     # 核心流水线（纯标准库，可独立测试）
 │   │   ├── parser.py             # LaTeX 轻量结构解析器
@@ -76,7 +80,9 @@ latexstruct/
 │   │   └── pipeline.py           # 流水线编排
 │   └── server/
 │       ├── app.py                # FastAPI 本地服务（含更新接口）
-│       └── static/               # 界面（无构建步骤）
+│       ├── static/               # 旧原生界面（/legacy）
+│       └── static-react/         # React+Monaco 主界面（frontend/ 构建产物）
+├── frontend/                     # React 18 + Vite + Monaco 前端源码（npm run build）
 ├── packaging/
 │   ├── LaTeXStruct.spec          # PyInstaller 单文件 exe
 │   ├── installer.iss             # Inno Setup 安装器
@@ -107,7 +113,8 @@ python -m latexstruct --port 8765     # 指定端口
 2. **处理与审阅页**：点击「运行结构化整理」→ 自动 解析→扫描→决策→补丁→校验→（AI 复查）→ 汇报；
 3. 查看**前后对照 diff** 与极简汇报（含歧义项清单），下载 `result.tex` / `report.md`；
 4. **AI 设置页**：配置决策/复查模型（默认 DeepSeek；复查默认 `deepseek-reasoner`）；
-   Key 仅存本机 `%APPDATA%\LaTeXStruct\config.json`，也可用环境变量
+   Key 仅存本机 `%APPDATA%\LaTeXStruct\config.json`，开启「系统凭据管理器」后改存
+   Windows 凭据管理器（配置文件仅占位符）；也可用环境变量
    `LATEXSTRUCT_DECIDE_KEY` / `LATEXSTRUCT_REVIEW_KEY`。无 Key 时 AI 模式自动降级为规则模式。
 
 ## 运行测试

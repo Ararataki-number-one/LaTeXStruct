@@ -75,14 +75,36 @@ def test_config_masked():
     with WorkspaceTmp() as tmp:
         srv._store = srv.ProjectStore(root=os.path.join(tmp, "projects"))
         srv._config = None
-        c = TestClient(srv.create_app())
-        r = c.put("/api/config", json={"decide_api_key": "sk-test", "review_enabled": False})
-        assert r.status_code == 200
-        masked = c.get("/api/config").json()
-        assert masked["decide_api_key"] == "已配置"
-        assert masked["review_enabled"] is False
-        r = c.put("/api/config", json={"decide_api_key": "", "review_enabled": True})
-        assert r.status_code == 200
+        # hermetic：配置读写注入 FakeBackend + 临时 config.json，绝不触碰真实用户配置/凭据
+        import latexstruct.config as configmod
+        from latexstruct.keystore import FakeBackend
+
+        fake = FakeBackend()
+        old_path, old_save, old_load = configmod.CONFIG_PATH, srv.save_config, srv.load_config
+        configmod.CONFIG_PATH = os.path.join(tmp, "config.json")
+        srv.save_config = lambda cfg: configmod.save_config(cfg, backend=fake)
+        srv.load_config = lambda: configmod.load_config(backend=fake)
+        try:
+            c = TestClient(srv.create_app())
+            r = c.put("/api/config", json={"decide_api_key": "sk-test", "review_enabled": False})
+            assert r.status_code == 200
+            masked = c.get("/api/config").json()
+            assert masked["decide_api_key"] == "已配置"
+            assert masked["review_enabled"] is False
+            # keyring 开启：密钥进凭据后端、配置文件只存占位符、展示带来源标记
+            r = c.put("/api/config", json={"keyring": True, "review_api_key": "sk-rev"})
+            assert r.status_code == 200
+            masked = c.get("/api/config").json()
+            assert masked["keyring"] is True
+            assert masked["review_api_key"] == "已配置(系统凭据)"
+            on_disk = json.loads(open(configmod.CONFIG_PATH, encoding="utf-8").read())
+            assert on_disk["review_api_key"] == "__keyring__"
+            assert fake.get("review_api_key") == "sk-rev"
+            r = c.put("/api/config", json={"decide_api_key": "", "review_enabled": True, "keyring": False})
+            assert r.status_code == 200
+            assert fake.get("decide_api_key") == ""
+        finally:
+            configmod.CONFIG_PATH, srv.save_config, srv.load_config = old_path, old_save, old_load
 
 
 def test_decisions_and_reject():

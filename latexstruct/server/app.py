@@ -74,6 +74,7 @@ class ConfigRequest(BaseModel):
     ocr_base_url: Optional[str] = None
     ocr_model: Optional[str] = None
     ocr_api_key: Optional[str] = None
+    keyring: Optional[bool] = None
 
 
 def create_app() -> FastAPI:
@@ -416,8 +417,8 @@ def create_app() -> FastAPI:
             if v is not None:
                 setattr(cfg, k, v)
         save_config(cfg)
-        _config = cfg
-        return cfg.masked()
+        _config = load_config()  # 重新解析（keyring 占位符 → 真实密钥 + 来源标记）
+        return _config.masked()
 
     # ---- OCR ----
 

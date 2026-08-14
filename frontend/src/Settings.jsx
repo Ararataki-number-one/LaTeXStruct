@@ -27,6 +27,7 @@ export default function Settings() {
       if (keys[prefix]) body[prefix + "_api_key"] = keys[prefix];
     }
     body.review_enabled = !!cfg.review_enabled;
+    body.keyring = !!cfg.keyring;
     await api("/api/config", { method: "PUT", body: JSON.stringify(body) });
     setMsg("已保存");
     setTimeout(() => setMsg(""), 2000);
@@ -52,7 +53,7 @@ export default function Settings() {
             />
             <input
               type="password"
-              placeholder={cfg[prefix + "_api_key"] ? "已配置（留空保持不变）" : "API Key（仅存本机）"}
+              placeholder={cfg[prefix + "_api_key"] ? `${cfg[prefix + "_api_key"]}（留空保持不变）` : "API Key（仅存本机）"}
               value={keys[prefix] || ""}
               onChange={(e) => setKeys({ ...keys, [prefix]: e.target.value })}
             />
@@ -67,6 +68,14 @@ export default function Settings() {
             onChange={(e) => setCfg({ ...cfg, review_enabled: e.target.checked })}
           />
           启用 AI 复查
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={!!cfg.keyring}
+            onChange={(e) => setCfg({ ...cfg, keyring: e.target.checked })}
+          />
+          使用系统凭据管理器保存密钥（Windows 凭据管理器，配置文件不再存明文）
         </label>
         <div className="row">
           <button className="primary" onClick={save}>保存设置</button>
