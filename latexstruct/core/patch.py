@@ -73,7 +73,8 @@ class PendingOp:
 @dataclass
 class PatchContext:
     is_elegantbook: bool = False
-    existing_envs: set = field(default_factory=set)
+    existing_envs: set = field(default_factory=set)  # 已声明（不是仅被使用）的环境
+    theorem_package: str = ""  # amsthm | ntheorem | ""
     exercise_env: str = "enumerate"
     preamble_anchor: int = 0  # \begin{document} 行号；0 = 无导言区
 
@@ -157,7 +158,23 @@ def build_ops(decision: Decision, lines: List[str], ctx: PatchContext) -> Tuple[
         if ctx.preamble_anchor <= 0:
             return [], "无导言区锚点"
         ops = []
+        required_envs = (
+            set(decision.payload.get("required_envs", []))
+            if "required_envs" in decision.payload
+            else None
+        )
         for text in AMSTHM_BLOCK:
+            if text == "\\usepackage{amsthm}" and ctx.theorem_package:
+                continue
+            if text.startswith("\\theoremstyle") and ctx.theorem_package == "ntheorem":
+                continue
+            declared = re.match(r"\\newtheorem\{([^{}]+)\}", text)
+            if declared:
+                env_name = declared.group(1)
+                if env_name in ctx.existing_envs:
+                    continue
+                if required_envs is not None and env_name not in required_envs:
+                    continue
             ops.append(PendingOp("insert_line", ctx.preamble_anchor - 1, new=text))
         return ops, ""
 

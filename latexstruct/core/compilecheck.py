@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from pathlib import PurePosixPath
 from typing import Dict, Optional
 
 PAGES_RE = re.compile(r"Output written on .*\((\d+) pages?")
@@ -34,34 +35,41 @@ def compile_latex(text: str, timeout: int = 240, extra_files: dict = None) -> Di
     if not exe:
         return {"available": False, "ok": None, "pages": 0, "errors": [], "log": ""}
     workdir = tempfile.mkdtemp(prefix="ls-compile-")
-    tex_path = os.path.join(workdir, "main.tex")
-    with open(tex_path, "w", encoding="utf-8") as f:
-        f.write(text)
-    for rel, data in (extra_files or {}).items():
-        p = os.path.join(workdir, rel)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "wb") as f:
-            f.write(data)
     try:
-        proc = subprocess.run(
-            [exe, "-interaction=nonstopmode", "-halt-on-error", "main.tex"],
-            cwd=workdir, capture_output=True, timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return {"available": True, "ok": False, "pages": 0,
-                "errors": ["编译超时（>{}s）".format(timeout)], "log": ""}
-    log_path = os.path.join(workdir, "main.log")
-    log = open(log_path, encoding="utf-8", errors="replace").read() if os.path.exists(log_path) else ""
-    errors = []
-    lines = log.split("\n")
-    for i, line in enumerate(lines):
-        if line.startswith("!"):
-            msg = line[1:].strip() or "（错误详情见下行）"
-            if i + 1 < len(lines) and lines[i + 1].startswith("l."):
-                msg += " @" + lines[i + 1].strip()
-            errors.append(msg[:140])
-    errors = errors[:5]
-    m = PAGES_RE.search(log)
-    pages = int(m.group(1)) if m else 0
-    ok = proc.returncode == 0 and pages > 0 and not errors
-    return {"available": True, "ok": ok, "pages": pages, "errors": errors, "log": log_path}
+        tex_path = os.path.join(workdir, "main.tex")
+        with open(tex_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        for rel, data in (extra_files or {}).items():
+            safe = PurePosixPath(str(rel).replace("\\", "/"))
+            if safe.is_absolute() or any(part in ("", ".", "..") for part in safe.parts):
+                raise ValueError(f"编译附加文件路径不安全：{rel!r}")
+            p = os.path.join(workdir, *safe.parts)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(data)
+        try:
+            proc = subprocess.run(
+                [exe, "-interaction=nonstopmode", "-halt-on-error", "main.tex"],
+                cwd=workdir, capture_output=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return {"available": True, "ok": False, "pages": 0,
+                    "errors": ["编译超时（>{}s）".format(timeout)], "log": ""}
+        log_path = os.path.join(workdir, "main.log")
+        log = open(log_path, encoding="utf-8", errors="replace").read() if os.path.exists(log_path) else ""
+        errors = []
+        lines = log.split("\n")
+        for i, line in enumerate(lines):
+            if line.startswith("!"):
+                msg = line[1:].strip() or "（错误详情见下行）"
+                if i + 1 < len(lines) and lines[i + 1].startswith("l."):
+                    msg += " @" + lines[i + 1].strip()
+                errors.append(msg[:140])
+        errors = errors[:5]
+        m = PAGES_RE.search(log)
+        pages = int(m.group(1)) if m else 0
+        ok = proc.returncode == 0 and pages > 0 and not errors
+        return {"available": True, "ok": ok, "pages": pages, "errors": errors,
+                "log": log[-4000:]}
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)

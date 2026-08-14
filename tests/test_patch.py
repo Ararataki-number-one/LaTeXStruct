@@ -136,6 +136,16 @@ def test_preamble_add():
     assert content_invariant(lines, out, applied)
 
 
+def test_preamble_add_does_not_redeclare_existing_customization():
+    lines = ["\\documentclass{book}", "\\newtheorem{definition}{定义}",
+             "\\begin{document}", "x", "\\end{document}"]
+    ctx = PatchContext(preamble_anchor=3, existing_envs={"definition"})
+    d = Decision(candidate_id="pre", action="preamble-add")
+    ops, err = build_ops(d, lines, ctx)
+    assert not err
+    assert not any(op.new.startswith("\\newtheorem{definition}") for op in ops)
+
+
 def test_wrap_with_title_strip():
     # 编号进可选参数 + 标题词条剥离（可逆）
     lines = ["Theorem 2.3.4 Result statement."]

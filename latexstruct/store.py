@@ -11,6 +11,7 @@ import uuid
 from typing import Dict, List, Optional
 
 SAFE_NAME_RE = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff _\-]+")
+PID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 def default_data_dir() -> str:
@@ -40,7 +41,9 @@ class ProjectStore:
     def delete(self, pid: str):
         import shutil
 
-        shutil.rmtree(self._dir(pid), ignore_errors=True)
+        d = self._dir(pid)
+        if os.path.isdir(d):
+            shutil.rmtree(d)
 
     def get(self, pid: str) -> Optional[Dict]:
         d = self._dir(pid)
@@ -57,6 +60,8 @@ class ProjectStore:
     def list(self) -> List[Dict]:
         out = []
         for name in sorted(os.listdir(self.root)):
+            if not PID_RE.fullmatch(name):
+                continue
             p = os.path.join(self.root, name)
             if os.path.isdir(p) and os.path.exists(os.path.join(p, "meta.json")):
                 out.append(self.get(name))
@@ -98,6 +103,8 @@ class ProjectStore:
     # ---- 内部 ----
 
     def _dir(self, pid: str) -> str:
+        if not PID_RE.fullmatch(str(pid or "")):
+            raise ValueError("项目 ID 格式无效")
         return os.path.join(self.root, pid)
 
     def _read(self, path: str) -> str:
@@ -108,9 +115,22 @@ class ProjectStore:
         return self._read(path) if os.path.exists(path) else None
 
     def _write_text(self, d: str, name: str, text: str):
-        with open(os.path.join(d, name), "w", encoding="utf-8", newline="") as f:
-            f.write(text)
+        self._atomic_write(d, name, text, newline="")
 
     def _write_json(self, d: str, name: str, obj):
-        with open(os.path.join(d, name), "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=1)
+        self._atomic_write(d, name, json.dumps(obj, ensure_ascii=False, indent=1))
+
+    def _atomic_write(self, d: str, name: str, text: str, newline=None):
+        """同目录临时文件 + os.replace，避免崩溃留下半个 JSON/TeX 文件。"""
+        os.makedirs(d, exist_ok=True)
+        target = os.path.join(d, name)
+        tmp = os.path.join(d, f".{name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8", newline=newline) as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)

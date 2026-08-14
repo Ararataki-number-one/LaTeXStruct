@@ -2,6 +2,7 @@
 """版本号单一事实来源测试。"""
 
 import os
+import json
 import re
 import sys
 
@@ -25,6 +26,75 @@ def test_pyproject_reads_version():
     assert 'dynamic = ["version"]' in content
     assert 'version = {attr = "latexstruct._version.__version__"}' in content
     assert 'version = "0.1.0"' not in content
+
+
+def test_python_package_includes_bundled_frontends():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "pyproject.toml"), encoding="utf-8") as f:
+        content = f.read()
+    assert "[tool.setuptools.package-data]" in content
+    assert '"latexstruct.server"' in content
+    assert '"static/*"' in content
+    assert '"static-react/assets/*"' in content
+
+
+def test_release_metadata_matches_app_version():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    version = latexstruct.__version__
+    with open(os.path.join(root, "frontend", "package.json"), encoding="utf-8") as f:
+        package = json.load(f)
+    with open(os.path.join(root, "frontend", "package-lock.json"), encoding="utf-8") as f:
+        package_lock = json.load(f)
+    assert package["version"] == version
+    assert package_lock["version"] == version
+    assert package_lock["packages"][""]["version"] == version
+
+    with open(os.path.join(root, "packaging", "version_info.txt"), encoding="utf-8") as f:
+        resource = f.read()
+    major, minor, patch = version.split(".")
+    assert resource.count(f"({major}, {minor}, {patch}, 0)") == 2
+    assert resource.count(f"u'{version}'") == 2
+
+    with open(os.path.join(root, "packaging", "installer.iss"), encoding="utf-8") as f:
+        installer = f.read()
+    assert "#error AppVersion must be supplied" in installer
+    assert '#define AppVersion "0.2.0"' not in installer
+
+    with open(os.path.join(root, "scripts", "build.ps1"), encoding="utf-8") as f:
+        build_script = f.read()
+    assert '[string]$Version = ""' in build_script
+    assert "packaging/sync_version.py" in build_script
+    assert "npm" in build_script and "run build" in build_script
+
+
+def test_version_resource_sync_rejects_bad_versions():
+    import importlib.util
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, "packaging", "sync_version.py")
+    spec = importlib.util.spec_from_file_location("latexstruct_sync_version", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    sample = "filevers=(1, 2, 3, 0)\nprodvers=(1, 2, 3, 0)\n" \
+        "StringStruct(u'FileVersion', u'1.2.3')\n" \
+        "StringStruct(u'ProductVersion', u'1.2.3')\n"
+    assert module.sync_text(sample, "2.0.1").count("(2, 0, 1, 0)") == 2
+    try:
+        module.sync_text(sample, "2.0")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid versions must be rejected")
+
+
+def test_windows_powershell_scripts_are_utf8_bom():
+    # Windows PowerShell 5.1 treats BOM-less UTF-8 as the active ANSI code page;
+    # Chinese messages can then corrupt quote parsing before the build even starts.
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for name in ("build.ps1", "sign_local.ps1"):
+        with open(os.path.join(root, "scripts", name), "rb") as f:
+            assert f.read(3) == b"\xef\xbb\xbf", name
 
 
 def main():

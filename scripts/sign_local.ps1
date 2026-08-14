@@ -1,4 +1,4 @@
-# 本地代码签名（自签证书，仅本机/内网信任；消除 SmartScreen 需购买 EV/OV 证书）
+﻿# 本地代码签名（自签证书，仅本机/内网信任；消除 SmartScreen 需购买 EV/OV 证书）
 # 用法：powershell -ExecutionPolicy Bypass -File scripts/sign_local.ps1
 param(
     [string]$CertName = "LaTeXStruct Self-Signed",

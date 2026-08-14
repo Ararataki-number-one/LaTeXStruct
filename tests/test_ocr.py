@@ -1,16 +1,23 @@
 # -*- coding: utf-8 -*-
 """OCR 转写模块测试（Fake 视觉客户端，不依赖网络与 PDF 渲染库）。"""
 
+import io
+import json
 import os
+import re
 import shutil
 import sys
+import urllib.error
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from latexstruct.core.ai import LLMError  # noqa: E402
+from latexstruct.core.ai import LLMClient, LLMError, RoleConfig  # noqa: E402
 from latexstruct.ocr import (  # noqa: E402
     OcrConfig,
     _clean_page_output,
+    encode_image,
+    image_mime_type,
     merge_book,
     parse_page_range,
     transcribe_images,
@@ -26,7 +33,8 @@ class FakeVisionClient:
 
     def chat_vision(self, system, user, data_uri):
         self.calls.append((system, user, data_uri[:30]))
-        page = len(self.calls)
+        hit = re.search(r"第\s*(\d+)\s*页", user)
+        page = int(hit.group(1)) if hit else len(self.calls)
         if self.fail_page == page:
             raise LLMError("模拟失败")
         if page in self.pages:
@@ -38,11 +46,97 @@ def test_parse_page_range():
     assert parse_page_range("", 10) == list(range(1, 11))
     assert parse_page_range("1-3,7", 10) == [1, 2, 3, 7]
     assert parse_page_range("5-99", 10) == [5, 6, 7, 8, 9, 10]
+    for bad in ("5-2", "abc", "99"):
+        try:
+            parse_page_range(bad, 10)
+        except ValueError as exc:
+            assert "页码" in str(exc)
+        else:
+            raise AssertionError(f"应拒绝页码范围：{bad}")
 
 
 def test_clean_page_output():
     assert _clean_page_output("```latex\nTheorem 1. X.\n```") == "Theorem 1. X."
     assert _clean_page_output("Theorem 1. X.") == "Theorem 1. X."
+
+
+def test_image_data_uri_uses_real_mime_type():
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 8
+    jpeg = b"\xff\xd8\xff\xe0" + b"0" * 8
+    assert image_mime_type(png) == "image/png"
+    assert image_mime_type(jpeg) == "image/jpeg"
+    assert encode_image(jpeg).startswith("data:image/jpeg;base64,")
+
+
+def test_qwen_vision_openai_compatible_payload():
+    """离线锁定 Qwen 官方的 image_url + Base64 Data URL 请求格式。"""
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "choices": [{"message": {"content": "```latex\nX\n```"}}],
+                "usage": {"total_tokens": 7},
+            }).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["authorization"] = request.get_header("Authorization")
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    role = RoleConfig(
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="qwen3-vl-flash",
+        api_key="not-a-real-key",
+        timeout=12,
+    )
+    image = encode_image(b"\x89PNG\r\n\x1a\n" + b"0" * 8)
+    with patch("urllib.request.urlopen", fake_urlopen):
+        client = LLMClient(role)
+        assert "X" in client.chat_vision("system", "transcribe", image)
+
+    assert captured["url"].endswith("/compatible-mode/v1/chat/completions")
+    assert captured["authorization"] == "Bearer not-a-real-key"
+    assert captured["timeout"] == 12
+    payload = captured["payload"]
+    assert payload["model"] == "qwen3-vl-flash"
+    assert payload["enable_thinking"] is False
+    content = payload["messages"][1]["content"]
+    assert content[0]["type"] == "image_url"
+    assert content[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert content[1] == {"type": "text", "text": "transcribe"}
+
+
+def test_provider_error_redacts_api_key():
+    key = "not-a-real-runtime-secret"
+
+    def unauthorized(request, timeout):
+        body = json.dumps({"error": {"message": f"invalid credential {key}"}}).encode("utf-8")
+        raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, io.BytesIO(body))
+
+    role = RoleConfig(
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="qwen3-vl-flash",
+        api_key=key,
+    )
+    try:
+        with patch("urllib.request.urlopen", unauthorized):
+            LLMClient(role).chat_vision("system", "user", "data:image/png;base64,AA==")
+    except LLMError as exc:
+        message = str(exc)
+        assert "HTTP 401" in message
+        assert key not in message
+        assert "[已隐藏]" in message
+    else:
+        raise AssertionError("401 应抛出 LLMError")
 
 
 def test_merge_book():
@@ -73,7 +167,7 @@ def test_transcribe_images_and_errors():
         result = transcribe_images(paths, client, OcrConfig())
         assert "Page one text" in result.tex
         assert len(result.errors) == 1 and result.errors[0]["page"] == 2
-        assert len(client.calls) == 2
+        assert len(client.calls) == 3  # 第 2 页自动重试 1 次
         # 视觉调用携带 system 规则
         assert "OCR" in client.calls[0][0] and "data:image/png;base64" in client.calls[0][2]
     finally:

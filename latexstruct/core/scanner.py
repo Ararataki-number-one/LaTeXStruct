@@ -28,9 +28,16 @@ THEOREM_LIKE_ENVS = {
 }
 BOX_ENVS = {"tcolorbox", "mdframed", "framed", "quote", "quotation"}
 ITEM_ENVS = {"enumerate", "itemize", "description", "problemset", "exercise", "problem"}
+MATH_ENVS = {
+    "math", "displaymath", "equation", "equation*", "align", "align*", "alignat",
+    "alignat*", "flalign", "flalign*", "gather", "gather*", "multline", "multline*",
+    "eqnarray", "eqnarray*", "split", "cases", "matrix", "pmatrix", "bmatrix",
+    "Bmatrix", "vmatrix", "Vmatrix", "smallmatrix",
+}
 SKIP_ENVS = (
     THEOREM_LIKE_ENVS
     | ITEM_ENVS
+    | MATH_ENVS
     | {"proof", "solution", "thebibliography", "figure", "table",
        "algorithm", "algorithmic", "minipage"}
 )
@@ -131,6 +138,11 @@ def scan(doc: Document, pack=None) -> ScanResult:
     skipped: List[dict] = []
     cid = 1
 
+    # 用户通过 \newtheorem 定义的环境与内置 theorem 一样属于已结构化区域，
+    # 里面即使出现 "Theorem ..." 字样也绝不能再次包裹。
+    custom_theorem_envs = set(re.findall(r"\\newtheorem\s*\{([^{}]+)\}", doc.masked))
+    skip_envs = SKIP_ENVS | custom_theorem_envs
+
     def add(**kw) -> Candidate:
         nonlocal cid
         c = Candidate(id=f"c-{cid:04d}", **kw)
@@ -159,7 +171,7 @@ def scan(doc: Document, pack=None) -> ScanResult:
         if not first:
             continue
         envs = set(b.in_env)
-        if envs & PROTECTED_ENVS or envs & SKIP_ENVS:
+        if envs & PROTECTED_ENVS or envs & skip_envs:
             continue
         if envs & BOX_ENVS:
             # 盒子内的标题行：多为英文条目的中文翻译辅助文本，按设计硬排除但记录跳过
@@ -281,17 +293,26 @@ def scan(doc: Document, pack=None) -> ScanResult:
         nxt = _next_block_after(doc, b)
         if nxt is not None and nxt.span.start_line == b.span.end_line + 1:
             if nxt.kind == "para":
-                add(
-                    kind="scope-fix",
-                    rule_id="env-body-outside",
-                    block_id=b.id,
-                    span=b.span,
-                    title_text=f"{b.name} 环境",
-                    env_hint=b.name,
-                    confidence=0.75,
-                    payload={"env_name": b.name, "next_kind": nxt.kind,
-                             "next_line": nxt.span.start_line, "next_end_line": nxt.span.end_line},
+                first = _first_nonempty_line(nxt.text)
+                # 章节、下一个定理标题或证明起始语是新的结构边界。把它们
+                # 移进前一个环境会造成语义破坏，因此不生成自动修复。
+                starts_new_structure = bool(
+                    SECTION_START_RE.match(first)
+                    or match_title(first)
+                    or proof_re.match(first)
                 )
+                if not starts_new_structure:
+                    add(
+                        kind="scope-fix",
+                        rule_id="env-body-outside",
+                        block_id=b.id,
+                        span=b.span,
+                        title_text=f"{b.name} 环境",
+                        env_hint=b.name,
+                        confidence=0.75,
+                        payload={"env_name": b.name, "next_kind": nxt.kind,
+                                 "next_line": nxt.span.start_line, "next_end_line": nxt.span.end_line},
+                    )
             elif nxt.kind == "displaymath":
                 add(
                     kind="scope-fix",

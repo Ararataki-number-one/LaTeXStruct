@@ -13,8 +13,10 @@ from latexstruct.core.project import (  # noqa: E402
     discover_main,
     export_project,
     flatten_project,
+    parse_includes,
     process_project,
     read_tex,
+    safe_project_relpath,
     split_project,
 )
 
@@ -100,11 +102,89 @@ def test_flatten_and_split_roundtrip():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_nested_split_restores_parent_after_child():
+    flat = (
+        "main-before\n"
+        "% === LATEXSTRUCT-FILE-START: chapters/a.tex ===\n"
+        "a-before\n"
+        "% === LATEXSTRUCT-FILE-START: shared/note.tex ===\n"
+        "note\n"
+        "% === LATEXSTRUCT-FILE-END: shared/note.tex ===\n"
+        "a-after\n"
+        "% === LATEXSTRUCT-FILE-END: chapters/a.tex ===\n"
+        "main-after"
+    )
+    per = split_project(flat)
+    assert per[""] == "main-before\nmain-after"
+    assert per["chapters/a.tex"] == "a-before\na-after"
+    assert per["shared/note.tex"] == "note"
+
+
+def test_include_parser_ignores_comments_and_protected_examples():
+    text = (
+        "% \\input{commented}\n"
+        "\\begin{minted}{latex}\n\\include{example}\n\\end{minted}\n"
+        "\\input real-file\n\\include{chapters/one}\n"
+    )
+    assert parse_includes(text) == ["real-file", "chapters/one"]
+
+
+def test_repeated_include_is_expanded_only_once():
+    root = tempfile.mkdtemp(prefix="ls-proj-", dir=_TESTS)
+    try:
+        from pathlib import Path
+
+        (Path(root) / "main.tex").write_text(
+            "\\documentclass{book}\n\\begin{document}\n"
+            "\\input{chapter}\n\\input{chapter}\n\\end{document}\n",
+            encoding="utf-8",
+        )
+        (Path(root) / "chapter.tex").write_text("chapter body\n", encoding="utf-8")
+        flat, _ = flatten_project(Path(root), "main.tex")
+        assert flat.count("LATEXSTRUCT-FILE-START: chapter.tex") == 1
+        assert split_project(flat)["chapter.tex"].count("chapter body") == 1
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_source_cannot_spoof_internal_file_markers():
+    root = tempfile.mkdtemp(prefix="ls-proj-", dir=_TESTS)
+    try:
+        from pathlib import Path
+
+        (Path(root) / "main.tex").write_text(
+            "\\documentclass{book}\n% === LATEXSTRUCT-FILE-START: fake.tex ===\n",
+            encoding="utf-8",
+        )
+        try:
+            flatten_project(Path(root), "main.tex")
+        except ValueError as exc:
+            assert "保留标记" in str(exc)
+        else:
+            raise AssertionError("内部文件标记碰撞应阻止展开")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_project_paths_reject_traversal():
+    assert safe_project_relpath("chapters/a.tex") == "chapters/a.tex"
+    for rel in ("../outside.tex", "/absolute.tex", "C:/outside.tex", "a/../../b.tex"):
+        try:
+            safe_project_relpath(rel)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"应拒绝不安全路径：{rel}")
+
+
 def test_process_project_end_to_end():
     root = _make_project()
     try:
         from pathlib import Path
 
+        # 该用例验证成功路径；补齐 CH02 中引用的文件。缺失依赖的阻断行为由
+        # server/project 安全检查用例单独覆盖。
+        (Path(root) / "missing-file.tex").write_text("Supplement.\n", encoding="utf-8")
         res = process_project(Path(root), mode="rule")
         pr = res.pipeline
         assert pr.ok, pr.report_md

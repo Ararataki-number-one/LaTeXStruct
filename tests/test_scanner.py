@@ -62,6 +62,19 @@ def test_environment_inner_not_rescanned():
     assert not any("Theorem 9.9" in c.title_text for c in tl)
 
 
+def test_custom_theorem_and_math_environments_are_not_rescanned():
+    text = (
+        "\\documentclass{book}\n"
+        "\\usepackage{amsthm}\n\\newtheorem{myresult}{Result}\n"
+        "\\begin{document}\n"
+        "\\begin{myresult}\nTheorem 7. This is already structured.\n\\end{myresult}\n"
+        "\\begin{equation}\nTheorem 8. This is literal math content.\n\\end{equation}\n"
+        "\\end{document}\n"
+    )
+    res = scan(parse_latex(text))
+    assert [c for c in res.candidates if c.kind == "theorem-like"] == []
+
+
 def test_exercise_sections():
     res = scan_sample("basic_book.tex")
     ex = [c for c in res.candidates if c.kind == "exercise-section"]

@@ -64,6 +64,14 @@ def test_label_ref_cite_image_collections():
     assert refs(SIMPLE) == ["eq:main", "sec:intro"]
     assert cites(SIMPLE) == ["knuth84"]
     assert image_paths(SIMPLE) == ["figures/plot.png"]
+    spaced = (
+        r"\label {sec:spaced}\autoref {sec:spaced}"
+        r"\citep[see][p. 2]{key}\includegraphics* [width=1cm] {figures/a b.png}"
+    )
+    assert labels(spaced) == ["sec:spaced"]
+    assert refs(spaced) == ["sec:spaced"]
+    assert cites(spaced) == ["key"]
+    assert image_paths(spaced) == ["figures/a b.png"]
 
 
 def test_invariants_equal_on_same_text():
@@ -82,6 +90,16 @@ def test_invariants_detect_content_change():
     assert out2["labels"]["equal"] is False
 
 
+def test_invariants_preserve_duplicate_reference_counts():
+    before = SIMPLE.replace(
+        "See \\ref{sec:intro}",
+        "See \\ref{sec:intro} and again \\ref{sec:intro}",
+    )
+    out = check_invariants(before, SIMPLE)
+    assert out["refs"]["equal"] is False
+    assert out["refs"]["before_count"] == out["refs"]["after_count"] + 1
+
+
 def test_pipeline_invariants_pass():
     res = run_pipeline(read_sample("basic_book.tex"), mode="rule")
     assert res.ok
@@ -89,6 +107,9 @@ def test_pipeline_invariants_pass():
     assert inv["ok"] is True
     assert "多层不变量校验" in res.report_md
     assert "数学公式 token" in res.report_md
+    assert res.verification["safe_to_export"] is True
+    assert res.verification["rolled_back"] is False
+    assert all(c["ok"] for c in res.verification["checks"])
 
 
 def test_compile_latex_ok_and_broken():

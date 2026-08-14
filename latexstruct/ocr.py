@@ -78,37 +78,58 @@ def parse_page_range(spec: str, total: int) -> List[int]:
     if not spec.strip():
         return list(range(1, total + 1))
     out = []
-    for part in spec.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            a, b = part.split("-", 1)
-            out.extend(range(int(a), int(b) + 1))
-        else:
-            out.append(int(part))
-    return sorted(set(p for p in out if 1 <= p <= total))
+    try:
+        for part in spec.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                a, b = part.split("-", 1)
+                a, b = int(a), int(b)
+                if a > b:
+                    raise ValueError
+                out.extend(range(a, b + 1))
+            else:
+                out.append(int(part))
+    except ValueError:
+        raise ValueError("页码范围格式无效，请使用 1-5 或 1,3,7") from None
+    selected = sorted(set(p for p in out if 1 <= p <= total))
+    if not selected:
+        raise ValueError(f"页码范围不在文档 1-{total} 页内")
+    return selected
 
 
 def render_pdf_pages(pdf_path: str, pages: List[int], dpi: int = 150):
     """返回 [(page_no, png_bytes)]。依赖 PyMuPDF（未安装时报错）。"""
+    return list(iter_pdf_pages(pdf_path, pages, dpi))
+
+
+def iter_pdf_pages(pdf_path: str, pages: List[int], dpi: int = 150):
+    """逐页渲染，避免大 PDF 一次把所有 PNG 堆进内存。"""
     import fitz  # PyMuPDF
 
     doc = fitz.open(pdf_path)
-    out = []
     try:
         for p in pages:
             page = doc[p - 1]
             pix = page.get_pixmap(dpi=dpi)
-            out.append((p, pix.tobytes("png")))
+            yield p, pix.tobytes("png")
     finally:
         doc.close()
-    return out
 
 
-def encode_image(png_bytes: bytes) -> str:
-    b64 = base64.b64encode(png_bytes).decode("ascii")
-    return f"data:image/png;base64,{b64}"
+def image_mime_type(image_bytes: bytes) -> str:
+    """根据文件签名判断 MIME，避免把 JPG 错标成 image/png。"""
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    raise LLMError("仅支持 PNG 或 JPEG 图片")
+
+
+def encode_image(image_bytes: bytes) -> str:
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{image_mime_type(image_bytes)};base64,{b64}"
 
 
 def _clean_page_output(raw: str) -> str:
@@ -125,10 +146,20 @@ def transcribe_page(client: LLMClient, png_bytes: bytes, page_no: int) -> str:
         raw = client.chat_vision(OCR_SYSTEM_PROMPT, user, encode_image(png_bytes))
     except LLMError as e:
         msg = str(e)
-        if "400" in msg or "image" in msg.lower() or "multimodal" in msg.lower():
+        lower = msg.lower()
+        if any(token in lower for token in ("http 401", "http error 401", "http 403", "http error 403")):
             raise LLMError(
-                f"{msg}｜当前模型可能不支持图片输入，请在 AI 设置页换用支持视觉的模型（如 qwen-vl、glm-4v、gpt-4o 等）"
-            )
+                f"{msg}｜请确认 API Key 与 Base URL 来自同一地域/工作空间，且该 Key 有视觉模型权限"
+            ) from None
+        if "http 429" in lower or "http error 429" in lower:
+            raise LLMError(f"{msg}｜已触发限流或额度不足，请稍后重试或检查账户额度") from None
+        if any(token in lower for token in (
+            "http 400", "http error 400", "http 404", "http error 404", "image", "multimodal",
+        )):
+            raise LLMError(
+                f"{msg}｜当前模型可能不支持图片输入；Qwen 视觉 Flash 的正式标识是 "
+                "qwen3-vl-flash（当前推荐低延迟型号为 qwen3.6-flash）"
+            ) from None
         raise
     text = _clean_page_output(raw)
     if not text:
@@ -171,20 +202,33 @@ def transcribe_pdf(
     return OcrResult(tex=tex, pages=[p for p, _ in rendered], errors=errors, usage=usage)
 
 
-def transcribe_images(image_paths: List[str], client: LLMClient, cfg: OcrConfig = None) -> OcrResult:
+def transcribe_images(
+    image_paths: List[str], client: LLMClient, cfg: OcrConfig = None, progress=None
+) -> OcrResult:
     cfg = cfg or OcrConfig()
     chunks = []
     errors = []
     usage: Dict = {}
     for i, path in enumerate(image_paths):
-        png = open(path, "rb").read()
-        try:
-            chunks.append(transcribe_page(client, png, i + 1))
-        except Exception as e:  # noqa: BLE001
-            errors.append({"page": i + 1, "path": path, "reason": str(e)})
+        if progress:
+            progress(i, len(image_paths), i + 1)
+        with open(path, "rb") as f:
+            png = f.read()
+        last_err = None
+        for _ in range(cfg.retries + 1):
+            try:
+                chunks.append(transcribe_page(client, png, i + 1))
+                last_err = None
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+        if last_err is not None:
+            errors.append({"page": i + 1, "path": path, "reason": str(last_err)})
         for k, v in (client.last_usage or {}).items():
             if isinstance(v, (int, float)):
                 usage[k] = usage.get(k, 0) + v
+    if progress:
+        progress(len(image_paths), len(image_paths), None)
     return OcrResult(tex=merge_book(chunks), pages=list(range(1, len(image_paths) + 1)), errors=errors, usage=usage)
 
 
@@ -220,4 +264,4 @@ def _pdf_page_count(pdf_path: str) -> int:
         with fitz.open(pdf_path) as doc:
             return doc.page_count
     except ImportError:
-        return 10**6
+        raise LLMError("缺少 PDF 渲染组件 PyMuPDF，请重新安装完整版本后重试") from None

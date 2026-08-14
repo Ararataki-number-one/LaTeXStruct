@@ -3,6 +3,34 @@
 本项目采用「tag 即发布」的自动化流程：`git tag vX.Y.Z && git push` 触发 CI
 （ruff → 全量测试 → PyInstaller → Inno Setup → 安装器冒烟测试 → 签名 → GitHub Release）。
 
+## Unreleased
+
+当前没有尚未发布的变更。
+
+## v1.0.0（2026-08-14）
+- 接入 Alibaba Cloud Model Studio / Qwen OpenAI 兼容视觉模型预设；按 2026-07
+  官方型号补充并首选原生视觉模型 `qwen3.7-flash`，同时保留 `qwen3-vl-flash`、
+  `qwen3.6-flash`、`qwen3.7-plus`；
+- OCR 支持 `DASHSCOPE_API_KEY`、provider/base URL/model 环境变量；环境变量 Key
+  不会因保存设置而写入 config.json 或 Windows 凭据管理器；
+- 修复 JPG 被误标为 PNG 及预览 MIME；补充安全的 HTTP 错误分类、密钥脱敏、
+  Qwen 多模态离线测试与在线冒烟脚本。
+- Parser/Scanner 对嵌套环境、注释、verbatim/minted、数学环境、自定义 theorem 与
+  错配环境采取保守处理；同名环境实例独立判断，结构边界不确定时不自动移动；
+- 修复“正文使用过 theorem”被误判为“导言区已声明 theorem”导致输出不可编译；已加载
+  amsthm 时只补缺失声明、不重复加载宏包；编译基准失败现在会返回非零状态并真正阻断 CI；
+- 重构安全门：正文、数学、label/ref/cite、图片路径、环境、花括号、多文件依赖、
+  文件集合和编译对比统一汇总；失败阻止导出并回滚可逆模板修改；
+- 多文件导入增加路径、数量、大小和内部标记校验，保留图片/bib/sty 等二进制资源；
+- OCR 增加逐页进度、瞬时失败自动重试、失败页手动重试、部分结果恢复，并将 raw OCR
+  与 structured 结果隔离；
+- 审阅页补齐前后项、接受/拒绝/撤销、筛选、低置信度与安全检查展示；决策状态变化
+  复用缓存，避免重复 AI 调用；超大文本改用压缩 diff/暂停全书双栏渲染；
+- 密钥写入与配置文件保存改为事务式、原子写入；凭据管理器不可用时明确失败，不再
+  静默回退明文；`.env`、`.env.*` 和本地 secret 文件持续禁止入库；
+- OCR 运行依赖加入安装元数据；前端、Windows 版本资源与安装器统一跟随 `_version.py`；
+  CI 改用 pytest 自动发现全部测试并在常规分支构建前端。
+
 ## v0.8.0（2025-08）
 - **系统凭据管理器（keyring）**：开启后 API Key 写入 Windows 凭据管理器
   （advapi32 CredWrite/CredRead/CredDelete，零依赖），config.json 只存 `__keyring__`

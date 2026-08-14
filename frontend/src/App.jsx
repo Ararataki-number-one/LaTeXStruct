@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { api } from "./api";
 import Projects from "./Projects";
-import Workspace from "./Workspace";
 import Settings from "./Settings";
-import Ocr from "./Ocr";
+
+// Monaco 只在审阅与 OCR 校对页需要。按页加载可避免导入/设置首屏先解析数 MB 编辑器代码。
+const Workspace = lazy(() => import("./Workspace"));
+const Ocr = lazy(() => import("./Ocr"));
 
 export default function App() {
   const [tab, setTab] = useState("projects");
@@ -33,10 +35,10 @@ export default function App() {
         <h1>LaTeXStruct</h1>
         <span className="sub">数学 LaTeX 安全结构化重构器 · v{version}</span>
         <nav>
-          <button className={tab === "projects" ? "active" : ""} onClick={() => setTab("projects")}>项目</button>
-          <button className={tab === "workspace" ? "active" : ""} onClick={() => setTab("workspace")}>工作台</button>
-          <button className={tab === "ocr" ? "active" : ""} onClick={() => setTab("ocr")}>OCR 转写</button>
-          <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>AI 设置</button>
+          <button className={tab === "projects" ? "active" : ""} onClick={() => setTab("projects")}>导入项目</button>
+          <button className={tab === "workspace" ? "active" : ""} onClick={() => setTab("workspace")}>分析与审阅</button>
+          <button className={tab === "ocr" ? "active" : ""} onClick={() => setTab("ocr")}>OCR 导入</button>
+          <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>设置</button>
         </nav>
       </header>
       {updateInfo && (
@@ -58,8 +60,16 @@ export default function App() {
       )}
       <main className="content">
         {tab === "projects" && <Projects onOpen={openProject} />}
-        {tab === "workspace" && <Workspace pid={currentPid} />}
-        {tab === "ocr" && <Ocr onImport={openProject} />}
+        {tab === "workspace" && (
+          <Suspense fallback={<section className="card">正在加载审阅工作台……</section>}>
+            <Workspace pid={currentPid} />
+          </Suspense>
+        )}
+        {tab === "ocr" && (
+          <Suspense fallback={<section className="card">正在加载 OCR 校对页……</section>}>
+            <Ocr onImport={openProject} />
+          </Suspense>
+        )}
         {tab === "settings" && <Settings />}
       </main>
     </div>

@@ -6,7 +6,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from latexstruct.core.pipeline import run_pipeline  # noqa: E402
+from latexstruct.core.patch import Decision, PatchContext, build_ops  # noqa: E402
+from latexstruct.core.parser import parse_latex  # noqa: E402
+from latexstruct.core.pipeline import resolve_overlaps, run_pipeline  # noqa: E402
+from latexstruct.core.rules import build_rule_decisions  # noqa: E402
+from latexstruct.core.scanner import scan  # noqa: E402
 
 SAMPLES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
 
@@ -131,6 +135,59 @@ def test_known_issues_reported():
     assert "已知问题（原书既有" in res.report_md
     # 内容未被修改
     assert "{2}^{\\left( \\begin{matrix} n \\\\ 2 \\end{matrix}\\right) }" in res.result
+
+
+def test_overlapping_decisions_are_both_deferred():
+    lines = ["Theorem. A.", "body", "Proof. B."]
+    d1 = Decision(candidate_id="a", action="wrap", env="theorem", body_span=(1, 2))
+    d2 = Decision(candidate_id="b", action="wrap", env="proof", body_span=(2, 3))
+    ctx = PatchContext()
+    planned = []
+    for d in (d1, d2):
+        ops, err = build_ops(d, lines, ctx)
+        assert not err
+        planned.append((d, ops))
+    kept, dropped = resolve_overlaps(planned, lines)
+    assert kept == []
+    assert {d.candidate_id for d, _ in dropped} == {"a", "b"}
+
+
+def test_scope_fixes_are_grouped_by_environment_instance():
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "\\begin{theorem}\nTheorem A.\n\\end{theorem}\n"
+        "Body belonging to A.\n\n"
+        "\\begin{theorem}\nTheorem B.\n\\end{theorem}\n"
+        "\\section{Next}\n\\end{document}\n"
+    )
+    doc = parse_latex(text)
+    decisions, ambiguous = build_rule_decisions(doc, scan(doc))
+    moves = [d for d in decisions if d.action == "move-boundary"]
+    assert len(moves) == 1
+    assert any("只包住标题" in item["reason"] for item in ambiguous)
+
+
+def test_used_but_undefined_theorem_is_declared_for_wrapped_output():
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "Theorem 1. A new statement.\n\n"
+        "\\begin{theorem}\nExisting but previously undefined.\n\\end{theorem}\n"
+        "\\end{document}\n"
+    )
+    result = run_pipeline(text, mode="rule")
+    assert result.ok, result.report_md
+    assert "\\newtheorem{theorem}{Theorem}" in result.result
+
+
+def test_existing_amsthm_package_is_not_inserted_twice():
+    text = (
+        "\\documentclass{book}\n\\usepackage{amsthm}\n\\begin{document}\n"
+        "Definition 1. A definition.\n\\end{document}\n"
+    )
+    result = run_pipeline(text, mode="rule")
+    assert result.ok, result.report_md
+    assert result.result.count("\\usepackage{amsthm}") == 1
+    assert "\\newtheorem{definition}{Definition}" in result.result
 
 
 def test_real_godsil_section_1_7():

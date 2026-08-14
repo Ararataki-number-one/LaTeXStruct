@@ -6,7 +6,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from latexstruct.core.ai import AIConfig, RoleConfig, parse_decisions  # noqa: E402
+from latexstruct.core.ai import AIConfig, LLMClient, LLMError, RoleConfig, parse_decisions  # noqa: E402
 from latexstruct.core.parser import parse_latex  # noqa: E402
 from latexstruct.core.pipeline import run_pipeline  # noqa: E402
 from latexstruct.core.prompts import build_decide_user, build_review_user  # noqa: E402
@@ -106,6 +106,39 @@ def test_parse_decisions_validation():
     ds4, amb4, notes4 = parse_decisions(none, cands, windows, doc)
     assert ds4 == [] and amb4 == [] and notes4
 
+    # 模型生成的 LaTeX 可选参数不得进入补丁；仅使用原文提取出的编号。
+    injected = {"decisions": [{
+        "candidate_id": c.id, "action": "wrap", "env": "theorem",
+        "body_span": {"start_line": c.span.start_line, "end_line": c.span.end_line},
+        "optional_arg": r"1]\\input{outside}", "reason": "ok", "confidence": 0.9,
+    }]}
+    ds5, amb5, _ = parse_decisions(injected, cands, windows, doc)
+    assert amb5 == [] and ds5[0].optional_arg == "1"
+
+    low = {"decisions": [{
+        "candidate_id": c.id, "action": "wrap", "env": "theorem",
+        "body_span": {"start_line": c.span.start_line, "end_line": c.span.end_line},
+        "reason": "uncertain", "confidence": 0.4,
+    }]}
+    ds6, amb6, _ = parse_decisions(low, cands, windows, doc)
+    assert ds6 == [] and "人工确认" in amb6[0]["reason"]
+
+
+def test_llm_response_errors_are_actionable():
+    try:
+        LLMClient._parse_json("```json\n{broken}\n```")
+    except LLMError as exc:
+        assert "JSON 无法解析" in str(exc)
+    else:
+        raise AssertionError("畸形 JSON 应转换为 LLMError")
+
+    try:
+        LLMClient(RoleConfig(base_url="not-a-url", api_key="fake"))._endpoint_url()
+    except LLMError as exc:
+        assert "http/https" in str(exc)
+    else:
+        raise AssertionError("无效 Base URL 应被拒绝")
+
 
 def test_ai_mode_pipeline_with_fake_decide():
     text = read_sample("basic_book.tex")
@@ -126,6 +159,33 @@ def test_ai_mode_pipeline_with_fake_decide():
     assert out.verification["ai_usage"]["decide"]["model"] == "fake-model"
     # 伪决策全部被采用
     assert len(fake.calls) == 1
+
+
+def test_cached_review_decisions_do_not_call_ai_again():
+    text = read_sample("basic_book.tex")
+    doc = parse_latex(text)
+    scanned = scan(doc)
+    first_client = FakeClient(build_fake_decide_response(doc, scanned))
+    cfg = AIConfig(decide=RoleConfig(api_key="test"), review_enabled=False)
+    first = run_pipeline(text, mode="ai", ai_config=cfg, ai_client=first_client)
+    assert first.ok
+
+    class ExplodingClient:
+        def chat_json(self, *_args, **_kwargs):
+            raise AssertionError("复用审阅决策时不应再次调用 AI")
+
+    second = run_pipeline(
+        text,
+        mode="ai",
+        ai_config=cfg,
+        ai_client=ExplodingClient(),
+        decisions_override=first.decisions,
+        ambiguous_override=first.ambiguous,
+        ai_notes_override=first.ai_notes,
+        exclude={first.decisions[0].candidate_id},
+    )
+    assert second.ok
+    assert second.verification["decisions_reused"] is True
 
 
 def test_ai_mode_without_key_degrades_to_rules():

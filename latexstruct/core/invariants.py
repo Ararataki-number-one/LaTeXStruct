@@ -27,19 +27,22 @@ INLINE_PAREN_RE = re.compile(r"\\\((.*?)\\\)", re.S)
 INLINE_DOLLAR_RE = re.compile(r"(?<!\\)\$([^$\n]+)\$")
 DISPLAY_BRACKET_RE = re.compile(r"\\\[(.*?)\\\]", re.S)
 DISPLAY_DOLLAR_RE = re.compile(r"\$\$(.*?)\$\$", re.S)
-LABEL_RE = re.compile(r"\\label\{([^{}]*)\}")
-REF_RE = re.compile(r"\\(?:ref|eqref|pageref|autoref|cref|Cref)\{([^{}]*)\}")
-CITE_RE = re.compile(r"\\(?:cite|citep|citet|citealp|citealt|parencite|footcite)\{([^{}]*)\}")
-IMG_RE = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\{([^{}]*)\}")
+LABEL_RE = re.compile(r"\\label\s*\{([^{}]*)\}")
+REF_RE = re.compile(r"\\(?:ref|eqref|pageref|autoref|cref|Cref)\s*\{([^{}]*)\}")
+CITE_RE = re.compile(
+    r"\\(?:cite|citep|citet|citealp|citealt|parencite|footcite)"
+    r"(?:\s*\[[^\]]*\]){0,2}\s*\{([^{}]*)\}"
+)
+IMG_RE = re.compile(r"\\includegraphics\*?(?:\s*\[[^\]]*\])?\s*\{([^{}]*)\}")
 
 
 def _norm(s: str) -> str:
     return " ".join(s.split())
 
 
-def math_tokens(text: str) -> List[str]:
+def math_tokens(text: str, masked: str = None) -> List[str]:
     """数学公式 token 多重集（排序后的可哈希列表）。"""
-    masked = _masked(text)
+    masked = masked if masked is not None else _masked(text)
     toks: List[str] = []
     for m in DISPLAY_DOLLAR_RE.finditer(masked):
         toks.append(_norm(m.group(1)))
@@ -56,8 +59,10 @@ def math_tokens(text: str) -> List[str]:
     return sorted(toks)
 
 
-def _collect(text: str, pattern) -> List[str]:
-    return sorted({m.group(1) for m in pattern.finditer(_masked(text))})
+def _collect(text: str, pattern, masked: str = None) -> List[str]:
+    # 保留重复次数：重复 label/ref/cite/image 的增删同样属于内容变化。
+    masked = masked if masked is not None else _masked(text)
+    return sorted(m.group(1) for m in pattern.finditer(masked))
 
 
 def labels(text: str) -> List[str]:
@@ -91,12 +96,14 @@ def _diff(before: List[str], after: List[str]) -> Dict:
 
 def check_invariants(before: str, after: str) -> Dict:
     """返回各不变量对比结果；ok=True 表示全部一致。"""
+    before_masked = _masked(before)
+    after_masked = _masked(after)
     out = {
-        "math": _diff(math_tokens(before), math_tokens(after)),
-        "labels": _diff(labels(before), labels(after)),
-        "refs": _diff(refs(before), refs(after)),
-        "cites": _diff(cites(before), cites(after)),
-        "images": _diff(image_paths(before), image_paths(after)),
+        "math": _diff(math_tokens(before, before_masked), math_tokens(after, after_masked)),
+        "labels": _diff(_collect(before, LABEL_RE, before_masked), _collect(after, LABEL_RE, after_masked)),
+        "refs": _diff(_collect(before, REF_RE, before_masked), _collect(after, REF_RE, after_masked)),
+        "cites": _diff(_collect(before, CITE_RE, before_masked), _collect(after, CITE_RE, after_masked)),
+        "images": _diff(_collect(before, IMG_RE, before_masked), _collect(after, IMG_RE, after_masked)),
     }
     out["ok"] = all(v["equal"] for v in out.values())
     return out

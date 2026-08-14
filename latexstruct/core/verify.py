@@ -54,6 +54,20 @@ def check_braces(text: str) -> Dict:
     return {"ok": depth == 0, "depth": depth}
 
 
+def compare_braces(before: str, after: str) -> Dict:
+    """整理不得新增花括号不平衡；原文已有且保持不变时允许继续审阅。"""
+    b = check_braces(before)
+    a = check_braces(after)
+    no_new = b == a
+    return {
+        "ok": bool(a["ok"] or no_new),
+        "no_new": no_new,
+        "before": b,
+        "after": a,
+        "depth": a.get("depth", 0),
+    }
+
+
 KNOWN_ISSUE_PATTERNS = [
     # 原文既有问题，仅报告不修改
     (r"\\left\s*\(\s*\\begin\{matrix\}",

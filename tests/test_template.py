@@ -139,6 +139,18 @@ def test_template_without_contents():
     assert "\\chapter*{1 Graphs}" in out
 
 
+def test_template_verification_covers_original_and_preserves_crlf_export():
+    text = (
+        "\\documentclass{article}\r\n\\begin{document}\r\n"
+        "\\section*{1 Graphs}\r\n\r\nTheorem 1. X.\r\n\\end{document}\r\n"
+    )
+    res = run_pipeline(text, mode="rule", template="elegantbook")
+    assert res.ok, res.report_md
+    assert res.original.startswith("\\documentclass{article}\n")
+    assert res.verification["content_invariant"] is True
+    assert "\r\n" in res.export_text and "\n" not in res.export_text.replace("\r\n", "")
+
+
 def test_template_ops_env_balance():
     ops, notes = build_template_ops(SYNTHETIC)
     from latexstruct.core.patch import Decision, apply_patches, validate_ops

@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from latexstruct import config
 from latexstruct.keystore import PLACEHOLDER, FakeBackend, WindowsCredBackend
+from latexstruct.providers import QWEN_CN_BASE_URL
 
 _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 _orig_path = config.CONFIG_PATH
@@ -102,6 +103,70 @@ def test_cleared_key_placeholder_resolves_empty():
         assert cfg2.decide_api_key == ""
         assert cfg2._keyring_resolved.get("decide_api_key") is not True
         assert cfg2.masked()["decide_api_key"] == ""
+    finally:
+        _restore(tmp)
+
+
+def test_qwen_environment_key_is_runtime_only():
+    tmp = _tmp()
+    env_names = ("LATEXSTRUCT_OCR_PROVIDER", "DASHSCOPE_API_KEY", "LATEXSTRUCT_OCR_KEY")
+    old_env = {name: os.environ.get(name) for name in env_names}
+    try:
+        os.environ.pop("LATEXSTRUCT_OCR_KEY", None)
+        os.environ["LATEXSTRUCT_OCR_PROVIDER"] = "qwen3-vl-flash-cn"
+        os.environ["DASHSCOPE_API_KEY"] = "runtime-only-value"
+        b = FakeBackend()
+        cfg = config.load_config(backend=b)
+        role = cfg.to_ocr_config().role
+        assert role.base_url == QWEN_CN_BASE_URL
+        assert role.model == "qwen3-vl-flash"
+        assert role.api_key == "runtime-only-value"
+        config.save_config(cfg, backend=b, secret_updates={})
+        on_disk = json.loads(open(config.CONFIG_PATH, encoding="utf-8").read())
+        assert on_disk["ocr_api_key"] == ""
+        assert "runtime-only-value" not in json.dumps(on_disk)
+    finally:
+        for name, value in old_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        _restore(tmp)
+
+
+def test_cross_provider_keys_are_not_reused():
+    cfg = config.AppConfig(
+        decide_base_url="https://api.deepseek.com",
+        decide_api_key="deepseek-only-value",
+        review_base_url=QWEN_CN_BASE_URL,
+        review_api_key="qwen-only-value",
+        ocr_base_url=QWEN_CN_BASE_URL,
+        ocr_model="qwen3-vl-flash",
+    )
+    ai = cfg.to_ai_config()
+    assert ai.decide.api_key == "deepseek-only-value"
+    assert ai.review.api_key == "qwen-only-value"
+    assert cfg.to_ocr_config().role.api_key == "qwen-only-value"
+    cfg2 = config.AppConfig(
+        decide_api_key="deepseek-only-value",
+        review_api_key="deepseek-review-only-value",
+        ocr_base_url=QWEN_CN_BASE_URL,
+        ocr_model="qwen3-vl-flash",
+    )
+    assert cfg2.to_ocr_config().role.api_key == ""
+
+
+def test_keyring_unavailable_never_falls_back_to_plaintext():
+    tmp = _tmp()
+    try:
+        cfg = config.AppConfig(decide_api_key="must-not-hit-disk", keyring=True)
+        try:
+            config.save_config(cfg, backend=FakeBackend(ok=False))
+        except OSError as exc:
+            assert "明文" in str(exc)
+        else:
+            raise AssertionError("凭据管理器不可用时必须拒绝明文回退")
+        assert not os.path.exists(config.CONFIG_PATH)
     finally:
         _restore(tmp)
 

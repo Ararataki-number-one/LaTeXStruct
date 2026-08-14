@@ -79,6 +79,32 @@ def test_verbatim_masked_and_blocked():
     assert not any("inside verbatim" in b.text for b in paras)
 
 
+def test_protected_environment_ignores_literal_environment_tokens():
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "\\begin{minted}{latex}\n"
+        "\\begin{theorem}\nTheorem 9.9. literal example.\n\\end{theorem}\n"
+        "\\end{minted}\n"
+        "\\begin{Verbatim}\n\\begin{lemma} literal\\end{lemma}\n\\end{Verbatim}\n"
+        "\\end{document}\n"
+    )
+    doc = parse_latex(text)
+    names = [r[0] for r in doc.env_ranges]
+    assert names == ["document", "minted", "Verbatim"]
+    assert doc.unbalanced_begins == [] and doc.unbalanced_ends == []
+    assert not any("literal example" in b.text for b in doc.blocks_of_kind("para"))
+
+
+def test_crossed_environments_are_not_reported_as_balanced():
+    doc = parse_latex(
+        "\\begin{document}\n\\begin{theorem}\n\\begin{proof}\n"
+        "\\end{theorem}\n\\end{proof}\n\\end{document}\n"
+    )
+    # 严格栈配对会保留错误证据，避免扫描器在畸形结构上继续自动改写。
+    assert "theorem" in doc.unbalanced_begins
+    assert "theorem" in doc.unbalanced_ends
+
+
 def test_paragraphs():
     doc = load_basic()
     paras = doc.blocks_of_kind("para")

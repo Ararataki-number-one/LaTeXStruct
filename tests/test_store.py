@@ -53,6 +53,18 @@ def test_store_name_sanitized():
         assert store.get(pid)["source_size"] == 1
 
 
+def test_store_rejects_path_like_project_ids():
+    with WorkspaceTmp() as tmp:
+        store = ProjectStore(root=tmp)
+        for pid in ("../outside", "..\\outside", "", "a" * 13):
+            try:
+                store.get(pid)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"应拒绝非法项目 ID：{pid!r}")
+
+
 def main():
     import traceback
 

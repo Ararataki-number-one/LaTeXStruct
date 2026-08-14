@@ -27,7 +27,11 @@ from dataclasses import dataclass, field
 from itertools import count
 from typing import List, Optional, Tuple
 
-PROTECTED_ENVS = {"verbatim", "verbatim*", "lstlisting", "minted", "comment"}
+PROTECTED_ENVS = {
+    "verbatim", "verbatim*", "Verbatim", "Verbatim*", "BVerbatim", "LVerbatim",
+    "SaveVerbatim", "lstlisting", "minted", "comment", "alltt", "filecontents",
+    "filecontents*", "luacode", "luacode*", "pycode",
+}
 SECTION_LEVEL = {"chapter": 0, "section": 1, "subsection": 2, "subsubsection": 3}
 
 ENV_RE = re.compile(r"\\(begin|end)\s*\{([^{}]*)\}")
@@ -170,23 +174,33 @@ def find_env_ranges(text: str):
 
     返回 (ranges, unbalanced_begins, unbalanced_ends)，
     ranges 为 (name, begin_start, begin_end, end_start, end_end) 列表，按位置排序。
+
+    配对采用严格栈语义：交叉闭合的环境不会被误判为正常嵌套。进入 verbatim/
+    minted 等保护环境后，只识别它自己的结束标记，内部展示的 LaTeX 命令全部忽略。
     """
     ranges = []
     stack = []  # (name, begin_start, begin_end)
     unbalanced_ends = []
     for m in ENV_RE.finditer(text):
         kind, name = m.group(1), m.group(2)
+
+        # verbatim 类环境里的 begin/end 是字面文本；只有当前保护环境自己的
+        # \end 才有结构意义。否则示例代码会污染真实环境栈。
+        if stack and stack[-1][0] in PROTECTED_ENVS:
+            if kind == "end" and name == stack[-1][0]:
+                protected, bs, be = stack.pop()
+                ranges.append((protected, bs, be, m.start(), m.end()))
+            continue
+
         if kind == "begin":
             stack.append((name, m.start(), m.end()))
         else:
-            found = False
-            for idx in range(len(stack) - 1, -1, -1):
-                if stack[idx][0] == name:
-                    _, bs, be = stack.pop(idx)
-                    ranges.append((name, bs, be, m.start(), m.end()))
-                    found = True
-                    break
-            if not found:
+            if stack and stack[-1][0] == name:
+                _, bs, be = stack.pop()
+                ranges.append((name, bs, be, m.start(), m.end()))
+            else:
+                # 不从栈中间“捞取”同名 begin：那会把
+                # \begin{a}\begin{b}\end{a}\end{b} 误报为平衡。
                 unbalanced_ends.append(name)
     unbalanced_begins = [nm for nm, _, _ in stack]
     ranges.sort(key=lambda r: (r[1], r[3]))

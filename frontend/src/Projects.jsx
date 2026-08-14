@@ -1,6 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 
+const TEXT_EXTENSIONS = new Set([
+  ".tex", ".sty", ".cls", ".bib", ".bst", ".cfg", ".def", ".bbx", ".cbx", ".lbx", ".txt",
+]);
+
+function bytesToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
 export default function Projects({ onOpen }) {
   const [projects, setProjects] = useState([]);
   const [packs, setPacks] = useState([]);
@@ -55,12 +68,20 @@ export default function Projects({ onOpen }) {
   };
 
   const doFolder = async (fileList) => {
+    const selected = Array.from(fileList);
+    const totalBytes = selected.reduce((sum, f) => sum + f.size, 0);
+    if (selected.length > 1000) return alert("项目文件过多（最多 1000 个）");
+    if (totalBytes > 100 * 1024 * 1024) return alert("项目超过 100 MB，请精简后重试");
     const files = {};
-    for (const f of fileList) {
-      if (f.name.endsWith(".tex") || f.name.endsWith(".sty") || f.name.endsWith(".cls") ||
-          f.name.endsWith(".bib") || f.webkitRelativePath.split("/").length > 2) {
-        files[f.webkitRelativePath] = await f.text();
-      }
+    for (const f of selected) {
+      const browserPath = f.webkitRelativePath || f.name;
+      const parts = browserPath.split("/").filter(Boolean);
+      const rel = (parts.length > 1 ? parts.slice(1) : parts).join("/");
+      const dot = f.name.lastIndexOf(".");
+      const ext = dot >= 0 ? f.name.slice(dot).toLowerCase() : "";
+      files[rel] = TEXT_EXTENSIONS.has(ext)
+        ? await f.text()
+        : { encoding: "base64", data: bytesToBase64(await f.arrayBuffer()) };
     }
     if (!Object.keys(files).length) return alert("文件夹中没有可用文件");
     setBusy(true);
@@ -83,29 +104,37 @@ export default function Projects({ onOpen }) {
   return (
     <div className="projects">
       <section className="card">
-        <h2>新建项目</h2>
+        <h2>导入项目</h2>
         <div className="row">
           <input placeholder="项目名称（可选）" value={name} onChange={(e) => setName(e.target.value)} />
-          <select value={mode} onChange={(e) => setMode(e.target.value)}>
-            <option value="rule">规则模式（无需 AI Key）</option>
-            <option value="ai">AI 模式（决策 + 复查）</option>
-          </select>
-          <select value={pack} onChange={(e) => setPack(e.target.value)}>
-            {packs.map((p) => (
-              <option key={p} value={p}>{p}</option>
-            ))}
-          </select>
-          <label>
-            <input type="checkbox" checked={template} onChange={(e) => setTemplate(e.target.checked)} />
-            ElegantBook 模板转换
-          </label>
         </div>
+        <details className="advanced">
+          <summary>高级选项</summary>
+          <div className="row">
+            <select value={mode} onChange={(e) => setMode(e.target.value)}>
+              <option value="rule">规则模式（默认，无需 AI Key）</option>
+              <option value="ai">AI 决策 + 复查</option>
+            </select>
+            <select value={pack} onChange={(e) => setPack(e.target.value)}>
+              {packs.map((p) => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+            <label>
+              <input type="checkbox" checked={template} onChange={(e) => setTemplate(e.target.checked)} />
+              转换为 ElegantBook（显式变换）
+            </label>
+          </div>
+        </details>
         <div className="row">
           <input
             ref={fileRef}
             type="file"
             accept=".tex,.txt"
-            onChange={async (e) => setText(await e.target.files[0].text())}
+            onChange={async (e) => {
+              const selectedFile = e.target.files?.[0];
+              if (selectedFile) setText(await selectedFile.text());
+            }}
             style={{ display: "none" }}
           />
           <button onClick={() => fileRef.current.click()}>选择 .tex 文件</button>
@@ -119,7 +148,7 @@ export default function Projects({ onOpen }) {
           />
           <button onClick={() => folderRef.current.click()}>导入项目文件夹（多文件）</button>
           <button className="primary" disabled={busy} onClick={doCreate}>
-            {busy ? "处理中……" : "创建项目"}
+            {busy ? "处理中……" : "导入并打开"}
           </button>
         </div>
         <textarea
@@ -157,8 +186,12 @@ export default function Projects({ onOpen }) {
                   <button
                     onClick={async () => {
                       if (!confirm("删除该项目？")) return;
-                      await api("/api/projects/" + p.id, { method: "DELETE" });
-                      reload();
+                      try {
+                        await api("/api/projects/" + p.id, { method: "DELETE" });
+                        reload();
+                      } catch (e) {
+                        alert("删除失败：" + e.message);
+                      }
                     }}
                   >
                     删除

@@ -16,9 +16,6 @@ export default function Ocr({ onImport }) {
     try {
       const j = await (await api(`/api/ocr/jobs/${jid}`)).json();
       setJob(j);
-      if (j.status === "running") {
-        setTimeout(() => poll(jid), 1500);
-      }
     } catch (e) {
       setMsg("轮询失败：" + e.message);
     }
@@ -32,14 +29,22 @@ export default function Ocr({ onImport }) {
     fd.append("dpi", String(dpi));
     fd.append("model", model);
     setMsg("上传中……");
-    const r = await fetch("/api/ocr/jobs", { method: "POST", body: fd });
-    if (!r.ok) {
-      setMsg("失败：" + ((await r.json()).detail || r.statusText));
-      return;
+    setCurrent(null);
+    setCurrentTex("");
+    try {
+      const r = await fetch("/api/ocr/jobs", { method: "POST", body: fd });
+      if (!r.ok) {
+        const error = await r.json().catch(() => ({}));
+        setMsg("失败：" + (error.detail || r.statusText));
+        return;
+      }
+      const { id } = await r.json();
+      setJob({ id, status: "running", pages: {} });
+      setMsg("已上传，正在逐页处理……");
+      await poll(id);
+    } catch (e) {
+      setMsg("上传失败：" + e.message + "。请检查文件后重试。");
     }
-    const { id } = await r.json();
-    setJob({ id, status: "running" });
-    poll(id);
   };
 
   const selectPage = async (n) => {
@@ -49,24 +54,40 @@ export default function Ocr({ onImport }) {
 
   const retry = async (n) => {
     setMsg(`第 ${n} 页重试中……`);
-    await api(`/api/ocr/jobs/${job.id}/pages/${n}/retry`, { method: "POST" });
-    poll(job.id);
-    selectPage(n);
+    try {
+      await api(`/api/ocr/jobs/${job.id}/pages/${n}/retry`, { method: "POST" });
+      await poll(job.id);
+      await selectPage(n);
+      setMsg("重试完成");
+    } catch (e) {
+      setMsg(`第 ${n} 页重试失败：${e.message}`);
+    }
   };
 
   const importProject = async () => {
-    const r = await api(`/api/ocr/jobs/${job.id}/import`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    const { id } = await r.json();
-    onImport(id);
+    setMsg("正在运行结构化与安全检查……");
+    try {
+      const r = await api(`/api/ocr/jobs/${job.id}/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const { id } = await r.json();
+      onImport(id);
+    } catch (e) {
+      setMsg("无法进入审阅：" + e.message);
+    }
   };
 
   useEffect(() => {
-    if (current && job) selectPage(current);
+    if (!job?.id || job.status !== "running") return undefined;
+    const timer = setTimeout(() => poll(job.id), 1200);
+    return () => clearTimeout(timer);
   }, [job]);
+
+  useEffect(() => {
+    if (current && job?.id) selectPage(current);
+  }, [job?.id, current, job?.pages?.[current]?.status]);
 
   const pageNums = job ? Object.keys(job.pages || {}).map(Number).sort((a, b) => a - b) : [];
 
@@ -83,19 +104,25 @@ export default function Ocr({ onImport }) {
             <option value={300}>300 DPI</option>
           </select>
           <input placeholder="视觉模型（需支持图片输入，留空用设置）" value={model} onChange={(e) => setModel(e.target.value)} />
-          <button className="primary" onClick={start}>开始转写</button>
+          <button className="primary" disabled={job?.status === "running"} onClick={start}>开始转写</button>
         </div>
         {job && (
           <div className="status">
-            状态：{job.status} · 第 {job.page || 0}/{job.total || 0} 页 · tokens {job.usage?.total_tokens || 0}
+            状态：{job.phase || job.status} · 完成 {job.done || 0}/{job.total || 0} 页
+            {` · ${Math.round((job.progress || 0) * 100)}% · tokens ${job.usage?.total_tokens || 0}`}
             {job.error && ` · 错误：${job.error}`}
           </div>
         )}
         <div className="status">{msg}</div>
-        {job?.status === "done" && (
+        {(job?.status === "done" || job?.status === "partial") && (
           <div className="row">
-            <button className="primary" onClick={importProject}>导入为项目并整理</button>
-            <a href={`/api/ocr/jobs/${job.id}/result`} download="ocr-book.tex"><button>下载转写 .tex</button></a>
+            {job.status === "done" && (
+              <button className="primary" onClick={importProject}>进入结构化审阅（保留原始 OCR）</button>
+            )}
+            <a href={`/api/ocr/jobs/${job.id}/result`} download="ocr-raw.tex">
+              <button>下载原始 OCR{job.status === "partial" ? "（不完整）" : ""}</button>
+            </a>
+            {job.status === "partial" && <span className="warning">请重试失败页后再进入结构化审阅。</span>}
           </div>
         )}
       </section>
@@ -111,7 +138,8 @@ export default function Ocr({ onImport }) {
               >
                 <span className="badge">P{n}</span>
                 <span className="m">
-                  {p.status === "done" ? (p.low_conf ? "⚠ 低置信" : "OK") : p.status}
+                  {p.status === "done" ? (p.low_conf ? "⚠ 低置信" : "OK") :
+                    p.status === "error" ? "失败，可重试" : p.status}
                 </span>
               </div>
             );
@@ -131,10 +159,13 @@ export default function Ocr({ onImport }) {
             <>
               <div className="row">
                 <b>第 {current} 页 LaTeX</b>
-                {job.pages[current]?.status === "done" && job.pages[current].low_conf && (
+                {(job.pages[current]?.status === "error" || job.pages[current]?.low_conf) && (
                   <button onClick={() => retry(current)}>重试此页</button>
                 )}
               </div>
+              {job.pages[current]?.error && (
+                <p className="warning">{job.pages[current].error}</p>
+              )}
               <Editor
                 height="70vh"
                 language="latex"

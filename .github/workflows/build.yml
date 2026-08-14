@@ -5,6 +5,11 @@ on:
     tags: ["v*"]
     branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "手动构建版本（留空则使用 latexstruct/_version.py）"
+        required: false
+        type: string
 
 jobs:
   test:
@@ -15,6 +20,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: 安装依赖
         run: python -m pip install -r requirements.txt ruff
       - name: 静态检查（ruff F/E741/W605 规则）
@@ -22,15 +32,16 @@ jobs:
       - name: 运行全部测试套件
         shell: pwsh
         run: |
-          $fail = 0
-          foreach ($t in @('test_parser','test_scanner','test_patch','test_pipeline','test_ai','test_template','test_store','test_server','test_updater','test_ocr','test_legalize','test_version','test_invariants','test_texparse','test_project','test_ruleset','test_benchmark','test_keystore')) {
-            python "tests/$t.py"
-            if ($LASTEXITCODE -ne 0) { $fail++ }
-          }
-          if ($fail -ne 0) { Write-Error "测试失败：$fail 个套件"; exit 1 }
+          python -m pytest -q
+          if ($LASTEXITCODE -ne 0) { Write-Error "测试失败"; exit 1 }
           python tools/benchmark.py | Out-Null
           if ($LASTEXITCODE -ne 0) { Write-Error "Benchmark 未通过"; exit 1 }
           Write-Host "全部测试通过"
+      - name: 构建前端
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
       - name: 安装 TinyTeX（Compile CI）
         shell: pwsh
         env:
@@ -79,8 +90,18 @@ jobs:
           python-version: "3.13"
       - name: 版本一致性校验（tag 与 __version__）
         shell: pwsh
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
         run: |
-          $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          } elseif (-not [string]::IsNullOrWhiteSpace($env:MANUAL_VERSION)) {
+            $v = $env:MANUAL_VERSION.TrimStart('v')
+          } else {
+            $v = python -c "from latexstruct._version import __version__; print(__version__)"
+          }
+          $v = $v.Trim()
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { Write-Error "版本格式无效: $v"; exit 1 }
           python -c "import latexstruct; assert latexstruct.__version__=='$v', f'版本不匹配: {latexstruct.__version__} vs $v'"
           echo "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
       - name: 安装依赖
@@ -89,14 +110,17 @@ jobs:
         shell: pwsh
         run: |
           python packaging/generate_icon.py
-          $v = $env:APP_VERSION
-          (Get-Content packaging/version_info.txt -Raw -Encoding UTF8) -replace '\d+\.\d+\.\d+', $v | Set-Content packaging/version_info.txt -Encoding UTF8
+          python packaging/sync_version.py --version $env:APP_VERSION
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: 构建 React 前端（Monaco 工作台）
+        working-directory: frontend
         run: |
-          cd frontend
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npm run build
-          cd ..
       - name: PyInstaller 构建单文件 exe
         run: python -m PyInstaller packaging/LaTeXStruct.spec --noconfirm --distpath dist --workpath build
       - name: 代码签名 exe（配置了证书 secrets 时）

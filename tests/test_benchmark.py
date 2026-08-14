@@ -3,6 +3,7 @@
 
 import os
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -63,6 +64,17 @@ def test_report_summary_rates():
 
     md = render_markdown(run_all())
     assert "正文零改动率" in md and "引用保持率" in md and "编译成功率" in md
+
+
+def test_compile_regression_fails_benchmark_gate():
+    compile_results = [
+        {"available": True, "ok": True, "pages": 1, "errors": []},
+        {"available": True, "ok": False, "pages": 0, "errors": ["broken"]},
+    ]
+    with patch("latexstruct.core.compilecheck.compile_latex", side_effect=compile_results):
+        result = evaluate_golden(GOLDEN_DIR / "basic_book.json", compile_check=True)
+    assert result["content"]["compile_gate"] is False
+    assert result["ok"] is False
 
 
 def main():

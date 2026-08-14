@@ -107,16 +107,24 @@ def evaluate_golden(golden_path, compile_check: bool = False) -> Dict:
     macro = _metrics(total_tp, total_fp, total_fn)
 
     # 内容指标（规则模式全流水线）
-    pr = run_pipeline(tex, mode=data.get("mode", "rule"), pack=pack)
+    pr = run_pipeline(
+        tex,
+        mode=data.get("mode", "rule"),
+        pack=pack,
+        compile_check=do_compile,
+    )
     content = {
         "content_invariant": pr.verification["content_invariant"],
         "invariants_ok": pr.verification["invariants"]["ok"],
         "env_balance": pr.verification["env_balance"]["ok"],
     }
     if do_compile:
-        from .core.compilecheck import compile_latex
-
-        content["compile"] = compile_latex(pr.result)
+        content["compile_before"] = pr.verification["compile_before"]
+        content["compile"] = pr.verification["compile_after"]
+        content["compile_gate"] = bool(
+            pr.verification["compile"]["checked"]
+            and pr.verification["compile"]["ok"]
+        )
 
     return {
         "name": data.get("name", Path(golden_path).stem),
@@ -128,7 +136,8 @@ def evaluate_golden(golden_path, compile_check: bool = False) -> Dict:
         "content": content,
         "ok": (not label_errors)
              and all(v["fn"] == 0 and v["fp"] == 0 for v in by_kind.values())
-             and content["content_invariant"] and content["invariants_ok"] and content["env_balance"],
+             and content["content_invariant"] and content["invariants_ok"] and content["env_balance"]
+             and (not do_compile or content["compile_gate"]),
     }
 
 

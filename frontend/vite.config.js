@@ -6,6 +6,25 @@ export default defineConfig({
   build: {
     outDir: "../latexstruct/server/static-react",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("vite/preload-helper")) {
+            return "runtime";
+          }
+          if (
+            id.includes("node_modules/react/")
+            || id.includes("node_modules/react-dom/")
+            || id.includes("node_modules/scheduler/")
+          ) {
+            return "react";
+          }
+          if (id.includes("node_modules/monaco-editor") || id.includes("node_modules/@monaco-editor")) {
+            return "monaco";
+          }
+        },
+      },
+    },
   },
   server: {
     port: 5173,

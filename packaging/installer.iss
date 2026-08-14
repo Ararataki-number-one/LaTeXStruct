@@ -1,7 +1,7 @@
 ; LaTeXStruct 安装器（Inno Setup 6）
 ; 每用户安装（无需管理员）；静默更新参数：/SILENT /CLOSEAPPLICATIONS /NORESTART
 #ifndef AppVersion
-  #define AppVersion "0.2.0"
+  #error AppVersion must be supplied by scripts/build.ps1 or CI
 #endif
 
 [Setup]

@@ -140,9 +140,9 @@ def build_report(
     inv = verification.get("invariants", {})
     L.append(f"- 内容不变校验：{'通过（与原文逐字符一致）' if ci else '失败（已自动回退）'}")
     L.append(
-        f"- 环境配平：{'通过' if eb.get('ok') else '失败 ' + str(eb.get('unbalanced_begins')) + '/' + str(eb.get('unbalanced_ends'))}"
+        f"- 环境配平：{'通过' if eb.get('ok') else '失败（整理后异常：' + str(eb.get('after_unbalanced', [])) + '）'}"
     )
-    L.append(f"- 花括号配平：{'通过' if br.get('ok') else '提示（' + str(br.get('depth')) + '）'}（仅参考）")
+    L.append(f"- 花括号配平：{'通过' if br.get('ok') else '失败（已自动回退）'}")
     if inv:
         names = {"math": "数学公式 token", "labels": "\\label 集合", "refs": "\\ref 集合",
                  "cites": "\\cite 集合", "images": "图片路径集合"}
@@ -162,6 +162,9 @@ def build_report(
         L.append(
             f"  - 整理后：{'成功 ' + str(ca.get('pages')) + ' 页' if ca.get('ok') else '失败 ' + '; '.join(ca.get('errors', [])[:2])}"
         )
+    L.append(
+        f"- 导出门禁：{'通过' if verification.get('safe_to_export') else '未通过（结果已回退且禁止危险导出）'}"
+    )
     if ki:
         L.append("")
         L.append("### 已知问题（原书既有，未做修改，仅供参考）")

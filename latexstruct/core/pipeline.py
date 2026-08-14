@@ -12,13 +12,15 @@
 
 from __future__ import annotations
 
+import copy
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .ai import AIConfig, AI_KINDS, LLMClient, LLMError, decide_candidates
-from .parser import line_starts, offset_to_line, parse_latex
+from .parser import detect_newline, line_starts, normalize_newlines, offset_to_line, parse_latex
 from .patch import (
+    AMSTHM_BLOCK,
     AppliedPatch,
     Decision,
     PatchContext,
@@ -31,7 +33,7 @@ from .report import build_report
 from .review import run_review
 from .rules import RuleConfig, build_rule_decisions
 from .scanner import scan
-from .verify import check_braces, compare_env_balance, known_issues
+from .verify import compare_braces, compare_env_balance, known_issues
 
 DOC_CLASS_RE = re.compile(r"\\documentclass(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
 
@@ -60,12 +62,16 @@ def _build_context(doc) -> PatchContext:
     m = DOC_CLASS_RE.search(doc.text)
     cls = m.group(1) if m else ""
     is_elegant = "elegantbook" in cls.lower()
-    env_names = {r[0] for r in doc.env_ranges}
-    newtheorem_names = set(re.findall(r"\\newtheorem\s*\{([^{}]*)\}", doc.text))
-    env_names |= newtheorem_names
+    used_env_names = {r[0] for r in doc.env_ranges}
+    newtheorem_names = set(re.findall(r"\\newtheorem\s*\{([^{}]*)\}", doc.masked))
+    available_env_names = used_env_names | newtheorem_names
+    packages = set()
+    for match in re.finditer(r"\\usepackage(?:\[[^\]]*\])?\{([^{}]+)\}", doc.masked):
+        packages.update(name.strip() for name in match.group(1).split(","))
+    theorem_package = "amsthm" if "amsthm" in packages else ("ntheorem" if "ntheorem" in packages else "")
     # 习题节需要"列表语义"环境；elegantbook 的 exercise 是定理式单题环境（放 \item 会报
     # Lonely \item），故仅 problemset（列表式）可复用，否则统一用 enumerate
-    if "problemset" in env_names:
+    if "problemset" in available_env_names:
         exercise_env = "problemset"
     else:
         exercise_env = "enumerate"
@@ -73,20 +79,37 @@ def _build_context(doc) -> PatchContext:
     anchor = offset_to_line(line_starts(doc.text), doc_range[1]) if doc_range else 0
     return PatchContext(
         is_elegantbook=is_elegant,
-        existing_envs=env_names,
+        existing_envs=newtheorem_names,
+        theorem_package=theorem_package,
         exercise_env=exercise_env,
         preamble_anchor=anchor,
     )
 
 
-def build_preamble_decision(doc, ctx: PatchContext) -> Optional[Decision]:
+def build_preamble_decision(
+    doc, ctx: PatchContext, decisions: List[Decision] = None
+) -> Optional[Decision]:
     if ctx.is_elegantbook:
         return None
-    if re.search(r"\\usepackage(?:\[[^\]]*\])?\{(?:amsthm|ntheorem)\}", doc.text):
-        return None
-    if re.search(r"\\newtheorem\s*\{theorem\}", doc.text):
-        return None
     if ctx.preamble_anchor <= 0:
+        return None
+    known_envs = {
+        re.match(r"\\newtheorem\{([^{}]+)\}", line).group(1)
+        for line in AMSTHM_BLOCK
+        if line.startswith("\\newtheorem")
+    }
+    if decisions is None:
+        required_envs = known_envs
+        needs_proof = True
+    else:
+        required_envs = {
+            d.env for d in decisions
+            if d.action == "wrap" and d.env in known_envs
+        }
+        needs_proof = any(d.action == "wrap" and d.env == "proof" for d in decisions)
+    missing_envs = required_envs - ctx.existing_envs
+    needs_package = not ctx.theorem_package and (bool(required_envs) or needs_proof)
+    if not missing_envs and not needs_package:
         return None
     return Decision(
         candidate_id="preamble",
@@ -94,6 +117,7 @@ def build_preamble_decision(doc, ctx: PatchContext) -> Optional[Decision]:
         source="rule",
         reason="导言区缺少定理环境定义",
         confidence=1.0,
+        payload={"required_envs": sorted(missing_envs)},
     )
 
 
@@ -119,21 +143,28 @@ def resolve_overlaps(
 ) -> Tuple[List[Tuple[Decision, List]], List[Tuple[Decision, str]]]:
     if not planned:
         return planned, []
-    indexed = sorted(
-        enumerate(planned), key=lambda t: (_interval(t[1][0])[0], -t[1][0].confidence)
-    )
-    kept: List[Tuple[Decision, List]] = []
-    dropped: List[Tuple[Decision, str]] = []
-    cur_end = -1
-    cur_d = None
-    for _, (d, ops) in indexed:
+    # 修改区间相交时无法证明两项组合仍符合原意。与其凭置信度猜一项，保守地
+    # 将冲突双方都交给人工审阅；导言区固定插入 (0, 0) 不参与冲突判断。
+    spans = []
+    for idx, (d, _) in enumerate(planned):
         s, e = _interval(d)
-        if cur_d is not None and s <= cur_end and not (s == 0 and e == 0):
-            dropped.append((d, f"与决策 {cur_d.candidate_id} 的修改区间重叠，保守保留较低置信度项"))
-            continue
-        kept.append((d, ops))
-        cur_end = e
-        cur_d = d
+        if (s, e) != (0, 0):
+            spans.append((s, e, idx, d))
+    spans.sort(key=lambda item: (item[0], item[1]))
+    active: List[Tuple[int, int, Decision]] = []  # (end, index, decision)
+    conflicts: Dict[int, set] = {}
+    for s, e, idx, d in spans:
+        active = [item for item in active if item[0] >= s]
+        for _, other_idx, other_d in active:
+            conflicts.setdefault(idx, set()).add(other_d.candidate_id)
+            conflicts.setdefault(other_idx, set()).add(d.candidate_id)
+        active.append((e, idx, d))
+    kept = [item for idx, item in enumerate(planned) if idx not in conflicts]
+    dropped = []
+    for idx in sorted(conflicts):
+        d = planned[idx][0]
+        peers = "、".join(sorted(conflicts[idx]))
+        dropped.append((d, f"与决策 {peers} 的修改区间重叠，已保守跳过并等待人工确认"))
     return kept, dropped
 
 
@@ -168,9 +199,16 @@ def run_pipeline(
     compile_check: bool = False,
     pack=None,
     exclude: set = None,
+    decisions_override: List[Decision] = None,
+    ambiguous_override: List[dict] = None,
+    ai_notes_override: List[dict] = None,
 ) -> PipelineResult:
+    source_newline = detect_newline(text)
+    source_text = normalize_newlines(text)
+    text = source_text
     template_notes: List[dict] = []
     template_applied = False
+    template_patches: List[AppliedPatch] = []
     if template == "elegantbook":
         from .template import build_template_ops
 
@@ -181,7 +219,7 @@ def run_pipeline(
                 t_lines, [(Decision(candidate_id="tpl", action="none"), t_ops)]
             )
             if not t_rejected:
-                out, _, _ = apply_patches(t_lines, ok_planned)
+                out, template_patches, _ = apply_patches(t_lines, ok_planned)
                 text = "\n".join(out)
                 template_applied = True
             else:
@@ -197,8 +235,14 @@ def run_pipeline(
     review_info: Dict = {}
     ai_degraded = False
     ai_usage: Dict = {}
+    decisions_reused = decisions_override is not None
 
-    if mode == "ai":
+    if decisions_reused:
+        decisions = copy.deepcopy(decisions_override or [])
+        ambiguous = copy.deepcopy(ambiguous_override or [])
+        ai_notes = copy.deepcopy(ai_notes_override or [])
+        review_info = {"reused": True}
+    elif mode == "ai":
         deterministic_kinds = {"bilingual-title", "exercise-section"}
         rule_decisions, ambiguous = build_rule_decisions(doc, scan_res, rule_config, kinds=deterministic_kinds, pack=pack)
         ai_candidates = [c for c in scan_res.candidates if c.kind in AI_KINDS]
@@ -219,13 +263,16 @@ def run_pipeline(
     else:
         decisions, ambiguous = build_rule_decisions(doc, scan_res, rule_config, pack=pack)
 
-    pre = build_preamble_decision(doc, ctx)
-    if pre is not None:
-        decisions.append(pre)
+    if not decisions_reused:
+        pre = build_preamble_decision(doc, ctx, decisions)
+        if pre is not None:
+            decisions.append(pre)
     for d in decisions:
         if d.action == "convert-to-exercise-env" and not d.env:
             d.env = ctx.exercise_env
+    user_rejected: List[Decision] = []
     if exclude:
+        user_rejected = [d for d in decisions if d.candidate_id in exclude]
         decisions = [d for d in decisions if d.candidate_id not in exclude]  # 单项拒绝（审阅）
 
     candidates_by_id = {c.id: c for c in scan_res.candidates}
@@ -243,6 +290,7 @@ def run_pipeline(
         and (ai_config is None or ai_config.review_enabled)
         and applied
         and not ai_degraded
+        and not decisions_reused
     ):
         cfg = ai_config or AIConfig()
         rclient = review_client or LLMClient(cfg.review)
@@ -276,26 +324,58 @@ def run_pipeline(
     from .invariants import check_invariants
 
     verification = {
-        "content_invariant": content_invariant(doc.text.split("\n"), out, applied),
-        "env_balance": compare_env_balance(doc.text, result_text),
-        "braces": check_braces(result_text),
-        "invariants": check_invariants(doc.text, result_text),
+        "content_invariant": content_invariant(
+            source_text.split("\n"), out, template_patches + applied
+        ),
+        "env_balance": compare_env_balance(source_text, result_text),
+        "braces": compare_braces(source_text, result_text),
+        "invariants": check_invariants(source_text, result_text),
         "known_issues": known_issues(result_text),
         "ai_degraded": ai_degraded,
         "ai_usage": ai_usage,
+        "decisions_reused": decisions_reused,
     }
     if compile_check:
         from .compilecheck import compile_latex
 
-        verification["compile_before"] = compile_latex(doc.text)
+        verification["compile_before"] = compile_latex(source_text)
         verification["compile_after"] = compile_latex(result_text)
+    compile_safe = True
+    if compile_check:
+        cb = verification["compile_before"]
+        ca = verification["compile_after"]
+        if cb.get("available") and ca.get("available"):
+            compile_safe = bool(
+                ca.get("ok")
+                or (not cb.get("ok") and cb.get("errors", []) == ca.get("errors", []))
+            )
+    verification["compile"] = {
+        "ok": compile_safe,
+        "checked": bool(compile_check and verification.get("compile_before", {}).get("available")),
+    }
     ok = (
         verification["content_invariant"]
         and verification["env_balance"]["ok"]
+        and verification["braces"]["ok"]
         and verification["invariants"]["ok"]
+        and compile_safe
     )
-    final_text = result_text if ok else doc.text
-    export_text = final_text.replace("\n", doc.newline)
+    verification["checks"] = [
+        {"id": "content", "label": "正文可逆", "ok": verification["content_invariant"]},
+        {"id": "environments", "label": "环境配平未恶化", "ok": verification["env_balance"]["ok"]},
+        {"id": "braces", "label": "花括号配平未恶化", "ok": verification["braces"]["ok"]},
+        {"id": "math", "label": "数学公式不变", "ok": verification["invariants"]["math"]["equal"]},
+        {"id": "labels", "label": "label 不变", "ok": verification["invariants"]["labels"]["equal"]},
+        {"id": "refs", "label": "引用不变", "ok": verification["invariants"]["refs"]["equal"]},
+        {"id": "images", "label": "图片路径不变", "ok": verification["invariants"]["images"]["equal"]},
+        {"id": "compile", "label": "编译结果未恶化", "ok": compile_safe,
+         "skipped": not verification["compile"]["checked"]},
+    ]
+    verification["safe_to_export"] = bool(ok)
+    verification["export_blocked"] = not ok
+    verification["rolled_back"] = not ok
+    final_text = result_text if ok else source_text
+    export_text = final_text.replace("\n", source_newline)
     report_md = build_report(
         applied, rejected, ambiguous, verification, mode,
         ai_notes=ai_notes, review=review_info,
@@ -308,7 +388,7 @@ def run_pipeline(
     rejected_ids = {ap.decision.candidate_id for ap in rejected}
     ambiguous_ids = {a.get("candidate_id") for a in ambiguous}
     decision_items = []
-    for d in decisions:
+    for d in decisions + user_rejected:
         c = cand_by_id.get(d.candidate_id)
         line = d.body_span[0] if d.body_span else 1
         if c is not None:
@@ -324,7 +404,9 @@ def run_pipeline(
             "source": d.source,
             "reason": d.reason,
         }
-        if d.candidate_id in applied_ids:
+        if d.candidate_id in (exclude or set()):
+            item["status"] = "rejected"
+        elif d.candidate_id in applied_ids:
             item["status"] = "applied"
         elif d.candidate_id in rejected_ids:
             item["status"] = "rejected"
@@ -344,10 +426,10 @@ def run_pipeline(
 
     return PipelineResult(
         ok=ok,
-        original=doc.text,
+        original=source_text,
         result=final_text,
         export_text=export_text,
-        newline=doc.newline,
+        newline=source_newline,
         decisions=decisions,
         applied=applied,
         rejected=rejected,

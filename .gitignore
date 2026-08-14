@@ -4,6 +4,7 @@ build/
 *.spec.bak
 __pycache__/
 *.pyc
+*.egg-info/
 .pytest_cache/
 frontend/node_modules/
 latexstruct/server/static-react/
@@ -24,3 +25,13 @@ corpus/
 *.aux
 *.out
 *.toc
+
+# 本地 AI secrets / 环境配置（禁止入库）
+.env
+.env.*
+!.env.example
+secrets/
+secrets.json
+*.secret
+*.secrets.json
+config.local.json

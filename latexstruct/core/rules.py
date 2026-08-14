@@ -115,11 +115,13 @@ def build_rule_decisions(
 
     # 范围修正按环境合并：优先采纳 env-body-outside / env-missing-display
     sf = [c for c in scan_res.candidates if c.kind == "scope-fix" and use_scope]
-    by_env: Dict[str, list] = {}
+    by_env: Dict[int, list] = {}
     for c in sf:
-        by_env.setdefault(c.env_hint, []).append(c)
+        # 按具体环境块合并，不能把整本书里所有同名 theorem 当成同一个实例。
+        by_env.setdefault(c.block_id or -1, []).append(c)
     handled = set()
-    for env, cs in by_env.items():
+    for _, cs in by_env.items():
+        env = cs[0].env_hint
         body = next((c for c in cs if c.rule_id == "env-body-outside"), None)
         disp = next((c for c in cs if c.rule_id == "env-missing-display"), None)
         pick = body or disp
