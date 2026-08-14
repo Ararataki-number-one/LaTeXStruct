@@ -47,15 +47,15 @@ def build_template_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
     lines = text.split("\n")
 
     # 1) documentclass
-    dc_idx = next((i for i, l in enumerate(lines) if DOC_CLASS_LINE_RE.match(l)), None)
+    dc_idx = next((i for i, line in enumerate(lines) if DOC_CLASS_LINE_RE.match(line)), None)
     if dc_idx is None:
         return [], [{"line": 1, "reason": "未找到 \\documentclass 行，跳过模板转换"}]
     ops.append(PendingOp("replace_line", dc_idx + 1, old=lines[dc_idx], new="\\documentclass{elegantbook}"))
 
     # 2) 删除与 elegantbook 重复（可能选项冲突）的包与宏
-    for i, l in enumerate(lines):
-        if GEOMETRY_LINE_RE.match(l) or CTEX_LINE_RE.match(l) or TCOLORBOX_LINE_RE.match(l) or CIRCLED_LINE_RE.match(l):
-            ops.append(PendingOp("delete_line", i + 1, old=l))
+    for i, line in enumerate(lines):
+        if GEOMETRY_LINE_RE.match(line) or CTEX_LINE_RE.match(line) or TCOLORBOX_LINE_RE.match(line) or CIRCLED_LINE_RE.match(line):
+            ops.append(PendingOp("delete_line", i + 1, old=line))
 
     sections = _non_box_sections(doc)
     contents = next((s for s in sections if CONTENTS_TITLE_RE.match(s.title)), None)

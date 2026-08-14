@@ -26,7 +26,7 @@
 
 | 金标集 | 内容不变 | 多层不变量 | 环境配平 | 编译 |
 |---|---|---|---|---|
-| basic-book | OK | OK | OK | — |
-| cn-fragment | OK | OK | OK | — |
-| godsil-1.7 | OK | OK | OK | — |
-| negatives | OK | OK | OK | — |
+| basic-book | OK | OK | OK | 成功 2 页 |
+| cn-fragment | OK | OK | OK | 成功 1 页 |
+| godsil-1.7 | OK | OK | OK | 失败 |
+| negatives | OK | OK | OK | 成功 1 页 |

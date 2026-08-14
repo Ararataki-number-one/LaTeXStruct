@@ -30,4 +30,8 @@ line-length = 100
 extend-exclude = ["build", "dist", "corpus"]
 
 [tool.ruff.lint]
-select = ["F"]
+select = ["F", "E741", "W605"]
+ignore = ["E402", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tools/*" = ["E741"]

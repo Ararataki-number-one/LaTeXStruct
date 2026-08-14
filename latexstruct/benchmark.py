@@ -53,6 +53,7 @@ def evaluate_golden(golden_path, compile_check: bool = False) -> Dict:
     data = load_golden(golden_path)
     tex = data["_tex"]
     pack = data.get("pack") or "bilingual"
+    do_compile = bool(data.get("compile", False)) or compile_check
     doc = parse_latex(tex)
     res = scan(doc, pack=pack)
 
@@ -105,7 +106,7 @@ def evaluate_golden(golden_path, compile_check: bool = False) -> Dict:
         "invariants_ok": pr.verification["invariants"]["ok"],
         "env_balance": pr.verification["env_balance"]["ok"],
     }
-    if compile_check:
+    if do_compile:
         from .core.compilecheck import compile_latex
 
         content["compile"] = compile_latex(pr.result)

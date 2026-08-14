@@ -17,8 +17,8 @@ jobs:
           python-version: "3.13"
       - name: 安装依赖
         run: python -m pip install -r requirements.txt ruff
-      - name: 静态检查（ruff F 规则：未定义名/未用导入等）
-        run: python -m ruff check latexstruct tests tools packaging --select F
+      - name: 静态检查（ruff F/E741/W605 规则）
+        run: python -m ruff check latexstruct tests tools packaging benchmark
       - name: 运行全部测试套件
         shell: pwsh
         run: |
@@ -31,6 +31,21 @@ jobs:
           python tools/benchmark.py | Out-Null
           if ($LASTEXITCODE -ne 0) { Write-Error "Benchmark 未通过"; exit 1 }
           Write-Host "全部测试通过"
+      - name: 安装 TinyTeX（Compile CI）
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "tinytex"
+          Invoke-WebRequest https://yihui.org/tinytex/install-bin-windows.ps1 -OutFile tinytex.ps1
+          & .\tinytex.ps1 -Path $dir -AddToPath
+          $bin = Join-Path $dir "bin\win32"
+          Add-Content $env:GITHUB_PATH $bin
+          & (Join-Path $bin "tlmgr.bat") install amsmath amssymb amsthm geometry tcolorbox graphics
+      - name: Benchmark（含前后编译对比）
+        shell: pwsh
+        run: |
+          python tools/benchmark.py --compile | Out-Null
+          if ($LASTEXITCODE -ne 0) { Write-Error "Benchmark（编译）未通过"; exit 1 }
+          Get-Content benchmark/report.md
 
   build:
     name: 构建安装包（仅 tag / 手动触发）

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""多文件 LaTeX 项目处理 CLI。
+r"""多文件 LaTeX 项目处理 CLI。
 
 用法：
   python tools/process_project.py <项目文件夹> [输出文件夹] [--mode rule|ai] [--template elegantbook]
