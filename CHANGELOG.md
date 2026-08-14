@@ -3,6 +3,10 @@
 本项目采用「tag 即发布」的自动化流程：`git tag vX.Y.Z && git push` 触发 CI
 （ruff → 全量测试 → PyInstaller → Inno Setup → 安装器冒烟测试 → 签名 → GitHub Release）。
 
+## v0.5.3（2025-08）
+- 多文件 LaTeX 项目支持：main.tex 发现、\input/\include 依赖图（缺失/循环检测）、
+  带标记展开→流水线→拆分回文件→副本导出；CLI tools/process_project.py。
+
 ## v0.5.2（2025-08）
 - 平衡括号解析器（core/texparse.py）：节标题支持嵌套花括号与数学内花括号、
   可选参数嵌套；双语翻译框识别同步升级；真实书稿回归零差异。
