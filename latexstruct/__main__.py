@@ -15,6 +15,24 @@ import sys
 import threading
 
 
+def _show_startup_error(message: str) -> None:
+    """Windowed builds have no console, so surface fatal packaging errors explicitly."""
+    detail = (
+        "LaTeXStruct 无法启动。\n\n"
+        f"{message}\n\n"
+        "请从官方发布页重新下载安装完整版本；重新安装不会删除本地项目。"
+    )
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(None, detail, "LaTeXStruct 启动失败", 0x10)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    print(detail, file=sys.stderr)
+
+
 def main():
     # PyInstaller windowed 模式下 stdout/stderr 为 None：uvicorn/print 首次写流会崩溃，重定向到 devnull
     if sys.stdout is None:
@@ -31,7 +49,14 @@ def main():
 
     from latexstruct.server.app import create_app
 
-    app = create_app()
+    try:
+        app = create_app()
+    except Exception as exc:  # noqa: BLE001
+        if args.server:
+            print(f"LaTeXStruct 启动失败: {exc}", file=sys.stderr)
+        else:
+            _show_startup_error(str(exc))
+        return 1
     port = args.port or 8080
 
     if args.server:

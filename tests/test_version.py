@@ -128,6 +128,28 @@ def test_release_build_safety_guards():
     with open(os.path.join(root, ".github", "workflows", "build.yml"), encoding="utf-8") as f:
         workflow = f.read()
     assert "$observedVersion -eq $env:APP_VERSION" in workflow
+    assert "安装版没有提供 React 工作台" in workflow
+    assert "React 资源名未带内容哈希" in workflow
+    assert "http://127.0.0.1:8099$assetPath" in workflow
+
+    with open(os.path.join(root, "packaging", "LaTeXStruct.spec"), encoding="utf-8") as f:
+        pyinstaller_spec = f.read()
+    assert "Path(SPECPATH).resolve().parent" in pyinstaller_spec
+    assert 'react_index.is_file()' in pyinstaller_spec
+    assert 'react_assets_dir.is_dir()' in pyinstaller_spec
+    assert '(str(react_static_dir), "latexstruct/server/static-react")' in pyinstaller_spec
+    assert 'os.path.exists("../latexstruct/server/static-react")' not in pyinstaller_spec
+
+    with open(os.path.join(root, "latexstruct", "server", "app.py"), encoding="utf-8") as f:
+        server_app = f.read()
+    assert 'getattr(sys, "frozen", False) and not react_ready' in server_app
+    assert "发布包缺少 React 前端资源" in server_app
+
+    with open(os.path.join(root, "latexstruct", "__main__.py"), encoding="utf-8") as f:
+        launcher = f.read()
+    assert "MessageBoxW" in launcher
+    assert "请从官方发布页重新下载安装完整版本" in launcher
+    assert "重新安装不会删除本地项目" in launcher
 
     with open(os.path.join(root, ".gitignore"), encoding="utf-8") as f:
         gitignore = f.read().splitlines()

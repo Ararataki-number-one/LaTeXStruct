@@ -107,6 +107,21 @@ def test_health_and_project_flow():
         assert c.get(f"/api/projects/{pid}").status_code == 404
 
 
+def test_frozen_release_refuses_to_serve_incompatible_legacy_frontend():
+    with WorkspaceTmp() as tmp:
+        fake_static = Path(tmp) / "package" / "static"
+        fake_static.mkdir(parents=True)
+        with patch.object(srv, "STATIC_DIR", fake_static), patch.object(
+            sys, "frozen", True, create=True
+        ):
+            try:
+                srv.create_app()
+            except RuntimeError as exc:
+                assert "发布包缺少 React 前端资源" in str(exc)
+            else:
+                raise AssertionError("frozen release must not fall back to the legacy frontend")
+
+
 def test_illegal_bracket_display_tag_blocks_server_export():
     with WorkspaceTmp() as tmp:
         c = _client(tmp)

@@ -1,13 +1,30 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller 打包配置：单文件 exe（GUI 模式，无控制台）。"""
 
-import os
+from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_submodules
 
-datas = [("../latexstruct/server/static", "latexstruct/server/static")]
-if os.path.exists("../latexstruct/server/static-react"):
-    datas.append(("../latexstruct/server/static-react", "latexstruct/server/static-react"))
+# PyInstaller executes a spec with the caller's current directory unchanged, while
+# relative paths passed to Analysis/datas are resolved relative to the spec file.
+# Using the same explicit base for both existence checks and collected files avoids
+# silently omitting the React build when CI invokes this spec from the repository root.
+repo_root = Path(SPECPATH).resolve().parent
+packaging_dir = repo_root / "packaging"
+legacy_static_dir = repo_root / "latexstruct" / "server" / "static"
+react_static_dir = repo_root / "latexstruct" / "server" / "static-react"
+react_index = react_static_dir / "index.html"
+react_assets_dir = react_static_dir / "assets"
+
+if not react_index.is_file() or not react_assets_dir.is_dir():
+    raise SystemExit(
+        "React frontend build is missing; run `npm ci && npm run build` in frontend first"
+    )
+
+datas = [
+    (str(legacy_static_dir), "latexstruct/server/static"),
+    (str(react_static_dir), "latexstruct/server/static-react"),
+]
 binaries = []
 hiddenimports = [
     "uvicorn.logging",
@@ -23,8 +40,8 @@ hiddenimports = [
 ] + collect_submodules("webview")
 
 a = Analysis(
-    ["run.py"],
-    pathex=[".."],
+    [str(packaging_dir / "run.py")],
+    pathex=[str(repo_root)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -51,6 +68,6 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
-    icon="icon.ico",
-    version="version_info.txt",
+    icon=str(packaging_dir / "icon.ico"),
+    version=str(packaging_dir / "version_info.txt"),
 )

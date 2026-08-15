@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -1743,7 +1744,18 @@ def create_app() -> FastAPI:
                     current["importing"] = False
 
     react_dir = STATIC_DIR.parent / "static-react"
-    if react_dir.exists():
+    react_ready = (
+        (react_dir / "index.html").is_file()
+        and (react_dir / "assets").is_dir()
+        and any((react_dir / "assets").iterdir())
+    )
+    if getattr(sys, "frozen", False) and not react_ready:
+        # A release must never pretend to work by serving the obsolete fallback UI:
+        # that page does not implement the current OCR/process APIs.
+        raise RuntimeError(
+            "发布包缺少 React 前端资源；请重新下载安装完整的 LaTeXStruct 安装包"
+        )
+    if react_ready:
         app.mount("/", StaticFiles(directory=str(react_dir), html=True), name="react")
     else:
         app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

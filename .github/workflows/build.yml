@@ -177,8 +177,36 @@ jobs:
               if ($h.ok) {
                 $observedVersion = [string]$h.version
                 if ($observedVersion -eq $env:APP_VERSION) {
+                  $home = Invoke-WebRequest "http://127.0.0.1:8099/" -UseBasicParsing -TimeoutSec 5
+                  if ($home.Content -notmatch '<div\s+id=["'']root["'']') {
+                    Write-Error "安装版没有提供 React 工作台，疑似错误回退到旧前端"
+                    exit 1
+                  }
+                  $assetMatches = [regex]::Matches(
+                    $home.Content,
+                    '(?:src|href)=["''](/assets/[^"'']+\.(?:js|css))["'']'
+                  )
+                  $assetPaths = @(
+                    $assetMatches | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+                  )
+                  if ($assetPaths.Count -lt 2) {
+                    Write-Error "React 首页缺少带哈希的 JS/CSS 资源引用"
+                    exit 1
+                  }
+                  foreach ($assetPath in $assetPaths) {
+                    if ($assetPath -notmatch '^/assets/.+-[A-Za-z0-9_-]{6,}\.(?:js|css)$') {
+                      Write-Error "React 资源名未带内容哈希: $assetPath"
+                      exit 1
+                    }
+                    $asset = Invoke-WebRequest "http://127.0.0.1:8099$assetPath" `
+                      -UseBasicParsing -TimeoutSec 10
+                    if ($asset.StatusCode -ne 200 -or $asset.RawContentLength -le 0) {
+                      Write-Error "React 资源不可用: $assetPath"
+                      exit 1
+                    }
+                  }
                   $ok = $true
-                  Write-Host "安装版运行正常: v$observedVersion"
+                  Write-Host "安装版运行正常（React 工作台与静态资源完整）: v$observedVersion"
                 } else {
                   Write-Host "安装版版本不匹配: expected=$env:APP_VERSION actual=$observedVersion"
                 }
