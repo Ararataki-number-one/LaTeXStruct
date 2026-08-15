@@ -19,9 +19,12 @@ async function request(path, opts = {}) {
 }
 
 export async function api(path, opts = {}) {
+  const isForm = typeof FormData !== "undefined" && opts.body instanceof FormData;
   const res = await request(path, {
-    headers: { "Content-Type": "application/json" },
     ...opts,
+    headers: isForm
+      ? { ...(opts.headers || {}) }
+      : { "Content-Type": "application/json", ...(opts.headers || {}) },
   });
   if (!res.ok) {
     throw new Error(await errorMessage(res));

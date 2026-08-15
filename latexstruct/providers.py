@@ -17,7 +17,11 @@ class ProviderPreset:
     base_url: str
     model: str
     api_key_env: str
+    provider: str = "custom"
+    provider_label: str = "自定义"
+    roles: tuple[str, ...] = ("decide", "review")
     vision: bool = False
+    recommended: bool = False
     note: str = ""
 
     def public_dict(self) -> Dict:
@@ -30,12 +34,39 @@ QWEN_CN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 PROVIDER_PRESETS = (
     ProviderPreset(
+        id="deepseek-v4-flash",
+        label="DeepSeek V4 Flash（省钱快速）",
+        base_url="https://api.deepseek.com",
+        model="deepseek-v4-flash",
+        api_key_env="LATEXSTRUCT_DECIDE_KEY",
+        provider="deepseek",
+        provider_label="DeepSeek",
+        roles=("decide", "review"),
+        recommended=True,
+        note="适合日常结构判断；速度快、成本低，不支持图片 OCR。",
+    ),
+    ProviderPreset(
+        id="deepseek-v4-pro",
+        label="DeepSeek V4 Pro（更强复查）",
+        base_url="https://api.deepseek.com",
+        model="deepseek-v4-pro",
+        api_key_env="LATEXSTRUCT_REVIEW_KEY",
+        provider="deepseek",
+        provider_label="DeepSeek",
+        roles=("decide", "review"),
+        note="适合复杂文档复查；速度和成本高于 Flash，不支持图片 OCR。",
+    ),
+    ProviderPreset(
         id="qwen3.7-flash-cn",
         label="Qwen3.7-Flash（中国内地，推荐）",
         base_url=QWEN_CN_BASE_URL,
         model="qwen3.7-flash",
         api_key_env="DASHSCOPE_API_KEY",
+        provider="qwen-cn",
+        provider_label="阿里云百炼（中国内地）",
+        roles=("decide", "review", "ocr"),
         vision=True,
+        recommended=True,
         note="Qwen3.7 原生视觉 Flash；支持图片、文本和视频输入。",
     ),
     ProviderPreset(
@@ -44,6 +75,9 @@ PROVIDER_PRESETS = (
         base_url=QWEN_CN_BASE_URL,
         model="qwen3-vl-flash",
         api_key_env="DASHSCOPE_API_KEY",
+        provider="qwen-cn",
+        provider_label="阿里云百炼（中国内地）",
+        roles=("decide", "review", "ocr"),
         vision=True,
         note="成熟的 Qwen3-VL 视觉 Flash 兼容选项。",
     ),
@@ -53,6 +87,9 @@ PROVIDER_PRESETS = (
         base_url=QWEN_CN_BASE_URL,
         model="qwen3.6-flash",
         api_key_env="DASHSCOPE_API_KEY",
+        provider="qwen-cn",
+        provider_label="阿里云百炼（中国内地）",
+        roles=("decide", "review", "ocr"),
         vision=True,
         note="上一代低延迟视觉模型。",
     ),
@@ -62,6 +99,9 @@ PROVIDER_PRESETS = (
         base_url=QWEN_CN_BASE_URL,
         model="qwen3.7-plus",
         api_key_env="DASHSCOPE_API_KEY",
+        provider="qwen-cn",
+        provider_label="阿里云百炼（中国内地）",
+        roles=("decide", "review", "ocr"),
         vision=True,
         note="适合比 Flash 更重的视觉推理任务。",
     ),

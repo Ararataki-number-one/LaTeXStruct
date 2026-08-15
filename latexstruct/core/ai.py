@@ -40,7 +40,7 @@ class LLMError(Exception):
 @dataclass
 class RoleConfig:
     base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-flash"
     api_key: str = ""
     timeout: float = 180.0
 
@@ -48,7 +48,7 @@ class RoleConfig:
 @dataclass
 class AIConfig:
     decide: RoleConfig = field(default_factory=RoleConfig)
-    review: RoleConfig = field(default_factory=lambda: RoleConfig(model="deepseek-reasoner"))
+    review: RoleConfig = field(default_factory=lambda: RoleConfig(model="deepseek-v4-pro"))
     review_enabled: bool = True
     batch_size: int = 30
     context_lines: int = 6
@@ -63,6 +63,7 @@ class LLMClient:
 
     def chat_json(self, system: str, user: str) -> Tuple[dict, Dict]:
         """返回 (解析后的 JSON 对象, usage)。失败抛出 LLMError。"""
+        self.last_usage = {}
         payload = {
             "model": self.cfg.model,
             "messages": [
@@ -99,6 +100,7 @@ class LLMClient:
 
     def chat_vision(self, system: str, user_text: str, image_data_uri: str) -> str:
         """视觉模型调用（OCR 转写）：返回模型文本。"""
+        self.last_usage = {}
         payload = {
             "model": self.cfg.model,
             "messages": [
@@ -362,6 +364,8 @@ def decide_candidates(
     candidates: List[Candidate],
     ai_config: AIConfig,
     mode: str,
+    progress_callback=None,
+    control_callback=None,
 ) -> Tuple[List[Decision], List[dict], List[dict], Dict]:
     if not candidates:
         return [], [], [], {}
@@ -371,6 +375,8 @@ def decide_candidates(
     notes: List[dict] = []
     usage_total: Dict = {}
     for i in range(0, len(candidates), max(1, ai_config.batch_size)):
+        if control_callback:
+            control_callback()
         batch = candidates[i : i + ai_config.batch_size]
         windows = {
             c.id: (
@@ -381,12 +387,20 @@ def decide_candidates(
         }
         user = build_decide_user(doc, batch, ai_config.context_lines)
         obj, usage = client.chat_json(system, user)
-        usage_total["model"] = getattr(client, "cfg", None) and client.cfg.model or ""
-        for k, v in usage.items():
-            if isinstance(v, (int, float)):
-                usage_total[k] = usage_total.get(k, 0) + v
+        model = getattr(client, "cfg", None) and client.cfg.model or ""
+        from ..pricing import add_usage
+
+        add_usage(usage_total, usage, model)
         ds, am, nt = parse_decisions(obj, batch, windows, doc)
         decisions.extend(ds)
         ambiguous.extend(am)
         notes.extend(nt)
+        if progress_callback:
+            progress_callback({
+                "done": min(i + len(batch), len(candidates)),
+                "total": len(candidates),
+                "usage": dict(usage_total),
+                "decisions": [d.candidate_id for d in decisions],
+                "ambiguous": len(ambiguous),
+            })
     return decisions, ambiguous, notes, usage_total

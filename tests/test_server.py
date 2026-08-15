@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -51,6 +52,7 @@ except ImportError:  # 依赖未安装 → 跳过
 
 
 def _client(tmp):
+    srv._process_jobs.clear()
     srv._store = srv.ProjectStore(root=os.path.join(tmp, "projects"))
     srv._config = None
     return TestClient(srv.create_app())
@@ -265,6 +267,119 @@ def test_folder_import_rejects_unsafe_paths_and_incomplete_graphs():
         pid = created.json()["id"]
         blocked = c.get(f"/api/projects/{pid}/export-folder")
         assert blocked.status_code == 409 and "安全检查" in blocked.json()["detail"]
+
+
+def test_zip_import_strips_wrapper_and_defers_processing():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(
+                "my-book/main.tex",
+                "\\documentclass{book}\n\\begin{document}\n"
+                "\\input{chapters/one}\n\\end{document}\n",
+            )
+            zf.writestr(
+                "my-book/chapters/one.tex",
+                "Theorem 1. A statement.\n\nProof. Clear.\n",
+            )
+            zf.writestr("my-book/images/pixel.bin", b"\x00\x01\xff")
+        created = c.post(
+            "/api/projects/archive",
+            files={"file": ("my-book.zip", buf.getvalue(), "application/zip")},
+            data={"mode": "rule", "defer_process": "true"},
+        )
+        assert created.status_code == 200, created.text
+        body = created.json()
+        assert body["processed"] is False
+        assert body["graph"]["main_rel"] == "main.tex"
+        pid = body["id"]
+        assert c.get(f"/api/projects/{pid}/result").status_code == 404
+
+        started = c.post(f"/api/projects/{pid}/process/start")
+        assert started.status_code == 200
+        for _ in range(200):
+            state = c.get(f"/api/projects/{pid}/process/status").json()
+            if state["status"] in {"done", "error", "cancelled"}:
+                break
+            time.sleep(0.01)
+        assert state["status"] == "done", state
+        assert state["result"]["ok"] is True
+        exported = c.get(f"/api/projects/{pid}/export-folder")
+        assert exported.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(exported.content)) as zf:
+            assert "main.tex" in zf.namelist()
+            assert "my-book/main.tex" not in zf.namelist()
+            assert zf.read("images/pixel.bin") == b"\x00\x01\xff"
+
+
+def test_zip_import_rejects_traversal_and_extreme_compression():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        bad_path = io.BytesIO()
+        with zipfile.ZipFile(bad_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("../outside.tex", "unsafe")
+        response = c.post(
+            "/api/projects/archive",
+            files={"file": ("bad.zip", bad_path.getvalue(), "application/zip")},
+        )
+        assert response.status_code == 400
+        assert "不安全" in response.json()["detail"]
+
+        bomb = io.BytesIO()
+        with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("main.tex", "A" * 1_100_000)
+        response = c.post(
+            "/api/projects/archive",
+            files={"file": ("bomb.zip", bomb.getvalue(), "application/zip")},
+        )
+        assert response.status_code == 400
+        assert "压缩比异常" in response.json()["detail"]
+
+
+def test_background_process_can_pause_preview_resume_and_finish():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        pid = c.post(
+            "/api/projects", json={"text": SAMPLE, "name": "pause-demo", "mode": "rule"}
+        ).json()["id"]
+        entered = threading.Event()
+        original_pipeline = srv.run_pipeline
+
+        def slow_pipeline(*args, **kwargs):
+            callback = kwargs.get("progress_callback")
+            control = kwargs.get("control_callback")
+            if callback:
+                callback("test-wait", 0.12, "正在测试安全暂停点", {
+                    "preview": args[0], "preview_label": "测试草稿"
+                })
+            entered.set()
+            for _ in range(100):
+                time.sleep(0.005)
+                if control:
+                    control()
+            return original_pipeline(*args, **kwargs)
+
+        with patch.object(srv, "run_pipeline", slow_pipeline):
+            assert c.post(f"/api/projects/{pid}/process/start").status_code == 200
+            assert entered.wait(1)
+            assert c.post(f"/api/projects/{pid}/process/pause").status_code == 200
+            for _ in range(100):
+                state = c.get(f"/api/projects/{pid}/process/status").json()
+                if state["status"] == "paused":
+                    break
+                time.sleep(0.01)
+            assert state["status"] == "paused", state
+            preview = c.get(f"/api/projects/{pid}/process/preview")
+            assert preview.status_code == 200 and "documentclass" in preview.text
+            assert c.post(f"/api/projects/{pid}/process/resume").status_code == 200
+            for _ in range(300):
+                state = c.get(f"/api/projects/{pid}/process/status").json()
+                if state["status"] in {"done", "error", "cancelled"}:
+                    break
+                time.sleep(0.01)
+        assert state["status"] == "done", state
+        assert c.get(f"/api/projects/{pid}/result").status_code == 200
 
 
 def test_batch_reject_and_reset():

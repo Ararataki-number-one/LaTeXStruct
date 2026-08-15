@@ -93,6 +93,8 @@ def run_review(
     ambiguous: List[dict],
     ai_config: AIConfig,
     mode: str,
+    progress_callback=None,
+    control_callback=None,
 ):
     """复查主循环：复查 → 修正决策 → 重新打补丁（上限 review_max_rounds 轮）。
 
@@ -106,7 +108,11 @@ def run_review(
         ambiguous.append({"candidate_id": d.candidate_id, "line": 1, "reason": reason})
 
     system = build_review_system(build_meta(doc, ctx, mode))
-    for _ in range(max(1, ai_config.review_max_rounds)):
+    max_rounds = max(1, ai_config.review_max_rounds)
+    completed_batches = 0
+    for round_index in range(max_rounds):
+        if control_callback:
+            control_callback()
         # 成本优化：规则模式决策（双语合并/习题转换/导言区等）是确定性编辑，不送复查；
         # 但存在歧义/漏报清单时仍需复核（missed-extra 反悔）
         to_review = [ap for ap in applied if ap.decision.source != "rule"]
@@ -119,17 +125,28 @@ def run_review(
         if not batches and ambiguous:
             batches = [[]]  # 无 AI 补丁但有漏报清单时，仍发一次复核
         for batch in batches:
+            if control_callback:
+                control_callback()
             user = build_review_user(result_lines, build_summaries(batch), ambiguous,
                                      ai_config.context_lines)
             obj, usage = client.chat_json(system, user)
-            usage_total["model"] = getattr(client, "cfg", None) and client.cfg.model or ""
-            for k, v in usage.items():
-                if isinstance(v, (int, float)):
-                    usage_total[k] = usage_total.get(k, 0) + v
+            model = getattr(client, "cfg", None) and client.cfg.model or ""
+            from ..pricing import add_usage
+
+            add_usage(usage_total, usage, model)
             total = len(result_lines)
             findings, invalid = parse_findings(obj, {d.candidate_id for d in decisions}, total)
             round_findings.extend(findings)
             invalid_all.extend(invalid)
+            completed_batches += 1
+            if progress_callback:
+                progress_callback({
+                    "round": round_index + 1,
+                    "rounds": max_rounds,
+                    "batch": completed_batches,
+                    "usage": dict(usage_total),
+                    "findings": len(all_findings) + len(round_findings),
+                })
         all_findings.extend(round_findings)
         actionable = [f for f in round_findings if f["verdict"] != "ok"]
         if not actionable:

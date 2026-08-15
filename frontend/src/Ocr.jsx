@@ -103,14 +103,31 @@ export default function Ocr({ onImport }) {
             <option value={200}>200 DPI</option>
             <option value={300}>300 DPI</option>
           </select>
-          <input placeholder="视觉模型（需支持图片输入，留空用设置）" value={model} onChange={(e) => setModel(e.target.value)} />
           <button className="primary" disabled={job?.status === "running"} onClick={start}>开始转写</button>
         </div>
+        <details className="advanced">
+          <summary>临时指定其他视觉模型（一般无需填写）</summary>
+          <div className="row">
+            <input placeholder="视觉模型 ID；留空使用设置页选择的模型" value={model} onChange={(e) => setModel(e.target.value)} />
+          </div>
+        </details>
         {job && (
-          <div className="status">
-            状态：{job.phase || job.status} · 完成 {job.done || 0}/{job.total || 0} 页
-            {` · ${Math.round((job.progress || 0) * 100)}% · tokens ${job.usage?.total_tokens || 0}`}
-            {job.error && ` · 错误：${job.error}`}
+          <div className={`process-card process-${job.status}`}>
+            <div className="process-summary">
+              <div><b>{job.phase || job.status}</b><span>完成 {job.done || 0}/{job.total || 0} 页</span></div>
+              <strong>{Math.round((job.progress || 0) * 100)}%</strong>
+            </div>
+            <div className="process-track" role="progressbar" aria-label="OCR 进度"
+              aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round((job.progress || 0) * 100)}>
+              <span style={{ width: `${Math.round((job.progress || 0) * 100)}%` }} />
+            </div>
+            <div className="process-metrics">
+              <span>Token：{(job.cost?.total_tokens || job.usage?.total_tokens || 0).toLocaleString()}</span>
+              <span>费用：{job.cost?.estimated_cost_cny == null ? "暂无估价" :
+                `约 ¥${job.cost.estimated_cost_cny < 0.01 ? job.cost.estimated_cost_cny.toFixed(4) : job.cost.estimated_cost_cny.toFixed(2)}`}</span>
+              {job.page > 0 && <span>正在处理第 {job.page} 页</span>}
+            </div>
+            {job.error && <p className="process-error-message">{job.error}</p>}
           </div>
         )}
         <div className="status">{msg}</div>

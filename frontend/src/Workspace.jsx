@@ -21,12 +21,18 @@ const KINDS = [
   ["ambiguous", "歧义"],
 ];
 
+const ACTIVE_TASKS = new Set(["running", "pausing", "paused", "cancelling", "committing"]);
+const TERMINAL_TASKS = new Set(["done", "error", "cancelled"]);
+
 export default function Workspace({ pid }) {
   const [info, setInfo] = useState(null);
   const [source, setSource] = useState("");
   const [result, setResult] = useState("");
   const [report, setReport] = useState("");
   const [status, setStatus] = useState("");
+  const [job, setJob] = useState(null);
+  const [livePreview, setLivePreview] = useState("");
+  const [pollGeneration, setPollGeneration] = useState(0);
   const [decisions, setDecisions] = useState([]);
   const [verification, setVerification] = useState(null);
   const [graph, setGraph] = useState(null);
@@ -48,13 +54,25 @@ export default function Workspace({ pid }) {
 
   const load = async () => {
     if (!pid) return;
-    setSource(await apiText(`/api/projects/${pid}/source`));
+    let project = null;
     try {
-      setResult(await apiText(`/api/projects/${pid}/result`));
-      setReport(await apiText(`/api/projects/${pid}/report`));
+      project = await (await api(`/api/projects/${pid}`)).json();
+      setInfo(project);
     } catch {
+      setInfo(null);
+    }
+    setSource(await apiText(`/api/projects/${pid}/source`));
+    if (project?.has_result) {
+      try {
+        setResult(await apiText(`/api/projects/${pid}/result`));
+        setReport(await apiText(`/api/projects/${pid}/report`));
+      } catch {
+        setResult("");
+        setReport("结果读取失败，请重新分析；原始内容仍已保留。");
+      }
+    } else {
       setResult("");
-      setReport("尚未处理。点击「运行结构化整理」。");
+      setReport("尚未分析。点击上方「开始分析」。");
     }
     try {
       const d = await (await api(`/api/projects/${pid}/decisions`)).json();
@@ -73,11 +91,6 @@ export default function Workspace({ pid }) {
     } catch {
       setGraph(null);
     }
-    try {
-      setInfo(await (await api(`/api/projects/${pid}`)).json());
-    } catch {
-      setInfo(null);
-    }
   };
 
   useEffect(() => {
@@ -87,9 +100,55 @@ export default function Workspace({ pid }) {
       setReviewed(new Set());
     }
     setSelected(null);
+    setJob(null);
+    setLivePreview("");
     undoStack.current = [];
     load();
   }, [pid]);
+
+  useEffect(() => {
+    if (!pid) return undefined;
+    let stopped = false;
+    let timer = null;
+    let terminalLoaded = false;
+    const poll = async () => {
+      try {
+        const state = await (await api(`/api/projects/${pid}/process/status`)).json();
+        if (stopped) return;
+        setJob(state);
+        if (state.preview_ready && ACTIVE_TASKS.has(state.status)) {
+          try {
+            const preview = await apiText(`/api/projects/${pid}/process/preview`);
+            if (!stopped) setLivePreview(preview);
+          } catch {}
+        }
+        if (ACTIVE_TASKS.has(state.status)) {
+          timer = window.setTimeout(poll, 650);
+        } else if (TERMINAL_TASKS.has(state.status) && !terminalLoaded) {
+          terminalLoaded = true;
+          setLivePreview("");
+          await load();
+          if (state.status === "done") {
+            const summary = state.result || {};
+            setStatus((summary.ok ? "安全检查通过" : "安全检查未通过，已回退并禁止导出") +
+              `：补丁 ${summary.applied || 0} · 拒绝 ${summary.rejected || 0} · 歧义 ${summary.ambiguous || 0}` +
+              (summary.degraded ? "（AI 已降级为规则）" : ""));
+          } else if (state.status === "cancelled") {
+            setStatus("任务已取消；未验证草稿未保存，原项目保持不变");
+          } else {
+            setStatus("处理未完成：" + (state.error || "请重试或检查 AI 设置"));
+          }
+        }
+      } catch (error) {
+        if (!stopped) setStatus("无法读取任务进度：" + error.message);
+      }
+    };
+    poll();
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [pid, pollGeneration]);
 
   useEffect(() => {
     try {
@@ -111,16 +170,27 @@ export default function Workspace({ pid }) {
   };
 
   const runProcess = async () => {
-    setStatus("处理中……");
+    setStatus("正在启动可暂停的后台任务……");
     try {
-      const r = await (await api(`/api/projects/${pid}/process`, { method: "POST" })).json();
+      const state = await (await api(`/api/projects/${pid}/process/start`, { method: "POST" })).json();
       setReviewed(new Set());
-      setStatus((r.ok ? "安全检查通过" : "安全检查未通过，已回退并禁止导出") +
-        `：补丁 ${r.applied} · 拒绝 ${r.rejected} · 歧义 ${r.ambiguous}` +
-        (r.degraded ? "（AI 降级规则）" : ""));
-      await load();
+      setJob(state);
+      setLivePreview(source);
+      setStatus("后台处理已开始，可随时暂停或取消");
+      setPollGeneration((value) => value + 1);
     } catch (e) {
       setStatus("失败：" + e.message);
+    }
+  };
+
+  const controlTask = async (action) => {
+    try {
+      const state = await (await api(`/api/projects/${pid}/process/${action}`, { method: "POST" })).json();
+      setJob(state);
+      setStatus(action === "pause" ? "已请求安全暂停" : action === "resume" ? "已继续处理" : "正在安全取消");
+      setPollGeneration((value) => value + 1);
+    } catch (error) {
+      setStatus("操作失败：" + error.message);
     }
   };
 
@@ -155,8 +225,15 @@ export default function Workspace({ pid }) {
   const safeToExport = verification?.safe_to_export === true;
   const reviewComplete = applied.length === 0 || reviewedCount === applied.length;
   const canExport = safeToExport && reviewComplete;
-  const largeDiff = source.length + result.length > 1_000_000;
+  const taskActive = ACTIVE_TASKS.has(job?.status);
+  const displayResult = taskActive && livePreview ? livePreview : result;
+  const largeDiff = source.length + displayResult.length > 1_000_000;
   const showDiffEditor = view === "side" && !largeDiff;
+  const tokenTotal = job?.cost?.total_tokens || 0;
+  const estimatedCny = job?.cost?.estimated_cost_cny;
+  const priceText = estimatedCny == null
+    ? (tokenTotal ? "自定义/未知模型，暂不估价" : "尚无模型费用")
+    : `约 ¥${estimatedCny < 0.01 ? estimatedCny.toFixed(4) : estimatedCny.toFixed(2)}`;
 
   const select = (d, scroll = true) => {
     setSelected(d);
@@ -206,6 +283,10 @@ export default function Workspace({ pid }) {
   };
 
   const reject = async (d) => {
+    if (ACTIVE_TASKS.has(job?.status)) {
+      setStatus("请等待当前处理完成或先取消任务，再修改审阅结论");
+      return;
+    }
     const ok = await rerun(`/api/projects/${pid}/decisions/${d.candidate_id}/reject`, { method: "POST" });
     if (ok) undoStack.current.push(d.candidate_id);
   };
@@ -238,7 +319,7 @@ export default function Workspace({ pid }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, flat, view]);
+  }, [selected, flat, view, job?.status]);
 
   if (!pid) return <section className="card">请在「项目」页选择或创建一个项目。</section>;
 
@@ -249,14 +330,30 @@ export default function Workspace({ pid }) {
     <div className="workspace3">
       <section className="card toolbar">
         <b>{info ? `${info.name}（${info.mode}）` : pid}</b>
-        <button className="primary" onClick={runProcess}>运行结构化整理</button>
+        <button className="primary" disabled={taskActive} onClick={runProcess}>
+          {taskActive ? "正在处理" : result ? "重新分析" : "开始分析"}
+        </button>
+        {job?.status === "paused" ? (
+          <button className="primary" onClick={() => controlTask("resume")}>▶ 继续</button>
+        ) : taskActive && job?.can_pause ? (
+          <button onClick={() => controlTask("pause")}>Ⅱ 暂停</button>
+        ) : null}
+        {taskActive && job?.can_cancel !== false && (
+          <button
+            className="danger-button"
+            disabled={job?.status === "cancelling"}
+            onClick={() => { if (confirm("取消本次处理？已验证的旧结果会保留，当前草稿不会保存。")) controlTask("cancel"); }}
+          >
+            取消
+          </button>
+        )}
         {canExport ? (
           <a href={`/api/projects/${pid}/export`} download="result.tex"><button>导出 result.tex</button></a>
         ) : <button disabled title="需先通过安全检查并完成审阅">导出 result.tex</button>}
         {graph && (canExport ? (
           <a href={`/api/projects/${pid}/export-folder`}><button>导出文件夹 zip</button></a>
         ) : <button disabled title="需先通过安全检查并完成审阅">导出文件夹 zip</button>)}
-        <button onClick={() => { if (confirm("撤销全部拒绝并重新应用所有修改？")) rerun(`/api/projects/${pid}/decisions/reset`, { method: "POST" }); }}>
+        <button disabled={taskActive} onClick={() => { if (confirm("撤销全部拒绝并重新应用所有修改？")) rerun(`/api/projects/${pid}/decisions/reset`, { method: "POST" }); }}>
           撤销全部拒绝
         </button>
         <span className="progress">
@@ -296,6 +393,46 @@ export default function Workspace({ pid }) {
           </span>
         )}
         <span className="status">{status}</span>
+        {job && job.status !== "idle" && (
+          <div className={`process-card process-${job.status}`}>
+            <div className="process-summary">
+              <div>
+                <b>{job.status === "paused" ? "已暂停" : job.status === "done" ? "处理完成" :
+                  job.status === "error" ? "处理未完成" : job.status === "cancelled" ? "已取消" :
+                  job.status === "pausing" ? "正在安全暂停" : job.status === "cancelling" ? "正在取消" :
+                  job.status === "committing" ? "正在安全保存" : "正在处理"}</b>
+                <span>{job.phase_label || job.message}</span>
+              </div>
+              <strong>{Math.round((job.progress || 0) * 100)}%</strong>
+            </div>
+            <div
+              className="process-track"
+              role="progressbar"
+              aria-label="项目处理进度"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow={Math.round((job.progress || 0) * 100)}
+            >
+              <span style={{ width: `${Math.round((job.progress || 0) * 100)}%` }} />
+            </div>
+            <div className="process-metrics">
+              <span>Token：{tokenTotal.toLocaleString()}</span>
+              <span>费用：{priceText}</span>
+              <span>实时预览：{job.preview_label || "等待草稿"}</span>
+              {job.completed_candidates && <span>已判断：{job.completed_candidates.length} 项</span>}
+            </div>
+            {job.events?.length > 0 && (
+              <ol className="process-events">
+                {job.events.slice(-5).map((event, index) => (
+                  <li key={`${event.at}-${index}`} className={index === job.events.slice(-5).length - 1 ? "current" : ""}>
+                    {event.message}
+                  </li>
+                ))}
+              </ol>
+            )}
+            {job.error && <p className="process-error-message">{job.error}。请检查 AI 设置后重试。</p>}
+          </div>
+        )}
         {verification?.checks && (
           <span className={`safety ${safeToExport ? "safe" : "unsafe"}`}>
             安全检查：{verification.checks.map((c) =>
@@ -333,10 +470,16 @@ export default function Workspace({ pid }) {
           {!flat.length && <p className="muted">没有匹配当前过滤条件的决策。</p>}
         </aside>
         <main className="col diff">
+          {taskActive && (
+            <div className="live-preview-label">
+              <span className="live-dot" /> 实时成果：{job?.preview_label || "正在准备草稿"}
+              <small>未通过安全检查前仅供查看，不会覆盖正式结果</small>
+            </div>
+          )}
           {showDiffEditor ? (
             <DiffEditor
               original={source}
-              modified={result}
+              modified={displayResult}
               language="latex"
               onMount={(ed) => (editorRef.current = ed)}
               options={{ readOnly: true, minimap: { enabled: false }, renderSideBySide: true,
@@ -345,7 +488,7 @@ export default function Workspace({ pid }) {
             />
           ) : (
             <Editor
-              value={view === "orig" ? source : result}
+              value={view === "orig" ? source : displayResult}
               language="latex"
               onMount={(ed) => (editorRef.current = ed)}
               options={{ readOnly: true, minimap: { enabled: false } }}
@@ -378,13 +521,13 @@ export default function Workspace({ pid }) {
                   <button className="primary" onClick={() => accept(selected)}>A 确认保留</button>
                 )}
                 {selApplied && (
-                  <button onClick={() => reject(selected)}>R 拒绝此修改</button>
+                  <button disabled={taskActive} onClick={() => reject(selected)}>R 拒绝此修改</button>
                 )}
                 {selApplied && (
                   <button onClick={() => acceptSimilar(selected)}>同类全部保留</button>
                 )}
                 {selected.status === "rejected" && (
-                  <button onClick={() => rerun(`/api/projects/${pid}/decisions/${selected.candidate_id}/unreject`, { method: "POST" })}>
+                  <button disabled={taskActive} onClick={() => rerun(`/api/projects/${pid}/decisions/${selected.candidate_id}/unreject`, { method: "POST" })}>
                     撤销拒绝（恢复此修改）
                   </button>
                 )}

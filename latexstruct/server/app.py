@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import difflib
 import base64
+import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -24,18 +27,21 @@ from ..config import AppConfig, load_config, save_config
 from ..core.pipeline import run_pipeline
 from ..providers import list_provider_presets
 from ..store import ProjectStore
+from .process_jobs import ProcessJobManager, ProcessingCancelled
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 _store: Optional[ProjectStore] = None
 _config: Optional[AppConfig] = None
 _ocr_jobs: Dict[str, dict] = {}
+_process_jobs = ProcessJobManager()
 
 MAX_FOLDER_FILES = 1000
 MAX_FOLDER_FILE_BYTES = 25 * 1024 * 1024
 MAX_FOLDER_TOTAL_BYTES = 100 * 1024 * 1024
 MAX_OCR_UPLOAD_BYTES = 100 * 1024 * 1024
 OCR_JOB_TTL_SECONDS = 24 * 60 * 60
+MAX_ZIP_COMPRESSION_RATIO = 200
 
 
 def _decode_folder_files(raw_files: dict) -> Dict[str, bytes]:
@@ -71,6 +77,70 @@ def _decode_folder_files(raw_files: dict) -> Dict[str, bytes]:
             raise ValueError("项目总大小超过 100 MB，请精简后重试")
         out[rel] = data
     return out
+
+
+def _decode_zip_files(upload: bytes) -> Dict[str, bytes]:
+    """安全解包浏览器上传的 ZIP，并自动去掉唯一的外层目录。"""
+    from ..core.project import safe_project_relpath
+
+    if not upload:
+        raise ValueError("ZIP 文件为空")
+    if len(upload) > MAX_FOLDER_TOTAL_BYTES:
+        raise ValueError("ZIP 文件超过 100 MB，请精简后重试")
+    try:
+        with zipfile.ZipFile(io.BytesIO(upload), "r") as archive:
+            members = archive.infolist()
+            if len(members) > MAX_FOLDER_FILES + 200:
+                raise ValueError(f"ZIP 内文件过多（最多 {MAX_FOLDER_FILES} 个）")
+            raw: list[tuple[str, bytes]] = []
+            total = 0
+            seen = set()
+            for member in members:
+                rel = safe_project_relpath(member.filename)
+                if member.is_dir():
+                    continue
+                parts = rel.split("/")
+                if "__MACOSX" in parts or parts[-1] in {".DS_Store", "Thumbs.db"}:
+                    continue
+                if member.flag_bits & 0x1:
+                    raise ValueError(f"ZIP 含加密文件，无法安全导入：{rel}")
+                if member.file_size > MAX_FOLDER_FILE_BYTES:
+                    raise ValueError(f"ZIP 内单个文件过大（上限 25 MB）：{rel}")
+                total += member.file_size
+                if total > MAX_FOLDER_TOTAL_BYTES:
+                    raise ValueError("ZIP 解压后超过 100 MB，请精简后重试")
+                if (
+                    member.file_size > 1_000_000
+                    and member.compress_size > 0
+                    and member.file_size / member.compress_size > MAX_ZIP_COMPRESSION_RATIO
+                ):
+                    raise ValueError(f"ZIP 内文件压缩比异常，已阻止导入：{rel}")
+                key = rel.casefold()
+                if key in seen:
+                    raise ValueError(f"ZIP 中存在重复或大小写冲突路径：{rel}")
+                seen.add(key)
+                raw.append((rel, archive.read(member)))
+    except zipfile.BadZipFile:
+        raise ValueError("ZIP 文件已损坏或格式不正确") from None
+    if not raw:
+        raise ValueError("ZIP 中没有可导入的项目文件")
+    first = {rel.split("/", 1)[0].casefold() for rel, _ in raw}
+    strip_wrapper = len(first) == 1 and all("/" in rel for rel, _ in raw)
+    out = {}
+    for rel, data in raw:
+        clean = rel.split("/", 1)[1] if strip_wrapper else rel
+        clean = safe_project_relpath(clean)
+        if clean.casefold() in {key.casefold() for key in out}:
+            raise ValueError(f"去除 ZIP 外层目录后出现重复路径：{clean}")
+        out[clean] = data
+    if len(out) > MAX_FOLDER_FILES:
+        raise ValueError(f"项目文件过多（最多 {MAX_FOLDER_FILES} 个）")
+    return out
+
+
+def _safe_task_error(exc: Exception) -> str:
+    text = str(exc) or exc.__class__.__name__
+    return re.sub(r"sk-(?:ws-|sp-)?[A-Za-z0-9._-]{8,}", "[已隐藏]", text)[:500]
 
 
 def _cleanup_ocr_jobs(now: float = None):
@@ -147,6 +217,7 @@ class FolderRequest(BaseModel):
     mode: str = "rule"
     template: str = ""
     pack: str = ""
+    defer_process: bool = False
 
 
 class BatchRejectRequest(BaseModel):
@@ -243,7 +314,18 @@ def create_app() -> FastAPI:
 
     @app.get("/api/projects")
     def list_projects():
-        return get_store().list()
+        projects = get_store().list()
+        for project in projects:
+            job = _process_jobs.latest(project["id"])
+            if job and job.get("status") in {
+                "running", "pausing", "paused", "cancelling", "committing"
+            }:
+                project["processing"] = {
+                    "status": job["status"],
+                    "progress": job.get("progress", 0),
+                    "message": job.get("message", ""),
+                }
+        return projects
 
     @app.post("/api/projects")
     def create_project(req: CreateRequest):
@@ -252,12 +334,11 @@ def create_app() -> FastAPI:
         pid = get_store().create(req.text, req.name, req.mode, req.template, req.pack)
         return {"id": pid}
 
-    @app.post("/api/projects/folder")
-    def import_folder(req: FolderRequest):
-        """文件夹导入：写入临时目录 → 多文件项目处理 → 返回项目与依赖图。"""
-        from ..core.project import discover_main, process_project
+    def _import_project_files(files: Dict[str, bytes], name: str, mode: str,
+                              template: str, pack: str, defer_process: bool):
+        """统一的文件夹/ZIP 导入；原始资源逐字节保存在项目副本中。"""
+        from ..core.project import discover_main, flatten_project, process_project
 
-        files = _decode_folder_files(req.files)
         tmpdir = tempfile.mkdtemp(prefix="ls-folder-")
         pid = None
         try:
@@ -268,55 +349,97 @@ def create_app() -> FastAPI:
             main_rel = discover_main(Path(tmpdir))
             if main_rel is None:
                 raise ValueError("文件夹中未找到 .tex 主文件")
-            cfg = get_config()
-            mode = req.mode or "rule"
-            res = process_project(Path(tmpdir), mode=mode, template=req.template or None,
-                                  ai_config=cfg.to_ai_config() if mode == "ai" else None,
-                                  pack=req.pack or None)
-            pr = res.pipeline
+            mode = mode or "rule"
+            if defer_process:
+                flattened, graph_obj = flatten_project(Path(tmpdir), main_rel)
+                pr = None
+                per_file = None
+            else:
+                cfg = get_config()
+                res = process_project(
+                    Path(tmpdir), mode=mode, template=template or None,
+                    ai_config=cfg.to_ai_config() if mode == "ai" else None,
+                    pack=pack or None,
+                )
+                flattened, graph_obj = res.flattened, res.graph
+                pr, per_file = res.pipeline, res.per_file
             # 项目源 = 展开文本（供 diff/决策审阅），原始文件另存本地 zip，导出时
             # 覆盖改动过的 .tex；图片/bib/sty 等二进制资源保持逐字节不变。
             pid = get_store().create(
-                res.flattened, req.name, mode, req.template or "", req.pack or ""
+                flattened, name, mode, template or "", pack or ""
             )
             project_dir = Path(get_store()._dir(pid))
             meta = json.loads((project_dir / "meta.json").read_text(encoding="utf-8"))
             meta["kind"] = "folder"
             meta["original_file_count"] = len(files)
             meta["graph"] = {
-                "main_rel": res.graph.main_rel,
-                "files": res.graph.files,
-                "missing": res.graph.missing,
-                "cycles": res.graph.cycles,
+                "main_rel": graph_obj.main_rel,
+                "files": graph_obj.files,
+                "missing": graph_obj.missing,
+                "cycles": graph_obj.cycles,
             }
             get_store()._write_json(str(project_dir), "meta.json", meta)
-            import zipfile
-
             with zipfile.ZipFile(project_dir / "original-files.zip", "w", zipfile.ZIP_DEFLATED) as zf:
                 for rel, content in files.items():
                     zf.writestr(rel, content)
-            decisions = [_decision_dict(d) for d in pr.decisions]
-            get_store().set_result(
-                pid, pr.export_text, pr.report_md, decisions, {
-                    "verification": pr.verification,
-                    "ambiguous": pr.ambiguous,
-                    "applied": [],
-                    "rejected": [],
-                    "ai_notes": pr.ai_notes,
-                    "review": {k: v for k, v in pr.review.items() if k != "decisions"},
-                    "items": pr.decision_items,
-                    "per_file": res.per_file,
-                    "decision_cache": decisions,
-                }
-            )
-            return {"id": pid, "graph": meta["graph"],
-                    "ok": pr.ok, "applied": len(pr.applied), "ambiguous": len(pr.ambiguous)}
+            if pr is not None:
+                decisions = [_decision_dict(d) for d in pr.decisions]
+                get_store().set_result(
+                    pid, pr.export_text, pr.report_md, decisions, {
+                        "verification": pr.verification,
+                        "ambiguous": pr.ambiguous,
+                        "applied": [],
+                        "rejected": [],
+                        "ai_notes": pr.ai_notes,
+                        "review": {k: v for k, v in pr.review.items() if k != "decisions"},
+                        "items": pr.decision_items,
+                        "per_file": per_file,
+                        "decision_cache": decisions,
+                    }
+                )
+            return {
+                "id": pid,
+                "graph": meta["graph"],
+                "processed": pr is not None,
+                "ok": pr.ok if pr is not None else None,
+                "applied": len(pr.applied) if pr is not None else 0,
+                "ambiguous": len(pr.ambiguous) if pr is not None else 0,
+            }
         except Exception:
             if pid is not None:
                 get_store().delete(pid)
             raise
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @app.post("/api/projects/folder")
+    def import_folder(req: FolderRequest):
+        files = _decode_folder_files(req.files)
+        return _import_project_files(
+            files, req.name, req.mode, req.template, req.pack, req.defer_process
+        )
+
+    @app.post("/api/projects/archive")
+    async def import_archive(
+        file: UploadFile = File(...),
+        name: str = Form(""),
+        mode: str = Form("rule"),
+        template: str = Form(""),
+        pack: str = Form(""),
+        defer_process: bool = Form(True),
+    ):
+        """ZIP 智能导入：安全解包、去外层目录、自动识别主文件。"""
+        filename = file.filename or "project.zip"
+        if Path(filename).suffix.lower() != ".zip":
+            raise HTTPException(400, "请选择 .zip 项目压缩包")
+        upload = await file.read(MAX_FOLDER_TOTAL_BYTES + 1)
+        if len(upload) > MAX_FOLDER_TOTAL_BYTES:
+            raise HTTPException(413, "ZIP 文件超过 100 MB，请精简后重试")
+        files = _decode_zip_files(upload)
+        project_name = name.strip() or Path(filename).stem
+        return _import_project_files(
+            files, project_name, mode, template, pack, defer_process
+        )
 
     @app.get("/api/projects/{pid}/graph")
     def project_graph(pid: str):
@@ -396,6 +519,8 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/projects/{pid}")
     def delete_project(pid: str):
+        if _process_jobs.active(pid):
+            raise HTTPException(409, "项目正在处理；请先取消任务，待安全停止后再删除")
         get_store().delete(pid)
         return {"ok": True}
 
@@ -437,7 +562,8 @@ def create_app() -> FastAPI:
         return FileResponse(target, filename=f"{pid}-structured.tex",
                             media_type="application/x-tex")
 
-    def _run_project(pid: str, exclude: set, reuse_decisions: bool = False):
+    def _run_project(pid: str, exclude: set, reuse_decisions: bool = False,
+                     progress_callback=None, control_callback=None, commit_callback=None):
         p = get_store().get(pid)
         text = get_store().read_source(pid)
         cfg = get_config()
@@ -456,6 +582,8 @@ def create_app() -> FastAPI:
             decisions_override=overrides,
             ambiguous_override=prior.get("ambiguous") if overrides else None,
             ai_notes_override=prior.get("ai_notes") if overrides else None,
+            progress_callback=progress_callback,
+            control_callback=control_callback,
         )
         extra_verification = {}
         if p.get("kind") == "folder":
@@ -512,6 +640,10 @@ def create_app() -> FastAPI:
             }
             for ap in res.applied
         ]
+        if control_callback:
+            control_callback()
+        if commit_callback:
+            commit_callback()
         get_store().set_result(
             pid, res.export_text, res.report_md, decisions, {
                 "verification": res.verification,
@@ -531,13 +663,82 @@ def create_app() -> FastAPI:
             "rejected": len(res.rejected),
             "ambiguous": len(res.ambiguous),
             "degraded": res.verification.get("ai_degraded", False),
+            "usage": res.verification.get("ai_usage", {}),
         }
 
     @app.post("/api/projects/{pid}/process")
     def process(pid: str):
         _ensure(pid)
+        if _process_jobs.active(pid):
+            raise HTTPException(409, "项目已有后台任务；请在进度卡片中暂停、继续或取消")
         meta = json.loads(Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8"))
         return _run_project(pid, set(meta.get("excludes", [])))
+
+    @app.post("/api/projects/{pid}/process/start")
+    def process_start(pid: str):
+        """启动可暂停的后台处理；同一项目最多一个活动任务。"""
+        _ensure(pid)
+        existing = _process_jobs.active(pid)
+        if existing:
+            return _process_jobs.public(existing) | {"already_running": True}
+        meta = json.loads(Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8"))
+        job = _process_jobs.create(pid, get_store().read_source(pid))
+        jid = job["id"]
+
+        def worker():
+            try:
+                processed = _run_project(
+                    pid,
+                    set(meta.get("excludes", [])),
+                    progress_callback=lambda phase, progress, message, data: _process_jobs.update(
+                        jid, phase, progress, message, data
+                    ),
+                    control_callback=lambda: _process_jobs.control(jid),
+                    commit_callback=lambda: _process_jobs.begin_commit(jid),
+                )
+                _process_jobs.complete(jid, processed)
+            except ProcessingCancelled:
+                _process_jobs.cancelled(jid)
+            except Exception as exc:  # noqa: BLE001
+                _process_jobs.fail(jid, _safe_task_error(exc))
+
+        threading.Thread(target=worker, daemon=True, name=f"latexstruct-{jid}").start()
+        return _process_jobs.public(job)
+
+    def _latest_process_job(pid: str):
+        _ensure(pid)
+        job = _process_jobs.latest(pid)
+        if not job:
+            raise HTTPException(404, "该项目还没有处理任务")
+        return job
+
+    @app.get("/api/projects/{pid}/process/status")
+    def process_status(pid: str):
+        _ensure(pid)
+        job = _process_jobs.latest(pid)
+        if not job:
+            return {"pid": pid, "status": "idle", "progress": 0, "preview_ready": False}
+        return _process_jobs.public(job)
+
+    @app.get("/api/projects/{pid}/process/preview")
+    def process_preview(pid: str):
+        job = _latest_process_job(pid)
+        return PlainTextResponse(
+            _process_jobs.preview(job),
+            headers={"X-LaTeXStruct-Task-Status": str(job.get("status", ""))},
+        )
+
+    @app.post("/api/projects/{pid}/process/pause")
+    def process_pause(pid: str):
+        return _process_jobs.public(_process_jobs.request_pause(_latest_process_job(pid)))
+
+    @app.post("/api/projects/{pid}/process/resume")
+    def process_resume(pid: str):
+        return _process_jobs.public(_process_jobs.request_resume(_latest_process_job(pid)))
+
+    @app.post("/api/projects/{pid}/process/cancel")
+    def process_cancel(pid: str):
+        return _process_jobs.public(_process_jobs.request_cancel(_latest_process_job(pid)))
 
     @app.get("/api/projects/{pid}/decisions")
     def decisions(pid: str):
@@ -554,6 +755,8 @@ def create_app() -> FastAPI:
     @app.post("/api/projects/{pid}/decisions/{cid}/reject")
     def reject_decision(pid: str, cid: str):
         _ensure(pid)
+        if _process_jobs.active(pid):
+            raise HTTPException(409, "请等待处理完成或先取消任务，再修改审阅结论")
         meta = json.loads(Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8"))
         excludes = set(meta.get("excludes", []))
         excludes.add(cid)
@@ -567,6 +770,8 @@ def create_app() -> FastAPI:
     def unreject_decision(pid: str, cid: str):
         """撤销对某一项的拒绝：从排除清单移除并重跑（审阅台 Ctrl+Z 的后端）。"""
         _ensure(pid)
+        if _process_jobs.active(pid):
+            raise HTTPException(409, "请等待处理完成或先取消任务，再修改审阅结论")
         meta = json.loads(Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8"))
         excludes = set(meta.get("excludes", []))
         excludes.discard(cid)
@@ -580,6 +785,8 @@ def create_app() -> FastAPI:
     def reject_batch(pid: str, req: BatchRejectRequest):
         """批量拒绝（Accept-All-Similar 的逆操作：拒绝同类其余修改）。"""
         _ensure(pid)
+        if _process_jobs.active(pid):
+            raise HTTPException(409, "请等待处理完成或先取消任务，再修改审阅结论")
         meta = json.loads(Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8"))
         excludes = set(meta.get("excludes", [])) | set(req.cids)
         meta["excludes"] = sorted(excludes)
@@ -592,6 +799,8 @@ def create_app() -> FastAPI:
     def reset_decisions(pid: str):
         """撤销全部拒绝：清空 excludes 并重跑。"""
         _ensure(pid)
+        if _process_jobs.active(pid):
+            raise HTTPException(409, "请等待处理完成或先取消任务，再修改审阅结论")
         meta = json.loads(Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8"))
         meta["excludes"] = []
         Path(get_store()._dir(pid), "meta.json").write_text(
@@ -719,6 +928,7 @@ def create_app() -> FastAPI:
                 png = image_file.read()
             for attempt in range(1, max_attempts + 1):
                 page["attempts"] = page.get("attempts", 0) + 1
+                client.last_usage = {}
                 try:
                     tex = transcribe_page(client, png, page_no)
                     page["tex"] = tex
@@ -738,6 +948,14 @@ def create_app() -> FastAPI:
                         break
                     if attempt >= max_attempts:
                         break
+                finally:
+                    if client.last_usage:
+                        from ..pricing import add_usage, summarize_ai_usage
+
+                        add_usage(
+                            job["usage"], client.last_usage, getattr(client.cfg, "model", "")
+                        )
+                        job["cost"] = summarize_ai_usage({"ocr": job["usage"]})
             page["status"] = "error"
             page["low_conf"] = True
             return False
@@ -780,6 +998,7 @@ def create_app() -> FastAPI:
             )
             client = LLMClient(role)
             job["client"] = client
+            job["model"] = selected_model
             try:
                 if suffix == ".pdf":
                     from ..ocr import _pdf_page_count
@@ -806,9 +1025,6 @@ def create_app() -> FastAPI:
                     _transcribe_one(job, client, page_no, png_path)
                     job["done"] = i + 1
                     job["progress"] = round((i + 1) / max(1, len(page_nos)), 3)
-                    for k, v in (client.last_usage or {}).items():
-                        if isinstance(v, (int, float)):
-                            job["usage"][k] = job["usage"].get(k, 0) + v
                 _merge_job(job)
             except Exception as e:  # noqa: BLE001
                 job["status"] = "error"
@@ -869,9 +1085,6 @@ def create_app() -> FastAPI:
         job["status"] = "running"
         job["phase"] = f"重试第 {n} 页"
         ok = job["_transcribe_one"](job, client, n, page["png"])
-        for k, v in (client.last_usage or {}).items():
-            if isinstance(v, (int, float)):
-                job["usage"][k] = job["usage"].get(k, 0) + v
         job["_merge_job"](job)
         return {"ok": ok, "page": n, "status": job["status"]}
 

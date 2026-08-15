@@ -19,11 +19,12 @@ LaTeX 数学书结构化整理本地客户端（Windows 优先，安装版 + 主
   生成自签证书签名（仅本机信任）。**消除 SmartScreen 警告需购买 EV/OV 代码签名证书**
   （如 DigiCert/Sectigo），拿到 pfx 后按上述方式配置即可；
 - 安装器界面默认**简体中文**（`packaging/installer.iss` 使用官方 ChineseSimplified 语言包）；
-- 依赖 DeepSeek（或任意 OpenAI 兼容端点）API Key 才启用 AI 模式；无 Key 自动降级规则模式。
+- AI 设置默认只需选择平台并填写一次 API Key；Qwen 可同时用于文字判断、复查和 OCR，
+  DeepSeek 用于文字判断/复查；无 Key 时 AI 模式自动降级规则模式。
 
 ## Qwen 视觉模型配置
 
-截至 2026-08-14，阿里云 Model Studio 已正式提供 `qwen3.7-flash`：它是支持
+截至 2026-08-15，阿里云 Model Studio 已正式提供 `qwen3.7-flash`：它是支持
 图片、文本和视频输入的 Qwen3.7 原生视觉 Flash 模型。LaTeXStruct 已将它作为首选
 视觉预设，同时保留 `qwen3-vl-flash`、`qwen3.6-flash` 和 `qwen3.7-plus` 兼容选项。
 调用使用 OpenAI 兼容 Chat Completions 的 `image_url` 格式，本地图片以 Base64 Data URL
@@ -45,8 +46,9 @@ workspace 专属 API Host，按控制台值覆盖即可：
 $env:LATEXSTRUCT_OCR_BASE_URL = "https://<WorkspaceId>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 ```
 
-也可以在「AI 设置 → OCR 视觉模型」选择 Qwen 预设，开启「系统凭据管理器」后再输入
-新 Key；密钥会存入 Windows 凭据管理器，`config.json` 只留占位符。环境变量优先，
+也可以直接在「设置」选择“阿里云百炼 Qwen”，只填写一次新 Key，再分别切换结构判断、
+AI 复查与 OCR 模型；开启「系统凭据管理器」后，密钥会存入 Windows 凭据管理器，
+`config.json` 只留占位符。环境变量优先，
 且普通设置保存不会把环境变量 Key 写入磁盘或凭据管理器。
 
 官方依据：[Qwen3.7-Flash 型号与能力](https://www.alibabacloud.com/help/en/model-studio/qwen3-7-flash)、
@@ -56,23 +58,28 @@ $env:LATEXSTRUCT_OCR_BASE_URL = "https://<WorkspaceId>.cn-beijing.maas.aliyuncs.
 ## 发布新版本（全自动）
 
 ```powershell
-# 1) 只改 latexstruct/_version.py 的 __version__
+# 1) 修改 latexstruct/_version.py 后同步生成元数据
+python packaging/sync_version.py --version 1.1.1
 # 2) 提交并打 tag 推送 → CI 自动：测试 → 构建 exe → 构建安装器 → 发布 Release
 git add -A
-git commit -m "release: v1.0.1"
+git commit -m "release: v1.1.1"
 git push
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.1.1
+git push origin v1.1.1
 # 3) 已安装客户端下次启动自动提示更新
 ```
 
-## 当前状态（v1.0.0 稳定版，功能冻结）
+## 当前状态（v1.1.0 工作流打磨版，能力边界仍冻结）
 
 - 核心流水线已具备解析、扫描、保守决策、可逆补丁和统一安全检查；正文、数学、
   label/ref、图片路径、环境、花括号、项目文件集合与可选编译对比共同决定能否导出；
 - 审阅工作台支持逐项接受/拒绝、上一项/下一项、筛选、低置信度提示、撤销和源码定位；
   审阅状态变化复用已有决策，不重复发起 AI 调用；
 - 多文件项目保留原始二进制资源，并校验 `input/include` 依赖、文件数量和导出安全门；
+- `.tex`、项目文件夹与 ZIP 均可拖拽导入；ZIP 自动去外层目录并识别主文件，导入完成后
+  再由用户明确启动分析；
+- 分阶段进度卡显示当前动作、实时草稿、Token 与约人民币费用；处理任务支持安全暂停、
+  继续和取消，未验证草稿永不写入正式结果；
 - OCR 保持“原始逐页转写 → 人工检查/失败重试 → 结构化流水线”分层，部分失败不会伪装成功；
 - Windows 凭据管理器开启后，配置文件只存占位符；凭据写入失败会中止保存，不会静默
   降级为明文。未开启时，界面会明确提示密钥保存在本机配置文件中；
@@ -118,7 +125,7 @@ latexstruct/
 │   ├── generate_icon.py          # 图标生成（纯标准库）
 │   └── run.py                    # 打包入口
 ├── scripts/build.ps1             # 本地构建脚本
-├── tests/                        # 18 个测试套件 + 合成/真实摘录语料
+├── tests/                        # 20 个测试套件 + 合成/真实摘录语料
 ├── tools/                        # 真实书稿摸底/抽查脚本
 ├── requirements.txt
 └── pyproject.toml
@@ -138,11 +145,13 @@ python -m latexstruct --port 8765     # 指定端口
 
 ## 使用流程
 
-1. **导入项目**：粘贴单个 `.tex`，或选择完整项目文件夹；
-2. **分析与审阅**：运行结构化整理，逐项查看 diff、置信度和原因，接受或拒绝修改；
+1. **导入项目**：拖入/选择单个 `.tex`、完整项目文件夹或 ZIP；系统自动识别主文件；
+2. **分析与审阅**：开始分析后可查看当前阶段、实时草稿、Token/费用，也可暂停、继续或
+   取消；完成后逐项查看 diff、置信度和原因，接受或拒绝修改；
 3. **应用与验证**：只有全部应用项完成审阅且统一安全检查通过时，才允许导出结果；
 4. **OCR 导入**：先逐页取得并保留原始 OCR，处理失败页，再导入结构化审阅；
-5. **设置**：配置决策/复查模型（默认 DeepSeek）与 OCR 视觉模型；未开启凭据管理器时，
+5. **设置**：新用户选择 DeepSeek 或 Qwen、填写一次 Key 后即可切换各角色模型；Base URL、
+   分角色 Key 与自定义模型收在高级设置。未开启凭据管理器时，
    Key 保存在本机 `%APPDATA%\LaTeXStruct\config.json`，开启后改存
    Windows 凭据管理器（配置文件仅占位符）；也可用环境变量
    `LATEXSTRUCT_DECIDE_KEY` / `LATEXSTRUCT_REVIEW_KEY`；OCR 还支持

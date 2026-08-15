@@ -158,7 +158,7 @@ def transcribe_page(client: LLMClient, png_bytes: bytes, page_no: int) -> str:
         )):
             raise LLMError(
                 f"{msg}｜当前模型可能不支持图片输入；Qwen 视觉 Flash 的正式标识是 "
-                "qwen3-vl-flash（当前推荐低延迟型号为 qwen3.6-flash）"
+                "qwen3.7-flash（推荐）或 qwen3-vl-flash"
             ) from None
         raise
     text = _clean_page_output(raw)

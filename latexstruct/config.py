@@ -27,10 +27,10 @@ CONFIG_PATH = os.path.join(default_data_dir(), "config.json")
 @dataclass
 class AppConfig:
     decide_base_url: str = "https://api.deepseek.com"
-    decide_model: str = "deepseek-chat"
+    decide_model: str = "deepseek-v4-flash"
     decide_api_key: str = ""
     review_base_url: str = "https://api.deepseek.com"
-    review_model: str = "deepseek-reasoner"
+    review_model: str = "deepseek-v4-pro"
     review_api_key: str = ""
     review_enabled: bool = True
     ocr_base_url: str = "https://api.deepseek.com"
@@ -56,7 +56,7 @@ class AppConfig:
 
     def to_ocr_config(self) -> OcrConfig:
         base_url = self.ocr_base_url or self.decide_base_url
-        model = self.ocr_model or self.decide_model or "deepseek-chat"
+        model = self.ocr_model or self.decide_model or "deepseek-v4-flash"
         key = self.ocr_api_key
         if not key and _same_api_host(base_url, self.decide_base_url):
             key = self.decide_api_key
@@ -102,6 +102,13 @@ def load_config(backend: KeystoreBackend | None = None) -> AppConfig:
     for k in asdict(cfg):
         if k in data and k not in ("_keyring_resolved", "_env_resolved"):
             setattr(cfg, k, data[k])
+    # DeepSeek 于 2026-07-24 退役旧别名。无感迁移，避免用户 Key 正确却收到模型不存在。
+    legacy_models = {
+        "deepseek-chat": "deepseek-v4-flash",
+        "deepseek-reasoner": "deepseek-v4-pro",
+    }
+    cfg.decide_model = legacy_models.get(cfg.decide_model, cfg.decide_model)
+    cfg.review_model = legacy_models.get(cfg.review_model, cfg.review_model)
     # keyring 占位符解析回真实密钥（不可用时留空，不崩溃）
     for k in KEY_FIELDS:
         if getattr(cfg, k) == PLACEHOLDER:

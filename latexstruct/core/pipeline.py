@@ -202,7 +202,19 @@ def run_pipeline(
     decisions_override: List[Decision] = None,
     ambiguous_override: List[dict] = None,
     ai_notes_override: List[dict] = None,
+    progress_callback=None,
+    control_callback=None,
 ) -> PipelineResult:
+    def control():
+        if control_callback:
+            control_callback()
+
+    def emit(phase: str, progress: float, message: str, **data):
+        control()
+        if progress_callback:
+            progress_callback(phase, progress, message, data)
+
+    emit("prepare", 0.02, "正在准备文档")
     source_newline = detect_newline(text)
     source_text = normalize_newlines(text)
     text = source_text
@@ -210,6 +222,7 @@ def run_pipeline(
     template_applied = False
     template_patches: List[AppliedPatch] = []
     if template == "elegantbook":
+        emit("template", 0.05, "正在检查模板转换")
         from .template import build_template_ops
 
         t_ops, template_notes = build_template_ops(text)
@@ -227,7 +240,9 @@ def run_pipeline(
                     {"line": 1, "reason": f"模板转换编辑校验失败，已跳过：{t_rejected[0].error}"}
                 )
 
+    emit("parse", 0.10, "正在解析 LaTeX 结构")
     doc = parse_latex(text)
+    emit("scan", 0.17, "正在扫描定理、证明与章节候选")
     scan_res = scan(doc, pack)
     ctx = _build_context(doc)
     ambiguous: List[dict] = []
@@ -248,19 +263,47 @@ def run_pipeline(
         ai_candidates = [c for c in scan_res.candidates if c.kind in AI_KINDS]
         client = ai_client or LLMClient((ai_config or AIConfig()).decide)
         try:
+            emit(
+                "decide", 0.24, "AI 正在逐批判断候选结构",
+                candidate_total=len(ai_candidates),
+            )
+
+            def decision_progress(state):
+                ai_usage["decide"] = state.get("usage", {})
+                total = max(1, state.get("total", 0))
+                value = 0.24 + 0.30 * state.get("done", 0) / total
+                emit(
+                    "decide", value,
+                    f"AI 已判断 {state.get('done', 0)}/{state.get('total', 0)} 个候选",
+                    usage={"decide": state.get("usage", {})},
+                    completed_candidates=state.get("decisions", []),
+                    ambiguous=state.get("ambiguous", 0),
+                )
+
             ai_decisions, ai_amb, ai_notes, usage = decide_candidates(
-                client, doc, ctx, ai_candidates, ai_config or AIConfig(), mode
+                client, doc, ctx, ai_candidates, ai_config or AIConfig(), mode,
+                progress_callback=decision_progress,
+                control_callback=control,
             )
             decisions = rule_decisions + ai_decisions
             ambiguous += ai_amb
             ai_usage["decide"] = usage
         except LLMError as e:
+            if client.last_usage:
+                from ..pricing import add_usage
+
+                add_usage(
+                    ai_usage.setdefault("decide", {}),
+                    client.last_usage,
+                    getattr(client.cfg, "model", ""),
+                )
             fallback, amb2 = build_rule_decisions(doc, scan_res, rule_config, kinds=AI_KINDS, pack=pack)
             decisions = rule_decisions + fallback
             ambiguous += amb2
             ai_degraded = True
             ai_notes.append({"candidate_id": "-", "line": 1, "reason": f"AI 不可用，已降级为规则决策：{e}"})
     else:
+        emit("decide", 0.48, "正在用保守规则生成修改建议")
         decisions, ambiguous = build_rule_decisions(doc, scan_res, rule_config, pack=pack)
 
     if not decisions_reused:
@@ -275,6 +318,7 @@ def run_pipeline(
         user_rejected = [d for d in decisions if d.candidate_id in exclude]
         decisions = [d for d in decisions if d.candidate_id not in exclude]  # 单项拒绝（审阅）
 
+    emit("patch", 0.60, "正在生成并校验补丁", decision_total=len(decisions))
     candidates_by_id = {c.id: c for c in scan_res.candidates}
     out, applied, rejected, dropped = _apply_decisions(
         doc, decisions, ctx, ambiguous, candidates_by_id=candidates_by_id
@@ -301,6 +345,21 @@ def run_pipeline(
             for n in ai_notes
         ]
         try:
+            def review_progress(state):
+                ai_usage["review"] = state.get("usage", {})
+                emit(
+                    "review",
+                    0.69 + 0.13 * min(
+                        1, state.get("round", 1) / max(1, state.get("rounds", 1))
+                    ),
+                    f"AI 正在复查第 {state.get('round', 1)} 轮",
+                    usage={
+                        "decide": ai_usage.get("decide", {}),
+                        "review": state.get("usage", {}),
+                    },
+                    review_findings=state.get("findings", 0),
+                )
+
             review_info = run_review(
                 rclient,
                 doc,
@@ -310,6 +369,8 @@ def run_pipeline(
                 review_ambiguous,
                 cfg,
                 mode,
+                progress_callback=review_progress,
+                control_callback=control,
             )
             out = review_info["out"]
             applied = review_info["applied"]
@@ -317,10 +378,27 @@ def run_pipeline(
             decisions = review_info["decisions"]
             ai_usage["review"] = review_info["usage"]
         except LLMError as e:
+            if rclient.last_usage:
+                from ..pricing import add_usage
+
+                add_usage(
+                    ai_usage.setdefault("review", {}),
+                    rclient.last_usage,
+                    getattr(rclient.cfg, "model", ""),
+                )
             review_info = {"error": str(e)}
             ai_notes.append({"candidate_id": "-", "line": 1, "reason": f"AI 复查失败，沿用初次结果：{e}"})
 
     result_text = "\n".join(out)
+    emit(
+        "draft", 0.84, "结构化草稿已生成，正在执行安全检查",
+        preview=result_text,
+        preview_label="未完成安全检查的草稿",
+        applied=len(applied),
+        rejected=len(rejected),
+        ambiguous=len(ambiguous),
+        usage=ai_usage,
+    )
     from .invariants import check_invariants
 
     verification = {
@@ -336,6 +414,7 @@ def run_pipeline(
         "decisions_reused": decisions_reused,
     }
     if compile_check:
+        emit("compile", 0.91, "正在比较编译结果")
         from .compilecheck import compile_latex
 
         verification["compile_before"] = compile_latex(source_text)
@@ -381,6 +460,13 @@ def run_pipeline(
         ai_notes=ai_notes, review=review_info,
         template_notes=template_notes, template_applied=template_applied,
     )
+    emit(
+        "report", 0.97, "安全检查完成，正在生成审阅清单",
+        preview=final_text,
+        preview_label="安全检查通过的结果" if ok else "已安全回退到原文",
+        usage=ai_usage,
+        safe_to_export=ok,
+    )
 
     # 审阅式 UI 决策清单：候选元信息 + 状态
     cand_by_id = {c.id: c for c in scan_res.candidates}
@@ -424,7 +510,7 @@ def run_pipeline(
                 "reason": a.get("reason", ""), "status": "ambiguous",
             })
 
-    return PipelineResult(
+    result = PipelineResult(
         ok=ok,
         original=source_text,
         result=final_text,
@@ -441,3 +527,11 @@ def run_pipeline(
         review=review_info,
         decision_items=decision_items,
     )
+    emit(
+        "done", 1.0, "处理完成",
+        preview=final_text,
+        preview_label="最终结果",
+        usage=ai_usage,
+        safe_to_export=ok,
+    )
+    return result

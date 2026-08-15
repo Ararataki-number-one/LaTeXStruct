@@ -96,6 +96,14 @@ def test_version_resource_sync_rejects_bad_versions():
         pass
     else:
         raise AssertionError("invalid versions must be rejected")
+    package = module.sync_package_data({"name": "demo", "version": "1.0.0"}, "2.0.1")
+    assert package["version"] == "2.0.1"
+    lock = module.sync_package_data(
+        {"version": "1.0.0", "packages": {"": {"version": "1.0.0"}}},
+        "2.0.1",
+        lock=True,
+    )
+    assert lock["version"] == "2.0.1" and lock["packages"][""]["version"] == "2.0.1"
 
 
 def test_windows_powershell_scripts_are_utf8_bom():
