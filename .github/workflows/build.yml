@@ -177,13 +177,13 @@ jobs:
               if ($h.ok) {
                 $observedVersion = [string]$h.version
                 if ($observedVersion -eq $env:APP_VERSION) {
-                  $home = Invoke-WebRequest "http://127.0.0.1:8099/" -UseBasicParsing -TimeoutSec 5
-                  if ($home.Content -notmatch '<div\s+id=["'']root["'']') {
+                  $pageResponse = Invoke-WebRequest "http://127.0.0.1:8099/" -UseBasicParsing -TimeoutSec 5
+                  if ($pageResponse.Content -notmatch '<div\s+id=["'']root["'']') {
                     Write-Error "安装版没有提供 React 工作台，疑似错误回退到旧前端"
                     exit 1
                   }
                   $assetMatches = [regex]::Matches(
-                    $home.Content,
+                    $pageResponse.Content,
                     '(?:src|href)=["''](/assets/[^"'']+\.(?:js|css))["'']'
                   )
                   $assetPaths = @(

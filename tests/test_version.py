@@ -131,6 +131,8 @@ def test_release_build_safety_guards():
     assert "安装版没有提供 React 工作台" in workflow
     assert "React 资源名未带内容哈希" in workflow
     assert "http://127.0.0.1:8099$assetPath" in workflow
+    assert '$pageResponse = Invoke-WebRequest "http://127.0.0.1:8099/"' in workflow
+    assert "$home = Invoke-WebRequest" not in workflow
 
     with open(os.path.join(root, "packaging", "LaTeXStruct.spec"), encoding="utf-8") as f:
         pyinstaller_spec = f.read()
