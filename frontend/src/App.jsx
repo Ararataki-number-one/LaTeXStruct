@@ -12,6 +12,7 @@ export default function App() {
   const [currentPid, setCurrentPid] = useState(null);
   const [version, setVersion] = useState("?");
   const [updateInfo, setUpdateInfo] = useState(null);
+  const [updating, setUpdating] = useState(false);
 
   useEffect(() => {
     api("/api/health")
@@ -43,19 +44,35 @@ export default function App() {
       </header>
       {updateInfo && (
         <div className="banner">
-          <span>发现新版本 v{updateInfo.latest}（当前 v{version}）</span>
+          <span>
+            {updating
+              ? "正在下载并校验更新包，完成后将安全关闭并重启应用……"
+              : `发现新版本 v${updateInfo.latest}（当前 v${version}）`}
+          </span>
           <button
+            disabled={updating}
             onClick={async () => {
+              const confirmed = window.confirm(
+                "更新会关闭并自动重启 LaTeXStruct。请先完成或安全取消运行中的任务，"
+                  + "并将已完成 OCR 导入项目或下载原始结果。是否继续？",
+              );
+              if (!confirmed) return;
+              setUpdating(true);
               try {
-                await api("/api/update/install", { method: "POST" });
-                alert("安装器已启动，安装完成后应用将自动重启。");
+                const response = await api("/api/update/install", { method: "POST" });
+                const result = await response.json();
+                if (!result.ok) throw new Error(result.error || "更新准备失败");
               } catch (e) {
+                setUpdating(false);
                 alert("更新失败：" + e.message);
               }
             }}
           >
-            立即更新
+            {updating ? "正在准备更新…" : "立即更新"}
           </button>
+          {!updating && (
+            <button className="secondary" onClick={() => setUpdateInfo(null)}>稍后</button>
+          )}
         </div>
       )}
       <main className="content">

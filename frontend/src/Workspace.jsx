@@ -24,6 +24,26 @@ const KINDS = [
 const ACTIVE_TASKS = new Set(["running", "pausing", "paused", "cancelling", "committing"]);
 const TERMINAL_TASKS = new Set(["done", "error", "cancelled"]);
 
+function processIssueGuidance(job) {
+  const detail = String(job?.error || job?.message || "");
+  if (job?.status === "cancelled" || /取消|cancel/i.test(detail)) {
+    return "任务已安全取消，未验证草稿没有保存；需要时可点击“开始分析”重新开始。";
+  }
+  if (/api\s*key|api\s*base|base\s*url|endpoint|鉴权|认证|unauthori[sz]ed|forbidden|http\s*(401|403)|模型|\bmodel\b/i.test(detail)) {
+    return "请打开顶部“设置”，检查服务商、API Key 和模型后再重试。";
+  }
+  if (/编译|compile|latexmk|xelatex|pdflatex|lualatex|安全检查|公式|数学|label|ref|引用|图片路径|正文变化|回退/i.test(detail)) {
+    return "请查看下方安全检查，修复标记的问题后再点击“重新分析”。";
+  }
+  if (/文件|目录|路径|读取|写入|权限|占用|磁盘|编码|zip|压缩|解压|input|include/i.test(detail)) {
+    return "请检查项目文件是否完整、可读且未被占用，然后点击“重新分析”重试。";
+  }
+  if (/规则|解析|扫描|scanner|parser|patch|补丁|候选|environment|环境/i.test(detail)) {
+    return "原文已保留；可点击“重新分析”重试，并根据上面的错误详情定位具体规则。";
+  }
+  return "原项目没有被覆盖；可点击“重新分析”重试，若仍失败请保留上面的错误详情。";
+}
+
 export default function Workspace({ pid }) {
   const [info, setInfo] = useState(null);
   const [source, setSource] = useState("");
@@ -51,6 +71,8 @@ export default function Workspace({ pid }) {
   const undoStack = useRef([]);
   const editorRef = useRef(null);
   const treeRef = useRef(null);
+  const previewVersionRef = useRef({ jobId: null, revision: null });
+  const pollFailuresRef = useRef(0);
 
   const load = async () => {
     if (!pid) return;
@@ -102,6 +124,8 @@ export default function Workspace({ pid }) {
     setSelected(null);
     setJob(null);
     setLivePreview("");
+    previewVersionRef.current = { jobId: null, revision: null };
+    pollFailuresRef.current = 0;
     undoStack.current = [];
     load();
   }, [pid]);
@@ -111,19 +135,42 @@ export default function Workspace({ pid }) {
     let stopped = false;
     let timer = null;
     let terminalLoaded = false;
+    const schedule = (delay) => {
+      if (!stopped) timer = window.setTimeout(poll, delay);
+    };
     const poll = async () => {
       try {
         const state = await (await api(`/api/projects/${pid}/process/status`)).json();
         if (stopped) return;
+        const priorFailures = pollFailuresRef.current;
+        pollFailuresRef.current = 0;
         setJob(state);
-        if (state.preview_ready && ACTIVE_TASKS.has(state.status)) {
+        if (priorFailures) setStatus("连接已恢复，正在继续读取任务进度");
+
+        if (previewVersionRef.current.jobId !== state.id) {
+          previewVersionRef.current = { jobId: state.id || null, revision: null };
+        }
+        const previewRevision = Number(state.preview_revision);
+        const hasNewPreview = !Number.isFinite(previewRevision)
+          || previewVersionRef.current.revision !== previewRevision;
+        if (state.preview_ready && ACTIVE_TASKS.has(state.status) && hasNewPreview) {
           try {
-            const preview = await apiText(`/api/projects/${pid}/process/preview`);
-            if (!stopped) setLivePreview(preview);
-          } catch {}
+            const response = await api(`/api/projects/${pid}/process/preview`);
+            const preview = await response.text();
+            if (!stopped) {
+              setLivePreview(preview);
+              const receivedRevision = Number(response.headers.get("X-LaTeXStruct-Preview-Revision"));
+              previewVersionRef.current = {
+                jobId: state.id || null,
+                revision: Number.isFinite(receivedRevision) ? receivedRevision : previewRevision,
+              };
+            }
+          } catch (error) {
+            if (!stopped) setStatus("实时草稿暂时读取失败，将随进度自动重试：" + error.message);
+          }
         }
         if (ACTIVE_TASKS.has(state.status)) {
-          timer = window.setTimeout(poll, 650);
+          schedule((state.preview_chars || 0) > 1_000_000 ? 1500 : 650);
         } else if (TERMINAL_TASKS.has(state.status) && !terminalLoaded) {
           terminalLoaded = true;
           setLivePreview("");
@@ -136,11 +183,17 @@ export default function Workspace({ pid }) {
           } else if (state.status === "cancelled") {
             setStatus("任务已取消；未验证草稿未保存，原项目保持不变");
           } else {
-            setStatus("处理未完成：" + (state.error || "请重试或检查 AI 设置"));
+            setStatus("处理未完成：" + (state.error || state.message || "原项目保持不变，可重新分析"));
           }
         }
       } catch (error) {
-        if (!stopped) setStatus("无法读取任务进度：" + error.message);
+        if (!stopped) {
+          const failures = Math.min(pollFailuresRef.current + 1, 6);
+          pollFailuresRef.current = failures;
+          const retryDelay = Math.min(8000, 650 * (2 ** (failures - 1)));
+          setStatus(`暂时无法读取任务进度，${Math.ceil(retryDelay / 1000)} 秒后自动重试：${error.message}`);
+          schedule(retryDelay);
+        }
       }
     };
     poll();
@@ -176,6 +229,11 @@ export default function Workspace({ pid }) {
       setReviewed(new Set());
       setJob(state);
       setLivePreview(source);
+      previewVersionRef.current = {
+        jobId: state.id || null,
+        revision: Number.isFinite(Number(state.preview_revision)) ? Number(state.preview_revision) : null,
+      };
+      pollFailuresRef.current = 0;
       setStatus("后台处理已开始，可随时暂停或取消");
       setPollGeneration((value) => value + 1);
     } catch (e) {
@@ -430,7 +488,12 @@ export default function Workspace({ pid }) {
                 ))}
               </ol>
             )}
-            {job.error && <p className="process-error-message">{job.error}。请检查 AI 设置后重试。</p>}
+            {job.error && (
+              <p className="process-error-message">{job.error}。{processIssueGuidance(job)}</p>
+            )}
+            {job.status === "cancelled" && (
+              <p className="muted">{processIssueGuidance(job)}</p>
+            )}
           </div>
         )}
         {verification?.checks && (
@@ -450,11 +513,14 @@ export default function Workspace({ pid }) {
             <div key={section}>
               <div className="group-title">{section}</div>
               {items.map((d) => (
-                <div
+                <button
+                  type="button"
                   key={d.candidate_id}
                   data-cid={d.candidate_id}
                   className={`tree-item d-${d.status} ${selected?.candidate_id === d.candidate_id ? "active" : ""}`}
                   onClick={() => select(d)}
+                  aria-pressed={selected?.candidate_id === d.candidate_id}
+                  style={{ width: "100%", border: 0, textAlign: "left" }}
                 >
                   <span className="badge">{d.kind === "theorem-like" ? d.env : d.kind}</span>
                   <span className="t">{d.title}</span>
@@ -463,7 +529,7 @@ export default function Workspace({ pid }) {
                     {(d.confidence || 0) < 0.9 && " ⚠"}
                     {reviewed.has(d.candidate_id) && <b className="rev-mark"> ✓</b>}
                   </span>
-                </div>
+                </button>
               ))}
             </div>
           ))}

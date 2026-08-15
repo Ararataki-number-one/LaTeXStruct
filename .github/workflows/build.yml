@@ -202,6 +202,103 @@ jobs:
           }
           if (-not $gone) { Write-Error "静默卸载后残留文件"; exit 1 }
           Write-Host "安装器冒烟测试通过（安装→运行→卸载）"
+      - name: 旧版自动更新冒烟（v1.1.1 运行中 → 当前版本）
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{
+            'User-Agent' = 'latexstruct-upgrade-smoke'
+            'Authorization' = "Bearer $env:GITHUB_TOKEN"
+            'Accept' = 'application/vnd.github+json'
+          }
+          $release = Invoke-RestMethod -Headers $headers `
+            'https://api.github.com/repos/Ararataki-number-one/LaTeXStruct/releases/tags/v1.1.1'
+          $asset = $release.assets | Where-Object {
+            $_.name -eq 'LaTeXStruct-setup-1.1.1.exe'
+          } | Select-Object -First 1
+          if (-not $asset) { Write-Error '公开 v1.1.1 安装器不存在'; exit 1 }
+          $oldSetup = Join-Path $env:RUNNER_TEMP $asset.name
+          Invoke-WebRequest -Headers $headers -Uri $asset.browser_download_url -OutFile $oldSetup
+          if ($asset.digest -notmatch '^sha256:([0-9a-fA-F]{64})$') {
+            Write-Error 'v1.1.1 安装器缺少 SHA-256 摘要'; exit 1
+          }
+          $expectedOldHash = $Matches[1]
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $oldSetup).Hash
+          if ($actual -ne $expectedOldHash) {
+            Write-Error 'v1.1.1 安装器摘要校验失败'; exit 1
+          }
+
+          $upgradeDir = Join-Path $env:LOCALAPPDATA 'Programs\LaTeXStruct-Upgrade-Smoke'
+          $currentSetup = Get-ChildItem dist/LaTeXStruct-setup-*.exe | Select-Object -First 1
+          if (-not $currentSetup) { Write-Error '未找到当前版本安装器'; exit 1 }
+          $oldProc = $null
+          try {
+            Start-Process -FilePath $oldSetup -ArgumentList `
+              '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$upgradeDir" -Wait
+            if (-not (Test-Path "$upgradeDir\LaTeXStruct.exe")) {
+              Write-Error 'v1.1.1 安装失败'; exit 1
+            }
+            $oldProc = Start-Process -FilePath "$upgradeDir\LaTeXStruct.exe" `
+              -ArgumentList '--server','--port','8100' -PassThru
+            $oldHealthy = $false
+            foreach ($i in 1..30) {
+              Start-Sleep -Seconds 2
+              try {
+                $health = Invoke-RestMethod 'http://127.0.0.1:8100/api/health' -TimeoutSec 3
+                if ($health.ok -and [string]$health.version -eq '1.1.1') {
+                  $oldHealthy = $true
+                  break
+                }
+              } catch {}
+            }
+            if (-not $oldHealthy) { Write-Error '运行中的 v1.1.1 健康检查失败'; exit 1 }
+
+            # 精确复现 v1.1.1 updater 的启动参数；/DIR 仅隔离 CI 安装目录。
+            $upgrade = Start-Process -FilePath $currentSetup.FullName -ArgumentList `
+              '/SILENT','/CLOSEAPPLICATIONS','/NORESTART',"/DIR=$upgradeDir" -PassThru
+            $deadline = [DateTime]::UtcNow.AddSeconds(150)
+            while (-not $upgrade.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+              Start-Sleep -Milliseconds 500
+              $upgrade.Refresh()
+            }
+            if (-not $upgrade.HasExited) {
+              Stop-Process -Id $upgrade.Id -Force -ErrorAction SilentlyContinue
+              Write-Error '升级安装器超时，疑似停在文件占用/重试/忽略对话框'; exit 1
+            }
+            if ($upgrade.ExitCode -ne 0) {
+              Write-Error "升级安装器退出码异常: $($upgrade.ExitCode)"; exit 1
+            }
+            if (Get-Process -Id $oldProc.Id -ErrorAction SilentlyContinue) {
+              Write-Error '旧版 PyInstaller 主进程仍未退出'; exit 1
+            }
+
+            # silent upgrade 的 [Run] 应自动启动新版本桌面应用（默认本地端口 8765）。
+            $newHealthy = $false
+            $observed = '<未响应>'
+            foreach ($i in 1..45) {
+              Start-Sleep -Seconds 2
+              try {
+                $health = Invoke-RestMethod 'http://127.0.0.1:8765/api/health' -TimeoutSec 3
+                if ($health.ok) {
+                  $observed = [string]$health.version
+                  if ($observed -eq $env:APP_VERSION) { $newHealthy = $true; break }
+                }
+              } catch {}
+            }
+            if (-not $newHealthy) {
+              Write-Error "升级后未自动启动当前版本: expected=$env:APP_VERSION actual=$observed"
+              exit 1
+            }
+            Write-Host "旧版自动更新通过：v1.1.1 → v$env:APP_VERSION"
+          } finally {
+            Get-Process LaTeXStruct -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Sleep -Seconds 2
+            if (Test-Path "$upgradeDir\unins000.exe") {
+              Start-Process -FilePath "$upgradeDir\unins000.exe" -ArgumentList `
+                '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+            }
+          }
       - name: 代码签名安装器（配置了证书 secrets 时）
         env:
           WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}

@@ -75,29 +75,72 @@ class OcrResult:
     usage: Dict
 
 
-def parse_page_range(spec: str, total: int) -> List[int]:
+def select_page_interval(
+    total: int,
+    start_page: int | None = None,
+    end_page: int | None = None,
+    max_pages: int | None = None,
+) -> List[int]:
+    """校验并返回 1-based 连续 PDF 页码。
+
+    页码必须完整落在源 PDF 内；不再静默截断越界输入，避免用户以为处理了
+    请求范围之外的页面。``max_pages`` 用于服务端限制单次 OCR 的意外费用。
+    """
+    if not isinstance(total, int) or isinstance(total, bool) or total < 1:
+        raise ValueError("PDF 没有可处理的页面")
+    start = 1 if start_page is None else start_page
+    end = total if end_page is None else end_page
+    if any(not isinstance(value, int) or isinstance(value, bool) for value in (start, end)):
+        raise ValueError("起始页和结束页必须是整数")
+    if start < 1:
+        raise ValueError("起始页必须从 1 开始")
+    if end > total:
+        raise ValueError(f"结束页不能超过 PDF 总页数 {total}")
+    if start > end:
+        raise ValueError("起始页不能大于结束页")
+    count = end - start + 1
+    if max_pages is not None and count > max_pages:
+        raise ValueError(f"单次最多处理 {max_pages} 页，请缩小页码范围")
+    return list(range(start, end + 1))
+
+
+def parse_page_range(spec: str, total: int, max_pages: int | None = None) -> List[int]:
+    """解析旧版逗号/横线页码格式，并严格拒绝越界或超大范围。"""
+    if not isinstance(spec, str) or len(spec) > 200:
+        raise ValueError("页码范围输入过长")
     if not spec.strip():
-        return list(range(1, total + 1))
-    out = []
-    try:
-        for part in spec.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            if "-" in part:
-                a, b = part.split("-", 1)
-                a, b = int(a), int(b)
-                if a > b:
-                    raise ValueError
-                out.extend(range(a, b + 1))
-            else:
-                out.append(int(part))
-    except ValueError:
-        raise ValueError("页码范围格式无效，请使用 1-5 或 1,3,7") from None
-    selected = sorted(set(p for p in out if 1 <= p <= total))
+        return select_page_interval(total, max_pages=max_pages)
+    if not isinstance(total, int) or isinstance(total, bool) or total < 1:
+        raise ValueError("PDF 没有可处理的页面")
+
+    selected = set()
+    parts = spec.split(",")
+    if any(not part.strip() for part in parts):
+        raise ValueError("页码范围格式无效，请使用 1-5 或 1,3,7")
+    for raw_part in parts:
+        part = raw_part.strip()
+        match = re.fullmatch(r"(\d+)\s*(?:-\s*(\d+))?", part)
+        if match is None:
+            raise ValueError("页码范围格式无效，请使用 1-5 或 1,3,7")
+        try:
+            start = int(match.group(1))
+            end = int(match.group(2) or match.group(1))
+        except ValueError:
+            raise ValueError("页码范围格式无效，请使用 1-5 或 1,3,7") from None
+        if start < 1 or end > total:
+            raise ValueError(f"页码范围必须完整位于 1-{total} 页内")
+        if start > end:
+            raise ValueError("页码范围起始页不能大于结束页")
+        interval_count = end - start + 1
+        if max_pages is not None and interval_count > max_pages:
+            raise ValueError(f"单次最多处理 {max_pages} 页，请缩小页码范围")
+        selected.update(range(start, end + 1))
+        if max_pages is not None and len(selected) > max_pages:
+            raise ValueError(f"单次最多处理 {max_pages} 页，请缩小页码范围")
+
     if not selected:
         raise ValueError(f"页码范围不在文档 1-{total} 页内")
-    return selected
+    return sorted(selected)
 
 
 def render_pdf_pages(pdf_path: str, pages: List[int], dpi: int = 150):
@@ -115,6 +158,27 @@ def iter_pdf_pages(pdf_path: str, pages: List[int], dpi: int = 150):
             page = doc[p - 1]
             pix = page.get_pixmap(dpi=dpi)
             yield p, pix.tobytes("png")
+    finally:
+        doc.close()
+
+
+def pdf_page_count_bytes(pdf_bytes: bytes) -> int:
+    """从已上传的 PDF 字节安全读取总页数，不渲染页面。"""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        raise LLMError("缺少 PDF 渲染组件 PyMuPDF，请重新安装完整版本后重试") from None
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception:
+        raise ValueError("PDF 文件损坏或无法读取，请重新导出后再试") from None
+    try:
+        if doc.needs_pass:
+            raise ValueError("暂不支持加密 PDF，请先移除打开密码")
+        total = doc.page_count
+        if total < 1:
+            raise ValueError("PDF 没有可处理的页面")
+        return total
     finally:
         doc.close()
 

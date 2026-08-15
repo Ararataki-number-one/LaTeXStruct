@@ -5,6 +5,7 @@ import io
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -54,6 +55,8 @@ except ImportError:  # 依赖未安装 → 跳过
 
 def _client(tmp):
     srv._process_jobs.clear()
+    srv._cancel_update_preparation()
+    srv._active_pipeline_runs = 0
     srv._store = srv.ProjectStore(root=os.path.join(tmp, "projects"))
     srv._config = None
     return TestClient(srv.create_app())
@@ -386,6 +389,145 @@ def test_ocr_multipart_and_jpeg_preview():
             shutil.rmtree(job.get("dir", ""), ignore_errors=True)
 
 
+def test_pdf_ocr_inspects_once_then_processes_only_selected_original_pages():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        fake_pdf = b"%PDF-1.7\nnot-rendered-in-test"
+        inspected = ""
+        calls = []
+
+        def fake_render(_path, pages, _dpi):
+            assert pages == [88, 89, 90]
+            for page_no in pages:
+                yield page_no, b"\x89PNG\r\n\x1a\n" + bytes([page_no]) * 32
+
+        def fake_vision(client, _system, user, _image):
+            match = re.search(r"第\s*(\d+)\s*页", user)
+            calls.append(int(match.group(1)))
+            client.last_usage = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+            return "```latex\nThis is a sufficiently long faithful transcription for the selected page.\n```"
+
+        try:
+            with patch("latexstruct.ocr.pdf_page_count_bytes", return_value=396):
+                response = c.post(
+                    "/api/ocr/inspect",
+                    files={"file": ("book.pdf", fake_pdf, "application/pdf")},
+                )
+            assert response.status_code == 200, response.text
+            info = response.json()
+            inspected = info["id"]
+            assert info["total_pages"] == 396
+            assert info["max_pages_per_job"] == srv.MAX_OCR_PAGES_PER_JOB
+            assert srv._ocr_jobs[inspected]["status"] == "ready"
+
+            invalid = c.post(
+                f"/api/ocr/jobs/{inspected}/start",
+                data={"start_page": "90", "end_page": "88"},
+            )
+            assert invalid.status_code == 400
+            assert srv._ocr_jobs[inspected]["status"] == "ready"
+
+            with (
+                patch("latexstruct.ocr.iter_pdf_pages", fake_render),
+                patch("latexstruct.core.ai.LLMClient.chat_vision", fake_vision),
+            ):
+                started = c.post(
+                    f"/api/ocr/jobs/{inspected}/start",
+                    data={"start_page": "88", "end_page": "90", "dpi": "150"},
+                )
+                assert started.status_code == 200, started.text
+                for _ in range(100):
+                    state = c.get(f"/api/ocr/jobs/{inspected}").json()
+                    if state["status"] != "running":
+                        break
+                    time.sleep(0.02)
+
+            assert state["status"] == "done", state
+            assert state["source_total"] == 396
+            assert state["total"] == 3
+            assert state["selected_start"] == 88 and state["selected_end"] == 90
+            assert state["page"] == 90 and state["current_index"] == 3
+            assert list(state["pages"]) == ["88", "89", "90"]
+            assert [state["pages"][str(n)]["task_index"] for n in (88, 89, 90)] == [1, 2, 3]
+            assert calls == [88, 89, 90]
+            assert state["usage"]["calls"] == 3
+            assert state["usage"]["total_tokens"] == 360
+            assert "target" not in state and "dir" not in state
+            assert c.get(f"/api/ocr/jobs/{inspected}/pages/88").status_code == 200
+            assert c.post(f"/api/ocr/jobs/{inspected}/start").status_code == 409
+        finally:
+            job = srv._ocr_jobs.pop(inspected, {}) if inspected else {}
+            shutil.rmtree(job.get("dir", ""), ignore_errors=True)
+
+
+def test_pdf_ocr_keeps_completed_pages_when_later_rendering_fails():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        inspected = ""
+
+        def interrupted_render(_path, pages, _dpi):
+            assert pages == [1, 2]
+            yield 1, b"\x89PNG\r\n\x1a\n" + b"1" * 32
+            raise RuntimeError("renderer stopped after first page")
+
+        def fake_vision(client, _system, _user, _image):
+            client.last_usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+            return "```latex\nA sufficiently long faithful transcription from the completed first page.\n```"
+
+        try:
+            with patch("latexstruct.ocr.pdf_page_count_bytes", return_value=2):
+                inspected = c.post(
+                    "/api/ocr/inspect",
+                    files={"file": ("book.pdf", b"%PDF-1.7\nfake", "application/pdf")},
+                ).json()["id"]
+            with (
+                patch("latexstruct.ocr.iter_pdf_pages", interrupted_render),
+                patch("latexstruct.core.ai.LLMClient.chat_vision", fake_vision),
+            ):
+                started = c.post(
+                    f"/api/ocr/jobs/{inspected}/start",
+                    data={"start_page": "1", "end_page": "2"},
+                )
+                assert started.status_code == 200
+                for _ in range(100):
+                    state = c.get(f"/api/ocr/jobs/{inspected}").json()
+                    if state["status"] != "running":
+                        break
+                    time.sleep(0.02)
+
+            assert state["status"] == "partial", state
+            assert state["raw_ready"] is True
+            assert state["raw_revision"] == 1
+            assert state["pages"]["1"]["status"] == "done"
+            assert state["pages"]["2"]["status"] == "pending"
+            assert state["error"]
+            raw = c.get(f"/api/ocr/jobs/{inspected}/result").text
+            assert "completed first page" in raw
+        finally:
+            job = srv._ocr_jobs.pop(inspected, {}) if inspected else {}
+            shutil.rmtree(job.get("dir", ""), ignore_errors=True)
+
+
+def test_pdf_ocr_rejects_malicious_or_excessive_ranges_before_starting_worker():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        before = set(srv._ocr_jobs)
+        with patch("latexstruct.ocr.pdf_page_count_bytes", return_value=600):
+            huge = c.post(
+                "/api/ocr/jobs",
+                files={"file": ("book.pdf", b"%PDF-1.7\nfake", "application/pdf")},
+                data={"pages": "1-999999999999999999999"},
+            )
+            excessive = c.post(
+                "/api/ocr/jobs",
+                files={"file": ("book.pdf", b"%PDF-1.7\nfake", "application/pdf")},
+                data={"start_page": "1", "end_page": str(srv.MAX_OCR_PAGES_PER_JOB + 1)},
+            )
+        assert huge.status_code == 400
+        assert excessive.status_code == 400
+        assert set(srv._ocr_jobs) == before
+
+
 def test_decisions_and_reject():
     with WorkspaceTmp() as tmp:
         c = _client(tmp)
@@ -579,6 +721,8 @@ def test_background_process_can_pause_preview_resume_and_finish():
             assert state["status"] == "paused", state
             preview = c.get(f"/api/projects/{pid}/process/preview")
             assert preview.status_code == 200 and "documentclass" in preview.text
+            assert state["preview_chars"] == len(preview.text)
+            assert preview.headers["X-LaTeXStruct-Preview-Revision"] == str(state["preview_revision"])
             assert c.post(f"/api/projects/{pid}/process/resume").status_code == 200
             for _ in range(300):
                 state = c.get(f"/api/projects/{pid}/process/status").json()
@@ -587,6 +731,45 @@ def test_background_process_can_pause_preview_resume_and_finish():
                 time.sleep(0.01)
         assert state["status"] == "done", state
         assert c.get(f"/api/projects/{pid}/result").status_code == 200
+
+
+def test_project_list_keeps_latest_terminal_process_status_and_message():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        project_ids = {
+            status: c.post(
+                "/api/projects",
+                json={"text": SAMPLE, "name": status, "mode": "rule"},
+            ).json()["id"]
+            for status in ("done", "error", "cancelled")
+        }
+
+        done = srv._process_jobs.create(project_ids["done"], SAMPLE)
+        srv._process_jobs.complete(done["id"], {"ok": True})
+        failed = srv._process_jobs.create(project_ids["error"], SAMPLE)
+        srv._process_jobs.fail(failed["id"], "未配置 API Key")
+        cancelled = srv._process_jobs.create(project_ids["cancelled"], SAMPLE)
+        srv._process_jobs.cancelled(cancelled["id"])
+
+        listed = {item["id"]: item for item in c.get("/api/projects").json()}
+        assert listed[project_ids["done"]]["processing"] == {
+            "status": "done",
+            "progress": 1.0,
+            "message": "安全检查通过",
+            "error": "",
+        }
+        assert listed[project_ids["error"]]["processing"] == {
+            "status": "error",
+            "progress": 0.0,
+            "message": "处理未完成，原项目保持不变",
+            "error": "未配置 API Key",
+        }
+        assert listed[project_ids["cancelled"]]["processing"] == {
+            "status": "cancelled",
+            "progress": 0.0,
+            "message": "未保存未验证草稿，原项目保持不变",
+            "error": "",
+        }
 
 
 def test_batch_reject_and_reset():
@@ -660,6 +843,134 @@ def test_ocr_per_page_endpoints():
         assert r.status_code == 200
         body = r.json()
         assert body["ok"] is False and body["page"] == 1 and body["status"] == "partial"
+
+
+def test_ocr_retry_rejects_same_page_double_click_without_double_counting_usage():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        png = b"\x89PNG\r\n\x1a\n" + b"0" * 24
+        retry_started = threading.Event()
+        allow_retry = threading.Event()
+        calls = {"count": 0}
+        first_response = {}
+        jid = ""
+
+        def controlled_vision(client, _system, _user, _image):
+            calls["count"] += 1
+            client.last_usage = {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10}
+            if calls["count"] > 1:
+                retry_started.set()
+                assert allow_retry.wait(timeout=3)
+            return (
+                "```latex\nA sufficiently long OCR transcription for retry concurrency "
+                f"testing, revision {calls['count']}.\n```"
+            )
+
+        try:
+            with patch("latexstruct.core.ai.LLMClient.chat_vision", controlled_vision):
+                created = c.post("/api/ocr/jobs", files={"file": ("a.png", png, "image/png")})
+                assert created.status_code == 200
+                jid = created.json()["id"]
+                for _ in range(100):
+                    state = c.get(f"/api/ocr/jobs/{jid}").json()
+                    if state["status"] != "running":
+                        break
+                    time.sleep(0.02)
+                assert state["status"] == "done"
+                assert c.get(f"/api/ocr/jobs/{jid}/result").status_code == 200
+                with srv._ocr_jobs_lock:
+                    first_revision = srv._ocr_jobs[jid]["raw_revision"]
+                    assert srv._ocr_jobs[jid]["downloaded_revision"] == first_revision
+
+                def run_first_retry():
+                    first_response["value"] = c.post(f"/api/ocr/jobs/{jid}/pages/1/retry")
+
+                thread = threading.Thread(target=run_first_retry)
+                thread.start()
+                assert retry_started.wait(timeout=2)
+                duplicate = c.post(f"/api/ocr/jobs/{jid}/pages/1/retry")
+                assert duplicate.status_code == 409
+                allow_retry.set()
+                thread.join(timeout=3)
+
+            assert first_response["value"].status_code == 200
+            final = c.get(f"/api/ocr/jobs/{jid}").json()
+            assert final["status"] == "done"
+            assert final["pages"]["1"]["attempts"] == 2
+            assert final["pages"]["1"]["retrying"] is False
+            assert final["usage"]["calls"] == 2
+            assert final["usage"]["total_tokens"] == 20
+            assert final["raw_revision"] == first_revision + 1
+            assert final["downloaded_revision"] == first_revision
+            with patch("latexstruct.updater.check_for_updates") as check:
+                blocked = c.post("/api/update/install")
+            assert blocked.status_code == 409
+            assert "尚未保存的 OCR 结果" in blocked.json()["detail"]
+            check.assert_not_called()
+        finally:
+            allow_retry.set()
+            job = srv._ocr_jobs.pop(jid, {}) if jid else {}
+            shutil.rmtree(job.get("dir", ""), ignore_errors=True)
+
+
+def test_ocr_import_blocks_duplicate_import_and_retry_until_snapshot_is_saved():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        import_started = threading.Event()
+        allow_import = threading.Event()
+        response = {}
+        jid = "importing-ocr"
+        job_dir = tempfile.mkdtemp(prefix="ocr-import-", dir=tmp)
+        page_path = os.path.join(job_dir, "page-1.png")
+        Path(page_path).write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 24)
+        with srv._ocr_jobs_lock:
+            srv._ocr_jobs[jid] = {
+                "id": jid,
+                "status": "done",
+                "raw_ready": True,
+                "raw_tex": "A paid OCR snapshot that must be imported exactly once.",
+                "raw_revision": 1,
+                "downloaded_revision": 0,
+                "imported_revision": 0,
+                "importing": False,
+                "usage": {"calls": 1, "total_tokens": 10},
+                "pages": {1: {"png": page_path, "status": "done"}},
+                "dir": job_dir,
+            }
+
+        store = srv.get_store()
+        original_create = store.create
+
+        def slow_create(*args, **kwargs):
+            import_started.set()
+            assert allow_import.wait(timeout=3)
+            return original_create(*args, **kwargs)
+
+        def run_import():
+            response["value"] = c.post(f"/api/ocr/jobs/{jid}/import")
+
+        try:
+            with patch.object(store, "create", slow_create):
+                thread = threading.Thread(target=run_import)
+                thread.start()
+                assert import_started.wait(timeout=2)
+                duplicate = c.post(f"/api/ocr/jobs/{jid}/import")
+                retry = c.post(f"/api/ocr/jobs/{jid}/pages/1/retry")
+                assert duplicate.status_code == 409
+                assert retry.status_code == 409
+                allow_import.set()
+                thread.join(timeout=3)
+
+            assert response["value"].status_code == 200
+            with srv._ocr_jobs_lock:
+                saved = srv._ocr_jobs[jid]
+                assert saved["importing"] is False
+                assert saved["imported_revision"] == saved["raw_revision"] == 1
+        finally:
+            allow_import.set()
+            with srv._ocr_jobs_lock:
+                srv._ocr_jobs.pop(jid, None)
+            shutil.rmtree(job_dir, ignore_errors=True)
 
 
 def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_separately():
@@ -740,6 +1051,157 @@ d &= e
         finally:
             job = srv._ocr_jobs.pop(jid, {}) if jid else {}
             shutil.rmtree(job.get("dir", ""), ignore_errors=True)
+
+
+def test_update_install_rejects_active_processing_before_network():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        srv._process_jobs.create("busy-project", "source")
+        with patch("latexstruct.updater.check_for_updates") as check:
+            response = c.post("/api/update/install")
+        assert response.status_code == 409
+        assert "结构化任务" in response.json()["detail"]
+        assert "Token" in response.json()["detail"]
+        check.assert_not_called()
+        srv._process_jobs.clear()
+
+
+def test_update_install_rejects_active_ocr_before_network():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        with srv._ocr_jobs_lock:
+            srv._ocr_jobs["busy-ocr"] = {"status": "running"}
+        try:
+            with patch("latexstruct.updater.check_for_updates") as check:
+                response = c.post("/api/update/install")
+            assert response.status_code == 409
+            assert "OCR 任务" in response.json()["detail"]
+            check.assert_not_called()
+        finally:
+            with srv._ocr_jobs_lock:
+                srv._ocr_jobs.pop("busy-ocr", None)
+
+
+def test_update_preparation_blocks_deleting_preserved_ocr_state():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        jid = "preserved-while-updating"
+        with srv._ocr_jobs_lock:
+            srv._ocr_jobs[jid] = {
+                "id": jid,
+                "status": "done",
+                "raw_ready": True,
+                "raw_revision": 1,
+                "downloaded_revision": 1,
+                "imported_revision": 0,
+                "usage": {"calls": 1, "total_tokens": 10},
+            }
+        try:
+            with srv._update_state_lock:
+                srv._update_preparing = True
+            response = c.delete(f"/api/ocr/jobs/{jid}")
+            assert response.status_code == 409
+            assert "更新包正在准备" in response.json()["detail"]
+            with srv._ocr_jobs_lock:
+                assert jid in srv._ocr_jobs
+        finally:
+            srv._cancel_update_preparation()
+            with srv._ocr_jobs_lock:
+                srv._ocr_jobs.pop(jid, None)
+
+
+def test_update_install_preserves_completed_paid_ocr_until_downloaded_or_discarded():
+    from latexstruct.updater import UpdateInfo
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        with srv._ocr_jobs_lock:
+            srv._ocr_jobs["paid-ocr"] = {
+                "id": "paid-ocr",
+                "status": "done",
+                "raw_ready": True,
+                "raw_tex": "paid OCR result",
+                "raw_revision": 1,
+                "downloaded_revision": 0,
+                "imported_revision": 0,
+                "importing": False,
+                "usage": {"calls": 1, "total_tokens": 100},
+            }
+        try:
+            with patch("latexstruct.updater.check_for_updates") as check:
+                blocked = c.post("/api/update/install")
+            assert blocked.status_code == 409
+            assert "尚未保存的 OCR 结果" in blocked.json()["detail"]
+            check.assert_not_called()
+
+            downloaded = c.get("/api/ocr/jobs/paid-ocr/result")
+            assert downloaded.status_code == 200
+            with srv._ocr_jobs_lock:
+                assert srv._ocr_jobs["paid-ocr"]["downloaded_revision"] == 1
+            with patch(
+                "latexstruct.updater.check_for_updates",
+                return_value=UpdateInfo(False, latest="v1.1.1"),
+            ) as check:
+                latest = c.post("/api/update/install")
+            assert latest.status_code == 409
+            assert latest.json()["detail"] == "当前已经是最新版本，无需重复安装"
+            check.assert_called_once()
+
+            discarded = c.delete("/api/ocr/jobs/paid-ocr")
+            assert discarded.status_code == 200
+        finally:
+            srv._cancel_update_preparation()
+            with srv._ocr_jobs_lock:
+                srv._ocr_jobs.pop("paid-ocr", None)
+
+
+def test_update_install_failures_are_non_200_and_release_reservation():
+    from latexstruct.updater import UpdateInfo
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        with patch(
+            "latexstruct.updater.check_for_updates",
+            return_value=UpdateInfo(False, latest="v1.1.1"),
+        ):
+            response = c.post("/api/update/install")
+        assert response.status_code == 409
+        assert response.json()["detail"] == "当前已经是最新版本，无需重复安装"
+        assert srv._update_preparing is False
+
+
+def test_update_install_schedules_exit_only_after_verified_download():
+    from latexstruct.updater import UpdateInfo
+
+    info = UpdateInfo(
+        True,
+        latest="v1.2.3",
+        url=(
+            "https://github.com/Ararataki-number-one/LaTeXStruct/"
+            "releases/download/v1.2.3/LaTeXStruct-setup-1.2.3.exe"
+        ),
+        size=123,
+        digest="sha256:" + "a" * 64,
+    )
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        with (
+            patch("latexstruct.updater.check_for_updates", return_value=info),
+            patch(
+                "latexstruct.updater.download_update",
+                return_value="C:/Temp/LaTeXStruct-setup-1.2.3.exe",
+            ) as download,
+            patch("latexstruct.updater.schedule_installer_after_exit") as schedule,
+            patch("latexstruct.updater.request_application_exit") as close_app,
+        ):
+            response = c.post("/api/update/install")
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert "installer" not in response.json()  # 不向前端泄露本机临时路径
+        download.assert_called_once_with(info)
+        schedule.assert_called_once_with("C:/Temp/LaTeXStruct-setup-1.2.3.exe")
+        close_app.assert_called_once_with()
+        srv._cancel_update_preparation()
 
 
 def main():

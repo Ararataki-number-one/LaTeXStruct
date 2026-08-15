@@ -5,6 +5,16 @@ const TEXT_EXTENSIONS = new Set([
   ".tex", ".sty", ".cls", ".bib", ".bst", ".cfg", ".def", ".bbx", ".cbx", ".lbx", ".txt",
 ]);
 const ACTIVE_TASKS = new Set(["running", "pausing", "paused", "cancelling", "committing"]);
+const TASK_LABELS = {
+  running: "处理中",
+  pausing: "暂停中",
+  paused: "已暂停",
+  cancelling: "取消中",
+  committing: "保存中",
+  done: "处理完成",
+  error: "处理失败",
+  cancelled: "已取消",
+};
 
 function extension(name) {
   const dot = name.lastIndexOf(".");
@@ -346,15 +356,19 @@ export default function Projects({ onOpen }) {
             {projects.map((project) => {
               const task = project.processing;
               const active = ACTIVE_TASKS.has(task?.status);
+              const taskMessage = task?.error || task?.message;
               return (
                 <tr key={project.id}>
                   <td><b>{project.name}</b>{project.kind === "folder" && <span className="file-badge">多文件</span>}</td>
                   <td>
                     {task ? (
-                      <span className={`task-chip ${task.status}`}>
-                        {task.status === "paused" ? "已暂停" : task.status === "pausing" ? "暂停中" : "处理中"}
-                        {" "}{Math.round((task.progress || 0) * 100)}%
-                      </span>
+                      <div>
+                        <span className={`task-chip ${task.status}`}>
+                          {TASK_LABELS[task.status] || "任务状态未知"}
+                          {active && ` ${Math.round((task.progress || 0) * 100)}%`}
+                        </span>
+                        {taskMessage && <div className="muted">{taskMessage}</div>}
+                      </div>
                     ) : project.has_result ? <span className="task-chip done">待审阅</span> : <span className="muted">未分析</span>}
                   </td>
                   <td>{project.mode === "ai" ? "AI" : "规则"}</td>

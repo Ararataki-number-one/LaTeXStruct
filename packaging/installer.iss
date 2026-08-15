@@ -13,6 +13,11 @@ DefaultDirName={localappdata}\Programs\LaTeXStruct
 DefaultGroupName=LaTeXStruct
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
+; v1.1.1 updater starts Setup before its PyInstaller process tree has exited.
+; Restart Manager therefore needs force as a compatibility fallback. Newer
+; updaters exit first and wait for LaTeXStruct.exe to become exclusively writable.
+CloseApplications=force
+RestartApplications=no
 OutputDir=..\dist
 OutputBaseFilename=LaTeXStruct-setup-{#AppVersion}
 Compression=lzma2
@@ -38,6 +43,25 @@ Name: "{autodesktop}\LaTeXStruct"; Filename: "{app}\LaTeXStruct.exe"; Tasks: des
 
 [Run]
 Filename: "{app}\LaTeXStruct.exe"; Description: "启动 LaTeXStruct"; Flags: nowait postinstall skipifsilent
+; Silent initial installs stay silent. A silent upgrade (including the old v1.1.1
+; updater command line) starts the newly installed version after replacement.
+Filename: "{app}\LaTeXStruct.exe"; Flags: nowait skipifnotsilent; Check: RestartAfterSilentUpdate
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+var
+  WasInstalledBefore: Boolean;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssInstall then
+    WasInstalledBefore := FileExists(ExpandConstant('{app}\LaTeXStruct.exe'));
+end;
+
+function RestartAfterSilentUpdate: Boolean;
+begin
+  Result := WasInstalledBefore or
+    (CompareText(ExpandConstant('{param:LATEXSTRUCTUPDATE|0}'), '1') = 0);
+end;

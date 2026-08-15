@@ -9,10 +9,12 @@ LaTeX 数学书结构化整理本地客户端（Windows 优先，安装版 + 主
 
 - **安装版**：GitHub Releases 下载 `LaTeXStruct-setup-*.exe` 双击安装（每用户、无需管理员）；
 - **便携版**：Releases 中的 `LaTeXStruct.exe` 单文件免安装；
-- **主动更新**：启动时自动检查 Releases 最新版，有新版即显示更新横幅，一键下载安装器静默升级；
+- **主动更新**：启动时自动检查 Releases 最新版；更新包通过大小与 SHA-256 校验后，应用会
+  在没有活动任务或未保存 OCR 成果时安全退出、静默升级并自动重启；
   更新源默认 `Ararataki-number-one/LaTeXStruct`（可用环境变量 `LATEXSTRUCT_UPDATE_REPO` 覆盖）。
-- **OCR 转写**：OCR 页签上传 PDF/图片 → 视觉模型逐页忠实转写（支持页码范围、DPI、
-  分页进度、失败页重试）→ 完成后把原始 OCR 导入独立项目，再进入结构化流水线；
+- **OCR 转写**：OCR 页签上传 PDF/图片 → 读取 PDF 总页数并选择起止页 → 视觉模型逐页忠实
+  转写（支持 DPI、原页码/任务序号进度、失败页重试）→ 完成后把原始 OCR 导入独立项目，
+  再进入结构化流水线；Token 与费用只统计所选页面；
   原始转写与结构化结果分开保存；
 - **代码签名**：CI 已内置签名步骤——把证书放进 GitHub Secrets（`WINDOWS_CERT_BASE64` +
   `WINDOWS_CERT_PASSWORD`）后每次发布自动签名 exe 与安装器；本地可用 `scripts/sign_local.ps1`
@@ -70,7 +72,7 @@ git push origin "v$version"
 # 3) 已安装客户端下次启动自动提示更新
 ```
 
-## 当前状态（v1.1.1 工作流打磨版，能力边界仍冻结）
+## 当前状态（v1.1.2 工作流打磨版，能力边界仍冻结）
 
 - 核心流水线已具备解析、扫描、保守决策、可逆补丁和统一安全检查；正文、数学、
   label/ref、图片路径、环境、花括号、项目文件集合与可选编译对比共同决定能否导出；

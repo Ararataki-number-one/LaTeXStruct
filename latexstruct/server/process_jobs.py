@@ -75,6 +75,7 @@ class ProcessJobManager:
                 "pause_requested": False,
                 "cancel_requested": False,
                 "preview": source_preview,
+                "preview_revision": 1 if source_preview else 0,
                 "preview_label": "原始内容（尚未生成草稿）",
                 "usage": {},
                 "cost": summarize_ai_usage({}),
@@ -99,6 +100,14 @@ class ProcessJobManager:
         with self._lock:
             return self._active_locked(pid)
 
+    def active_count(self) -> int:
+        """返回所有项目的活动任务数，供更新/退出安全门使用。"""
+        with self._lock:
+            return sum(
+                1 for job in self._jobs.values()
+                if job.get("status") in ACTIVE_STATUSES
+            )
+
     def _active_locked(self, pid: str) -> Optional[dict]:
         jid = self._latest_by_pid.get(pid)
         job = self._jobs.get(jid) if jid else None
@@ -112,6 +121,7 @@ class ProcessJobManager:
             } | {
                 "preview_ready": bool(job.get("preview")),
                 "preview_lines": (job.get("preview") or "").count("\n") + 1,
+                "preview_chars": len(job.get("preview") or ""),
                 "can_pause": job.get("status") in {"running", "pausing"},
                 "can_resume": job.get("status") == "paused",
                 "can_cancel": job.get("status") in ACTIVE_STATUSES - {"committing"},
@@ -129,7 +139,10 @@ class ProcessJobManager:
             job["message"] = message
             job["progress"] = round(max(job.get("progress", 0.0), min(1.0, progress)), 4)
             if isinstance(data.get("preview"), str):
-                job["preview"] = data["preview"]
+                preview = data["preview"]
+                if preview != job.get("preview", ""):
+                    job["preview"] = preview
+                    job["preview_revision"] = job.get("preview_revision", 0) + 1
                 job["preview_label"] = data.get("preview_label") or "处理中草稿"
             if isinstance(data.get("usage"), dict):
                 job["usage"] = data["usage"]
@@ -265,3 +278,8 @@ class ProcessJobManager:
     def preview(self, job: dict) -> str:
         with self._lock:
             return job.get("preview", "")
+
+    def preview_snapshot(self, job: dict) -> tuple[str, int]:
+        """在同一把锁内读取草稿及其版本，避免状态与正文跨版本。"""
+        with self._lock:
+            return job.get("preview", ""), int(job.get("preview_revision", 0))

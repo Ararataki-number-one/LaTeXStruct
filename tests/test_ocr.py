@@ -21,6 +21,8 @@ from latexstruct.ocr import (  # noqa: E402
     merge_book,
     ocr_page_needs_retry,
     parse_page_range,
+    pdf_page_count_bytes,
+    select_page_interval,
     transcribe_images,
 )
 
@@ -46,14 +48,53 @@ class FakeVisionClient:
 def test_parse_page_range():
     assert parse_page_range("", 10) == list(range(1, 11))
     assert parse_page_range("1-3,7", 10) == [1, 2, 3, 7]
-    assert parse_page_range("5-99", 10) == [5, 6, 7, 8, 9, 10]
-    for bad in ("5-2", "abc", "99"):
+    for bad in ("5-2", "abc", "99", "5-99", "1,,2", "0-2"):
         try:
             parse_page_range(bad, 10)
         except ValueError as exc:
             assert "页码" in str(exc)
         else:
             raise AssertionError(f"应拒绝页码范围：{bad}")
+
+
+def test_page_interval_defaults_validates_bounds_and_caps_work():
+    assert select_page_interval(8) == list(range(1, 9))
+    assert select_page_interval(100, 88, 90, 10) == [88, 89, 90]
+    for args in ((10, 0, 2, 10), (10, 3, 2, 10), (10, 2, 11, 10), (20, 1, 11, 10)):
+        try:
+            select_page_interval(*args)
+        except ValueError as exc:
+            assert "页" in str(exc)
+        else:
+            raise AssertionError(f"应拒绝页码范围：{args}")
+
+
+def test_parse_page_range_rejects_oversized_interval_before_expansion():
+    try:
+        parse_page_range("1-999999999999999999999", 20, max_pages=10)
+    except ValueError as exc:
+        assert "1-20" in str(exc) or "最多" in str(exc)
+    else:
+        raise AssertionError("应拒绝巨大越界范围")
+
+
+def test_pdf_page_count_bytes_reads_real_pdf_and_rejects_damage():
+    import fitz
+
+    document = fitz.open()
+    try:
+        document.new_page()
+        document.new_page()
+        payload = document.tobytes()
+    finally:
+        document.close()
+    assert pdf_page_count_bytes(payload) == 2
+    try:
+        pdf_page_count_bytes(b"%PDF-1.7\nbroken")
+    except ValueError as exc:
+        assert "损坏" in str(exc) or "无法读取" in str(exc)
+    else:
+        raise AssertionError("应拒绝损坏 PDF")
 
 
 def test_clean_page_output():
