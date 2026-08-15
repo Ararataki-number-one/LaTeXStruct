@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -92,10 +93,38 @@ class ProjectStore:
         verification: Dict,
     ):
         d = self._dir(pid)
-        self._write_text(d, "result.tex", result_text)
-        self._write_text(d, "report.md", report_md)
-        self._write_json(d, "decisions.json", decisions)
-        self._write_json(d, "verification.json", verification)
+        marker = os.path.join(d, "verification.json")
+        old_marker = os.path.join(d, f".verification.json.{uuid.uuid4().hex}.previous")
+        had_marker = os.path.exists(marker)
+        if had_marker:
+            # verification.json 是整组结果的提交标记。先原子移走旧标记，保证后续任一
+            # 文件写入失败时，导出端不会用旧验证结果放行新 result.tex。
+            os.replace(marker, old_marker)
+        try:
+            self._write_text(d, "result.tex", result_text)
+            self._write_text(d, "report.md", report_md)
+            self._write_json(d, "decisions.json", decisions)
+            committed = dict(verification)
+            committed["result_sha256"] = hashlib.sha256(
+                result_text.encode("utf-8")
+            ).hexdigest()
+            # 必须最后写：只有该原子 replace 成功，整组结果才可导出。
+            self._write_json(d, "verification.json", committed)
+        except Exception:
+            if had_marker and os.path.exists(old_marker):
+                try:
+                    os.replace(old_marker, marker)
+                except OSError:
+                    # 恢复失败时保留 previous 文件供人工恢复；正式 marker 缺失，导出
+                    # 仍会 fail-closed。
+                    pass
+            raise
+        else:
+            if os.path.exists(old_marker):
+                try:
+                    os.remove(old_marker)
+                except OSError:
+                    pass
 
     def read_decisions(self, pid: str) -> List[Dict]:
         return json.loads(self._read_optional(os.path.join(self._dir(pid), "decisions.json")) or "[]")

@@ -67,7 +67,7 @@ export default function App() {
         )}
         {tab === "ocr" && (
           <Suspense fallback={<section className="card">正在加载 OCR 校对页……</section>}>
-            <Ocr onImport={openProject} />
+            <Ocr onImport={openProject} onOpenSettings={() => setTab("settings")} />
           </Suspense>
         )}
         {tab === "settings" && <Settings />}

@@ -59,17 +59,18 @@ AI 复查与 OCR 模型；开启「系统凭据管理器」后，密钥会存入
 
 ```powershell
 # 1) 修改 latexstruct/_version.py 后同步生成元数据
-python packaging/sync_version.py --version 1.1.1
+$version = "X.Y.Z"
+python packaging/sync_version.py --version $version
 # 2) 提交并打 tag 推送 → CI 自动：测试 → 构建 exe → 构建安装器 → 发布 Release
 git add -A
-git commit -m "release: v1.1.1"
-git push
-git tag v1.1.1
-git push origin v1.1.1
+git commit -m "release: v$version"
+git push origin HEAD
+git tag "v$version"
+git push origin "v$version"
 # 3) 已安装客户端下次启动自动提示更新
 ```
 
-## 当前状态（v1.1.0 工作流打磨版，能力边界仍冻结）
+## 当前状态（v1.1.1 工作流打磨版，能力边界仍冻结）
 
 - 核心流水线已具备解析、扫描、保守决策、可逆补丁和统一安全检查；正文、数学、
   label/ref、图片路径、环境、花括号、项目文件集合与可选编译对比共同决定能否导出；

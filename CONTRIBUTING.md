@@ -13,11 +13,9 @@ python -m pip install --user -e .        # 可选：安装为可编辑包
 ## 跑测试与静态检查
 
 ```powershell
-# 全部测试套件（11 个，纯标准库核心 + 服务层）
-foreach ($t in @('test_parser','test_scanner','test_patch','test_pipeline','test_ai','test_template','test_store','test_server','test_updater','test_ocr','test_legalize')) {
-  python "tests/$t.py"
-}
-python -m ruff check latexstruct tests tools packaging --select F
+python -m pytest -q
+python -m ruff check latexstruct tests tools packaging benchmark
+python tools/benchmark.py
 ```
 
 ## 提交约定
@@ -28,14 +26,20 @@ python -m ruff check latexstruct tests tools packaging --select F
 
 ## 发布
 
-版本号唯一来源是 `latexstruct/_version.py`。发布三步（CI 全自动完成其余）：
+版本号唯一来源是 `latexstruct/_version.py`。发布时先同步生成元数据，再由 CI 完成构建与发布：
 
 ```powershell
 # 1) 修改 latexstruct/_version.py 的 __version__
-# 2) 提交推送
-git add -A; git commit -m "vX.Y.Z ..."; git push
-# 3) 打 tag 触发发布（ruff → 测试 → 构建 → 安装器冒烟 → 签名 → Release）
-git tag vX.Y.Z; git push origin vX.Y.Z
+# 2) 同步前端与 Windows 版本元数据，并运行版本一致性测试
+python packaging/sync_version.py --version X.Y.Z
+python -B tests/test_version.py
+# 3) 提交并推送
+git add -A
+git commit -m "release: vX.Y.Z"
+git push
+# 4) 打 tag 触发发布（ruff → 测试 → 构建 → 安装器冒烟 → 签名 → Release）
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 ## 目录速览
@@ -43,5 +47,5 @@ git tag vX.Y.Z; git push origin vX.Y.Z
 - `latexstruct/core/`：解析/扫描/决策/补丁/校验/复查/模板/合法化（纯标准库，可独立测试）；
 - `latexstruct/server/`：FastAPI 本地服务 + 无构建步骤界面；
 - `packaging/`：PyInstaller spec、Inno Setup 脚本、图标生成；
-- `tests/`：11 个测试套件 + 合成/真实摘录语料；
+- `tests/`：pytest 测试套件 + 合成/真实摘录语料；
 - `tools/`：真实书稿摸底、E2E（AI/OCR/整书）、剖析脚本。

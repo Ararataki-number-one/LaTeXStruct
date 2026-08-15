@@ -3,9 +3,15 @@
 
 from __future__ import annotations
 
+import re
 from typing import Dict, List
 
 from .parser import find_env_ranges, mask_comments, mask_inline_verb, mask_protected
+
+
+DISPLAY_SAFETY_TOKEN_RE = re.compile(
+    r"(?<!\\)\\(?P<delimiter>[\[\]])|(?<!\\)\\(?P<tag>tag)(?![A-Za-z@])"
+)
 
 
 def _masked(text: str) -> str:
@@ -68,6 +74,53 @@ def compare_braces(before: str, after: str) -> Dict:
     }
 
 
+def check_display_tag_safety(text: str) -> Dict:
+    r"""检查活动 ``\[``/``\]`` 配对及其中的非法 ``\tag``。
+
+    名称为兼容既有 verification 字段保留；检查范围只覆盖 bracket display，
+    equation/align 等 AMS 数学环境中的合法 ``\tag`` 不受影响。
+    """
+    masked = _masked(text)
+    issues = []
+    open_offset = None
+    for token in DISPLAY_SAFETY_TOKEN_RE.finditer(masked):
+        delimiter = token.group("delimiter")
+        if delimiter == "[":
+            if open_offset is not None:
+                issues.append({
+                    "line": masked.count("\n", 0, token.start()) + 1,
+                    "reason": "展示公式尚未闭合又出现新的 \\[，请检查公式分隔符",
+                })
+            else:
+                open_offset = token.start()
+        elif delimiter == "]":
+            if open_offset is None:
+                issues.append({
+                    "line": masked.count("\n", 0, token.start()) + 1,
+                    "reason": "发现没有对应 \\[ 的 \\]，请检查公式分隔符",
+                })
+            else:
+                open_offset = None
+        elif open_offset is not None:
+            issues.append({
+                "line": masked.count("\n", 0, token.start()) + 1,
+                "reason": (
+                    "\\tag 不能直接用于 \\[...\\] 显示公式；"
+                    "请改用 equation/align 等 AMS 数学环境，或移除多余 tag"
+                ),
+            })
+    if open_offset is not None:
+        issues.append({
+            "line": masked.count("\n", 0, open_offset) + 1,
+            "reason": "展示公式的 \\[ 缺少对应 \\]，请补全或移除未闭合分隔符",
+        })
+    return {
+        "ok": not issues,
+        "count": len(issues),
+        "issues": issues[:20],
+    }
+
+
 KNOWN_ISSUE_PATTERNS = [
     # 原文既有问题，仅报告不修改
     (r"\\left\s*\(\s*\\begin\{matrix\}",
@@ -76,8 +129,6 @@ KNOWN_ISSUE_PATTERNS = [
 
 
 def known_issues(text: str) -> List[Dict]:
-    import re
-
     masked = _masked(text)
     out = []
     for pat, desc in KNOWN_ISSUE_PATTERNS:

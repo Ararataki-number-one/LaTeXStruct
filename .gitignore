@@ -14,6 +14,8 @@ latexstruct/server/static-react/
 debug_tpl.txt
 spot.txt
 jobs.json
+jobs*.json
+dbgz.txt
 job.log
 tests/ls-*/
 
@@ -34,4 +36,6 @@ secrets/
 secrets.json
 *.secret
 *.secrets.json
+*.pfx
+*.p12
 config.local.json

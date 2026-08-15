@@ -77,6 +77,26 @@ def test_release_metadata_matches_app_version():
     assert "npm" in build_script and "run build" in build_script
 
 
+def test_release_build_safety_guards():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "scripts", "build.ps1"), encoding="utf-8-sig") as f:
+        build_script = f.read()
+    assert "与 latexstruct._version" in build_script
+    assert "Remove-StaleDistOutput $portableExe" in build_script
+    assert "Remove-StaleDistOutput $installerExe" in build_script
+    assert "$pyInstallerExit -ne 0" in build_script
+    assert "$isccExit -ne 0" in build_script
+
+    with open(os.path.join(root, ".github", "workflows", "build.yml"), encoding="utf-8") as f:
+        workflow = f.read()
+    assert "$observedVersion -eq $env:APP_VERSION" in workflow
+
+    with open(os.path.join(root, ".gitignore"), encoding="utf-8") as f:
+        gitignore = f.read().splitlines()
+    assert "*.pfx" in gitignore
+    assert "*.p12" in gitignore
+
+
 def test_version_resource_sync_rejects_bad_versions():
     import importlib.util
 

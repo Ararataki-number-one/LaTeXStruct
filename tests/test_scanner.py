@@ -66,8 +66,10 @@ def test_custom_theorem_and_math_environments_are_not_rescanned():
     text = (
         "\\documentclass{book}\n"
         "\\usepackage{amsthm}\n\\newtheorem{myresult}{Result}\n"
+        "\\newtheorem*{myremark}{Remark}\n"
         "\\begin{document}\n"
         "\\begin{myresult}\nTheorem 7. This is already structured.\n\\end{myresult}\n"
+        "\\begin{myremark}\nTheorem 7.5. This is also structured.\n\\end{myremark}\n"
         "\\begin{equation}\nTheorem 8. This is literal math content.\n\\end{equation}\n"
         "\\end{document}\n"
     )

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Dict, List, Optional
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,13 @@ class ProviderPreset:
 # 中国内地旧兼容域名仍受官方支持，且无需用户先查 Workspace ID。若控制台提供了
 # workspace 专属 API Host，用户可在设置页或 LATEXSTRUCT_OCR_BASE_URL 中覆盖。
 QWEN_CN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+# 自动凭据（例如 DASHSCOPE_API_KEY）只允许发送到这些已知供应商域名。
+# workspace 专属地址形如 <WorkspaceId>.<region>.maas.aliyuncs.com，因此使用
+# 带点边界的官方后缀；绝不能使用简单 substring 匹配。
+DEEPSEEK_API_HOSTS = frozenset({"api.deepseek.com"})
+QWEN_API_HOSTS = frozenset({"dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com"})
+QWEN_API_HOST_SUFFIXES = (".maas.aliyuncs.com",)
 
 PROVIDER_PRESETS = (
     ProviderPreset(
@@ -118,5 +126,42 @@ def list_provider_presets() -> List[Dict]:
     return [preset.public_dict() for preset in PROVIDER_PRESETS]
 
 
+def api_hostname(base_url: str) -> Optional[str]:
+    """返回规范化的 HTTPS hostname；畸形/含凭据/非 HTTPS 地址返回 None。"""
+    try:
+        parsed = urlsplit((base_url or "").strip())
+        # 访问 port 会触发对非法端口的校验（例如 :not-a-port）。
+        port = parsed.port
+        hostname = parsed.hostname
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.netloc
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or port not in (None, 443)
+    ):
+        return None
+    return hostname.rstrip(".").lower()
+
+
+def api_provider(base_url: str) -> Optional[str]:
+    """仅按严格 HTTPS hostname 识别可自动携带凭据的内置供应商。"""
+    hostname = api_hostname(base_url)
+    if hostname in DEEPSEEK_API_HOSTS:
+        return "deepseek"
+    if hostname in QWEN_API_HOSTS or any(
+        hostname and hostname.endswith(suffix) for suffix in QWEN_API_HOST_SUFFIXES
+    ):
+        return "qwen"
+    return None
+
+
 def is_qwen_config(base_url: str, model: str) -> bool:
-    return "aliyuncs.com" in (base_url or "").lower() or (model or "").lower().startswith("qwen")
+    # model 名可由用户任意指定，不能作为注入 DASHSCOPE_API_KEY 的信任依据。
+    _ = model
+    return api_provider(base_url) == "qwen"

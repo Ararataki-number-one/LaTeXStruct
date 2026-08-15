@@ -32,8 +32,9 @@ def test_basic_book_fast_mode():
     assert "Theorem 2.3.4" not in out
     assert "\\begin{definition}[1.1.1]" in out
     assert "Definition 1.1.1" not in out
-    # 无编号条目保留标题文本
-    assert "Remark. This is a short note" in out
+    # 无编号条目也剥离重复标题词条，但保留其后的正文
+    assert "This is a short note" in out
+    assert "Remark. This is a short note" not in out
     # proof 起始语剥离 + 整段证明覆盖（align 环境与收束句并入，后续叙述不并入）
     assert "Proof. Fix" not in out
     assert "Fix a sequence" in out
@@ -53,7 +54,7 @@ def test_basic_book_fast_mode():
     assert "The body of Theorem 9.9 was left outside" in out
     # 导言区补充
     assert "\\usepackage{amsthm}" in out
-    assert "\\newtheorem{definition}{Definition}" in out
+    assert "\\newtheorem*{definition}{Definition}" in out
     # 校验
     assert res.verification["content_invariant"] is True
     assert res.verification["env_balance"]["ok"] is True
@@ -66,13 +67,12 @@ def test_cn_fragment_fast_mode():
     res = run_pipeline(read_sample("cn_fragment.tex"), mode="rule")
     assert res.ok, res.report_md
     out = res.result
+    # elegantbook 自带环境的计数语义无法证明安全；显式源编号全部保守保留。
     for env in ("definition", "theorem", "proposition", "corollary", "lemma", "remark", "example"):
-        assert f"\\begin{{{env}}}" in out, env
-    # 中文编号提取
-    assert "\\begin{theorem}[2.1]" in out and "定理 2.1" not in out
-    assert "（某某）. 结论陈述" in out
-    assert "\\begin{definition}[1.1]" in out and "定义 1.1" not in out
-    assert "\\begin{remark}[3]" in out and "\\begin{example}[5]" in out
+        assert f"\\begin{{{env}}}" not in out, env
+    assert "定理 2.1（某某）. 结论陈述" in out
+    assert "定义 1.1. 设 $A$ 是集合" in out
+    assert any("避免双编号" in item["reason"] for item in res.ambiguous)
     # 证明起始语剥离
     assert out.count("\\begin{proof}") == 2
     assert "证明：略" not in out and "略。" in out
@@ -81,6 +81,92 @@ def test_cn_fragment_fast_mode():
     assert "\\usepackage{amsthm}" not in out
     assert res.verification["content_invariant"] is True
     assert res.verification["env_balance"]["ok"] is True
+
+
+def test_cn_numbered_titles_use_generated_unnumbered_environments():
+    text = read_sample("cn_fragment.tex").replace(
+        "\\documentclass{elegantbook}", "\\documentclass{book}", 1,
+    )
+    res = run_pipeline(text, mode="rule")
+    assert res.ok, res.report_md
+    out = res.result
+    assert "\\newtheorem*{theorem}{Theorem}" in out
+    assert "\\begin{theorem}[2.1]" in out and "定理 2.1" not in out
+    assert "（某某）. 结论陈述" in out
+    assert "\\begin{definition}[1.1]" in out and "定义 1.1" not in out
+    assert "\\begin{remark}[3]" in out and "\\begin{example}[5]" in out
+
+
+def test_unnumbered_title_prefix_is_removed_but_title_only_is_preserved():
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "Theorem. A statement without a source number.\n\n"
+        "Remark\n"
+        "\\end{document}\n"
+    )
+    result = run_pipeline(text, mode="rule")
+    assert result.ok, result.report_md
+    assert "\\begin{theorem}\n A statement without a source number." in result.result
+    assert "Theorem. A statement without a source number." not in result.result
+    assert "\\begin{remark}\nRemark\n\\end{remark}" in result.result
+
+
+def test_unnumbered_chinese_title_prefix_consumes_punctuation_safely():
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "定理：结论成立。\n\n"
+        "注：这是注记。\n\n"
+        "例。这里是例子。\n\n"
+        "定理：\n"
+        "\\end{document}\n"
+    )
+    result = run_pipeline(text, mode="rule")
+    assert result.ok, result.report_md
+    assert "\\begin{theorem}\n结论成立。" in result.result
+    assert "\\begin{remark}\n这是注记。" in result.result
+    assert "\\begin{example}\n这里是例子。" in result.result
+    assert "\n：" not in result.result and "\n。这里" not in result.result
+    # 标题词条后没有正文时不剥离，避免生成空内容。
+    assert "\\begin{theorem}\n定理：\n\\end{theorem}" in result.result
+
+
+def test_existing_numbered_theorem_declaration_defers_explicit_source_number():
+    text = (
+        "\\documentclass{book}\n\\usepackage{amsthm}\n"
+        "\\newtheorem{theorem}{Theorem}\n\\begin{document}\n"
+        "Theorem 7. A statement with its own number.\n"
+        "\\end{document}\n"
+    )
+    first = run_pipeline(text, mode="rule")
+    assert first.ok, first.report_md
+    assert first.result == text
+    assert not first.applied
+    assert any("避免双编号" in item["reason"] for item in first.ambiguous)
+
+    # 缓存/审阅复用也必须再次经过最终应用保护，不能绕过。
+    reused = run_pipeline(
+        text,
+        mode="rule",
+        decisions_override=first.decisions,
+        ambiguous_override=[],
+    )
+    assert reused.ok, reused.report_md
+    assert reused.result == text
+    assert reused.verification["decisions_reused"] is True
+    assert any("避免双编号" in item["reason"] for item in reused.ambiguous)
+
+
+def test_existing_starred_theorem_declaration_accepts_explicit_source_number():
+    text = (
+        "\\documentclass{book}\n\\usepackage{amsthm}\n"
+        "\\newtheorem*{theorem}{Theorem}\n\\begin{document}\n"
+        "Theorem 7. A statement with its own number.\n"
+        "\\end{document}\n"
+    )
+    result = run_pipeline(text, mode="rule")
+    assert result.ok, result.report_md
+    assert "\\begin{theorem}[7]\n A statement with its own number." in result.result
+    assert result.result.count("\\newtheorem*{theorem}{Theorem}") == 1
 
 
 def test_crlf_export_preserved():
@@ -137,6 +223,111 @@ def test_known_issues_reported():
     assert "{2}^{\\left( \\begin{matrix} n \\\\ 2 \\end{matrix}\\right) }" in res.result
 
 
+def test_repeated_known_issues_are_grouped_in_report():
+    matrix = r"\left( \begin{matrix} n \\ 2 \end{matrix}\right)"
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        f"{matrix} + {matrix}\n{matrix}\n"
+        "\\end{document}\n"
+    )
+    res = run_pipeline(text, mode="rule")
+    assert res.ok
+    assert len(res.verification["known_issues"]) == 3
+    assert res.report_md.count("内嵌 matrix 环境") == 1
+    assert "共 3 处，涉及 2 行" in res.report_md
+
+
+def test_bracket_display_with_tag_fails_closed_without_tex_engine():
+    text = r"""\documentclass{book}
+\usepackage{amsmath}
+\begin{document}
+\[
+\begin{aligned}
+a &= b \\
+c &= d \tag{5.4}
+\end{aligned}
+\tag{duplicate}
+\]
+\end{document}
+"""
+    result = run_pipeline(text, mode="rule")
+    assert result.ok is False
+    assert result.verification["display_tags"]["ok"] is False
+    assert result.verification["display_tags"]["count"] == 2
+    assert result.verification["safe_to_export"] is False
+    assert result.verification["export_blocked"] is True
+    assert "\\tag 不能直接用于 \\[...\\]" in result.report_md
+
+
+def test_unbalanced_bracket_display_fails_closed_without_tex_engine():
+    cases = (
+        ("unmatched-open", "\\[x=y\n", "缺少对应 \\]"),
+        ("stray-close", "x=y\\]\n", "没有对应 \\["),
+        ("nested-open", "\\[x+\\[y\\]\\]\n", "尚未闭合又出现新的 \\["),
+    )
+    for name, body, expected_reason in cases:
+        text = (
+            "\\documentclass{book}\n\\begin{document}\n"
+            + body
+            + "\\end{document}\n"
+        )
+        result = run_pipeline(text, mode="rule")
+        assert result.ok is False, name
+        assert result.verification["display_tags"]["ok"] is False, name
+        assert result.verification["safe_to_export"] is False, name
+        assert result.verification["export_blocked"] is True, name
+        assert expected_reason in result.report_md, name
+
+
+def test_tag_in_ams_math_environments_is_not_misreported():
+    text = r"""\documentclass{book}
+\usepackage{amsmath}
+\begin{document}
+\begin{equation}a=b\tag{1}\end{equation}
+\begin{align}a&=b\tag{2}\end{align}
+\begin{alignat}{2}a&=b&\quad c&=d\tag{3}\end{alignat}
+\begin{gather}a=b\tag{4}\end{gather}
+\begin{multline}a+b+c=d\tag{5}\end{multline}
+\[
+x=y % \tag{ignored-comment}
+\]
+% \[ ignored unmatched display in a comment
+\begin{verbatim}
+\[ \tag{literal} \]
+\end{verbatim}
+\begin{minted}{tex}
+\[ \tag{literal} \]
+\end{minted}
+\end{document}
+"""
+    result = run_pipeline(text, mode="rule")
+    assert result.ok, result.report_md
+    assert result.verification["display_tags"] == {"ok": True, "count": 0, "issues": []}
+    assert result.verification["safe_to_export"] is True
+
+
+def test_ocr_repaired_tagged_display_passes_static_safety_gate():
+    from latexstruct.ocr import _clean_page_output
+
+    raw = r"""\[
+\begin{aligned}
+a &= b \\
+c &= d \tag{5.4}
+\end{aligned}
+\]"""
+    cleaned = _clean_page_output(raw)
+    assert r"\begin{equation}" in cleaned and r"\[" not in cleaned
+    result = run_pipeline(
+        "\\documentclass{book}\n\\usepackage{amsmath}\n\\begin{document}\n"
+        + cleaned
+        + "\n\\end{document}\n",
+        mode="rule",
+    )
+    assert result.ok, result.report_md
+    assert result.verification["display_tags"]["ok"] is True
+    assert result.verification["safe_to_export"] is True
+
+
 def test_overlapping_decisions_are_both_deferred():
     lines = ["Theorem. A.", "body", "Proof. B."]
     d1 = Decision(candidate_id="a", action="wrap", env="theorem", body_span=(1, 2))
@@ -176,7 +367,7 @@ def test_used_but_undefined_theorem_is_declared_for_wrapped_output():
     )
     result = run_pipeline(text, mode="rule")
     assert result.ok, result.report_md
-    assert "\\newtheorem{theorem}{Theorem}" in result.result
+    assert "\\newtheorem*{theorem}{Theorem}" in result.result
 
 
 def test_existing_amsthm_package_is_not_inserted_twice():
@@ -187,7 +378,7 @@ def test_existing_amsthm_package_is_not_inserted_twice():
     result = run_pipeline(text, mode="rule")
     assert result.ok, result.report_md
     assert result.result.count("\\usepackage{amsthm}") == 1
-    assert "\\newtheorem{definition}{Definition}" in result.result
+    assert "\\newtheorem*{definition}{Definition}" in result.result
 
 
 def test_real_godsil_section_1_7():

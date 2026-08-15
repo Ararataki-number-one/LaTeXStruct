@@ -169,18 +169,31 @@ jobs:
           if (-not (Test-Path "$dir\LaTeXStruct.exe")) { Write-Error "安装后未找到 exe"; exit 1 }
           $proc = Start-Process -FilePath "$dir\LaTeXStruct.exe" -ArgumentList "--server","--port","8099" -PassThru
           $ok = $false
+          $observedVersion = "<未响应>"
           foreach ($i in 1..30) {
             Start-Sleep -Seconds 2
             try {
               $h = Invoke-RestMethod "http://127.0.0.1:8099/api/health" -TimeoutSec 3
-              if ($h.ok) { $ok = $true; Write-Host "安装版运行正常: v$($h.version)"; break }
+              if ($h.ok) {
+                $observedVersion = [string]$h.version
+                if ($observedVersion -eq $env:APP_VERSION) {
+                  $ok = $true
+                  Write-Host "安装版运行正常: v$observedVersion"
+                } else {
+                  Write-Host "安装版版本不匹配: expected=$env:APP_VERSION actual=$observedVersion"
+                }
+                break
+              }
             } catch {}
           }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           # 单文件 exe 有引导父子进程：全部结束，避免锁文件导致卸载残留
           Get-Process LaTeXStruct -ErrorAction SilentlyContinue | Stop-Process -Force
           Start-Sleep -Seconds 2
-          if (-not $ok) { Write-Error "安装版健康检查失败"; exit 1 }
+          if (-not $ok) {
+            Write-Error "安装版健康检查失败或版本不匹配: expected=$env:APP_VERSION actual=$observedVersion"
+            exit 1
+          }
           Start-Process -FilePath "$dir\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
           $gone = $false
           foreach ($i in 1..10) {

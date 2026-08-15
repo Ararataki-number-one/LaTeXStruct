@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
+from ..providers import api_provider
 from .parser import Document
 from .patch import Decision
 from .prompts import build_decide_system, build_decide_user, build_meta
@@ -37,12 +38,26 @@ class LLMError(Exception):
     pass
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Chat API 禁止重定向，避免 Authorization 被转发到其他 authority。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: PLR0913
+        return None
+
+
+def _open_no_redirect(request, timeout):
+    return urllib.request.build_opener(_NoRedirectHandler()).open(request, timeout=timeout)
+
+
 @dataclass
 class RoleConfig:
     base_url: str = "https://api.deepseek.com"
     model: str = "deepseek-v4-flash"
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)
     timeout: float = 180.0
+    max_tokens: int = 8000
+    max_retries: int = 1
+    retry_delay: float = 2.0
 
 
 @dataclass
@@ -72,9 +87,9 @@ class LLMClient:
             ],
             "temperature": 0,
             "response_format": {"type": "json_object"},
+            "max_tokens": self._max_tokens(),
         }
-        if self._is_qwen():
-            payload["enable_thinking"] = False
+        self._add_provider_options(payload)
         raw = self._post_chat(payload, "LLM 调用")
         content = self._message_text(raw)
         return self._parse_json(content), self.last_usage
@@ -114,10 +129,9 @@ class LLMClient:
                 },
             ],
             "temperature": 0,
-            "max_tokens": 8000,
+            "max_tokens": self._max_tokens(),
         }
-        if self._is_qwen():
-            payload["enable_thinking"] = False
+        self._add_provider_options(payload)
         raw = self._post_chat(payload, "视觉模型调用")
         return self._message_text(raw)
 
@@ -127,25 +141,55 @@ class LLMClient:
             raise LLMError("未配置 API Base URL")
         try:
             parsed = urlsplit(base)
+            # 访问 hostname/port 会验证畸形 IPv6 与非法端口。
+            hostname = parsed.hostname
+            _ = parsed.port
         except ValueError:
             raise LLMError("API Base URL 格式无效") from None
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            raise LLMError("API Base URL 必须是有效的 http/https 地址")
+        scheme = parsed.scheme.lower()
+        if scheme not in ("http", "https") or not parsed.netloc or not hostname:
+            raise LLMError("API Base URL 必须是有效的 HTTPS 地址")
         if parsed.username or parsed.password:
             raise LLMError("API Base URL 不应包含用户名或密码")
+        if parsed.query or parsed.fragment:
+            raise LLMError("API Base URL 不应包含查询参数或片段")
+        if scheme == "http" and hostname.rstrip(".").lower() not in {
+            "localhost", "127.0.0.1", "::1",
+        }:
+            raise LLMError("API Base URL 必须使用 HTTPS（仅本机 loopback 允许 HTTP）")
         if base.endswith("/chat/completions"):
             return base
         return base + "/chat/completions"
 
-    def _is_qwen(self) -> bool:
-        return (self.cfg.model or "").lower().startswith("qwen")
+    def _add_provider_options(self, payload: dict) -> None:
+        provider = api_provider(self.cfg.base_url)
+        if provider == "deepseek":
+            payload["thinking"] = {"type": "disabled"}
+        elif provider == "qwen":
+            payload["enable_thinking"] = False
+
+    def _max_tokens(self) -> int:
+        value = self.cfg.max_tokens
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise LLMError("max_tokens 必须是正整数")
+        return value
+
+    def _retry_settings(self) -> Tuple[int, float]:
+        retries = self.cfg.max_retries
+        delay = self.cfg.retry_delay
+        if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+            raise LLMError("max_retries 必须是非负整数")
+        if isinstance(delay, bool) or not isinstance(delay, (int, float)) or delay < 0:
+            raise LLMError("retry_delay 必须是非负数")
+        return retries, float(delay)
 
     def _post_chat(self, payload: dict, label: str) -> dict:
         """发送 OpenAI 兼容请求；仅重试限流、服务端错误和暂时性网络错误。"""
         if not self.cfg.api_key:
             raise LLMError("未配置 API Key")
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        for attempt in range(2):
+        max_retries, retry_delay = self._retry_settings()
+        for attempt in range(max_retries + 1):
             req = urllib.request.Request(
                 self._endpoint_url(),
                 data=data,
@@ -156,7 +200,7 @@ class LLMClient:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(req, timeout=self.cfg.timeout) as resp:
+                with _open_no_redirect(req, timeout=self.cfg.timeout) as resp:
                     body = resp.read().decode("utf-8")
                 raw = json.loads(body)
                 if not isinstance(raw, dict):
@@ -165,14 +209,16 @@ class LLMClient:
                 return raw
             except urllib.error.HTTPError as e:
                 detail = self._describe_http_error(e)
-                if attempt == 0 and e.code in {408, 409, 425, 429, 500, 502, 503, 504}:
-                    time.sleep(2)
+                if attempt < max_retries and e.code in {408, 409, 425, 429, 500, 502, 503, 504}:
+                    if retry_delay:
+                        time.sleep(retry_delay)
                     continue
                 raise LLMError(f"{label}失败: {detail}") from None
             except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
                 detail = self._redact(str(getattr(e, "reason", e)))
-                if attempt == 0:
-                    time.sleep(2)
+                if attempt < max_retries:
+                    if retry_delay:
+                        time.sleep(retry_delay)
                     continue
                 raise LLMError(f"{label}失败: 网络错误: {detail}") from None
             except json.JSONDecodeError:
@@ -306,12 +352,21 @@ def parse_decisions(
                 ambiguous.append({"candidate_id": cid, "line": c.span.start_line,
                                   "reason": f"AI 置信度 {conf:.0%} 低于自动修改阈值，需人工确认"})
                 continue
-            # 可选参数只能来自扫描器在原文中确定性提取的编号/Proof 参数，绝不采用
-            # 模型自由生成的 LaTeX 片段。
-            source_optional = (
-                c.payload.get("proof_arg", "") if c.kind == "proof"
-                else c.payload.get("number", "")
-            )
+            # 编号/证明说明及可剥离前缀只能来自扫描器对原文的确定性提取，
+            # 绝不采用模型生成的 optional_arg/keep_title_text。剥离条件与规则模式一致。
+            strip_prefix = ""
+            if c.kind == "proof":
+                source_optional = c.payload.get("proof_arg", "")
+                prefix = c.payload.get("strip_prefix", "")
+                remainder = c.title_text[len(prefix):].strip() if prefix else ""
+                if prefix and remainder and body[0] == c.span.start_line:
+                    strip_prefix = prefix
+            else:
+                source_optional = c.payload.get("number", "")
+                prefix = c.payload.get("title_prefix", "")
+                remainder = c.title_text[len(prefix):].strip() if prefix else ""
+                if prefix and remainder and body[0] == c.span.start_line:
+                    strip_prefix = prefix
             decisions.append(
                 Decision(
                     candidate_id=cid,
@@ -320,10 +375,11 @@ def parse_decisions(
                     body_span=body,
                     title_span=(body[0], body[0]),
                     optional_arg=str(source_optional or "")[:120],
-                    keep_title_text=True,
+                    keep_title_text=not strip_prefix,
                     source="ai",
                     reason=str(item.get("reason", ""))[:120],
                     confidence=conf,
+                    payload={"title_prefix": strip_prefix},
                 )
             )
         else:  # move-boundary

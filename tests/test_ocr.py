@@ -19,6 +19,7 @@ from latexstruct.ocr import (  # noqa: E402
     encode_image,
     image_mime_type,
     merge_book,
+    ocr_page_needs_retry,
     parse_page_range,
     transcribe_images,
 )
@@ -60,6 +61,78 @@ def test_clean_page_output():
     assert _clean_page_output("Theorem 1. X.") == "Theorem 1. X."
 
 
+def test_clean_page_output_normalizes_single_line_tagged_display():
+    source = r"\[x+y=z\tag{5.6}\]"
+    assert _clean_page_output(source) == (
+        r"\begin{equation}x+y=z\tag{5.6}\end{equation}"
+    )
+
+
+def test_clean_page_output_moves_aligned_tag_after_environment():
+    source = r"""\[
+\begin{aligned}
+a &= b \\
+c &= d \tag{5.4}
+\end{aligned}
+\]"""
+    expected = (
+        "\\begin{equation}\n"
+        "\\begin{aligned}\n"
+        "a &= b \\\\\n"
+        "c &= d " + "\n"
+        "\\end{aligned}\n"
+        "\\tag{5.4}\n"
+        "\\end{equation}"
+    )
+    cleaned = _clean_page_output(source)
+    assert cleaned == expected
+    assert cleaned.index(r"\end{aligned}") < cleaned.index(r"\tag{5.4}")
+
+
+def test_clean_page_output_leaves_ambiguous_or_untagged_math_unchanged():
+    unchanged = (
+        r"\[x+y=z\]",
+        r"\[x\tag{1}+y\tag{2}\]",
+        r"\[x+y\tag{1}",
+        r"\begin{equation}x+y\tag{5.6}\end{equation}",
+        "\\[\nx=y % \\tag{ignored-comment}\n\\]",
+    )
+    for source in unchanged:
+        assert _clean_page_output(source) == source
+
+
+def test_ocr_page_needs_retry_for_broken_or_illegal_bracket_displays():
+    missing_first_close = r"""\[
+\begin{aligned}
+a &= b + c \tag{5.4}
+\end{aligned}
+The following display starts before the first one was closed.
+\[
+d &= e
+\]"""
+    assert ocr_page_needs_retry(missing_first_close)
+    assert ocr_page_needs_retry(r"\[x=y")
+    assert ocr_page_needs_retry(r"x=y\]")
+
+    multiple_tags = _clean_page_output(r"\[x\tag{1}+y\tag{2}\]")
+    assert multiple_tags == r"\[x\tag{1}+y\tag{2}\]"
+    assert ocr_page_needs_retry(multiple_tags)
+
+
+def test_ocr_page_retry_check_ignores_valid_math_and_comments():
+    normalized = _clean_page_output(r"\[x=y\tag{1}\]")
+    safe = (
+        r"\[x=y\]",
+        normalized,
+        r"\begin{equation}x=y\tag{1}\end{equation}",
+        r"\begin{align}x&=y\tag{1}\end{align}",
+        "% inactive examples: \\[x=y\\tag{1)\n"
+        r"\begin{equation}a=b\end{equation}",
+    )
+    for source in safe:
+        assert not ocr_page_needs_retry(source)
+
+
 def test_image_data_uri_uses_real_mime_type():
     png = b"\x89PNG\r\n\x1a\n" + b"0" * 8
     jpeg = b"\xff\xd8\xff\xe0" + b"0" * 8
@@ -99,7 +172,7 @@ def test_qwen_vision_openai_compatible_payload():
         timeout=12,
     )
     image = encode_image(b"\x89PNG\r\n\x1a\n" + b"0" * 8)
-    with patch("urllib.request.urlopen", fake_urlopen):
+    with patch("latexstruct.core.ai._open_no_redirect", fake_urlopen):
         client = LLMClient(role)
         assert "X" in client.chat_vision("system", "transcribe", image)
 
@@ -109,6 +182,7 @@ def test_qwen_vision_openai_compatible_payload():
     payload = captured["payload"]
     assert payload["model"] == "qwen3-vl-flash"
     assert payload["enable_thinking"] is False
+    assert "thinking" not in payload
     content = payload["messages"][1]["content"]
     assert content[0]["type"] == "image_url"
     assert content[0]["image_url"]["url"].startswith("data:image/png;base64,")
@@ -128,7 +202,7 @@ def test_provider_error_redacts_api_key():
         api_key=key,
     )
     try:
-        with patch("urllib.request.urlopen", unauthorized):
+        with patch("latexstruct.core.ai._open_no_redirect", unauthorized):
             LLMClient(role).chat_vision("system", "user", "data:image/png;base64,AA==")
     except LLMError as exc:
         message = str(exc)
@@ -222,7 +296,10 @@ def test_ocr_pipeline_two_stages():
 
         pr = run_pipeline(ocr.tex, mode="rule")
         assert pr.ok
-        assert "\\begin{theorem}[1]" in pr.result  # Stage B 结构化
+        # OCR 默认导言区使用 elegantbook；其定理计数语义未知时，显式源编号宁可保留。
+        assert "\\begin{theorem}" not in pr.result
+        assert "Theorem 1. X." in pr.result
+        assert any("避免双编号" in item["reason"] for item in pr.ambiguous)
         assert "\\begin{proof}" in pr.result
     finally:
         shutil.rmtree(d, ignore_errors=True)

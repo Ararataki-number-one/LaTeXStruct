@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "./api";
+import { apiAuthority, sameApiAuthority } from "./providerUrl";
 
 const PROVIDER_GROUPS = [
   {
@@ -28,36 +29,75 @@ const ROLES = [
   { prefix: "ocr", label: "图片 / PDF OCR", help: "必须选择支持图片输入的视觉模型", vision: true },
 ];
 
+function normalizeUrl(value) {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function sameApiHost(left, right) {
+  return sameApiAuthority(left, right);
+}
+
+function hasConfiguredKey(value) {
+  return String(value || "").startsWith("已配置");
+}
+
+function providerOwnsUrl(providerId, value, candidates) {
+  const authority = apiAuthority(value);
+  return providerId !== "custom" && authority.startsWith("https://")
+    && candidates.some((item) => {
+      const presetAuthority = apiAuthority(item.base_url);
+      return presetAuthority.startsWith("https://") && presetAuthority === authority;
+    });
+}
+
 function detectProvider(cfg, providers) {
-  const decideUrl = (cfg?.decide_base_url || "").replace(/\/$/, "");
-  const match = providers.find((item) =>
-    item.base_url.replace(/\/$/, "") === decideUrl && item.model === cfg?.decide_model);
-  if (match) return match.provider;
-  if (decideUrl.includes("aliyuncs.com")) return "qwen-cn";
-  if (decideUrl.includes("deepseek.com")) return "deepseek";
+  const authority = apiAuthority(cfg?.decide_base_url);
+  if (!authority.startsWith("https://")) return "custom";
+  const authorityMatch = providers.find((item) => {
+    const presetAuthority = apiAuthority(item.base_url);
+    return presetAuthority.startsWith("https://") && presetAuthority === authority;
+  });
+  if (authorityMatch) return authorityMatch.provider;
   return "custom";
 }
 
 export default function Settings() {
   const [cfg, setCfg] = useState(null);
+  const [savedCfg, setSavedCfg] = useState(null);
   const [providers, setProviders] = useState([]);
   const [providerId, setProviderId] = useState("qwen-cn");
   const [sharedKey, setSharedKey] = useState("");
   const [advancedKeys, setAdvancedKeys] = useState({});
   const [providerChanged, setProviderChanged] = useState(false);
+  const [plainKeyConfirmed, setPlainKeyConfirmed] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
 
-  useEffect(() => {
-    Promise.all([
+  const loadSettings = () => {
+    setLoading(true);
+    setLoadError("");
+    setMsg("");
+    return Promise.all([
       api("/api/config").then((r) => r.json()),
       api("/api/providers").then((r) => r.json()),
     ]).then(([config, data]) => {
       const list = data.providers || [];
-      setCfg(config);
+      const hasAnyKey = ROLES.some(({ prefix }) =>
+        hasConfiguredKey(config[prefix + "_api_key"]));
+      // 新配置默认使用系统凭据；已有明文配置保持原样，避免无提示迁移。
+      setCfg(!config.keyring && !hasAnyKey ? { ...config, keyring: true } : config);
+      setSavedCfg(config);
       setProviders(list);
       setProviderId(detectProvider(config, list));
-    }).catch((error) => setMsg("加载设置失败：" + error.message));
+    }).catch(() => {
+      setLoadError("无法加载 AI 设置。请确认本地服务正在运行，然后重试。");
+    }).finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    loadSettings();
   }, []);
 
   const groupModels = useMemo(
@@ -70,8 +110,10 @@ export default function Settings() {
 
   const chooseProvider = (id) => {
     setProviderId(id);
-    setProviderChanged(id !== providerId || providerChanged);
+    setProviderChanged(id !== detectProvider(savedCfg || cfg, providers));
     setSharedKey("");
+    setAdvancedKeys({});
+    setPlainKeyConfirmed(false);
     if (id === "custom") return;
     const candidates = providers.filter((item) => item.provider === id);
     const recommended = candidates.find((item) => item.recommended) || candidates[0];
@@ -89,8 +131,8 @@ export default function Settings() {
     }));
   };
 
-  const selectModel = (role, model) => {
-    const preset = modelsFor(role).find((item) => item.model === model);
+  const selectModel = (role, presetId) => {
+    const preset = modelsFor(role).find((item) => item.id === presetId);
     if (!preset) return;
     setCfg((current) => ({
       ...current,
@@ -100,8 +142,27 @@ export default function Settings() {
   };
 
   const save = async () => {
-    if (providerId !== "custom" && providerChanged && !sharedKey.trim()) {
-      setMsg("切换服务商后，请先填写这个服务商的新 API Key");
+    const changedHostRoles = savedCfg ? ROLES.filter(({ prefix }) => {
+      const nextUrl = cfg[prefix + "_base_url"] || "";
+      return nextUrl && !sameApiHost(savedCfg[prefix + "_base_url"], nextUrl);
+    }) : [];
+    const sharedKeyRoles = new Set(ROLES.filter(({ prefix }) =>
+      groupModels.some((item) => (item.roles || []).includes(prefix))
+      && providerOwnsUrl(providerId, cfg[prefix + "_base_url"], groupModels))
+      .map(({ prefix }) => prefix));
+    const missingKeyRoles = changedHostRoles.filter(({ prefix }) =>
+      !String(advancedKeys[prefix] || "").trim()
+      && !(providerId !== "custom" && sharedKey.trim() && sharedKeyRoles.has(prefix)));
+    if (missingKeyRoles.length) {
+      setMsg(`API Host 已改变；请为${missingKeyRoles.map((role) => role.label).join("、")}填写新服务商的 API Key`);
+      return;
+    }
+    const hasPendingKey = !!sharedKey.trim()
+      || Object.values(advancedKeys).some((value) => String(value || "").trim());
+    const plaintextConfirmationNeeded = !cfg.keyring
+      && (hasPendingKey || !!savedCfg?.keyring);
+    if (plaintextConfirmationNeeded && !plainKeyConfirmed) {
+      setMsg("请先确认明文保存风险，或启用 Windows 凭据管理器");
       return;
     }
     const body = { review_enabled: !!cfg.review_enabled, keyring: !!cfg.keyring };
@@ -111,9 +172,8 @@ export default function Settings() {
       if (advancedKeys[prefix]) body[prefix + "_api_key"] = advancedKeys[prefix].trim();
     }
     if (sharedKey.trim() && providerId !== "custom") {
-      const supported = new Set(groupModels.flatMap((item) => item.roles || []));
       for (const { prefix } of ROLES) {
-        if (supported.has(prefix)) body[prefix + "_api_key"] = sharedKey.trim();
+        if (sharedKeyRoles.has(prefix)) body[prefix + "_api_key"] = sharedKey.trim();
       }
     }
     setSaving(true);
@@ -122,10 +182,12 @@ export default function Settings() {
       const response = await api("/api/config", { method: "PUT", body: JSON.stringify(body) });
       const saved = await response.json();
       setCfg(saved);
+      setSavedCfg(saved);
       setProviderId(detectProvider(saved, providers));
       setSharedKey("");
       setAdvancedKeys({});
       setProviderChanged(false);
+      setPlainKeyConfirmed(false);
       setMsg("设置已保存，可以开始处理项目了");
     } catch (error) {
       setMsg("保存失败：" + error.message);
@@ -134,10 +196,31 @@ export default function Settings() {
     }
   };
 
-  if (!cfg) return <section className="card">正在加载 AI 设置……</section>;
+  if (loading) return <section className="card" role="status">正在加载 AI 设置……</section>;
+  if (!cfg) {
+    return (
+      <section className="card" role="alert">
+        <h2>AI 设置加载失败</h2>
+        <p>{loadError || "暂时无法读取设置，请重试。"}</p>
+        <button type="button" className="primary" onClick={loadSettings}>重试</button>
+      </section>
+    );
+  }
 
-  const anyConfigured = ["decide", "review", "ocr"].some((role) =>
-    String(cfg[role + "_api_key"] || "").startsWith("已配置"));
+  const providerAuthorities = new Set(groupModels
+    .map((item) => apiAuthority(item.base_url))
+    .filter((authority) => authority.startsWith("https://")));
+  const decideAuthority = apiAuthority(cfg.decide_base_url);
+  const reviewAuthority = apiAuthority(cfg.review_base_url);
+  const hasReusableTextKey = providerId !== "custom"
+    && !!decideAuthority
+    && decideAuthority === reviewAuthority
+    && providerAuthorities.has(decideAuthority)
+    && (hasConfiguredKey(cfg.decide_api_key) || hasConfiguredKey(cfg.review_api_key));
+  const hasPendingKey = !!sharedKey.trim()
+    || Object.values(advancedKeys).some((value) => String(value || "").trim());
+  const plaintextConfirmationNeeded = !cfg.keyring
+    && (hasPendingKey || !!savedCfg?.keyring);
 
   return (
     <div className="settings-simple">
@@ -171,11 +254,14 @@ export default function Settings() {
             <input
               type="password"
               autoComplete="off"
-              placeholder={anyConfigured && !providerChanged ? "已配置；留空可保持不变" : "粘贴 API Key"}
+              placeholder={hasReusableTextKey && !providerChanged
+                ? "已配置；留空可保持不变" : "粘贴 API Key"}
               value={sharedKey}
               onChange={(event) => setSharedKey(event.target.value)}
             />
-            <span className="key-safety">🔒 保存时会自动用于该平台支持的模型</span>
+            <span className="key-safety">
+              {cfg.keyring ? "🔒 将安全保存并用于该平台支持的模型" : "⚠ 尚未启用安全存储"}
+            </span>
           </div>
         </section>
       )}
@@ -189,17 +275,25 @@ export default function Settings() {
           <div className="model-grid">
             {ROLES.map((role) => {
               const options = modelsFor(role);
+              const selectedPreset = options.find((item) =>
+                normalizeUrl(item.base_url) === normalizeUrl(cfg[role.prefix + "_base_url"])
+                && item.model === cfg[role.prefix + "_model"]);
+              const currentModel = cfg[role.prefix + "_model"] || "";
               return (
                 <label className="model-choice" key={role.prefix}>
                   <span><b>{role.label}</b><small>{role.help}</small></span>
                   {options.length ? (
                     <select
-                      value={options.some((item) => item.model === cfg[role.prefix + "_model"])
-                        ? cfg[role.prefix + "_model"] : options[0].model}
+                      value={selectedPreset?.id || "__current__"}
                       onChange={(event) => selectModel(role, event.target.value)}
                     >
+                      {!selectedPreset && (
+                        <option value="__current__">
+                          {currentModel ? `当前：${currentModel}（非预设）` : "当前未选择模型"}
+                        </option>
+                      )}
                       {options.map((item) => (
-                        <option key={item.id} value={item.model}>{item.label}</option>
+                        <option key={item.id} value={item.id}>{item.label}</option>
                       ))}
                     </select>
                   ) : (
@@ -257,12 +351,27 @@ export default function Settings() {
           <input
             type="checkbox"
             checked={!!cfg.keyring}
-            onChange={(event) => setCfg({ ...cfg, keyring: event.target.checked })}
+            onChange={(event) => {
+              setCfg({ ...cfg, keyring: event.target.checked });
+              setPlainKeyConfirmed(false);
+            }}
           />
           使用 Windows 凭据管理器加密保存 API Key（推荐）
         </label>
         {!cfg.keyring && (
-          <p className="warning">当前密钥会保存在这台电脑的本地配置中。建议勾选上方安全保存。</p>
+          <div className="warning" role="alert">
+            当前密钥会以明文保存在这台电脑的本地配置中。建议勾选上方安全保存。
+            {plaintextConfirmationNeeded && (
+              <label className="plaintext-confirmation">
+                <input
+                  type="checkbox"
+                  checked={plainKeyConfirmed}
+                  onChange={(event) => setPlainKeyConfirmed(event.target.checked)}
+                />
+                我了解本次保存会写入明文 API Key，并确认继续
+              </label>
+            )}
+          </div>
         )}
         <div className="row">
           <button className="primary" disabled={saving} onClick={save}>

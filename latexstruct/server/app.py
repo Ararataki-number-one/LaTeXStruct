@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
-import difflib
 import base64
+import difflib
+import hashlib
+import hmac
 import io
 import json
 import os
@@ -15,6 +17,7 @@ import threading
 import time
 import uuid
 import zipfile
+from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -42,6 +45,38 @@ MAX_FOLDER_TOTAL_BYTES = 100 * 1024 * 1024
 MAX_OCR_UPLOAD_BYTES = 100 * 1024 * 1024
 OCR_JOB_TTL_SECONDS = 24 * 60 * 60
 MAX_ZIP_COMPRESSION_RATIO = 200
+
+_CREDENTIAL_STORE_ERRORS = (
+    (
+        "系统凭据管理器不可用",
+        "系统凭据管理器不可用；为避免密钥明文落盘，本次设置未保存",
+    ),
+    (
+        "API Key 写入系统凭据管理器失败",
+        "API Key 写入系统凭据管理器失败；配置文件未保存",
+    ),
+    (
+        "API Key 从系统凭据管理器删除失败",
+        "API Key 从系统凭据管理器删除失败；配置文件未保存",
+    ),
+)
+
+
+def _os_error_content(exc: OSError) -> Dict[str, str]:
+    message = str(exc)
+    for prefix, safe_detail in _CREDENTIAL_STORE_ERRORS:
+        if message.startswith(prefix):
+            return {
+                "detail": safe_detail,
+                "action": (
+                    "请重新启用并检查 Windows Credential Manager 服务与当前账户权限后重试；"
+                    "系统不会降级为明文保存"
+                ),
+            }
+    return {
+        "detail": "无法读写本地文件；原文件未被覆盖",
+        "action": "请检查磁盘空间、文件权限或是否被其他程序占用后重试",
+    }
 
 
 def _decode_folder_files(raw_files: dict) -> Dict[str, bytes]:
@@ -249,13 +284,10 @@ def create_app() -> FastAPI:
         )
 
     @app.exception_handler(OSError)
-    async def os_error(_request: Request, _exc: OSError):
+    async def os_error(_request: Request, exc: OSError):
         return JSONResponse(
             status_code=500,
-            content={
-                "detail": "无法读写本地文件；原文件未被覆盖",
-                "action": "请检查磁盘空间、文件权限或是否被其他程序占用后重试",
-            },
+            content=_os_error_content(exc),
         )
 
     @app.exception_handler(Exception)
@@ -447,20 +479,33 @@ def create_app() -> FastAPI:
         meta = json.loads((Path(get_store()._dir(pid)) / "meta.json").read_text(encoding="utf-8"))
         return {"kind": meta.get("kind", "single"), "graph": meta.get("graph")}
 
+    def _committed_export(pid: str):
+        """读取与提交标记精确匹配的结果；任何缺失/陈旧状态都 fail-closed。"""
+        _ensure(pid)
+        d = Path(get_store()._dir(pid))
+        target = d / "result.tex"
+        info_path = d / "verification.json"
+        if not target.exists() or not info_path.exists():
+            raise HTTPException(409, "尚无完整且通过安全检查的结果，请重新处理项目")
+        try:
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+            result_bytes = target.read_bytes()
+        except (OSError, ValueError, TypeError):
+            raise HTTPException(409, "安全检查记录无法读取，已阻止导出；请重新处理项目") from None
+        verification = info.get("verification") if isinstance(info, dict) else None
+        expected_hash = info.get("result_sha256") if isinstance(info, dict) else None
+        actual_hash = hashlib.sha256(result_bytes).hexdigest()
+        if not isinstance(verification, dict) or verification.get("safe_to_export") is not True:
+            raise HTTPException(409, "安全检查未明确通过，已阻止导出；请查看汇报或重新处理")
+        if not isinstance(expected_hash, str) or not hmac.compare_digest(expected_hash, actual_hash):
+            raise HTTPException(409, "结果与安全检查记录不一致，已阻止导出；请重新处理项目")
+        return info, result_bytes
+
     @app.get("/api/projects/{pid}/export-folder")
     def export_folder(pid: str):
         from ..core.project import safe_project_relpath
 
-        _ensure(pid)
-        info_path = Path(get_store()._dir(pid)) / "verification.json"
-        if not info_path.exists():
-            raise HTTPException(404, "尚未处理")
-        info = json.loads(info_path.read_text(encoding="utf-8"))
-        verification = info.get("verification", {})
-        if verification.get("safe_to_export") is False:
-            raise HTTPException(
-                409, "安全检查未通过，已阻止导出。请先修复缺失/循环引用或查看汇报。"
-            )
+        info, _result_bytes = _committed_export(pid)
         per_file = info.get("per_file")
         if not per_file:
             raise HTTPException(400, "该项目不是文件夹导入")
@@ -547,20 +592,12 @@ def create_app() -> FastAPI:
 
     @app.get("/api/projects/{pid}/export")
     def export(pid: str):
-        _ensure(pid)
-        d = Path(get_store()._dir(pid))
-        target = d / "result.tex"
-        if not target.exists():
-            raise HTTPException(404, "尚未处理")
-        info_path = d / "verification.json"
-        if info_path.exists():
-            info = json.loads(info_path.read_text(encoding="utf-8"))
-            if info.get("verification", {}).get("safe_to_export") is False:
-                raise HTTPException(
-                    409, "安全检查未通过，结果已回退到原文并禁止导出；请查看汇报。"
-                )
-        return FileResponse(target, filename=f"{pid}-structured.tex",
-                            media_type="application/x-tex")
+        _info, result_bytes = _committed_export(pid)
+        return Response(
+            content=result_bytes,
+            media_type="application/x-tex",
+            headers={"Content-Disposition": f'attachment; filename="{pid}-structured.tex"'},
+        )
 
     def _run_project(pid: str, exclude: set, reuse_decisions: bool = False,
                      progress_callback=None, control_callback=None, commit_callback=None):
@@ -857,7 +894,8 @@ def create_app() -> FastAPI:
     @app.put("/api/config")
     def put_cfg(req: ConfigRequest):
         global _config
-        cfg = get_config()
+        # 在副本上验证/持久化；失败时绝不污染当前运行时缓存。
+        cfg = deepcopy(get_config())
         updates = req.model_dump()
         secret_updates = {
             k: v for k, v in updates.items() if k.endswith("_api_key") and v is not None
@@ -916,7 +954,7 @@ def create_app() -> FastAPI:
 
         def _transcribe_one(job, client, page_no: int, png_path: str, max_attempts: int = 2):
             """转写单页并更新 job.pages；暂时性失败自动再试一次。"""
-            from ..ocr import transcribe_page
+            from ..ocr import ocr_page_needs_retry, transcribe_page
 
             page = job["pages"].setdefault(
                 page_no, {"status": "running", "tex": "", "error": "", "png": png_path,
@@ -935,7 +973,10 @@ def create_app() -> FastAPI:
                     page["status"] = "done"
                     page["error"] = ""
                     page["low_conf"] = (
-                        "[?]" in tex or "% unsure" in tex or len(tex.strip()) < 40
+                        "[?]" in tex
+                        or "% unsure" in tex
+                        or len(tex.strip()) < 40
+                        or ocr_page_needs_retry(tex)
                     )
                     return True
                 except Exception as e:  # noqa: BLE001

@@ -100,12 +100,12 @@ def _title_regex(kw: str) -> re.Pattern:
         if len(kw) == 1:  # 单字（注/例）：必须紧跟编号或标点
             return re.compile(
                 rf"^{re.escape(kw)}\s*(\d+(?:\.\d+)*)\s*[:：.。]?\s*(?=\S|$)"
-                rf"|^{re.escape(kw)}(?=\s*\d|\s*[:：.。])"
+                rf"|^{re.escape(kw)}\s*[:：.。]\s*"
             )
         # 长中文词：编号捕获优先；无编号时需编号/标点/空白+内容/括号
         return re.compile(
             rf"^{re.escape(kw)}\s*(\d+(?:\.\d+)*)\s*[:：.。]?\s*(?=\S|$)"
-            rf"|^{re.escape(kw)}(?=\s*\d|\s*[:：.。]|\s+\S|（|\()"
+            rf"|^{re.escape(kw)}(?:\s*[:：.。]\s*|\s+(?=\S)|(?=（|\())"
         )
     return re.compile(
         rf"^{re.escape(kw)}\b(?:\s+(\d+(?:\.\d+)*))?\s*[.:]?\s*(?=\s|$|（|\()"

@@ -138,6 +138,7 @@ def build_report(
     br = verification.get("braces", {})
     ki = verification.get("known_issues", [])
     inv = verification.get("invariants", {})
+    display_tags = verification.get("display_tags", {})
     L.append(f"- 内容不变校验：{'通过（与原文逐字符一致）' if ci else '失败（已自动回退）'}")
     L.append(
         f"- 环境配平：{'通过' if eb.get('ok') else '失败（整理后异常：' + str(eb.get('after_unbalanced', [])) + '）'}"
@@ -152,6 +153,26 @@ def build_report(
             if d:
                 status = "一致" if d["equal"] else f"不一致（{d['before_count']}→{d['after_count']}）"
                 L.append(f"  - {label}：{status}")
+    if display_tags:
+        if display_tags.get("ok"):
+            L.append("- 展示公式语法：通过")
+        else:
+            lines = sorted({
+                item.get("line") for item in display_tags.get("issues", [])
+                if isinstance(item.get("line"), int)
+            })
+            locations = "、".join(str(line) for line in lines[:6]) or "未知"
+            L.append(
+                "- 展示公式语法：失败"
+                f"（第 {locations} 行；\\[ / \\] 分隔符或 \\tag 用法异常，已阻止导出）"
+            )
+            reasons = []
+            for item in display_tags.get("issues", []):
+                reason = str(item.get("reason", "")).strip()
+                if reason and reason not in reasons:
+                    reasons.append(reason)
+            for reason in reasons[:3]:
+                L.append(f"  - {reason}")
     cb = verification.get("compile_before")
     ca = verification.get("compile_after")
     if cb and ca and cb.get("available"):
@@ -168,8 +189,22 @@ def build_report(
     if ki:
         L.append("")
         L.append("### 已知问题（原书既有，未做修改，仅供参考）")
-        for k in ki[:20]:
-            L.append(f"- 第 {k.get('line')} 行：{k.get('reason')}")
-        if len(ki) > 20:
-            L.append(f"- ……共 {len(ki)} 处")
+        grouped = {}
+        for item in ki:
+            reason = str(item.get("reason", ""))
+            group = grouped.setdefault(reason, {"count": 0, "lines": set()})
+            group["count"] += max(1, int(item.get("count", 1) or 1))
+            line = item.get("line")
+            if isinstance(line, int) and line > 0:
+                group["lines"].add(line)
+        for reason, group in grouped.items():
+            lines = sorted(group["lines"])
+            shown = "、".join(str(line) for line in lines[:6])
+            if len(lines) > 6:
+                shown += " 等"
+            location = f"第 {shown} 行" if shown else "位置未知"
+            suffix = ""
+            if group["count"] > 1:
+                suffix = f"（共 {group['count']} 处，涉及 {len(lines)} 行）"
+            L.append(f"- {location}：{reason}{suffix}")
     return "\n".join(L)

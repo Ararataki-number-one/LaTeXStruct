@@ -118,6 +118,10 @@ def test_pipeline_with_elegantbook_template():
     assert "\\addcontentsline{toc}{section}{1.1 Graphs（1.1 图）}" in out
     # elegantbook：不补 amsthm
     assert "\\usepackage{amsthm}" not in out
+    # 模板自带 theorem 的计数语义不由本工具控制；显式源编号不得自动包裹成双编号。
+    assert "\\begin{theorem}" not in out
+    assert "Theorem 1.1. A statement." in out
+    assert any("避免双编号" in item["reason"] for item in res.ambiguous)
     # 证明覆盖整段（Then 续段并入）
     i1 = out.index("\\begin{proof}")
     i2 = out.index("\\end{proof}")
@@ -149,6 +153,8 @@ def test_template_verification_covers_original_and_preserves_crlf_export():
     assert res.original.startswith("\\documentclass{article}\n")
     assert res.verification["content_invariant"] is True
     assert "\r\n" in res.export_text and "\n" not in res.export_text.replace("\r\n", "")
+    assert "\\begin{theorem}" not in res.result
+    assert any("避免双编号" in item["reason"] for item in res.ambiguous)
 
 
 def test_template_ops_env_balance():

@@ -18,16 +18,20 @@ from typing import Dict, List, Optional, Tuple
 
 AMSTHM_BLOCK = [
     "\\usepackage{amsthm}",
-    "\\newtheorem{definition}{Definition}",
-    "\\newtheorem{theorem}{Theorem}",
-    "\\newtheorem{lemma}{Lemma}",
-    "\\newtheorem{proposition}{Proposition}",
-    "\\newtheorem{corollary}{Corollary}",
+    "\\newtheorem*{definition}{Definition}",
+    "\\newtheorem*{theorem}{Theorem}",
+    "\\newtheorem*{lemma}{Lemma}",
+    "\\newtheorem*{proposition}{Proposition}",
+    "\\newtheorem*{corollary}{Corollary}",
     "\\theoremstyle{remark}",
-    "\\newtheorem{remark}{Remark}",
+    "\\newtheorem*{remark}{Remark}",
     "\\theoremstyle{definition}",
-    "\\newtheorem{example}{Example}",
+    "\\newtheorem*{example}{Example}",
 ]
+
+# 只识别真正的声明命令；``\\begin{theorem}`` 等环境使用不属于声明。
+# group(1) 表示星号（无编号），group(2) 是环境名。
+NEW_THEOREM_RE = re.compile(r"\\newtheorem\s*(\*)?\s*\{([^{}]+)\}")
 
 ITEM_PREFIX_RE = re.compile(r"^(\s*\d+\.\s*)")
 
@@ -74,6 +78,7 @@ class PendingOp:
 class PatchContext:
     is_elegantbook: bool = False
     existing_envs: set = field(default_factory=set)  # 已声明（不是仅被使用）的环境
+    unnumbered_envs: set = field(default_factory=set)  # 由 \\newtheorem* 明确声明为无编号
     theorem_package: str = ""  # amsthm | ntheorem | ""
     exercise_env: str = "enumerate"
     preamble_anchor: int = 0  # \begin{document} 行号；0 = 无导言区
@@ -168,9 +173,9 @@ def build_ops(decision: Decision, lines: List[str], ctx: PatchContext) -> Tuple[
                 continue
             if text.startswith("\\theoremstyle") and ctx.theorem_package == "ntheorem":
                 continue
-            declared = re.match(r"\\newtheorem\{([^{}]+)\}", text)
+            declared = NEW_THEOREM_RE.match(text)
             if declared:
-                env_name = declared.group(1)
+                env_name = declared.group(2)
                 if env_name in ctx.existing_envs:
                     continue
                 if required_envs is not None and env_name not in required_envs:

@@ -160,11 +160,12 @@ def build_rule_decisions(
                 ambiguous.append({"candidate_id": c.id, "line": c.span.start_line,
                                   "reason": "置信度过低，保守保留"})
                 continue
-            # 编号提取：编号进可选参数，标题词条从前缀剥离（剩余正文非空时才剥离）
+            # 编号提取：编号进可选参数。只要标题词条后仍有正文，就剥离词条；
+            # 纯标题行没有可保留的正文，仍原样保守保留。
             num = c.payload.get("number")
             prefix = c.payload.get("title_prefix", "")
-            remainder = c.title_text[len(prefix):].strip() if num and prefix else ""
-            keep = not (num and prefix and remainder)
+            remainder = c.title_text[len(prefix):].strip() if prefix else ""
+            keep = not (prefix and remainder)
             decisions.append(
                 Decision(
                     candidate_id=c.id,
@@ -175,7 +176,10 @@ def build_rule_decisions(
                     optional_arg=num or "",
                     keep_title_text=keep,
                     source="rule",
-                    reason="裸写标题包裹为定理类环境（编号保留进可选参数）" if not keep else "裸写标题包裹为定理类环境",
+                    reason=(
+                        "裸写标题包裹为定理类环境（编号保留进可选参数）"
+                        if num else "裸写标题包裹为定理类环境（剥离重复标题词条）"
+                    ) if not keep else "裸写标题包裹为定理类环境",
                     confidence=c.confidence,
                     payload={"title_prefix": "" if keep else prefix},
                 )

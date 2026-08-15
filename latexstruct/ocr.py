@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from .core.ai import LLMClient, LLMError, RoleConfig
+from .core.parser import mask_comments
 
 OCR_SYSTEM_PROMPT = """你是「数学文档页面转写专家」。把给定书页图像**忠实**转写为 LaTeX 正文片段——
 你的唯一任务是"看清楚"，**不做任何结构判断**（结构整理由后续引擎完成）。
@@ -132,12 +133,79 @@ def encode_image(image_bytes: bytes) -> str:
     return f"data:{image_mime_type(image_bytes)};base64,{b64}"
 
 
+_DISPLAY_MATH_RE = re.compile(r"(?<!\\)\\\[(.*?)(?<!\\)\\\]", re.S)
+_TAG_MARKER_RE = re.compile(r"(?<!\\)\\tag(?![A-Za-z@])")
+_TAG_RE = re.compile(r"(?<!\\)\\tag\s*\{(?P<label>[^{}\r\n]+)\}")
+_DISPLAY_SAFETY_TOKEN_RE = re.compile(
+    r"(?<!\\)\\(?P<delimiter>[\[\]])|(?<!\\)\\(?P<tag>tag)(?![A-Za-z@])"
+)
+
+
+def _normalize_tagged_display_math(text: str) -> str:
+    r"""把唯一明确带 tag 的 ``\[...\]`` 保守改写为合法 equation。"""
+
+    def replace(match: re.Match) -> str:
+        body = match.group(1)
+        # 嵌套 display 起点说明边界有歧义；任何额外/畸形 tag 记号也都不处理。
+        if re.search(r"(?<!\\)\\\[", body):
+            return match.group(0)
+        # 注释中的示例命令不是活动 tag。mask_comments 保留长度，后续仍可用
+        # 匹配位置从原始正文提取/移除命令，避免把注释 tag 意外激活。
+        active_body = mask_comments(body)
+        markers = list(_TAG_MARKER_RE.finditer(active_body))
+        tags = list(_TAG_RE.finditer(active_body))
+        if (
+            len(markers) != 1
+            or len(tags) != 1
+            or markers[0].start() != tags[0].start()
+            or not tags[0].group("label").strip()
+        ):
+            return match.group(0)
+        tag = tags[0].group(0)
+        body_without_tag = body[: tags[0].start()] + body[tags[0].end() :]
+        closing_separator = "\n" if "\n" in body else ""
+        # tag 统一置于整个 body 之后；若有 aligned，自然落在 \end{aligned} 之后。
+        return (
+            "\\begin{equation}"
+            + body_without_tag
+            + tag
+            + closing_separator
+            + "\\end{equation}"
+        )
+
+    return _DISPLAY_MATH_RE.sub(replace, text)
+
+
 def _clean_page_output(raw: str) -> str:
     text = raw.strip()
     m = re.search(r"```(?:latex)?\s*(.*?)```", text, re.S)
     if m:
         text = m.group(1).strip()
-    return text
+    return _normalize_tagged_display_math(text)
+
+
+def ocr_page_needs_retry(text: str) -> bool:
+    r"""检测明确的 OCR display 语法错误，供逐页重试提示使用。
+
+    这里只处理可确定的 ``\[``/``\]`` 顺序与闭合错误，以及后处理后仍
+    位于 bracket display 内的活动 ``\tag``。注释被等长屏蔽；普通 AMS
+    equation/align 环境不参与该窄检查。
+    """
+    active = mask_comments(text)
+    in_display = False
+    for token in _DISPLAY_SAFETY_TOKEN_RE.finditer(active):
+        delimiter = token.group("delimiter")
+        if delimiter == "[":
+            if in_display:  # display 尚未闭合又遇到下一个起点
+                return True
+            in_display = True
+        elif delimiter == "]":
+            if not in_display:  # 无对应起点的 display 终点
+                return True
+            in_display = False
+        elif in_display:  # \tag 在 \[...\] 中始终非法
+            return True
+    return in_display
 
 
 def transcribe_page(client: LLMClient, png_bytes: bytes, page_no: int) -> str:

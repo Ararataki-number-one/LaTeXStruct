@@ -131,7 +131,7 @@ def test_preamble_add():
     assert not err and len(ops) == 10
     out, applied, rejected = run(lines, d, ctx)
     assert rejected == []
-    assert "\\usepackage{amsthm}" in out and "\\newtheorem{theorem}{Theorem}" in out
+    assert "\\usepackage{amsthm}" in out and "\\newtheorem*{theorem}{Theorem}" in out
     assert out[-1] == "\\end{document}"
     assert content_invariant(lines, out, applied)
 
@@ -143,7 +143,7 @@ def test_preamble_add_does_not_redeclare_existing_customization():
     d = Decision(candidate_id="pre", action="preamble-add")
     ops, err = build_ops(d, lines, ctx)
     assert not err
-    assert not any(op.new.startswith("\\newtheorem{definition}") for op in ops)
+    assert not any(op.new.startswith("\\newtheorem*{definition}") for op in ops)
 
 
 def test_wrap_with_title_strip():

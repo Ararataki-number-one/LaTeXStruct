@@ -23,6 +23,7 @@ from .patch import (
     AMSTHM_BLOCK,
     AppliedPatch,
     Decision,
+    NEW_THEOREM_RE,
     PatchContext,
     apply_patches,
     build_ops,
@@ -33,7 +34,7 @@ from .report import build_report
 from .review import run_review
 from .rules import RuleConfig, build_rule_decisions
 from .scanner import scan
-from .verify import compare_braces, compare_env_balance, known_issues
+from .verify import check_display_tag_safety, compare_braces, compare_env_balance, known_issues
 
 DOC_CLASS_RE = re.compile(r"\\documentclass(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
 
@@ -63,7 +64,12 @@ def _build_context(doc) -> PatchContext:
     cls = m.group(1) if m else ""
     is_elegant = "elegantbook" in cls.lower()
     used_env_names = {r[0] for r in doc.env_ranges}
-    newtheorem_names = set(re.findall(r"\\newtheorem\s*\{([^{}]*)\}", doc.masked))
+    theorem_declarations = list(NEW_THEOREM_RE.finditer(doc.masked))
+    newtheorem_names = {m.group(2) for m in theorem_declarations}
+    numbered_envs = {m.group(2) for m in theorem_declarations if not m.group(1)}
+    unnumbered_envs = {
+        m.group(2) for m in theorem_declarations if m.group(1)
+    } - numbered_envs
     available_env_names = used_env_names | newtheorem_names
     packages = set()
     for match in re.finditer(r"\\usepackage(?:\[[^\]]*\])?\{([^{}]+)\}", doc.masked):
@@ -80,6 +86,7 @@ def _build_context(doc) -> PatchContext:
     return PatchContext(
         is_elegantbook=is_elegant,
         existing_envs=newtheorem_names,
+        unnumbered_envs=unnumbered_envs,
         theorem_package=theorem_package,
         exercise_env=exercise_env,
         preamble_anchor=anchor,
@@ -94,7 +101,7 @@ def build_preamble_decision(
     if ctx.preamble_anchor <= 0:
         return None
     known_envs = {
-        re.match(r"\\newtheorem\{([^{}]+)\}", line).group(1)
+        NEW_THEOREM_RE.match(line).group(2)
         for line in AMSTHM_BLOCK
         if line.startswith("\\newtheorem")
     }
@@ -178,6 +185,24 @@ def _apply_decisions(doc, decisions: List[Decision], ctx: PatchContext, ambiguou
     planned: List[Tuple[Decision, List]] = []
     rejected: List[AppliedPatch] = []
     for d in decisions:
+        candidate = _candidate_for_decision(d, candidates_by_id or {})
+        unsafe_reason = _normalize_theorem_wrap_start(d, candidate)
+        if not unsafe_reason:
+            _restore_theorem_title_metadata(d, candidate)
+            unsafe_reason = _unsafe_numbered_theorem_reason(d, candidate, ctx)
+        if unsafe_reason:
+            item = {
+                "candidate_id": d.candidate_id,
+                "line": candidate.span.start_line if candidate is not None else (_interval(d)[0] or 1),
+                "reason": unsafe_reason,
+            }
+            if not any(
+                old.get("candidate_id") == item["candidate_id"]
+                and old.get("reason") == item["reason"]
+                for old in ambiguous
+            ):
+                ambiguous.append(item)
+            continue
         ops, err = build_ops(d, lines, ctx)
         if err:
             rejected.append(AppliedPatch(decision=d, edits=[], error=err))
@@ -186,6 +211,70 @@ def _apply_decisions(doc, decisions: List[Decision], ctx: PatchContext, ambiguou
     planned, dropped = resolve_overlaps(planned, lines)
     out, applied, rejected2 = apply_patches(lines, planned)
     return out, applied, rejected + rejected2, dropped
+
+
+def _candidate_for_decision(decision: Decision, candidates_by_id: dict):
+    candidate = candidates_by_id.get(decision.candidate_id)
+    if candidate is None and decision.candidate_id.startswith("review-missed-"):
+        candidate = candidates_by_id.get(decision.candidate_id[len("review-missed-"):])
+    return candidate
+
+
+def _normalize_theorem_wrap_start(decision: Decision, candidate) -> str:
+    """定理类包裹必须从扫描器确认的标题行开始，复查不得绕过该锚点。"""
+    if (
+        decision.action != "wrap"
+        or candidate is None
+        or candidate.kind != "theorem-like"
+        or not decision.body_span
+    ):
+        return ""
+    _start, end = decision.body_span
+    title_line = candidate.span.start_line
+    if end < title_line:
+        return "复查包裹范围未覆盖扫描器确认的标题，已保守跳过并等待人工确认"
+    decision.body_span = (title_line, end)
+    return ""
+
+
+def _restore_theorem_title_metadata(decision: Decision, candidate) -> None:
+    """复用/复查决策也只能使用扫描器从原文确定提取的标题元数据。"""
+    if (
+        decision.action != "wrap"
+        or candidate is None
+        or candidate.kind != "theorem-like"
+        or not decision.body_span
+        or decision.body_span[0] != candidate.span.start_line
+    ):
+        return
+    prefix = candidate.payload.get("title_prefix", "")
+    remainder = candidate.title_text[len(prefix):].strip() if prefix else ""
+    number = candidate.payload.get("number") or ""
+    decision.optional_arg = str(number)[:120]
+    decision.keep_title_text = not (prefix and remainder)
+    decision.payload = dict(decision.payload)
+    decision.payload["title_prefix"] = prefix if prefix and remainder else ""
+
+
+def _unsafe_numbered_theorem_reason(decision: Decision, candidate, ctx: PatchContext) -> str:
+    """源编号遇到会自动计数或编号语义未知的目标环境时，宁可不包裹。"""
+    if decision.action != "wrap" or decision.env == "proof" or candidate is None:
+        return ""
+    if candidate.kind != "theorem-like" or not candidate.payload.get("number"):
+        return ""
+    if decision.env in ctx.unnumbered_envs:
+        return ""
+    if decision.env in ctx.existing_envs:
+        return (
+            f"源标题含显式编号，但已有 {decision.env} 声明不是无编号环境；"
+            "为避免双编号，已保守跳过并等待人工确认"
+        )
+    if ctx.is_elegantbook:
+        return (
+            f"源标题含显式编号，但 elegantbook 提供的 {decision.env} 编号语义无法证明安全；"
+            "为避免双编号，已保守跳过并等待人工确认"
+        )
+    return ""
 
 
 def run_pipeline(
@@ -409,6 +498,7 @@ def run_pipeline(
         "braces": compare_braces(source_text, result_text),
         "invariants": check_invariants(source_text, result_text),
         "known_issues": known_issues(result_text),
+        "display_tags": check_display_tag_safety(result_text),
         "ai_degraded": ai_degraded,
         "ai_usage": ai_usage,
         "decisions_reused": decisions_reused,
@@ -437,6 +527,7 @@ def run_pipeline(
         and verification["env_balance"]["ok"]
         and verification["braces"]["ok"]
         and verification["invariants"]["ok"]
+        and verification["display_tags"]["ok"]
         and compile_safe
     )
     verification["checks"] = [
@@ -447,6 +538,7 @@ def run_pipeline(
         {"id": "labels", "label": "label 不变", "ok": verification["invariants"]["labels"]["equal"]},
         {"id": "refs", "label": "引用不变", "ok": verification["invariants"]["refs"]["equal"]},
         {"id": "images", "label": "图片路径不变", "ok": verification["invariants"]["images"]["equal"]},
+        {"id": "display-math", "label": "展示公式语法合法", "ok": verification["display_tags"]["ok"]},
         {"id": "compile", "label": "编译结果未恶化", "ok": compile_safe,
          "skipped": not verification["compile"]["checked"]},
     ]

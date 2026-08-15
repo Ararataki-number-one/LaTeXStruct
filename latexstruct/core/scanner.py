@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .parser import PROTECTED_ENVS, Block, Document, Span
+from .patch import NEW_THEOREM_RE
 
 # ---------------------------------------------------------------------------
 # 常量与模式
@@ -140,7 +141,7 @@ def scan(doc: Document, pack=None) -> ScanResult:
 
     # 用户通过 \newtheorem 定义的环境与内置 theorem 一样属于已结构化区域，
     # 里面即使出现 "Theorem ..." 字样也绝不能再次包裹。
-    custom_theorem_envs = set(re.findall(r"\\newtheorem\s*\{([^{}]+)\}", doc.masked))
+    custom_theorem_envs = {m.group(2) for m in NEW_THEOREM_RE.finditer(doc.masked)}
     skip_envs = SKIP_ENVS | custom_theorem_envs
 
     def add(**kw) -> Candidate:
