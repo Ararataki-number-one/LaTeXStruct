@@ -79,13 +79,19 @@ def test_progress_is_monotonic_and_preview_is_private_from_status():
     initial = manager.public(job)
     assert initial["preview_revision"] == 1
     assert initial["preview_chars"] == len("source")
-    manager.update(job["id"], "draft", 0.8, "草稿", {"preview": "new draft"})
+    manager.update(job["id"], "draft", 0.8, "草稿", {
+        "preview": "new draft",
+        "candidate_total": 12,
+        "processed_candidates": 6,
+    })
     manager.update(job["id"], "late", 0.4, "较晚回调")
     public = manager.public(job)
     assert public["progress"] == 0.8
     assert public["preview_ready"] is True
     assert public["preview_revision"] == 2
     assert public["preview_chars"] == len("new draft")
+    assert public["candidate_total"] == 12
+    assert public["processed_candidates"] == 6
     assert "preview" not in public
     assert manager.preview(job) == "new draft"
 

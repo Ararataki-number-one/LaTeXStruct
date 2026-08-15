@@ -38,6 +38,44 @@ def test_python_package_includes_bundled_frontends():
     assert '"static-react/assets/*"' in content
 
 
+def test_workspace_reuses_monaco_models_until_editor_widget_is_disposed():
+    """Guard the @monaco-editor/react DiffEditor unmount-order workaround."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "frontend", "src", "Workspace.jsx"), encoding="utf-8") as f:
+        workspace = f.read()
+    assert 'ORIGINAL_MODEL_PATH = "inmemory://latexstruct/workspace/source.tex"' in workspace
+    assert 'MODIFIED_MODEL_PATH = "inmemory://latexstruct/workspace/result.tex"' in workspace
+    assert "originalModelPath={ORIGINAL_MODEL_PATH}" in workspace
+    assert "modifiedModelPath={MODIFIED_MODEL_PATH}" in workspace
+    assert "keepCurrentOriginalModel" in workspace
+    assert "keepCurrentModifiedModel" in workspace
+    assert "keepCurrentModel" in workspace
+
+
+def test_workspace_layout_prioritizes_a_large_stable_preview():
+    """Keep the workbench wide and preserve the explicit focus/panorama modes."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "frontend", "src", "Workspace.jsx"), encoding="utf-8") as f:
+        workspace = f.read()
+    with open(os.path.join(root, "frontend", "src", "styles.css"), encoding="utf-8") as f:
+        styles = f.read()
+    with open(os.path.join(root, "frontend", "src", "App.jsx"), encoding="utf-8") as f:
+        app = f.read()
+
+    assert 'EDITOR_HEIGHT = "clamp(560px, 68vh, 900px)"' in workspace
+    assert "height={EDITOR_HEIGHT}" in workspace
+    assert 'aria-label="审阅布局"' in workspace
+    assert "aria-pressed={!focusPreview}" in workspace
+    assert "aria-pressed={focusPreview}" in workspace
+    assert 'review-main ${focusPreview ? "focus-preview" : ""}' in workspace
+    assert 'review-bottom ${focusPreview ? "focus-hidden" : ""}' in workspace
+    assert "grid-template-columns: minmax(210px, 250px) minmax(0, 1fr)" in styles
+    assert ".review-main.focus-preview > .tree { display: none; }" in styles
+    assert ".review-bottom.focus-hidden { display: none; }" in styles
+    assert "content-workbench" in app
+    assert ".content.content-workbench" in styles
+
+
 def test_ci_installs_texlive_distribution_packages():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, ".github", "workflows", "build.yml"), encoding="utf-8") as f:

@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """项目存储与配置测试（纯标准库，无 FastAPI 依赖）。"""
 
+import hashlib
+import json
 import os
 import shutil
 import sys
@@ -63,6 +65,52 @@ def test_store_rejects_path_like_project_ids():
                 pass
             else:
                 raise AssertionError(f"应拒绝非法项目 ID：{pid!r}")
+
+
+def test_set_result_commits_result_and_report_hashes():
+    with WorkspaceTmp() as tmp:
+        store = ProjectStore(root=tmp)
+        pid = store.create("SOURCE")
+        result = "RESULT\n含中文"
+        report = "# 汇报\n\n- 通过"
+
+        store.set_result(pid, result, report, [], {"ok": True})
+
+        marker_path = os.path.join(tmp, pid, "verification.json")
+        with open(marker_path, encoding="utf-8") as f:
+            marker = json.load(f)
+        assert marker["result_sha256"] == hashlib.sha256(result.encode("utf-8")).hexdigest()
+        assert marker["report_sha256"] == hashlib.sha256(report.encode("utf-8")).hexdigest()
+
+
+def test_set_result_failure_restores_previous_commit_marker():
+    with WorkspaceTmp() as tmp:
+        store = ProjectStore(root=tmp)
+        pid = store.create("SOURCE")
+        store.set_result(pid, "OLD RESULT", "# OLD REPORT", [], {"ok": True})
+        marker_path = os.path.join(tmp, pid, "verification.json")
+        with open(marker_path, encoding="utf-8") as f:
+            previous_marker = json.load(f)
+
+        original_write_json = store._write_json
+
+        def fail_final_marker(directory, name, obj):
+            if name == "verification.json":
+                raise OSError("simulated final marker failure")
+            return original_write_json(directory, name, obj)
+
+        store._write_json = fail_final_marker
+        try:
+            store.set_result(pid, "NEW RESULT", "# NEW REPORT", [{"new": True}], {"ok": True})
+        except OSError as exc:
+            assert "simulated final marker failure" in str(exc)
+        else:
+            raise AssertionError("最终提交标记写入失败时必须向调用方报错")
+
+        with open(marker_path, encoding="utf-8") as f:
+            restored_marker = json.load(f)
+        assert restored_marker == previous_marker
+        assert not any(name.endswith(".previous") for name in os.listdir(os.path.join(tmp, pid)))
 
 
 def main():

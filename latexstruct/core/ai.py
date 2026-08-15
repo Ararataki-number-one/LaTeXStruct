@@ -457,6 +457,9 @@ def decide_candidates(
                 "total": len(candidates),
                 "usage": dict(usage_total),
                 "decisions": [d.candidate_id for d in decisions],
+                # Internal snapshot for the pipeline's incremental TeX preview.
+                # Public progress payloads keep using the serializable id list above.
+                "_decision_objects": list(decisions),
                 "ambiguous": len(ambiguous),
             })
     return decisions, ambiguous, notes, usage_total

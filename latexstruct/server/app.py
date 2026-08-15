@@ -41,6 +41,23 @@ _ocr_jobs_lock = threading.RLock()
 _process_jobs = ProcessJobManager()
 _update_state_lock = threading.RLock()
 _update_preparing = False
+
+
+def _ocr_snapshot_preserved(job: dict) -> bool:
+    """最新正文、逐页状态和计费状态是否由同一次保存/导入共同保全。"""
+    raw_revision = int(job.get("raw_revision") or 0)
+    if raw_revision <= 0:
+        return False
+    usage_revision = int(job.get("usage_revision") or 0)
+    page_revision = int(job.get("page_revision") or 0)
+    return any(
+        raw_revision == int(job.get(f"{kind}_revision") or 0)
+        and usage_revision == int(job.get(f"{kind}_usage_revision") or 0)
+        and page_revision == int(job.get(f"{kind}_page_revision") or 0)
+        for kind in ("downloaded", "imported")
+    )
+
+
 _active_pipeline_runs = 0
 
 
@@ -74,15 +91,13 @@ def _reserve_update_preparation():
             active_ocr = 0
             unpreserved_ocr = 0
             for job in _ocr_jobs.values():
-                if job.get("status") in {"starting", "running"} or job.get("importing"):
+                if (
+                    job.get("status") in {"starting", "running"}
+                    or job.get("importing") or job.get("saving")
+                ):
                     active_ocr += 1
                 elif job.get("raw_ready") or bool(job.get("usage")):
-                    revision = int(job.get("raw_revision") or 0)
-                    preserved = revision > 0 and revision in {
-                        int(job.get("downloaded_revision") or 0),
-                        int(job.get("imported_revision") or 0),
-                    }
-                    if not preserved:
+                    if not _ocr_snapshot_preserved(job):
                         unpreserved_ocr += 1
         active_process = max(_active_pipeline_runs, _process_jobs.active_count())
         if active_process or active_ocr or unpreserved_ocr:
@@ -252,9 +267,19 @@ def _cleanup_ocr_jobs(now: float = None):
     expired = []
     with _ocr_jobs_lock:
         for jid, job in list(_ocr_jobs.items()):
-            if job.get("status") in ("running", "starting"):
+            if (
+                job.get("status") in ("running", "starting")
+                or job.get("importing") or job.get("saving")
+            ):
                 continue
             if now - job.get("created", now) < OCR_JOB_TTL_SECONDS:
+                continue
+            if (
+                (job.get("raw_ready") or bool(job.get("usage")))
+                and not _ocr_snapshot_preserved(job)
+            ):
+                # 付费 OCR 或已生成正文的终态结果只能由用户明确保存、导入或放弃；
+                # 不能因内存 TTL 在用户不知情时静默删除。
                 continue
             expired.append(_ocr_jobs.pop(jid))
     for job in expired:
@@ -576,8 +601,8 @@ def create_app() -> FastAPI:
         meta = json.loads((Path(get_store()._dir(pid)) / "meta.json").read_text(encoding="utf-8"))
         return {"kind": meta.get("kind", "single"), "graph": meta.get("graph")}
 
-    def _committed_export(pid: str):
-        """读取与提交标记精确匹配的结果；任何缺失/陈旧状态都 fail-closed。"""
+    def _committed_record(pid: str):
+        """读取与最终提交标记精确匹配的一组结果。"""
         _ensure(pid)
         d = Path(get_store()._dir(pid))
         target = d / "result.tex"
@@ -589,14 +614,36 @@ def create_app() -> FastAPI:
             result_bytes = target.read_bytes()
         except (OSError, ValueError, TypeError):
             raise HTTPException(409, "安全检查记录无法读取，已阻止导出；请重新处理项目") from None
-        verification = info.get("verification") if isinstance(info, dict) else None
         expected_hash = info.get("result_sha256") if isinstance(info, dict) else None
         actual_hash = hashlib.sha256(result_bytes).hexdigest()
-        if not isinstance(verification, dict) or verification.get("safe_to_export") is not True:
-            raise HTTPException(409, "安全检查未明确通过，已阻止导出；请查看汇报或重新处理")
         if not isinstance(expected_hash, str) or not hmac.compare_digest(expected_hash, actual_hash):
             raise HTTPException(409, "结果与安全检查记录不一致，已阻止导出；请重新处理项目")
+        return info, result_bytes, d
+
+    def _committed_export(pid: str):
+        """只放行明确通过安全检查的、与提交标记一致的 TeX 结果。"""
+        info, result_bytes, _directory = _committed_record(pid)
+        verification = info.get("verification") if isinstance(info, dict) else None
+        if not isinstance(verification, dict) or verification.get("safe_to_export") is not True:
+            raise HTTPException(409, "安全检查未明确通过，已阻止导出；请查看汇报或重新处理")
         return info, result_bytes
+
+    def _committed_report(pid: str):
+        """读取同一次提交的汇报；新提交还会校验独立 SHA-256。"""
+        info, _result_bytes, directory = _committed_record(pid)
+        report_path = directory / "report.md"
+        try:
+            report_bytes = report_path.read_bytes()
+        except OSError:
+            raise HTTPException(409, "汇报文件无法读取，请重新处理项目") from None
+        expected_hash = info.get("report_sha256") if isinstance(info, dict) else None
+        if expected_hash is not None:
+            actual_hash = hashlib.sha256(report_bytes).hexdigest()
+            if not isinstance(expected_hash, str) or not hmac.compare_digest(
+                expected_hash, actual_hash
+            ):
+                raise HTTPException(409, "汇报与安全检查记录不一致，请重新处理项目")
+        return report_bytes
 
     @app.get("/api/projects/{pid}/export-folder")
     def export_folder(pid: str):
@@ -639,7 +686,7 @@ def create_app() -> FastAPI:
                     409,
                     f"文件数量安全检查未通过（原始 {expected}，导出 {len(written)}），已阻止导出。",
                 )
-            zf.writestr("LATEXSTRUCT-REPORT.md", get_store().read_report(pid) or "")
+            zf.writestr("LATEXSTRUCT-REPORT.md", _committed_report(pid))
         buf.seek(0)
         return Response(
             content=buf.read(),
@@ -687,6 +734,15 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "尚未处理")
         return PlainTextResponse(r, media_type="text/markdown")
 
+    @app.get("/api/projects/{pid}/export-report")
+    def export_report(pid: str):
+        report_bytes = _committed_report(pid)
+        return Response(
+            content=report_bytes,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{pid}-report.md"'},
+        )
+
     @app.get("/api/projects/{pid}/export")
     def export(pid: str):
         _info, result_bytes = _committed_export(pid)
@@ -695,6 +751,43 @@ def create_app() -> FastAPI:
             media_type="application/x-tex",
             headers={"Content-Disposition": f'attachment; filename="{pid}-structured.tex"'},
         )
+
+    def _download_artifact(pid: str, artifact: str) -> tuple[bytes, str]:
+        project = get_store().get(pid)
+        if project is None:
+            raise HTTPException(404, "项目不存在")
+        project_name = str(project.get("name") or "LaTeXStruct")
+        if artifact == "result":
+            _info, data = _committed_export(pid)
+            return data, f"{project_name}-structured.tex"
+        if artifact == "report":
+            return _committed_report(pid), f"{project_name}-report.md"
+        if artifact == "folder":
+            response = export_folder(pid)
+            return bytes(response.body), f"{project_name}-structured.zip"
+        raise HTTPException(404, "不支持的下载类型")
+
+    @app.post("/api/projects/{pid}/exports/{artifact}/save")
+    def save_export_to_downloads(pid: str, artifact: str):
+        """桌面 WebView 下载被拦截时，可靠保存到固定的用户下载目录。"""
+        from .downloads import save_unique_download
+
+        data, filename = _download_artifact(pid, artifact)
+        saved = save_unique_download(data, filename)
+        return {
+            "ok": True,
+            "filename": saved.name,
+            "folder": "下载/LaTeXStruct",
+            "bytes": len(data),
+        }
+
+    @app.post("/api/exports/open-folder")
+    def open_export_folder():
+        """只打开应用固定下载目录，不接受任何路径参数。"""
+        from .downloads import reveal_download_location
+
+        reveal_download_location()
+        return {"ok": True, "folder": "下载/LaTeXStruct"}
 
     def _run_project_impl(pid: str, exclude: set, reuse_decisions: bool = False,
                           progress_callback=None, control_callback=None, commit_callback=None):
@@ -882,6 +975,7 @@ def create_app() -> FastAPI:
             headers={
                 "X-LaTeXStruct-Task-Status": str(job.get("status", "")),
                 "X-LaTeXStruct-Preview-Revision": str(revision),
+                "Cache-Control": "no-store",
             },
         )
 
@@ -1070,7 +1164,7 @@ def create_app() -> FastAPI:
         except Exception:
             shutil.rmtree(tmpdir, ignore_errors=True)
             raise
-        jid = uuid.uuid4().hex[:10]
+        jid = uuid.uuid4().hex
         job = {
             "id": jid,
             "status": status,
@@ -1085,9 +1179,19 @@ def create_app() -> FastAPI:
             "raw_tex": "",
             "raw_ready": False,
             "raw_revision": 0,
+            "raw_chars": 0,
+            "usage_revision": 0,
+            "page_revision": 0,
             "downloaded_revision": 0,
+            "downloaded_usage_revision": 0,
+            "downloaded_page_revision": 0,
             "imported_revision": 0,
+            "imported_usage_revision": 0,
+            "imported_page_revision": 0,
             "importing": False,
+            "saving": False,
+            "imported_project_id": "",
+            "imported_processed": None,
             "error": "",
             "usage": {},
             "created": time.time(),
@@ -1139,28 +1243,34 @@ def create_app() -> FastAPI:
             from ..ocr import ocr_page_needs_retry, transcribe_page
 
             page = job["pages"][page_no]
-            page["status"] = "running"
-            page["error"] = ""
+            with _ocr_jobs_lock:
+                page["status"] = "running"
+                page["error"] = ""
             with open(png_path, "rb") as image_file:
                 png = image_file.read()
             for attempt in range(1, max_attempts + 1):
-                page["attempts"] = page.get("attempts", 0) + 1
+                with _ocr_jobs_lock:
+                    page["attempts"] = page.get("attempts", 0) + 1
                 client.last_usage = {}
                 try:
                     tex = transcribe_page(client, png, page_no)
-                    page["tex"] = tex
-                    page["status"] = "done"
-                    page["error"] = ""
-                    page["low_conf"] = (
+                    low_conf = (
                         "[?]" in tex
                         or "% unsure" in tex
                         or len(tex.strip()) < 40
                         or ocr_page_needs_retry(tex)
                     )
+                    with _ocr_jobs_lock:
+                        page["tex"] = tex
+                        page["status"] = "done"
+                        page["error"] = ""
+                        page["low_conf"] = low_conf
+                        job["page_revision"] = int(job.get("page_revision") or 0) + 1
                     return True
                 except Exception as exc:  # noqa: BLE001
                     message = _safe_task_error(exc)
-                    page["error"] = message
+                    with _ocr_jobs_lock:
+                        page["error"] = message
                     if any(token in message.lower() for token in (
                         "未配置 api key", "http 401", "http 403", "http 400", "http 404",
                     )):
@@ -1171,41 +1281,55 @@ def create_app() -> FastAPI:
                     if client.last_usage:
                         from ..pricing import add_usage, summarize_ai_usage
 
-                        add_usage(
-                            job["usage"], client.last_usage, getattr(client.cfg, "model", "")
-                        )
-                        job["cost"] = summarize_ai_usage({"ocr": job["usage"]})
-            page["status"] = "error"
-            page["low_conf"] = True
+                        with _ocr_jobs_lock:
+                            add_usage(
+                                job["usage"], client.last_usage,
+                                getattr(client.cfg, "model", ""),
+                            )
+                            job["cost"] = summarize_ai_usage({"ocr": job["usage"]})
+                            job["usage_revision"] = (
+                                int(job.get("usage_revision") or 0) + 1
+                            )
+            with _ocr_jobs_lock:
+                page["status"] = "error"
+                page["low_conf"] = True
+                job["page_revision"] = int(job.get("page_revision") or 0) + 1
             return False
 
-        def _merge_job(job):
+        def _refresh_raw_preview(job):
             from ..ocr import merge_book
 
-            chunks = []
+            with _ocr_jobs_lock:
+                chunks = [
+                    job["pages"][page_no]["tex"]
+                    for page_no in job["selected_pages"]
+                    if job["pages"][page_no]["status"] == "done"
+                ]
+                merged = merge_book(chunks)
+                job["raw_tex"] = merged
+                job["raw_ready"] = bool(chunks)
+                job["raw_chars"] = len(merged)
+                job["raw_revision"] = int(job.get("raw_revision") or 0) + 1
+
+        def _merge_job(job, complete_progress: bool = True):
             errors = []
             for page_no in job["selected_pages"]:
                 page = job["pages"][page_no]
-                if page["status"] == "done":
-                    chunks.append(page["tex"])
-                else:
+                if page["status"] != "done":
                     errors.append({
                         "page": page_no,
                         "task_index": page["task_index"],
                         "reason": page["error"] or page["status"],
                     })
-            merged = merge_book(chunks)
             with _ocr_jobs_lock:
-                if merged != job.get("raw_tex", ""):
-                    job["raw_revision"] = int(job.get("raw_revision") or 0) + 1
-                job["raw_tex"] = merged
-                job["raw_ready"] = bool(chunks)
                 job["errors"] = errors
                 job["status"] = "done" if not errors else "partial"
                 job["phase"] = "原始 OCR 已就绪" if not errors else "部分页面失败，等待重试"
-                job["progress"] = 1.0
+                if complete_progress:
+                    job["progress"] = 1.0
 
         job["_transcribe_one"] = _transcribe_one
+        job["_refresh_raw_preview"] = _refresh_raw_preview
         job["_merge_job"] = _merge_job
 
         def worker():
@@ -1243,7 +1367,9 @@ def create_app() -> FastAPI:
                         if job["source_type"] == "pdf" else "正在转写图片"
                     )
                     job["progress"] = round((index - 1) / max(1, len(page_nos)), 3)
-                    _transcribe_one(job, client, page_no, page["png"])
+                    page_ok = _transcribe_one(job, client, page_no, page["png"])
+                    if page_ok:
+                        _refresh_raw_preview(job)
                     job["done"] = index
                     job["progress"] = round(index / max(1, len(page_nos)), 3)
                 _merge_job(job)
@@ -1254,7 +1380,7 @@ def create_app() -> FastAPI:
                 if any(
                     page.get("status") == "done" for page in job.get("pages", {}).values()
                 ):
-                    _merge_job(job)
+                    _merge_job(job, complete_progress=False)
                     job["status"] = "partial"
                     job["phase"] = "后续页面处理失败，已保留完成页"
                     job["error"] = message
@@ -1267,14 +1393,13 @@ def create_app() -> FastAPI:
 
     @app.post("/api/ocr/inspect")
     async def ocr_inspect(file: UploadFile = File(...)):
-        """上传一次 PDF 并读取总页数；稍后从同一临时文件启动 OCR。"""
+        """上传一次 PDF/图片并创建不可猜测的待启动任务。"""
         _cleanup_ocr_jobs()
         suffix, upload, source_total = await _read_ocr_upload(file)
-        if suffix != ".pdf":
-            raise HTTPException(400, "页数检查仅用于 PDF；图片可直接开始转写")
         job = _create_ocr_job(suffix, upload, source_total, "ready")
         return {
             "id": job["id"],
+            "source_type": job["source_type"],
             "total_pages": source_total,
             "max_pages_per_job": MAX_OCR_PAGES_PER_JOB,
         }
@@ -1297,9 +1422,13 @@ def create_app() -> FastAPI:
         with _ocr_jobs_lock:
             job = _ocr_jobs.get(jid)
             if job is None:
-                raise HTTPException(404, "上传已过期，请重新选择 PDF")
+                raise HTTPException(404, "上传已过期，请重新选择文件")
             if job.get("status") != "ready":
-                raise HTTPException(409, "该 PDF 已经开始处理，请勿重复提交")
+                return {
+                    "id": jid,
+                    "reused": True,
+                    "status": str(job.get("status") or "running"),
+                }
         from ..ocr import select_page_interval
 
         try:
@@ -1312,14 +1441,18 @@ def create_app() -> FastAPI:
             _raise_if_update_preparing()
             with _ocr_jobs_lock:
                 if _ocr_jobs.get(jid) is not job:
-                    raise HTTPException(404, "上传已过期，请重新选择 PDF")
+                    raise HTTPException(404, "上传已过期，请重新选择文件")
                 if job.get("status") != "ready":
-                    raise HTTPException(409, "该 PDF 已经开始处理，请勿重复提交")
+                    return {
+                        "id": jid,
+                        "reused": True,
+                        "status": str(job.get("status") or "running"),
+                    }
                 job["status"] = "starting"
                 _set_ocr_selection(job, page_nos)
                 job["status"] = "running"
         _launch_ocr_job(job, page_nos, dpi, base_url, model, api_key)
-        return {"id": jid}
+        return {"id": jid, "reused": False, "status": "running"}
 
     @app.delete("/api/ocr/jobs/{jid}")
     def ocr_discard_inspected(jid: str):
@@ -1329,76 +1462,71 @@ def create_app() -> FastAPI:
                 job = _ocr_jobs.get(jid)
                 if job is None:
                     return {"ok": True}
-                if job.get("status") in {"starting", "running"} or job.get("importing"):
+                if (
+                    job.get("status") in {"starting", "running"}
+                    or job.get("importing") or job.get("saving")
+                ):
                     raise HTTPException(409, "运行中的 OCR 任务不能删除")
                 _ocr_jobs.pop(jid, None)
         shutil.rmtree(job.get("dir", ""), ignore_errors=True)
         return {"ok": True}
 
     @app.post("/api/ocr/jobs")
-    async def ocr_start(
-        file: UploadFile = File(...),
-        pages: str = Form(""),
-        start_page: Optional[int] = Form(None),
-        end_page: Optional[int] = Form(None),
-        dpi: int = Form(150),
-        base_url: str = Form(""),
-        model: str = Form(""),
-        api_key: str = Form(""),
-    ):
-        """兼容图片与旧版一次上传即启动的 PDF 客户端。"""
-        _cleanup_ocr_jobs()
-        if not 72 <= dpi <= 300:
-            raise HTTPException(400, "DPI 必须在 72-300 之间")
-        if len(pages) > 200 or len(model) > 160 or len(base_url) > 500:
-            raise HTTPException(400, "页码、模型或 Base URL 输入过长")
-        suffix, upload, source_total = await _read_ocr_upload(file)
-        if suffix == ".pdf":
-            from ..ocr import parse_page_range, select_page_interval
+    async def ocr_start():
+        """旧版一次上传即启动端点已停用；必须先 inspect 获取随机任务号。
 
-            try:
-                if pages.strip():
-                    if start_page is not None or end_page is not None:
-                        raise ValueError("不能同时提交两种页码范围")
-                    page_nos = parse_page_range(
-                        pages, source_total, max_pages=MAX_OCR_PAGES_PER_JOB
-                    )
-                else:
-                    page_nos = select_page_interval(
-                        source_total, start_page, end_page, MAX_OCR_PAGES_PER_JOB
-                    )
-            except ValueError as exc:
-                raise HTTPException(400, str(exc)) from None
-        else:
-            page_nos = [1]
-        job = _create_ocr_job(suffix, upload, source_total, "starting")
-        _set_ocr_selection(job, page_nos)
-        job["status"] = "running"
-        _launch_ocr_job(job, page_nos, dpi, base_url, model, api_key)
-        return {"id": job["id"]}
+        两阶段启动既能在响应丢失后安全重放，也避免任意网页通过跨站表单直接
+        消耗本机已配置的视觉模型额度。
+        """
+        raise HTTPException(409, "请先上传并读取文件信息，再使用任务编号开始 OCR")
 
     @app.get("/api/ocr/jobs/{jid}")
     def ocr_status(jid: str):
-        job = _ocr_jobs.get(jid)
-        if job is None:
-            raise HTTPException(404, "任务不存在")
-        pages_summary = {
-            str(n): {
-                "status": p["status"],
-                "low_conf": p["low_conf"],
-                "error": p["error"][:120],
-                "attempts": p.get("attempts", 0),
-                "task_index": p.get("task_index", 0),
-                "retrying": p.get("retrying", False),
+        with _ocr_jobs_lock:
+            job = _ocr_jobs.get(jid)
+            if job is None:
+                raise HTTPException(404, "任务不存在")
+            pages_summary = {
+                str(n): {
+                    "status": p["status"],
+                    "low_conf": p["low_conf"],
+                    "error": p["error"][:120],
+                    "attempts": p.get("attempts", 0),
+                    "task_index": p.get("task_index", 0),
+                    "retrying": p.get("retrying", False),
+                }
+                for n, p in job.get("pages", {}).items()
             }
-            for n, p in job.get("pages", {}).items()
-        }
-        return {k: v for k, v in job.items() if k not in (
-            "raw_tex", "pages", "client", "dir", "target", "suffix",
-            "_transcribe_one", "_merge_job",
-        )} | {
-            "pages": pages_summary
-        }
+            public = {
+                k: deepcopy(v)
+                for k, v in job.items()
+                if k not in (
+                    "raw_tex", "pages", "client", "dir", "target", "suffix",
+                    "_transcribe_one", "_refresh_raw_preview", "_merge_job",
+                )
+            }
+            public["raw_revision"] = int(job.get("raw_revision") or 0)
+            public["raw_chars"] = int(job.get("raw_chars") or len(job.get("raw_tex") or ""))
+        return public | {"pages": pages_summary}
+
+    @app.get("/api/ocr/jobs/{jid}/preview")
+    def ocr_preview(jid: str):
+        """返回当前已完成页的原子 LaTeX 草稿快照。"""
+        with _ocr_jobs_lock:
+            job = _ocr_jobs.get(jid)
+            if job is None:
+                raise HTTPException(404, "任务不存在")
+            raw_tex = str(job.get("raw_tex") or "")
+            revision = int(job.get("raw_revision") or 0)
+            raw_chars = int(job.get("raw_chars") or len(raw_tex))
+        return PlainTextResponse(
+            raw_tex,
+            headers={
+                "X-LaTeXStruct-OCR-Revision": str(revision),
+                "X-LaTeXStruct-OCR-Chars": str(raw_chars),
+                "Cache-Control": "no-store",
+            },
+        )
 
     @app.get("/api/ocr/jobs/{jid}/pages/{n}")
     def ocr_page_png(jid: str, n: int):
@@ -1431,6 +1559,8 @@ def create_app() -> FastAPI:
                     raise HTTPException(404, "页面不存在")
                 if job.get("importing"):
                     raise HTTPException(409, "OCR 结果正在导入项目，暂时不能重试页面")
+                if job.get("saving"):
+                    raise HTTPException(409, "OCR 结果正在保存，完成后再重试页面")
                 if job.get("status") == "running" or page.get("retrying"):
                     raise HTTPException(409, "该页正在处理，请勿重复点击重试")
                 client = job.get("client")
@@ -1447,16 +1577,23 @@ def create_app() -> FastAPI:
                     if job.get("source_type") == "pdf" else "重试图片"
                 )
         try:
-            ok = job["_transcribe_one"](job, client, n, page["png"])
-        except Exception as exc:  # noqa: BLE001
-            ok = False
-            page["status"] = "error"
-            page["low_conf"] = True
-            page["error"] = _safe_task_error(exc)
+            try:
+                ok = job["_transcribe_one"](job, client, n, page["png"])
+            except Exception as exc:  # noqa: BLE001
+                ok = False
+                with _ocr_jobs_lock:
+                    page["status"] = "error"
+                    page["low_conf"] = True
+                    page["error"] = _safe_task_error(exc)
+                    job["page_revision"] = int(job.get("page_revision") or 0) + 1
+            if ok:
+                job["_refresh_raw_preview"](job)
         finally:
-            job["_merge_job"](job)
-            with _ocr_jobs_lock:
-                page["retrying"] = False
+            try:
+                job["_merge_job"](job)
+            finally:
+                with _ocr_jobs_lock:
+                    page["retrying"] = False
         return {
             "ok": ok,
             "page": n,
@@ -1465,30 +1602,85 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/ocr/jobs/{jid}/result")
-    def ocr_result(jid: str, background_tasks: BackgroundTasks):
+    def ocr_result(jid: str):
         with _ocr_jobs_lock:
             job = _ocr_jobs.get(jid)
             if job is None or job.get("status") not in ("done", "partial"):
                 raise HTTPException(404, "原始 OCR 尚未生成")
             raw_tex = job["raw_tex"]
             status = job["status"]
-            revision = int(job.get("raw_revision") or 0)
-
-        def mark_downloaded():
-            with _ocr_jobs_lock:
-                current = _ocr_jobs.get(jid)
-                if (
-                    current is not None
-                    and int(current.get("raw_revision") or 0) == revision
-                    and current.get("raw_tex") == raw_tex
-                ):
-                    current["downloaded_revision"] = revision
-
-        background_tasks.add_task(mark_downloaded)
         return PlainTextResponse(
             raw_tex,
             headers={"X-LaTeXStruct-OCR-Complete": "true" if status == "done" else "false"},
         )
+
+    @app.post("/api/ocr/jobs/{jid}/save")
+    def save_ocr_result(jid: str):
+        """可靠保存终态 OCR；成功落盘后才把该 revision 标记为已保全。"""
+        from .downloads import save_unique_download
+
+        with _update_state_lock:
+            _raise_if_update_preparing()
+            with _ocr_jobs_lock:
+                job = _ocr_jobs.get(jid)
+                if job is None or job.get("status") not in ("done", "partial"):
+                    raise HTTPException(409, "原始 OCR 尚未生成")
+                if job.get("saving"):
+                    raise HTTPException(409, "原始 OCR 正在保存，请勿重复点击")
+                if job.get("importing"):
+                    raise HTTPException(409, "OCR 结果正在导入项目，请等待完成")
+                raw_tex = str(job.get("raw_tex") or "")
+                if not raw_tex:
+                    raise HTTPException(409, "原始 OCR 结果为空，请先重试失败页面")
+                revision = int(job.get("raw_revision") or 0)
+                usage_revision = int(job.get("usage_revision") or 0)
+                page_revision = int(job.get("page_revision") or 0)
+                status = str(job.get("status") or "")
+                start = int(job.get("selected_start") or 1)
+                end = int(job.get("selected_end") or start)
+                source_type = str(job.get("source_type") or "image")
+                job["saving"] = True
+        range_label = f"-P{start}-{end}" if source_type == "pdf" else ""
+        partial_label = "-partial" if status == "partial" else ""
+        data = raw_tex.encode("utf-8")
+        try:
+            saved = save_unique_download(
+                data,
+                f"OCR{range_label}{partial_label}-{jid}.tex",
+            )
+            with _ocr_jobs_lock:
+                current = _ocr_jobs.get(jid)
+                preserved = bool(
+                    current is not None
+                    and int(current.get("raw_revision") or 0) == revision
+                    and int(current.get("usage_revision") or 0) == usage_revision
+                    and int(current.get("page_revision") or 0) == page_revision
+                    and current.get("raw_tex") == raw_tex
+                )
+                if preserved:
+                    current["downloaded_revision"] = revision
+                    current["downloaded_usage_revision"] = usage_revision
+                    current["downloaded_page_revision"] = page_revision
+            if not preserved:
+                raise HTTPException(
+                    409,
+                    f"保存期间 OCR 已更新；旧版 {saved.name} 已保留，请再次保存最新结果",
+                )
+            return {
+                "ok": True,
+                "filename": saved.name,
+                "folder": "下载/LaTeXStruct",
+                "bytes": len(data),
+                "revision": revision,
+                "usage_revision": usage_revision,
+                "page_revision": page_revision,
+                "preserved": True,
+            }
+        finally:
+            with _ocr_jobs_lock:
+                current = _ocr_jobs.get(jid)
+                if current is not None:
+                    current["saving"] = False
 
     @app.post("/api/ocr/jobs/{jid}/import")
     def ocr_import(jid: str, name: str = "OCR 转写项目"):
@@ -1500,9 +1692,28 @@ def create_app() -> FastAPI:
                     raise HTTPException(409, "仍有失败页面；请逐页重试成功后再进入结构化审阅")
                 if job.get("importing"):
                     raise HTTPException(409, "OCR 结果正在导入，请勿重复点击")
+                if job.get("saving"):
+                    raise HTTPException(409, "OCR 结果正在保存，请等待完成后再导入")
+                revision = int(job.get("raw_revision") or 0)
+                usage_revision = int(job.get("usage_revision") or 0)
+                page_revision = int(job.get("page_revision") or 0)
+                existing_pid = str(job.get("imported_project_id") or "")
+                if (
+                    existing_pid
+                    and int(job.get("imported_revision") or 0) == revision
+                    and int(job.get("imported_usage_revision") or 0) == usage_revision
+                    and int(job.get("imported_page_revision") or 0) == page_revision
+                ):
+                    return {
+                        "id": existing_pid,
+                        "processed": (
+                            job.get("imported_processed")
+                            if job.get("imported_processed") is not None else False
+                        ),
+                        "reused": True,
+                    }
                 job["importing"] = True
                 raw_tex = job["raw_tex"]
-                revision = int(job.get("raw_revision") or 0)
         # 原始 OCR 永远作为 source.tex 保存；结构化结果单独写 result.tex，二者不混写。
         try:
             pid = get_store().create(raw_tex, name, "rule", "")
@@ -1511,11 +1722,19 @@ def create_app() -> FastAPI:
                 if (
                     current is not None
                     and int(current.get("raw_revision") or 0) == revision
+                    and int(current.get("usage_revision") or 0) == usage_revision
+                    and int(current.get("page_revision") or 0) == page_revision
                     and current.get("raw_tex") == raw_tex
                 ):
                     current["imported_revision"] = revision
+                    current["imported_usage_revision"] = usage_revision
+                    current["imported_page_revision"] = page_revision
                     current["imported_project_id"] = pid
             processed = _run_project(pid, set())
+            with _ocr_jobs_lock:
+                current = _ocr_jobs.get(jid)
+                if current is not None and current.get("imported_project_id") == pid:
+                    current["imported_processed"] = processed
             return {"id": pid, "processed": processed}
         finally:
             with _ocr_jobs_lock:

@@ -334,6 +334,14 @@ def run_pipeline(
     emit("scan", 0.17, "正在扫描定理、证明与章节候选")
     scan_res = scan(doc, pack)
     ctx = _build_context(doc)
+    candidates_by_id = {c.id: c for c in scan_res.candidates}
+    emit(
+        "scan",
+        0.20,
+        f"已发现 {len(scan_res.candidates)} 个候选，正在保守判断",
+        candidate_total=len(scan_res.candidates),
+        processed_candidates=0,
+    )
     ambiguous: List[dict] = []
     ai_notes: List[dict] = []
     review_info: Dict = {}
@@ -361,12 +369,47 @@ def run_pipeline(
                 ai_usage["decide"] = state.get("usage", {})
                 total = max(1, state.get("total", 0))
                 value = 0.24 + 0.30 * state.get("done", 0) / total
+                preview_data = {}
+                partial_decisions = state.get("_decision_objects")
+                if isinstance(partial_decisions, list):
+                    # Preview only at completed AI batches. Work on deep copies because
+                    # legalization/title restoration intentionally mutates decisions.
+                    # A preview failure must never change the verified pipeline result.
+                    try:
+                        preview_decisions = copy.deepcopy(
+                            rule_decisions + partial_decisions
+                        )
+                        preview_preamble = build_preamble_decision(
+                            doc, ctx, preview_decisions
+                        )
+                        if preview_preamble is not None:
+                            preview_decisions.append(preview_preamble)
+                        preview_out, preview_applied, _, _ = _apply_decisions(
+                            doc,
+                            preview_decisions,
+                            ctx,
+                            [],
+                            candidates_by_id=candidates_by_id,
+                        )
+                        preview_data = {
+                            "preview": "\n".join(preview_out),
+                            "preview_label": (
+                                f"批次草稿：已检查 {state.get('done', 0)}/"
+                                f"{state.get('total', 0)} 个 AI 候选"
+                            ),
+                            "applied": len(preview_applied),
+                        }
+                    except Exception:  # noqa: BLE001
+                        preview_data = {}
                 emit(
                     "decide", value,
                     f"AI 已判断 {state.get('done', 0)}/{state.get('total', 0)} 个候选",
                     usage={"decide": state.get("usage", {})},
                     completed_candidates=state.get("decisions", []),
+                    processed_candidates=state.get("done", 0),
+                    candidate_total=state.get("total", 0),
                     ambiguous=state.get("ambiguous", 0),
+                    **preview_data,
                 )
 
             ai_decisions, ai_amb, ai_notes, usage = decide_candidates(
@@ -394,6 +437,15 @@ def run_pipeline(
     else:
         emit("decide", 0.48, "正在用保守规则生成修改建议")
         decisions, ambiguous = build_rule_decisions(doc, scan_res, rule_config, pack=pack)
+        emit(
+            "decide",
+            0.54,
+            f"规则已检查 {len(scan_res.candidates)} 个候选",
+            candidate_total=len(scan_res.candidates),
+            processed_candidates=len(scan_res.candidates),
+            completed_candidates=[d.candidate_id for d in decisions],
+            ambiguous=len(ambiguous),
+        )
 
     if not decisions_reused:
         pre = build_preamble_decision(doc, ctx, decisions)
@@ -408,7 +460,6 @@ def run_pipeline(
         decisions = [d for d in decisions if d.candidate_id not in exclude]  # 单项拒绝（审阅）
 
     emit("patch", 0.60, "正在生成并校验补丁", decision_total=len(decisions))
-    candidates_by_id = {c.id: c for c in scan_res.candidates}
     out, applied, rejected, dropped = _apply_decisions(
         doc, decisions, ctx, ambiguous, candidates_by_id=candidates_by_id
     )
@@ -416,6 +467,23 @@ def run_pipeline(
         ambiguous.append({"candidate_id": d.candidate_id, "line": _interval(d)[0] or 1, "reason": reason})
     for s in scan_res.skipped:
         ambiguous.append({"candidate_id": "", "line": s.get("line"), "reason": f"{s.get('reason')}（{s.get('kind')}）"})
+
+    initial_draft = "\n".join(out)
+    emit(
+        "patch",
+        0.64,
+        f"已安全应用 {len(applied)} 项，正在复查草稿",
+        preview=initial_draft,
+        preview_label=(
+            "初步草稿（等待 AI 复查）"
+            if mode == "ai" and not decisions_reused
+            else "规则草稿（等待安全检查）"
+        ),
+        applied=len(applied),
+        rejected=len(rejected),
+        ambiguous=len(ambiguous),
+        completed_candidates=[d.candidate_id for d in decisions],
+    )
 
     # AI 复查（默认开启；降级或无补丁时跳过）
     if (

@@ -27,7 +27,9 @@ export async function api(path, opts = {}) {
       : { "Content-Type": "application/json", ...(opts.headers || {}) },
   });
   if (!res.ok) {
-    throw new Error(await errorMessage(res));
+    const error = new Error(await errorMessage(res));
+    error.status = res.status;
+    throw error;
   }
   return res;
 }

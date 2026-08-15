@@ -397,6 +397,42 @@ def test_ai_mode_pipeline_with_fake_decide():
     assert len(fake.calls) == 1
 
 
+def test_ai_batches_emit_progressive_tex_previews():
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "Theorem 1. First statement.\n\n"
+        "Theorem 2. Second statement.\n"
+        "\\end{document}\n"
+    )
+    doc = parse_latex(text)
+    scanned = scan(doc)
+    fake = FakeClient(build_fake_decide_response(doc, scanned))
+    cfg = AIConfig(
+        decide=RoleConfig(api_key="test"),
+        review_enabled=False,
+        batch_size=1,
+    )
+    events = []
+
+    result = run_pipeline(
+        text,
+        mode="ai",
+        ai_config=cfg,
+        ai_client=fake,
+        progress_callback=lambda phase, progress, message, data: events.append(
+            (phase, progress, message, data)
+        ),
+    )
+
+    assert result.ok, result.report_md
+    batch_events = [event for event in events if event[0] == "decide" and "preview" in event[3]]
+    assert len(batch_events) == 2
+    assert [event[3]["processed_candidates"] for event in batch_events] == [1, 2]
+    assert batch_events[0][3]["preview"].count("\\begin{theorem}") == 1
+    assert batch_events[1][3]["preview"].count("\\begin{theorem}") == 2
+    assert batch_events[0][3]["preview"] != batch_events[1][3]["preview"]
+
+
 def test_ai_cannot_wrap_explicit_number_in_existing_numbered_environment():
     text = (
         "\\documentclass{book}\n\\usepackage{amsthm}\n"

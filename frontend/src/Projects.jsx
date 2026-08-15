@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 
 const TEXT_EXTENSIONS = new Set([
@@ -76,6 +76,22 @@ function normalizedEntries(entries) {
   }));
 }
 
+function ocrProjectHint(project, duplicateCount) {
+  const isOcr = project.origin === "ocr" || project.name === "OCR 转写项目";
+  if (!isOcr) return "";
+  const sourceName = project.ocr_source_name || project.source_name || "";
+  const start = Number(project.ocr_start_page ?? project.selected_start);
+  const end = Number(project.ocr_end_page ?? project.selected_end);
+  const range = Number.isInteger(start) && Number.isInteger(end) && start > 0 && end >= start
+    ? `第 ${start}–${end} 页`
+    : "";
+  if (sourceName || range) return ["OCR 导入", sourceName, range].filter(Boolean).join(" · ");
+  if (duplicateCount > 1) {
+    return `OCR 导入 · ${project.created || "时间未知"} · 编号 ${project.id.slice(-4)}`;
+  }
+  return "OCR 导入";
+}
+
 export default function Projects({ onOpen }) {
   const [projects, setProjects] = useState([]);
   const [packs, setPacks] = useState([]);
@@ -94,7 +110,10 @@ export default function Projects({ onOpen }) {
 
   const reload = async () => {
     const response = await api("/api/projects");
-    setProjects(await response.json());
+    const data = await response.json();
+    setProjects([...data].sort((left, right) =>
+      String(right.created || "").localeCompare(String(left.created || ""))
+      || String(right.id || "").localeCompare(String(left.id || ""))));
   };
 
   useEffect(() => {
@@ -120,6 +139,11 @@ export default function Projects({ onOpen }) {
     template: template ? "elegantbook" : "",
     pack,
   };
+
+  const duplicateNames = useMemo(() => projects.reduce((counts, project) => {
+    counts[project.name] = (counts[project.name] || 0) + 1;
+    return counts;
+  }, {}), [projects]);
 
   const doCreate = async () => {
     if (!text.trim()) return alert("请粘贴内容，或拖入/选择一个 .tex 文件");
@@ -357,23 +381,30 @@ export default function Projects({ onOpen }) {
               const task = project.processing;
               const active = ACTIVE_TASKS.has(task?.status);
               const taskMessage = task?.error || task?.message;
+              const originHint = ocrProjectHint(project, duplicateNames[project.name] || 0);
               return (
                 <tr key={project.id}>
-                  <td><b>{project.name}</b>{project.kind === "folder" && <span className="file-badge">多文件</span>}</td>
+                  <td className="project-name-cell">
+                    <div>
+                      <b>{project.name}</b>
+                      {project.kind === "folder" && <span className="file-badge">多文件</span>}
+                    </div>
+                    {originHint && <small title={originHint}>{originHint}</small>}
+                  </td>
                   <td>
                     {task ? (
-                      <div>
+                      <div className="project-task-status">
                         <span className={`task-chip ${task.status}`}>
                           {TASK_LABELS[task.status] || "任务状态未知"}
                           {active && ` ${Math.round((task.progress || 0) * 100)}%`}
                         </span>
-                        {taskMessage && <div className="muted">{taskMessage}</div>}
+                        {taskMessage && <small title={taskMessage}>{taskMessage}</small>}
                       </div>
                     ) : project.has_result ? <span className="task-chip done">待审阅</span> : <span className="muted">未分析</span>}
                   </td>
                   <td>{project.mode === "ai" ? "AI" : "规则"}</td>
                   <td>{project.created}</td>
-                  <td className="table-actions">
+                  <td className="table-actions compact-actions">
                     <button onClick={() => onOpen(project.id)}>打开</button>
                     {task?.status === "paused" ? (
                       <button onClick={() => controlProject(project, "resume")}>继续</button>

@@ -75,7 +75,7 @@ export default function App() {
           )}
         </div>
       )}
-      <main className="content">
+      <main className={`content ${tab === "workspace" || tab === "ocr" ? "content-workbench" : ""}`}>
         {tab === "projects" && <Projects onOpen={openProject} />}
         {tab === "workspace" && (
           <Suspense fallback={<section className="card">正在加载审阅工作台……</section>}>

@@ -23,6 +23,13 @@ const KINDS = [
 
 const ACTIVE_TASKS = new Set(["running", "pausing", "paused", "cancelling", "committing"]);
 const TERMINAL_TASKS = new Set(["done", "error", "cancelled"]);
+// @monaco-editor/react 4.7 disposes DiffEditor models before its widget during
+// unmount unless keepCurrent* is enabled. Reuse one stable pair across the sole
+// Workspace instance so route switches dispose the widget first without leaking
+// a new anonymous model for every visit.
+const ORIGINAL_MODEL_PATH = "inmemory://latexstruct/workspace/source.tex";
+const MODIFIED_MODEL_PATH = "inmemory://latexstruct/workspace/result.tex";
+const EDITOR_HEIGHT = "clamp(560px, 68vh, 900px)";
 
 function processIssueGuidance(job) {
   const detail = String(job?.error || job?.message || "");
@@ -44,12 +51,97 @@ function processIssueGuidance(job) {
   return "原项目没有被覆盖；可点击“重新分析”重试，若仍失败请保留上面的错误详情。";
 }
 
+function inlineMarkdown(text, keyPrefix) {
+  return String(text || "").split(/(`[^`\n]+`)/g).filter(Boolean).map((part, index) => {
+    const key = `${keyPrefix}-${index}`;
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return <code key={key}>{part.slice(1, -1)}</code>;
+    }
+    return <span key={key}>{part}</span>;
+  });
+}
+
+function parseReportBlocks(markdown) {
+  const blocks = [];
+  let paragraph = [];
+  let list = null;
+  const flushParagraph = () => {
+    if (paragraph.length) {
+      blocks.push({ type: "paragraph", text: paragraph.join(" ") });
+      paragraph = [];
+    }
+  };
+  const flushList = () => {
+    if (list) {
+      blocks.push(list);
+      list = null;
+    }
+  };
+
+  String(markdown || "").replace(/\r\n?/g, "\n").split("\n").forEach((line) => {
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      blocks.push({ type: "heading", level: heading[1].length, text: heading[2] });
+    } else if (unordered || ordered) {
+      flushParagraph();
+      const type = ordered ? "ordered" : "unordered";
+      if (!list || list.type !== type) {
+        flushList();
+        list = { type, items: [] };
+      }
+      list.items.push((ordered || unordered)[1]);
+    } else if (!line.trim()) {
+      flushParagraph();
+      flushList();
+    } else {
+      flushList();
+      paragraph.push(line.trim());
+    }
+  });
+  flushParagraph();
+  flushList();
+  return blocks;
+}
+
+function MarkdownReport({ markdown }) {
+  const blocks = useMemo(() => parseReportBlocks(markdown), [markdown]);
+  return (
+    <div className="report-rendered">
+      {blocks.map((block, index) => {
+        if (block.type === "heading") {
+          const Tag = `h${Math.min(4, block.level + 1)}`;
+          return <Tag key={`heading-${index}`}>{inlineMarkdown(block.text, `heading-${index}`)}</Tag>;
+        }
+        if (block.type === "ordered" || block.type === "unordered") {
+          const Tag = block.type === "ordered" ? "ol" : "ul";
+          return (
+            <Tag key={`list-${index}`}>
+              {block.items.map((item, itemIndex) => (
+                <li key={`item-${index}-${itemIndex}`}>
+                  {inlineMarkdown(item, `item-${index}-${itemIndex}`)}
+                </li>
+              ))}
+            </Tag>
+          );
+        }
+        return <p key={`paragraph-${index}`}>{inlineMarkdown(block.text, `paragraph-${index}`)}</p>;
+      })}
+    </div>
+  );
+}
+
 export default function Workspace({ pid }) {
   const [info, setInfo] = useState(null);
   const [source, setSource] = useState("");
   const [result, setResult] = useState("");
   const [report, setReport] = useState("");
   const [status, setStatus] = useState("");
+  const [fileAction, setFileAction] = useState("");
+  const [savedExport, setSavedExport] = useState(null);
   const [job, setJob] = useState(null);
   const [livePreview, setLivePreview] = useState("");
   const [pollGeneration, setPollGeneration] = useState(0);
@@ -61,6 +153,7 @@ export default function Workspace({ pid }) {
   const [conf, setConf] = useState("all");
   const [query, setQuery] = useState("");
   const [view, setView] = useState("side"); // side | orig | mod
+  const [focusPreview, setFocusPreview] = useState(false);
   const [reviewed, setReviewed] = useState(() => {
     try {
       return new Set(JSON.parse(localStorage.getItem(`ls-reviewed-${pid}`) || "[]"));
@@ -73,6 +166,7 @@ export default function Workspace({ pid }) {
   const treeRef = useRef(null);
   const previewVersionRef = useRef({ jobId: null, revision: null });
   const pollFailuresRef = useRef(0);
+  const autoFocusedJobRef = useRef(null);
 
   const load = async () => {
     if (!pid) return;
@@ -124,8 +218,12 @@ export default function Workspace({ pid }) {
     setSelected(null);
     setJob(null);
     setLivePreview("");
+    setFileAction("");
+    setSavedExport(null);
+    setFocusPreview(false);
     previewVersionRef.current = { jobId: null, revision: null };
     pollFailuresRef.current = 0;
+    autoFocusedJobRef.current = null;
     undoStack.current = [];
     load();
   }, [pid]);
@@ -145,6 +243,11 @@ export default function Workspace({ pid }) {
         const priorFailures = pollFailuresRef.current;
         pollFailuresRef.current = 0;
         setJob(state);
+        if (state.id && ACTIVE_TASKS.has(state.status) && autoFocusedJobRef.current !== state.id) {
+          // 每个任务只自动聚焦一次；用户手动切回全景后不再抢走布局。
+          autoFocusedJobRef.current = state.id;
+          setFocusPreview(true);
+        }
         if (priorFailures) setStatus("连接已恢复，正在继续读取任务进度");
 
         if (previewVersionRef.current.jobId !== state.id) {
@@ -228,6 +331,8 @@ export default function Workspace({ pid }) {
       const state = await (await api(`/api/projects/${pid}/process/start`, { method: "POST" })).json();
       setReviewed(new Set());
       setJob(state);
+      autoFocusedJobRef.current = state.id || null;
+      setFocusPreview(true);
       setLivePreview(source);
       previewVersionRef.current = {
         jobId: state.id || null,
@@ -249,6 +354,98 @@ export default function Workspace({ pid }) {
       setPollGeneration((value) => value + 1);
     } catch (error) {
       setStatus("操作失败：" + error.message);
+    }
+  };
+
+  const copyText = async (label, text) => {
+    if (!text) {
+      setFileAction(`${label} 暂无可复制内容`);
+      return;
+    }
+    try {
+      let copied = false;
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(text);
+          copied = true;
+        } catch {
+          // Electron/浏览器可能暴露 API 却因权限拒绝；继续尝试本地 textarea。
+        }
+      }
+      if (!copied) {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        try {
+          area.select();
+          copied = document.execCommand("copy");
+        } finally {
+          area.remove();
+        }
+      }
+      if (!copied) throw new Error("系统未允许访问剪贴板");
+      setFileAction(`已复制 ${label}`);
+    } catch (error) {
+      setFileAction(`复制 ${label} 失败：${error.message}`);
+    }
+  };
+
+  const copyFromApi = async (path, label) => {
+    setFileAction(`正在读取已验证的 ${label}……`);
+    try {
+      const response = await api(path);
+      const text = await response.text();
+      await copyText(label, text);
+    } catch (error) {
+      setFileAction(`复制 ${label} 失败：${error.message}`);
+    }
+  };
+
+  const downloadFromApi = async (path, filename) => {
+    setFileAction(`正在准备 ${filename}……`);
+    try {
+      const response = await api(path);
+      const blob = await response.blob();
+      if (!blob.size) throw new Error("服务返回了空文件");
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setFileAction(`已请求浏览器下载 ${filename}；桌面版若没有保存，请使用“修复下载”`);
+    } catch (error) {
+      setFileAction(`下载 ${filename} 失败：${error.message}，请重试`);
+    }
+  };
+
+  const saveToDownloads = async (artifact, label) => {
+    setSavedExport(null);
+    setFileAction(`正在将 ${label} 保存到下载文件夹……`);
+    try {
+      const response = await api(`/api/projects/${pid}/exports/${artifact}/save`, {
+        method: "POST",
+      });
+      const saved = await response.json();
+      setSavedExport(saved);
+      setFileAction(`已保存 ${saved.filename} 到 ${saved.folder}`);
+    } catch (error) {
+      setSavedExport(null);
+      setFileAction(`保存 ${label} 失败：${error.message}，可重试或使用浏览器备用下载`);
+    }
+  };
+
+  const openSavedLocation = async () => {
+    try {
+      await api("/api/exports/open-folder", { method: "POST" });
+      setFileAction(`已打开 ${savedExport?.folder || "下载文件夹"}`);
+    } catch (error) {
+      setFileAction(`打开保存位置失败：${error.message}`);
     }
   };
 
@@ -278,17 +475,22 @@ export default function Workspace({ pid }) {
 
   const flat = useMemo(() => Object.values(groups).flat(), [groups]);
   const applied = decisions.filter((d) => d.status === "applied");
+  const rejectedCount = decisions.filter((d) => d.status === "rejected").length;
+  const ambiguousCount = decisions.filter((d) => d.status === "ambiguous").length;
   const reviewedCount = applied.filter((d) => reviewed.has(d.candidate_id)).length;
   const lowConfidenceCount = applied.filter((d) => (d.confidence || 0) < 0.9).length;
   const safeToExport = verification?.safe_to_export === true;
-  const reviewComplete = applied.length === 0 || reviewedCount === applied.length;
-  const canExport = safeToExport && reviewComplete;
   const taskActive = ACTIVE_TASKS.has(job?.status);
+  const reportReady = Boolean(info?.has_result && report && !taskActive);
+  const reviewComplete = applied.length === 0 || reviewedCount === applied.length;
+  const canExport = safeToExport && reviewComplete && !taskActive;
   const displayResult = taskActive && livePreview ? livePreview : result;
   const largeDiff = source.length + displayResult.length > 1_000_000;
   const showDiffEditor = view === "side" && !largeDiff;
   const tokenTotal = job?.cost?.total_tokens || 0;
   const estimatedCny = job?.cost?.estimated_cost_cny;
+  const processedCandidateCount = Number(job?.processed_candidates || 0);
+  const candidateTotal = Number(job?.candidate_total || 0);
   const priceText = estimatedCny == null
     ? (tokenTotal ? "自定义/未知模型，暂不估价" : "尚无模型费用")
     : `约 ¥${estimatedCny < 0.01 ? estimatedCny.toFixed(4) : estimatedCny.toFixed(2)}`;
@@ -405,12 +607,47 @@ export default function Workspace({ pid }) {
             取消
           </button>
         )}
-        {canExport ? (
-          <a href={`/api/projects/${pid}/export`} download="result.tex"><button>导出 result.tex</button></a>
-        ) : <button disabled title="需先通过安全检查并完成审阅">导出 result.tex</button>}
-        {graph && (canExport ? (
-          <a href={`/api/projects/${pid}/export-folder`}><button>导出文件夹 zip</button></a>
-        ) : <button disabled title="需先通过安全检查并完成审阅">导出文件夹 zip</button>)}
+        <button
+          disabled={!canExport}
+          className="primary"
+          title={canExport ? "可靠保存到系统下载/LaTeXStruct 文件夹" : "需先通过安全检查并完成审阅"}
+          onClick={() => saveToDownloads("result", "result.tex")}
+        >
+          修复下载 result.tex
+        </button>
+        <button
+          disabled={!canExport}
+          title={canExport ? "若桌面保存不可用，可使用浏览器备用下载" : "需先通过安全检查并完成审阅"}
+          onClick={() => downloadFromApi(`/api/projects/${pid}/export`, "result.tex")}
+        >
+          浏览器下载（备用）
+        </button>
+        <button
+          disabled={!canExport}
+          title={canExport ? "复制已验证结果" : "需先通过安全检查并完成审阅"}
+          onClick={() => copyFromApi(`/api/projects/${pid}/export`, "result.tex")}
+        >
+          一键复制 result.tex
+        </button>
+        {graph && (
+          <>
+            <button
+              className="primary"
+              disabled={!canExport}
+              title={canExport ? "可靠保存已验证多文件项目" : "需先通过安全检查并完成审阅"}
+              onClick={() => saveToDownloads("folder", "项目 ZIP")}
+            >
+              修复下载项目 ZIP
+            </button>
+            <button
+              disabled={!canExport}
+              title={canExport ? "浏览器备用下载" : "需先通过安全检查并完成审阅"}
+              onClick={() => downloadFromApi(`/api/projects/${pid}/export-folder`, "LaTeXStruct-project.zip")}
+            >
+              ZIP 浏览器下载（备用）
+            </button>
+          </>
+        )}
         <button disabled={taskActive} onClick={() => { if (confirm("撤销全部拒绝并重新应用所有修改？")) rerun(`/api/projects/${pid}/decisions/reset`, { method: "POST" }); }}>
           撤销全部拒绝
         </button>
@@ -443,6 +680,22 @@ export default function Workspace({ pid }) {
             </button>
           ))}
         </div>
+        <div className="layout-toggle" role="group" aria-label="审阅布局">
+          <button
+            className={!focusPreview ? "primary" : ""}
+            aria-pressed={!focusPreview}
+            onClick={() => setFocusPreview(false)}
+          >
+            审阅全景
+          </button>
+          <button
+            className={focusPreview ? "primary" : ""}
+            aria-pressed={focusPreview}
+            onClick={() => setFocusPreview(true)}
+          >
+            专注预览
+          </button>
+        </div>
         {graph && (
           <span className="graph-info">
             主文件 {graph.main_rel} · 依赖 {graph.files.length}
@@ -451,6 +704,12 @@ export default function Workspace({ pid }) {
           </span>
         )}
         <span className="status">{status}</span>
+        {fileAction && (
+          <div className="file-action-status">
+            <span role="status">{fileAction}</span>
+            {savedExport && <button onClick={openSavedLocation}>打开保存位置</button>}
+          </div>
+        )}
         {job && job.status !== "idle" && (
           <div className={`process-card process-${job.status}`}>
             <div className="process-summary">
@@ -477,8 +736,17 @@ export default function Workspace({ pid }) {
               <span>Token：{tokenTotal.toLocaleString()}</span>
               <span>费用：{priceText}</span>
               <span>实时预览：{job.preview_label || "等待草稿"}</span>
-              {job.completed_candidates && <span>已判断：{job.completed_candidates.length} 项</span>}
+              {candidateTotal > 0 && (
+                <span>候选进度：{Math.min(processedCandidateCount, candidateTotal)}/{candidateTotal}</span>
+              )}
+              {Array.isArray(job.completed_candidates) && (
+                <span>已形成建议：{job.completed_candidates.length} 项</span>
+              )}
+              {(job.preview_revision || 0) > 1 && <span>草稿版本：{job.preview_revision}</span>}
             </div>
+            <p className="process-current-action">
+              当前动作：{job.phase_label || job.message || "等待下一安全批次"}
+            </p>
             {job.events?.length > 0 && (
               <ol className="process-events">
                 {job.events.slice(-5).map((event, index) => (
@@ -507,7 +775,7 @@ export default function Workspace({ pid }) {
         )}
         <span className="kbd-hint">↑↓ 切换 · A 确认保留 · R 拒绝 · Ctrl+Z 撤销上次拒绝</span>
       </section>
-      <div className="three-col">
+      <div className={`review-main ${focusPreview ? "focus-preview" : ""}`}>
         <aside className="col tree" ref={treeRef}>
           {Object.entries(groups).map(([section, items]) => (
             <div key={section}>
@@ -546,26 +814,35 @@ export default function Workspace({ pid }) {
             <DiffEditor
               original={source}
               modified={displayResult}
+              originalModelPath={ORIGINAL_MODEL_PATH}
+              modifiedModelPath={MODIFIED_MODEL_PATH}
+              keepCurrentOriginalModel
+              keepCurrentModifiedModel
               language="latex"
               onMount={(ed) => (editorRef.current = ed)}
               options={{ readOnly: true, minimap: { enabled: false }, renderSideBySide: true,
                 maxComputationTime: 5000, ignoreTrimWhitespace: false }}
-              height="72vh"
+              height={EDITOR_HEIGHT}
             />
           ) : (
             <Editor
               value={view === "orig" ? source : displayResult}
+              path={view === "orig" ? ORIGINAL_MODEL_PATH : MODIFIED_MODEL_PATH}
+              keepCurrentModel
               language="latex"
               onMount={(ed) => (editorRef.current = ed)}
               options={{ readOnly: true, minimap: { enabled: false } }}
-              height="72vh"
+              height={EDITOR_HEIGHT}
             />
           )}
           {largeDiff && view === "side" && (
             <p className="warning">文档较大，已暂停整本并排 Diff 以避免界面卡顿；可用左侧决策逐条定位，或切换原文/修改后视图。</p>
           )}
         </main>
-        <aside className="col inspector">
+      </div>
+      <section className={`col inspector review-bottom ${focusPreview ? "focus-hidden" : ""}`}>
+        <div className="review-bottom-grid">
+          <section className="decision-detail" aria-label="当前决策详情">
           {selected ? (
             <>
               <div className="inspector-nav">
@@ -602,10 +879,64 @@ export default function Workspace({ pid }) {
           ) : (
             <p className="muted">点击左侧决策项查看详情并跳转 diff 对应行。</p>
           )}
-          <h3>汇报</h3>
-          <pre className="report">{report}</pre>
-        </aside>
-      </div>
+          </section>
+          <section className={`result-overview ${safeToExport ? "safe" : "pending"}`}>
+            <div className="result-overview-heading">
+              <h3>结果概览</h3>
+              <span>{safeToExport ? "安全检查通过" : verification ? "暂不可导出" : "等待分析"}</span>
+            </div>
+            <div className="result-overview-grid">
+              <span><b>{applied.length}</b> 已应用</span>
+              <span><b>{rejectedCount}</b> 已拒绝</span>
+              <span><b>{ambiguousCount}</b> 待确认</span>
+              <span><b>{reviewedCount}/{applied.length}</b> 已审阅</span>
+            </div>
+            {verification?.checks?.length ? (
+              <ul className="safety-check-list" aria-label="安全检查清单">
+                {verification.checks.map((check) => (
+                  <li key={check.id} className={check.ok ? "ok" : "failed"}>
+                    <span aria-hidden="true">{check.ok ? "✓" : "✗"}</span>
+                    {check.label}{check.skipped ? "（未运行）" : ""}
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="muted">完成分析后，这里会逐项显示公式、引用、图片路径和编译安全检查。</p>}
+          </section>
+        </div>
+        <details className="report-panel">
+          <summary>整理汇报（展开查看）</summary>
+          <div className="report-heading-row">
+            <span className="muted">安全渲染的结果说明与操作记录</span>
+            <div className="report-actions">
+              <button
+                className="primary"
+                disabled={!reportReady}
+                onClick={() => saveToDownloads("report", "汇报 Markdown")}
+              >
+                修复下载
+              </button>
+              <button
+                disabled={!reportReady}
+                onClick={() => copyFromApi(`/api/projects/${pid}/export-report`, "汇报")}
+              >
+                一键复制
+              </button>
+              <button
+                disabled={!reportReady}
+                title="若桌面保存不可用，可使用浏览器备用下载"
+                onClick={() => downloadFromApi(`/api/projects/${pid}/export-report`, "LaTeXStruct-report.md")}
+              >
+                浏览器下载（备用）
+              </button>
+            </div>
+          </div>
+          <MarkdownReport markdown={report} />
+          <details className="report-raw">
+            <summary>查看原始 Markdown</summary>
+            <pre className="report">{report}</pre>
+          </details>
+        </details>
+      </section>
     </div>
   );
 }

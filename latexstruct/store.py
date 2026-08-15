@@ -108,6 +108,9 @@ class ProjectStore:
             committed["result_sha256"] = hashlib.sha256(
                 result_text.encode("utf-8")
             ).hexdigest()
+            committed["report_sha256"] = hashlib.sha256(
+                report_md.encode("utf-8")
+            ).hexdigest()
             # 必须最后写：只有该原子 replace 成功，整组结果才可导出。
             self._write_json(d, "verification.json", committed)
         except Exception:

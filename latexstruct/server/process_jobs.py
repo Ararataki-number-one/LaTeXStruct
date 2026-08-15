@@ -148,8 +148,9 @@ class ProcessJobManager:
                 job["usage"] = data["usage"]
                 job["cost"] = summarize_ai_usage(data["usage"])
             for key in (
-                "candidate_total", "decision_total", "completed_candidates", "ambiguous",
-                "applied", "rejected", "review_findings", "safe_to_export",
+                "candidate_total", "processed_candidates", "decision_total",
+                "completed_candidates", "ambiguous", "applied", "rejected",
+                "review_findings", "safe_to_export",
             ):
                 if key in data:
                     job[key] = data[key]
