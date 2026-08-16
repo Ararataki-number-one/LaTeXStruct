@@ -181,6 +181,7 @@ def test_release_build_safety_guards():
     assert '$pageResponse = Invoke-WebRequest "http://127.0.0.1:8099/"' in workflow
     assert "$home = Invoke-WebRequest" not in workflow
     assert "v1.1.5 运行中 → 当前版本" in workflow
+    assert "v1.1.4" not in workflow
     assert "/api/update/result" in workflow
     assert "body_path: dist/RELEASE_NOTES.md" in workflow
 
