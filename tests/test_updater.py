@@ -212,7 +212,19 @@ def test_installer_script_force_closes_old_updater_and_restarts_only_upgrade():
     assert "CloseApplications=force" in text
     assert "RestartApplications=no" in text
     assert "WasInstalledBefore := FileExists" in text
-    assert "skipifnotsilent; Check: RestartAfterSilentUpdate" in text
+    assert "update_restart.ps1" in text
+    assert "UpdatePreviousVersion" in text
+    assert "-ExpectedVersion \"\"{#AppVersion}\"\"" in text
+    assert "runhidden skipifnotsilent; Check: RestartAfterSilentUpdate" in text
+
+    restart_script = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "packaging", "update_restart.ps1"
+    )
+    restart = open(restart_script, encoding="utf-8").read()
+    assert "Wait-ForExpectedVersion" in restart
+    assert "for ($attempt = 1; $attempt -le 2; $attempt++)" in restart
+    assert "$observed -eq $ExpectedVersion" in restart
+    assert "update-restart.log" in restart
 
 
 def main():

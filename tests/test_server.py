@@ -996,6 +996,96 @@ def test_background_process_can_pause_preview_resume_and_finish():
         assert c.get(f"/api/projects/{pid}/result").status_code == 200
 
 
+def test_background_process_commits_ai_review_without_runtime_patch_objects():
+    """A completed multi-batch review must not fail at the final JSON commit."""
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        pid = c.post(
+            "/api/projects",
+            json={"text": SAMPLE, "name": "review-commit", "mode": "rule"},
+        ).json()["id"]
+        original_pipeline = srv.run_pipeline
+
+        def pipeline_with_full_runtime_review(*args, **kwargs):
+            result = original_pipeline(*args, **kwargs)
+            assert result.applied
+            runtime_patch = result.applied[0]
+            result.review = {
+                "findings": [{
+                    "candidate_id": runtime_patch.decision.candidate_id,
+                    "verdict": "ok",
+                    "reason": "复查通过",
+                }],
+                "invalid": [],
+                "usage": {"input_tokens": 1234, "output_tokens": 56},
+                "decisions": result.decisions,
+                "out": result.result.splitlines(),
+                # Match the reported 48-candidate job and retain the exact
+                # non-JSON AppliedPatch type that caused the v1.1.6 failure.
+                "applied": [runtime_patch] * 48,
+                "rejected": result.rejected,
+            }
+            return result
+
+        with patch.object(srv, "run_pipeline", pipeline_with_full_runtime_review):
+            assert c.post(f"/api/projects/{pid}/process/start").status_code == 200
+            for _ in range(300):
+                state = c.get(f"/api/projects/{pid}/process/status").json()
+                if state["status"] in {"done", "error", "cancelled"}:
+                    break
+                time.sleep(0.01)
+
+        assert state["status"] == "done", state
+        assert state["progress"] == 1.0
+        assert c.get(f"/api/projects/{pid}/result").status_code == 200
+        record = json.loads(
+            (Path(srv.get_store()._dir(pid)) / "verification.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        review = record["review"]
+        assert set(review) == {"findings", "invalid", "usage"}
+        assert len(review["findings"]) == 1
+        assert review["findings"][0]["candidate_id"]
+        assert review["findings"][0]["verdict"] == "ok"
+        assert review["findings"][0]["reason"] == "复查通过"
+        assert review["invalid"] == []
+        assert review["usage"] == {"input_tokens": 1234, "output_tokens": 56}
+        assert not ({"decisions", "out", "applied", "rejected"} & review.keys())
+        assert "AppliedPatch" not in json.dumps(record, ensure_ascii=False)
+
+
+def test_task_error_hides_internal_json_runtime_type():
+    message = srv._safe_task_error(
+        TypeError("Object of type AppliedPatch is not JSON serializable")
+    )
+    assert "AppliedPatch" not in message
+    assert "原项目和上一份已验证结果保持不变" in message
+    assert "更新到最新版本" in message
+
+
+def test_background_commit_failure_never_reports_one_hundred_percent():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        pid = c.post(
+            "/api/projects",
+            json={"text": SAMPLE, "name": "commit-failure", "mode": "rule"},
+        ).json()["id"]
+        store = srv.get_store()
+        with patch.object(store, "set_result", side_effect=OSError("simulated disk failure")):
+            assert c.post(f"/api/projects/{pid}/process/start").status_code == 200
+            for _ in range(300):
+                state = c.get(f"/api/projects/{pid}/process/status").json()
+                if state["status"] in {"done", "error", "cancelled"}:
+                    break
+                time.sleep(0.01)
+
+        assert state["status"] == "error", state
+        assert state["phase"] == "error"
+        assert state["progress"] == 0.99
+        assert c.get(f"/api/projects/{pid}/result").status_code == 404
+
+
 def test_project_list_keeps_latest_terminal_process_status_and_message():
     with WorkspaceTmp() as tmp:
         c = _client(tmp)

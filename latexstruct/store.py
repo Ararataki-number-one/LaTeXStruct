@@ -115,6 +115,19 @@ class ProjectStore:
         decisions: List[Dict],
         verification: Dict,
     ):
+        committed = dict(verification)
+        committed["result_sha256"] = hashlib.sha256(
+            result_text.encode("utf-8")
+        ).hexdigest()
+        committed["report_sha256"] = hashlib.sha256(
+            report_md.encode("utf-8")
+        ).hexdigest()
+        # Validate both JSON documents before moving the previous commit marker
+        # or writing any new result files.  A leaked runtime object must leave the
+        # entire prior commit byte-for-byte untouched.
+        json.dumps(decisions, ensure_ascii=False, indent=1)
+        json.dumps(committed, ensure_ascii=False, indent=1)
+
         d = self._dir(pid)
         marker = os.path.join(d, "verification.json")
         old_marker = os.path.join(d, f".verification.json.{uuid.uuid4().hex}.previous")
@@ -127,13 +140,6 @@ class ProjectStore:
             self._write_text(d, "result.tex", result_text)
             self._write_text(d, "report.md", report_md)
             self._write_json(d, "decisions.json", decisions)
-            committed = dict(verification)
-            committed["result_sha256"] = hashlib.sha256(
-                result_text.encode("utf-8")
-            ).hexdigest()
-            committed["report_sha256"] = hashlib.sha256(
-                report_md.encode("utf-8")
-            ).hexdigest()
             # 必须最后写：只有该原子 replace 成功，整组结果才可导出。
             self._write_json(d, "verification.json", committed)
         except Exception:
