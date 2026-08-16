@@ -53,6 +53,16 @@ def test_bundled_elegantbook_snapshot_is_present_and_hash_verified():
     assert b"v4.7 ElegantBook document class" in class_bytes
     assert b"The LaTeX Project Public License" in license_bytes
 
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, ".gitattributes"), encoding="utf-8") as f:
+        attributes = f.read()
+    for path in (
+        "latexstruct/assets/elegantbook/elegantbook.cls",
+        "latexstruct/assets/elegantbook/ELEGANTBOOK-LICENSE.txt",
+    ):
+        rule = next(line for line in attributes.splitlines() if line.startswith(path + " "))
+        assert " -text " in f" {rule} ", "Windows checkout must preserve reviewed bytes"
+
 
 def test_workspace_reuses_monaco_models_until_editor_widget_is_disposed():
     """Guard the @monaco-editor/react DiffEditor unmount-order workaround."""
