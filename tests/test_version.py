@@ -183,6 +183,8 @@ def test_release_build_safety_guards():
     assert "v1.1.6 运行中 → 当前版本" in workflow
     assert "v1.1.5" not in workflow
     assert "v1.1.4" not in workflow
+    assert "name: LaTeXStruct-v${{ env.APP_VERSION }}" in workflow
+    assert "name: LaTeXStruct-${{ github.ref_name }}" not in workflow
     assert "                if ($health.ok -and [string]$health.version -eq '1.1.6')" in workflow
     assert "            if (-not $oldHealthy)" in workflow
     assert "            if (-not $updated.updated" in workflow

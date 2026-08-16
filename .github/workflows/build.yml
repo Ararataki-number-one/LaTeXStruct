@@ -367,7 +367,7 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: LaTeXStruct-${{ github.ref_name }}
+          name: LaTeXStruct-v${{ env.APP_VERSION }}
           path: |
             dist/LaTeXStruct.exe
             dist/LaTeXStruct-setup-*.exe
