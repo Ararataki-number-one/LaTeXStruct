@@ -431,6 +431,9 @@ def test_ai_batches_emit_progressive_tex_previews():
     assert batch_events[0][3]["preview"].count("\\begin{theorem}") == 1
     assert batch_events[1][3]["preview"].count("\\begin{theorem}") == 2
     assert batch_events[0][3]["preview"] != batch_events[1][3]["preview"]
+    assert events[-1][0] == "ready"
+    assert events[-1][1] < 1.0
+    assert "等待保存" in events[-1][2]
 
 
 def test_ai_cannot_wrap_explicit_number_in_existing_numbered_environment():

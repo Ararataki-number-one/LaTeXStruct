@@ -230,7 +230,7 @@ jobs:
           }
           if (-not $gone) { Write-Error "静默卸载后残留文件"; exit 1 }
           Write-Host "安装器冒烟测试通过（安装→运行→卸载）"
-      - name: 上一版自动更新冒烟（v1.1.5 运行中 → 当前版本）
+      - name: 上一版自动更新冒烟（v1.1.6 运行中 → 当前版本）
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -241,20 +241,20 @@ jobs:
             'Accept' = 'application/vnd.github+json'
           }
           $release = Invoke-RestMethod -Headers $headers `
-            'https://api.github.com/repos/Ararataki-number-one/LaTeXStruct/releases/tags/v1.1.5'
+            'https://api.github.com/repos/Ararataki-number-one/LaTeXStruct/releases/tags/v1.1.6'
           $asset = $release.assets | Where-Object {
-            $_.name -eq 'LaTeXStruct-setup-1.1.5.exe'
+            $_.name -eq 'LaTeXStruct-setup-1.1.6.exe'
           } | Select-Object -First 1
-          if (-not $asset) { Write-Error '公开 v1.1.5 安装器不存在'; exit 1 }
+          if (-not $asset) { Write-Error '公开 v1.1.6 安装器不存在'; exit 1 }
           $oldSetup = Join-Path $env:RUNNER_TEMP $asset.name
           Invoke-WebRequest -Headers $headers -Uri $asset.browser_download_url -OutFile $oldSetup
           if ($asset.digest -notmatch '^sha256:([0-9a-fA-F]{64})$') {
-            Write-Error 'v1.1.5 安装器缺少 SHA-256 摘要'; exit 1
+            Write-Error 'v1.1.6 安装器缺少 SHA-256 摘要'; exit 1
           }
           $expectedOldHash = $Matches[1]
           $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $oldSetup).Hash
           if ($actual -ne $expectedOldHash) {
-            Write-Error 'v1.1.5 安装器摘要校验失败'; exit 1
+            Write-Error 'v1.1.6 安装器摘要校验失败'; exit 1
           }
 
           $upgradeDir = Join-Path $env:LOCALAPPDATA 'Programs\LaTeXStruct-Upgrade-Smoke'
@@ -265,7 +265,7 @@ jobs:
             Start-Process -FilePath $oldSetup -ArgumentList `
               '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$upgradeDir" -Wait
             if (-not (Test-Path "$upgradeDir\LaTeXStruct.exe")) {
-              Write-Error 'v1.1.5 安装失败'; exit 1
+              Write-Error 'v1.1.6 安装失败'; exit 1
             }
             $oldProc = Start-Process -FilePath "$upgradeDir\LaTeXStruct.exe" `
               -ArgumentList '--server','--port','8100' -PassThru
@@ -274,15 +274,15 @@ jobs:
               Start-Sleep -Seconds 2
               try {
                 $health = Invoke-RestMethod 'http://127.0.0.1:8100/api/health' -TimeoutSec 3
-                if ($health.ok -and [string]$health.version -eq '1.1.5') {
+                if ($health.ok -and [string]$health.version -eq '1.1.6') {
                   $oldHealthy = $true
                   break
                 }
               } catch {}
             }
-            if (-not $oldHealthy) { Write-Error '运行中的 v1.1.5 健康检查失败'; exit 1 }
+            if (-not $oldHealthy) { Write-Error '运行中的 v1.1.6 健康检查失败'; exit 1 }
 
-            # 使用 v1.1.5 updater 的完整安装器参数；/DIR 仅隔离 CI 安装目录。
+            # 使用 v1.1.6 updater 的完整安装器参数；/DIR 仅隔离 CI 安装目录。
             # CI 保留运行中的旧进程，同时覆盖 Restart Manager 的强制关闭兜底。
             $upgrade = Start-Process -FilePath $currentSetup.FullName -ArgumentList `
               '/VERYSILENT','/SUPPRESSMSGBOXES','/CLOSEAPPLICATIONS', `
@@ -322,12 +322,12 @@ jobs:
               exit 1
             }
             $updated = Invoke-RestMethod 'http://127.0.0.1:8765/api/update/result' -TimeoutSec 5
-            if (-not $updated.updated -or [string]$updated.previous -ne '1.1.5' -or
+            if (-not $updated.updated -or [string]$updated.previous -ne '1.1.6' -or
                 [string]$updated.current -ne $env:APP_VERSION) {
               Write-Error "升级成功提示状态错误: $($updated | ConvertTo-Json -Compress)"
               exit 1
             }
-            Write-Host "上一版自动更新通过：v1.1.5 → v$env:APP_VERSION"
+            Write-Host "上一版自动更新通过：v1.1.6 → v$env:APP_VERSION"
           } finally {
             Get-Process LaTeXStruct -ErrorAction SilentlyContinue | Stop-Process -Force
             Start-Sleep -Seconds 2

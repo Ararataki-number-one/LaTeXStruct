@@ -7,9 +7,11 @@ import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from latexstruct.core.patch import AppliedPatch, Decision  # noqa: E402
 from latexstruct.store import ProjectStore  # noqa: E402
 
 _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -111,6 +113,36 @@ def test_set_result_failure_restores_previous_commit_marker():
             restored_marker = json.load(f)
         assert restored_marker == previous_marker
         assert not any(name.endswith(".previous") for name in os.listdir(os.path.join(tmp, pid)))
+
+
+def test_set_result_rejects_runtime_objects_before_touching_previous_commit():
+    with WorkspaceTmp() as tmp:
+        store = ProjectStore(root=tmp)
+        pid = store.create("SOURCE")
+        store.set_result(pid, "OLD RESULT", "# OLD REPORT", [{"old": True}], {"ok": True})
+        project_dir = Path(tmp) / pid
+        names = ("result.tex", "report.md", "decisions.json", "verification.json")
+        before = {name: (project_dir / name).read_bytes() for name in names}
+        runtime_patch = AppliedPatch(
+            decision=Decision(candidate_id="runtime", action="none"),
+            edits=[],
+        )
+
+        try:
+            store.set_result(
+                pid,
+                "NEW RESULT",
+                "# NEW REPORT",
+                [{"new": True}],
+                {"review": {"applied": [runtime_patch]}},
+            )
+        except TypeError as exc:
+            assert "AppliedPatch" in str(exc)
+        else:
+            raise AssertionError("运行时补丁对象不得进入项目 JSON")
+
+        after = {name: (project_dir / name).read_bytes() for name in names}
+        assert after == before
 
 
 def main():

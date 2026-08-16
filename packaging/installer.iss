@@ -36,16 +36,19 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 
 [Files]
 Source: "..\dist\LaTeXStruct.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\packaging\update_restart.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\LaTeXStruct"; Filename: "{app}\LaTeXStruct.exe"
 Name: "{autodesktop}\LaTeXStruct"; Filename: "{app}\LaTeXStruct.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\LaTeXStruct.exe"; Description: "启动 LaTeXStruct"; Parameters: "{code:UpdateLaunchParameters}"; Flags: nowait postinstall skipifsilent
-; Silent initial installs stay silent. A silent upgrade (including the old v1.1.1
-; updater command line) starts the newly installed version after replacement.
-Filename: "{app}\LaTeXStruct.exe"; Parameters: "{code:UpdateLaunchParameters}"; Flags: nowait skipifnotsilent; Check: RestartAfterSilentUpdate
+Filename: "{app}\LaTeXStruct.exe"; Description: "启动 LaTeXStruct"; Parameters: "{code:UpdateLaunchParameters}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
+; Silent updates use a detached health-checking launcher. It waits out a stale
+; PyInstaller server, retries startup and only succeeds after /api/health reports
+; the expected version. This path also works when an older updater launched this
+; installer, because the recovery script is carried by the new installer.
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\update_restart.ps1"" -AppPath ""{app}\LaTeXStruct.exe"" -PreviousVersion ""{code:UpdatePreviousVersion}"" -ExpectedVersion ""{#AppVersion}"""; WorkingDir: "{app}"; Flags: nowait runhidden skipifnotsilent; Check: RestartAfterSilentUpdate
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
@@ -71,6 +74,11 @@ begin
     Result := '--updated-from "' + PreviousVersion + '"'
   else
     Result := '';
+end;
+
+function UpdatePreviousVersion(Param: String): String;
+begin
+  Result := PreviousVersion;
 end;
 
 function RestartAfterSilentUpdate: Boolean;

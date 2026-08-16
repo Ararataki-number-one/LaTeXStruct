@@ -812,10 +812,13 @@ def run_pipeline(
         review=review_info,
         decision_items=decision_items,
     )
+    # The pipeline result is complete in memory, but the server still has to
+    # atomically commit result/report/decisions/verification.  Only the job
+    # manager may publish 100% after that commit succeeds.
     emit(
-        "done", 1.0, "处理完成",
+        "ready", 0.985, "安全检查完成，等待保存最终结果",
         preview=final_text,
-        preview_label="最终结果",
+        preview_label="已验证、尚待保存的最终结果",
         usage=ai_usage,
         safe_to_export=ok,
     )

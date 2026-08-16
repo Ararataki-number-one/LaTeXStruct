@@ -180,9 +180,10 @@ def test_release_build_safety_guards():
     assert "http://127.0.0.1:8099$assetPath" in workflow
     assert '$pageResponse = Invoke-WebRequest "http://127.0.0.1:8099/"' in workflow
     assert "$home = Invoke-WebRequest" not in workflow
-    assert "v1.1.5 运行中 → 当前版本" in workflow
+    assert "v1.1.6 运行中 → 当前版本" in workflow
+    assert "v1.1.5" not in workflow
     assert "v1.1.4" not in workflow
-    assert "                if ($health.ok -and [string]$health.version -eq '1.1.5')" in workflow
+    assert "                if ($health.ok -and [string]$health.version -eq '1.1.6')" in workflow
     assert "            if (-not $oldHealthy)" in workflow
     assert "            if (-not $updated.updated" in workflow
     assert "/api/update/result" in workflow
@@ -197,6 +198,9 @@ def test_release_build_safety_guards():
     assert 'elegantbook_class.is_file()' in pyinstaller_spec
     assert '(str(elegantbook_assets_dir), "latexstruct/assets/elegantbook")' in pyinstaller_spec
     assert 'os.path.exists("../latexstruct/server/static-react")' not in pyinstaller_spec
+
+    restart_script = os.path.join(root, "packaging", "update_restart.ps1")
+    assert os.path.isfile(restart_script)
 
     with open(os.path.join(root, "latexstruct", "server", "app.py"), encoding="utf-8") as f:
         server_app = f.read()

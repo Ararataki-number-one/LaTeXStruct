@@ -363,6 +363,11 @@ def _decode_zip_files(upload: bytes) -> Dict[str, bytes]:
 
 def _safe_task_error(exc: Exception) -> str:
     text = str(exc) or exc.__class__.__name__
+    if "not JSON serializable" in text:
+        return (
+            "审阅结果保存格式异常；本次结果未保存，原项目和上一份已验证结果保持不变。"
+            "请更新到最新版本后重新分析"
+        )
     return re.sub(r"sk-(?:ws-|sp-)?[A-Za-z0-9._-]{8,}", "[已隐藏]", text)[:500]
 
 
@@ -425,6 +430,34 @@ def _decision_from_dict(data: dict):
         confidence=float(data.get("confidence", 0.0)),
         payload=dict(data.get("payload") or {}),
     )
+
+
+def _persisted_review_summary(review: dict) -> dict:
+    """Return only the JSON review data needed after processing.
+
+    ``run_review`` also returns runtime objects (Decision/AppliedPatch and the
+    intermediate output lines) so the pipeline can keep applying patches.  Those
+    values are deliberately not part of the on-disk project format.  Keeping an
+    explicit allowlist here prevents a successful long-running AI job from
+    failing only when ``verification.json`` is committed.
+    """
+    if not isinstance(review, dict):
+        return {}
+    summary = {}
+    for key, expected_type in (
+        ("findings", list),
+        ("invalid", list),
+        ("usage", dict),
+        ("error", str),
+    ):
+        value = review.get(key)
+        if isinstance(value, expected_type):
+            summary[key] = deepcopy(value)
+    # Validate the persisted contract close to its boundary.  This is not a
+    # ``default=str`` escape hatch: unsupported data must never be hidden in a
+    # supposedly structured verification record.
+    json.dumps(summary, ensure_ascii=False)
+    return summary
 
 
 def get_store() -> ProjectStore:
@@ -738,7 +771,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                         "applied": [],
                         "rejected": [],
                         "ai_notes": pr.ai_notes,
-                        "review": {k: v for k, v in pr.review.items() if k != "decisions"},
+                        "review": _persisted_review_summary(pr.review),
                         "items": pr.decision_items,
                         "per_file": per_file,
                         "decision_cache": decisions,
@@ -1132,7 +1165,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "applied": applied,
                 "rejected": [{"candidate_id": ap.decision.candidate_id, "error": ap.error} for ap in res.rejected],
                 "ai_notes": res.ai_notes,
-                "review": {k: v for k, v in res.review.items() if k != "decisions"},
+                "review": _persisted_review_summary(res.review),
                 "items": res.decision_items,
                 "decision_cache": decision_cache,
                 **extra_verification,
