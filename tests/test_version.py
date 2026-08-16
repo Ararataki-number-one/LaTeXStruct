@@ -182,6 +182,9 @@ def test_release_build_safety_guards():
     assert "$home = Invoke-WebRequest" not in workflow
     assert "v1.1.5 运行中 → 当前版本" in workflow
     assert "v1.1.4" not in workflow
+    assert "                if ($health.ok -and [string]$health.version -eq '1.1.5')" in workflow
+    assert "            if (-not $oldHealthy)" in workflow
+    assert "            if (-not $updated.updated" in workflow
     assert "/api/update/result" in workflow
     assert "body_path: dist/RELEASE_NOTES.md" in workflow
 
