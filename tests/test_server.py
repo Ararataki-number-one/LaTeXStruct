@@ -573,7 +573,10 @@ def test_pdf_ocr_keeps_completed_pages_when_later_rendering_fails():
             return "```latex\nA sufficiently long faithful transcription from the completed first page.\n```"
 
         try:
-            with patch("latexstruct.ocr.pdf_page_count_bytes", return_value=2):
+            with patch(
+                "latexstruct.ocr.pdf_document_info_bytes",
+                return_value={"pages": 2, "outline": []},
+            ):
                 inspected = c.post(
                     "/api/ocr/inspect",
                     files={"file": ("book.pdf", b"%PDF-1.7\nfake", "application/pdf")},
@@ -641,7 +644,10 @@ def test_pdf_ocr_preview_revision_grows_after_each_page_without_finishing_early(
             return f"```latex\nA sufficiently long transcription uniquely from original page {page_no}.\n```"
 
         try:
-            with patch("latexstruct.ocr.pdf_page_count_bytes", return_value=5):
+            with patch(
+                "latexstruct.ocr.pdf_document_info_bytes",
+                return_value={"pages": 5, "outline": []},
+            ):
                 inspected = c.post(
                     "/api/ocr/inspect",
                     files={"file": ("book.pdf", b"%PDF-1.7\nfake", "application/pdf")},
@@ -705,7 +711,10 @@ def test_pdf_ocr_rejects_malicious_or_excessive_ranges_before_starting_worker():
     with WorkspaceTmp() as tmp:
         c = _client(tmp)
         before = set(srv._ocr_jobs)
-        with patch("latexstruct.ocr.pdf_page_count_bytes", return_value=600):
+        with patch(
+            "latexstruct.ocr.pdf_document_info_bytes",
+            return_value={"pages": 600, "outline": []},
+        ):
             inspected = c.post(
                 "/api/ocr/inspect",
                 files={"file": ("book.pdf", b"%PDF-1.7\nfake", "application/pdf")},
