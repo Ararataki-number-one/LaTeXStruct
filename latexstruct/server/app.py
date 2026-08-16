@@ -523,6 +523,18 @@ def create_app(updated_from: str = "") -> FastAPI:
 
         return {"packs": list_builtin_packs(), "default": "bilingual"}
 
+    @app.get("/api/templates")
+    def templates():
+        from ..core.template import ELEGANTBOOK, list_template_presets
+
+        return {
+            "templates": list_template_presets(),
+            "default": ELEGANTBOOK,
+            "ocr_default": ELEGANTBOOK,
+            "export_default": ELEGANTBOOK,
+            "fixed": True,
+        }
+
     @app.get("/api/providers")
     def providers():
         """只返回公开预设；此接口永远不包含 API Key。"""
@@ -656,15 +668,22 @@ def create_app(updated_from: str = "") -> FastAPI:
 
     @app.post("/api/projects")
     def create_project(req: CreateRequest):
+        from ..core.template import ELEGANTBOOK, normalize_template_id
+
         if not req.text.strip():
             raise HTTPException(400, "内容为空")
-        pid = get_store().create(req.text, req.name, req.mode, req.template, req.pack)
+        normalize_template_id(req.template)
+        pid = get_store().create(req.text, req.name, req.mode, ELEGANTBOOK, req.pack)
         return {"id": pid}
 
     def _import_project_files(files: Dict[str, bytes], name: str, mode: str,
                               template: str, pack: str, defer_process: bool):
         """统一的文件夹/ZIP 导入；原始资源逐字节保存在项目副本中。"""
         from ..core.project import discover_main, flatten_project, process_project
+        from ..core.template import ELEGANTBOOK, normalize_template_id
+
+        normalize_template_id(template)
+        template = ELEGANTBOOK
 
         tmpdir = tempfile.mkdtemp(prefix="ls-folder-")
         pid = None
@@ -685,6 +704,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 cfg = get_config()
                 res = process_project(
                     Path(tmpdir), mode=mode, template=template or None,
+                    template_context={"title": name},
                     ai_config=cfg.to_ai_config() if mode == "ai" else None,
                     pack=pack or None,
                 )
@@ -799,6 +819,17 @@ def create_app(updated_from: str = "") -> FastAPI:
         verification = info.get("verification") if isinstance(info, dict) else None
         if not isinstance(verification, dict) or verification.get("safe_to_export") is not True:
             raise HTTPException(409, "安全检查未明确通过，已阻止导出；请查看汇报或重新处理")
+        try:
+            result_text = result_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(409, "结果不是有效 UTF-8 TEX，已阻止导出；请重新处理项目") from None
+        from ..core.template import uses_elegantbook_class
+
+        if not uses_elegantbook_class(result_text):
+            raise HTTPException(
+                409,
+                "该结果不是当前固定的 ElegantBook 成品；请重新运行结构化整理后再导出",
+            )
         return info, result_bytes
 
     def _committed_report(pid: str):
@@ -818,54 +849,87 @@ def create_app(updated_from: str = "") -> FastAPI:
                 raise HTTPException(409, "汇报与安全检查记录不一致，请重新处理项目")
         return report_bytes
 
-    @app.get("/api/projects/{pid}/export-folder")
-    def export_folder(pid: str):
+    def _export_package_bytes(pid: str) -> bytes:
+        """Build a portable ElegantBook package from the same committed result marker."""
         from ..core.project import safe_project_relpath
+        from ..core.template import uses_elegantbook_class
+        from ..elegantbook import elegantbook_bundle_assets
 
-        info, _result_bytes = _committed_export(pid)
-        per_file = info.get("per_file")
-        if not per_file:
-            raise HTTPException(400, "该项目不是文件夹导入")
-        import io
-        import zipfile
-
+        info, result_bytes = _committed_export(pid)
+        report_bytes = _committed_report(pid)
+        assets = elegantbook_bundle_assets()
+        reserved = {**assets, "LATEXSTRUCT-REPORT.md": report_bytes}
+        meta = json.loads(
+            (Path(get_store()._dir(pid)) / "meta.json").read_text(encoding="utf-8")
+        )
+        per_file = info.get("per_file") if isinstance(info, dict) else None
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            meta = json.loads((Path(get_store()._dir(pid)) / "meta.json").read_text(encoding="utf-8"))
-            main_rel = safe_project_relpath(meta["graph"]["main_rel"])
-            processed = {main_rel} | {
-                safe_project_relpath(rel) for rel in per_file if rel
-            }
-            written = set()
-            original_zip = Path(get_store()._dir(pid)) / "original-files.zip"
-            if original_zip.exists():
-                with zipfile.ZipFile(original_zip, "r") as source_zip:
-                    for member in source_zip.infolist():
-                        rel = safe_project_relpath(member.filename)
-                        if member.is_dir() or rel in processed:
-                            continue
-                        zf.writestr(rel, source_zip.read(member))
-                        written.add(rel)
-            zf.writestr(main_rel, per_file.get("", ""))
-            written.add(main_rel)
-            for rel, content in per_file.items():
-                if rel:
-                    rel = safe_project_relpath(rel)
-                    zf.writestr(rel, content)
-                    written.add(rel)
-            expected = meta.get("original_file_count")
-            if expected is not None and len(written) != expected:
-                raise HTTPException(
-                    409,
-                    f"文件数量安全检查未通过（原始 {expected}，导出 {len(written)}），已阻止导出。",
-                )
-            zf.writestr("LATEXSTRUCT-REPORT.md", _committed_report(pid))
-        buf.seek(0)
+            if per_file:
+                graph = meta.get("graph") or {}
+                main_rel = safe_project_relpath(graph.get("main_rel", ""))
+                main_text = str(per_file.get("", ""))
+                if not uses_elegantbook_class(main_text):
+                    raise HTTPException(
+                        409,
+                        "项目主文件不是 ElegantBook 成品，已阻止打包；请重新处理项目",
+                    )
+                processed = {main_rel} | {
+                    safe_project_relpath(rel) for rel in per_file if rel
+                }
+                written = set()
+                original_zip = Path(get_store()._dir(pid)) / "original-files.zip"
+                if original_zip.exists():
+                    with zipfile.ZipFile(original_zip, "r") as source_zip:
+                        for member in source_zip.infolist():
+                            rel = safe_project_relpath(member.filename)
+                            if member.is_dir() or rel in processed:
+                                continue
+                            data = source_zip.read(member)
+                            if rel in reserved:
+                                if data != reserved[rel]:
+                                    raise HTTPException(
+                                        409,
+                                        f"原项目中的 {rel} 与固定工程资源冲突，已阻止打包",
+                                    )
+                            else:
+                                zf.writestr(rel, data)
+                            written.add(rel)
+                zf.writestr(main_rel, main_text.encode("utf-8"))
+                written.add(main_rel)
+                for rel, content in per_file.items():
+                    if not rel:
+                        continue
+                    safe_rel = safe_project_relpath(rel)
+                    zf.writestr(safe_rel, str(content).encode("utf-8"))
+                    written.add(safe_rel)
+                expected = meta.get("original_file_count")
+                if expected is not None and len(written) != expected:
+                    raise HTTPException(
+                        409,
+                        f"文件数量安全检查未通过（原始 {expected}，导出 {len(written)}），已阻止导出。",
+                    )
+            else:
+                zf.writestr("main.tex", result_bytes)
+            existing = set(zf.namelist())
+            for rel, data in reserved.items():
+                if rel not in existing:
+                    zf.writestr(rel, data)
+        return buf.getvalue()
+
+    @app.get("/api/projects/{pid}/export-package")
+    def export_package(pid: str):
+        data = _export_package_bytes(pid)
         return Response(
-            content=buf.read(),
+            content=data,
             media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{pid}-structured.zip"'},
+            headers={"Content-Disposition": f'attachment; filename="{pid}-ElegantBook.zip"'},
         )
+
+    @app.get("/api/projects/{pid}/export-folder")
+    def export_folder(pid: str):
+        """Backward-compatible alias for clients released before package export."""
+        return export_package(pid)
 
     @app.post("/api/projects/upload")
     async def upload_project(file: bytes = None, name: str = "", mode: str = "rule"):
@@ -932,12 +996,11 @@ def create_app(updated_from: str = "") -> FastAPI:
         project_name = str(project.get("name") or "LaTeXStruct")
         if artifact == "result":
             _info, data = _committed_export(pid)
-            return data, f"{project_name}-structured.tex"
+            return data, f"{project_name}-ElegantBook.tex"
         if artifact == "report":
             return _committed_report(pid), f"{project_name}-report.md"
-        if artifact == "folder":
-            response = export_folder(pid)
-            return bytes(response.body), f"{project_name}-structured.zip"
+        if artifact in {"package", "folder"}:
+            return _export_package_bytes(pid), f"{project_name}-ElegantBook-project.zip"
         raise HTTPException(404, "不支持的下载类型")
 
     @app.post("/api/projects/{pid}/exports/{artifact}/save")
@@ -968,7 +1031,16 @@ def create_app(updated_from: str = "") -> FastAPI:
         text = get_store().read_source(pid)
         cfg = get_config()
         mode = p["mode"]
-        template = (p.get("template") or "") or None
+        from ..core.template import ELEGANTBOOK
+
+        previous_template = str(p.get("template") or "")
+        template = ELEGANTBOOK
+        if previous_template != ELEGANTBOOK:
+            # Existing projects migrate only when the user explicitly reruns processing.
+            # Cached spans were produced against a different preamble, so they cannot be reused.
+            get_store().set_template(pid, ELEGANTBOOK)
+            p["template"] = ELEGANTBOOK
+            reuse_decisions = False
         pack = (p.get("pack") or "") or None
         prior = {}
         info_path = Path(get_store()._dir(pid)) / "verification.json"
@@ -977,16 +1049,20 @@ def create_app(updated_from: str = "") -> FastAPI:
         cached = prior.get("decision_cache") if reuse_decisions else None
         overrides = [_decision_from_dict(item) for item in cached] if cached else None
         is_ocr_project = p.get("kind") == "ocr"
+        # OCR is noisy enough to require an actual final compile when TeX is installed.
+        # Ordinary imported TEX keeps the fast path; its report states that compile was not run.
+        template_compile_guard = is_ocr_project
         res = run_pipeline(
             text, mode=mode, ai_config=cfg.to_ai_config() if mode == "ai" else None,
             template=template, pack=pack, exclude=exclude or None,
+            template_context={"title": p.get("template_title") or p.get("name") or ""},
             decisions_override=overrides,
             ambiguous_override=prior.get("ambiguous") if overrides else None,
             ai_notes_override=prior.get("ai_notes") if overrides else None,
             progress_callback=progress_callback,
             control_callback=control_callback,
-            compile_check=is_ocr_project,
-            require_compile_when_available=is_ocr_project,
+            compile_check=is_ocr_project or template_compile_guard,
+            require_compile_when_available=is_ocr_project or template_compile_guard,
             resource_root=get_store()._dir(pid) if is_ocr_project else None,
             require_resources=is_ocr_project,
         )
@@ -1873,7 +1949,26 @@ def create_app(updated_from: str = "") -> FastAPI:
                     current["saving"] = False
 
     @app.post("/api/ocr/jobs/{jid}/import")
-    def ocr_import(jid: str, name: str = "OCR 转写项目"):
+    def ocr_import(
+        jid: str,
+        name: str = "OCR 转写项目",
+        mode: str = "rule",
+        template: str = "elegantbook",
+        title: str = "",
+    ):
+        from ..core.template import ELEGANTBOOK, normalize_template_id
+
+        mode = str(mode or "").strip().lower()
+        if mode not in {"rule", "ai"}:
+            raise HTTPException(400, "结构化整理方式只能是 AI 或规则")
+        normalize_template_id(template)
+        template = ELEGANTBOOK
+        import_options = {
+            "mode": mode,
+            "template": template,
+            "title": title.strip(),
+            "name": name.strip(),
+        }
         with _update_state_lock:
             _raise_if_update_preparing()
             with _ocr_jobs_lock:
@@ -1893,6 +1988,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                     and int(job.get("imported_revision") or 0) == revision
                     and int(job.get("imported_usage_revision") or 0) == usage_revision
                     and int(job.get("imported_page_revision") or 0) == page_revision
+                    and job.get("imported_options", import_options) == import_options
                 ):
                     return {
                         "id": existing_pid,
@@ -1906,7 +2002,14 @@ def create_app(updated_from: str = "") -> FastAPI:
                 raw_tex = job["raw_tex"]
         # 原始 OCR 永远作为 source.tex 保存；结构化结果单独写 result.tex，二者不混写。
         try:
-            pid = get_store().create(raw_tex, name, "rule", "", kind="ocr")
+            pid = get_store().create(
+                raw_tex,
+                name,
+                mode,
+                template,
+                kind="ocr",
+                template_title=title or name,
+            )
             with _ocr_jobs_lock:
                 current = _ocr_jobs.get(jid)
                 if (
@@ -1920,12 +2023,15 @@ def create_app(updated_from: str = "") -> FastAPI:
                     current["imported_usage_revision"] = usage_revision
                     current["imported_page_revision"] = page_revision
                     current["imported_project_id"] = pid
-            processed = _run_project(pid, set())
+                    current["imported_options"] = import_options
+                    current["imported_processed"] = False
+            # 立即进入工作台，再由标准后台任务提供进度、暂停与实时 TeX 草稿。
+            process_job = process_start(pid)
             with _ocr_jobs_lock:
                 current = _ocr_jobs.get(jid)
                 if current is not None and current.get("imported_project_id") == pid:
-                    current["imported_processed"] = processed
-            return {"id": pid, "processed": processed}
+                    current["imported_processed"] = False
+            return {"id": pid, "processed": False, "process": process_job}
         finally:
             with _ocr_jobs_lock:
                 current = _ocr_jobs.get(jid)

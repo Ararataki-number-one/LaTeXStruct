@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """OCR 转写模块（M2，两阶段解耦）：PDF/图片 → 视觉模型逐页**忠实转写** LaTeX
-（Stage A，不做任何结构判断）→ 合并为 ElegantBook 书稿 → 交给结构化流水线
+（Stage A，不做任何结构判断）→ 合并为中性 article/book 书稿 → 交给结构化流水线
 （Stage B：扫描→决策→补丁→校验，与"AI 只决策、Patch 负责改"核心理念统一）。
 
 流程（对应设计文档 §12）：
   渲染页面 → 逐页视觉转写（模型可选，OpenAI 兼容视觉端点）→ 逐页校验/重试 →
-  合并（统一 ElegantBook 导言区 + % Page N 标记）→ 输出 .tex → run_pipeline。
+  合并（中性导言区 + % Page N 标记）→ 输出原始 .tex → 用户选择固定排版模板 → run_pipeline。
 """
 
 from __future__ import annotations

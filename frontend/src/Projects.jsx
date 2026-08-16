@@ -15,6 +15,9 @@ const TASK_LABELS = {
   error: "处理失败",
   cancelled: "已取消",
 };
+const FALLBACK_TEMPLATES = [
+  { id: "elegantbook", label: "ElegantBook 专业讲义（固定）", description: "章节、目录和定理结构通过安全检查后，统一生成 ElegantBook 成品。" },
+];
 
 function extension(name) {
   const dot = name.lastIndexOf(".");
@@ -98,7 +101,7 @@ export default function Projects({ onOpen }) {
   const [name, setName] = useState("");
   const [mode, setMode] = useState("rule");
   const [pack, setPack] = useState("bilingual");
-  const [template, setTemplate] = useState(false);
+  const template = "elegantbook";
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -136,7 +139,7 @@ export default function Projects({ onOpen }) {
   const projectOptions = {
     name,
     mode,
-    template: template ? "elegantbook" : "",
+    template,
     pack,
   };
 
@@ -215,7 +218,7 @@ export default function Projects({ onOpen }) {
     form.append("file", file);
     form.append("name", name || file.name.replace(/\.zip$/i, ""));
     form.append("mode", mode);
-    form.append("template", template ? "elegantbook" : "");
+    form.append("template", template);
     form.append("pack", pack);
     form.append("defer_process", "true");
     setBusy(true);
@@ -344,11 +347,14 @@ export default function Projects({ onOpen }) {
             <select value={pack} onChange={(event) => setPack(event.target.value)}>
               {packs.map((item) => <option key={item} value={item}>{item}</option>)}
             </select>
-            <label>
-              <input type="checkbox" checked={template} onChange={(event) => setTemplate(event.target.checked)} />
-              转换为 ElegantBook（显式变换）
-            </label>
+            <div className="template-choice fixed-template" aria-label="固定排版方案">
+              <span>成品模板</span>
+              <b>{FALLBACK_TEMPLATES[0].label}</b>
+            </div>
           </div>
+          <p className="template-description">
+            {FALLBACK_TEMPLATES[0].description} 模型不自由改写导言区；安全检查失败时不会导出。
+          </p>
           <textarea
             placeholder="也可以在这里粘贴 .tex 全文……"
             value={text}

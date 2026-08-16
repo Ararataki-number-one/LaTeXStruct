@@ -34,12 +34,19 @@ def compile_latex(text: str, timeout: int = 240, extra_files: dict = None) -> Di
     exe = find_xelatex()
     if not exe:
         return {"available": False, "ok": None, "pages": 0, "errors": [], "log": ""}
+    compile_files = dict(extra_files or {})
+    from .template import uses_elegantbook_class
+
+    if uses_elegantbook_class(text):
+        from ..elegantbook import CLASS_FILENAME, elegantbook_class_bytes
+
+        compile_files.setdefault(CLASS_FILENAME, elegantbook_class_bytes())
     workdir = tempfile.mkdtemp(prefix="ls-compile-")
     try:
         tex_path = os.path.join(workdir, "main.tex")
         with open(tex_path, "w", encoding="utf-8") as f:
             f.write(text)
-        for rel, data in (extra_files or {}).items():
+        for rel, data in compile_files.items():
             safe = PurePosixPath(str(rel).replace("\\", "/"))
             if safe.is_absolute() or any(part in ("", ".", "..") for part in safe.parts):
                 raise ValueError(f"编译附加文件路径不安全：{rel!r}")

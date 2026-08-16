@@ -75,6 +75,16 @@ def _build_context(doc) -> PatchContext:
     unnumbered_envs = {
         m.group(2) for m in theorem_declarations if m.group(1)
     } - numbered_envs
+    if is_elegant:
+        from .template import (
+            ELEGANTBOOK_BUILTIN_ENVS,
+            ELEGANT_NEW_THEOREM_RE,
+        )
+
+        elegant_declared = {m.group(1) for m in ELEGANT_NEW_THEOREM_RE.finditer(doc.masked)}
+        elegant_envs = set(ELEGANTBOOK_BUILTIN_ENVS) | elegant_declared
+        newtheorem_names |= elegant_envs | {f"{name}*" for name in elegant_envs}
+        unnumbered_envs |= {f"{name}*" for name in elegant_envs}
     available_env_names = used_env_names | newtheorem_names
     packages = set()
     for match in re.finditer(r"\\usepackage(?:\[[^\]]*\])?\{([^{}]+)\}", doc.masked):
@@ -194,6 +204,7 @@ def _apply_decisions(doc, decisions: List[Decision], ctx: PatchContext, ambiguou
         unsafe_reason = _normalize_theorem_wrap_start(d, candidate)
         if not unsafe_reason:
             _restore_theorem_title_metadata(d, candidate)
+            _adapt_elegantbook_theorem_env(d, candidate, ctx)
             unsafe_reason = _unsafe_numbered_theorem_reason(d, candidate, ctx)
         if unsafe_reason:
             item = {
@@ -275,6 +286,21 @@ def _restore_theorem_title_metadata(decision: Decision, candidate) -> None:
     )
 
 
+def _adapt_elegantbook_theorem_env(decision: Decision, candidate, ctx: PatchContext) -> None:
+    """Use ElegantBook's unnumbered box while preserving an OCR/source number as note."""
+    if (
+        not ctx.is_elegantbook
+        or decision.action != "wrap"
+        or candidate is None
+        or candidate.kind != "theorem-like"
+        or decision.env.endswith("*")
+    ):
+        return
+    starred = f"{decision.env}*"
+    if starred in ctx.unnumbered_envs:
+        decision.env = starred
+
+
 def _unsafe_numbered_theorem_reason(decision: Decision, candidate, ctx: PatchContext) -> str:
     """源编号遇到会自动计数或编号语义未知的目标环境时，宁可不包裹。"""
     if decision.action != "wrap" or decision.env == "proof" or candidate is None:
@@ -304,6 +330,7 @@ def run_pipeline(
     ai_client=None,
     review_client=None,
     template: str = None,
+    template_context: dict = None,
     compile_check: bool = False,
     pack=None,
     exclude: set = None,
@@ -330,6 +357,10 @@ def run_pipeline(
     source_newline = detect_newline(text)
     source_text = normalize_newlines(text)
     text = source_text
+    from .template import normalize_template_id, template_label
+
+    template = normalize_template_id(template)
+    template_name = template_label(template) if template else ""
     ocr_structure_notes: List[dict] = []
     ocr_structure_patches: List[AppliedPatch] = []
     if is_ocr_document(text):
@@ -353,11 +384,15 @@ def run_pipeline(
     template_notes: List[dict] = []
     template_applied = False
     template_patches: List[AppliedPatch] = []
-    if template == "elegantbook":
-        emit("template", 0.05, "正在检查模板转换")
+    if template:
+        emit("template", 0.05, f"正在检查{template_name}排版")
         from .template import build_template_ops
 
-        t_ops, template_notes = build_template_ops(text)
+        t_ops, template_notes = build_template_ops(
+            text,
+            template=template,
+            context=template_context,
+        )
         if t_ops:
             t_lines = text.split("\n")
             ok_planned, t_rejected = validate_ops(
@@ -628,7 +663,15 @@ def run_pipeline(
         emit("compile", 0.91, "正在比较编译结果")
         from .compilecheck import compile_latex
 
-        verification["compile_before"] = compile_latex(transformed_source_text)
+        if require_compile or require_compile_when_available:
+            # When the final result itself is required to compile, a separate compile of the
+            # intermediate template text doubles latency without changing the safety decision.
+            verification["compile_before"] = {
+                "available": False, "ok": None, "pages": 0, "errors": [],
+                "log": "", "skipped": True,
+            }
+        else:
+            verification["compile_before"] = compile_latex(transformed_source_text)
         verification["compile_after"] = compile_latex(result_text)
     compile_safe = not require_compile
     if compile_check:
@@ -651,7 +694,7 @@ def run_pipeline(
     )
     verification["compile"] = {
         "ok": compile_safe,
-        "checked": bool(compile_check and verification.get("compile_before", {}).get("available")),
+        "checked": bool(compile_check and verification.get("compile_after", {}).get("available")),
     }
     ok = (
         verification["content_invariant"]
@@ -699,6 +742,7 @@ def run_pipeline(
         applied, rejected, ambiguous, verification, mode,
         ai_notes=ai_notes, review=review_info,
         template_notes=template_notes, template_applied=template_applied,
+        template_name=template_name,
         ocr_structure_notes=ocr_structure_notes,
     )
     emit(

@@ -18,6 +18,7 @@ def build_report(
     review: Dict = None,
     template_notes: List[dict] = None,
     template_applied: bool = False,
+    template_name: str = "",
     ocr_structure_notes: List[dict] = None,
 ) -> str:
     ai_notes = ai_notes or []
@@ -127,11 +128,11 @@ def build_report(
         L.append("")
 
     if template_applied or template_notes:
-        section("模板转换（elegantbook）")
+        section(f"模板排版（{template_name or '固定模板'}）")
         for t in template_notes:
             L.append(f"- 第 {t.get('line')} 行：{t.get('reason')}")
         if template_applied:
-            L.append("- 内容不变校验以模板转换后的文本为基准")
+            L.append("- 模板也以可逆补丁应用；正文、公式与引用仍参与统一安全检查")
         L.append("")
 
     if ocr_structure_notes:

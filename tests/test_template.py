@@ -7,7 +7,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from latexstruct.core.pipeline import run_pipeline  # noqa: E402
-from latexstruct.core.template import build_template_ops  # noqa: E402
+from latexstruct.core.template import (  # noqa: E402
+    ELEGANTBOOK,
+    PROFESSIONAL_HANDOUT,
+    build_template_ops,
+    list_template_presets,
+    normalize_template_id,
+    uses_elegantbook_class,
+)
 from latexstruct.core.verify import check_env_balance  # noqa: E402
 
 SYNTHETIC = """\\documentclass[10pt]{article}
@@ -82,46 +89,45 @@ def test_build_template_ops():
     assert "replace_line" in kinds and "delete_line" in kinds and "insert_line" in kinds
     # documentclass 替换
     dc = next(op for op in ops if "documentclass" in op.old)
-    assert dc.new == "\\documentclass{elegantbook}"
+    assert dc.new == "\\documentclass[lang=cn,scheme=chinese,11pt]{elegantbook}"
     # geometry/ctex/tcolorbox/\circled 删除（elegantbook 自带，避免选项冲突）
     assert any("geometry" in op.old for op in ops if op.kind == "delete_line")
     assert any("ctex" in op.old for op in ops if op.kind == "delete_line")
     assert any("tcolorbox" in op.old for op in ops if op.kind == "delete_line")
     assert any("circled" in op.old for op in ops if op.kind == "delete_line")
-    # 目录替换
-    toc = next(op for op in ops if op.new == "\\tableofcontents")
-    assert "Contents" in toc.old
-    # 章标题转换 + 计数器
+    # 没有 OCR 大纲证据时不得凭数字标题删除/伪造目录。
+    assert not any(op.new == "\\tableofcontents" for op in ops)
+    assert not any(op.kind == "delete_line" and "vii" in op.old for op in ops)
+    # article 的已解析标题层级整体上移；不再用 refstepcounter 伪造章号。
     ch = [op for op in ops if "\\chapter*{1 Graphs}" == op.new]
     assert len(ch) == 1
-    assert any(op.new == "\\refstepcounter{chapter}" for op in ops)
-    # 目录区内条目不得转章（"1 Graphs 1" 以页号结尾）
-    assert not any("\\chapter*{1 Graphs 1}" in op.new for op in ops)
+    assert not any(op.new == "\\refstepcounter{chapter}" for op in ops)
+    assert any("\\elegantnewtheorem{remark}" in op.new for op in ops)
 
 
 def test_pipeline_with_elegantbook_template():
     res = run_pipeline(SYNTHETIC, mode="rule", template="elegantbook")
     assert res.ok, res.report_md
     out = res.result
-    assert "\\documentclass{elegantbook}" in out
+    assert "\\documentclass[lang=cn,scheme=chinese,11pt]{elegantbook}" in out
+    assert uses_elegantbook_class(out)
     assert "geometry" not in out.split("\\begin{document}")[0]
     assert "\\usepackage{ctex}" not in out
-    assert "\\tableofcontents" in out
-    # 旧目录区（含页号条目）已删除
-    assert "1 Graphs 1" not in out
-    assert "vii" not in out
-    # 章转换 + 章计数器 + 章级目录条目
+    assert "\\tableofcontents" not in out
+    # 没有 PDF 大纲证据时旧目录逐字保留，交给审阅而不是猜测删除边界。
+    assert "1 Graphs 1" in out
+    assert "vii" in out
+    # article 层级适配成 book 章级命令；不再额外推进章计数器。
     assert "\\chapter*{1 Graphs（1 图）}" in out
-    assert "\\refstepcounter{chapter}" in out
+    assert "\\refstepcounter{chapter}" not in out
     assert "\\addcontentsline{toc}{chapter}{1 Graphs（1 图）}" in out
-    # 节级目录条目
-    assert "\\addcontentsline{toc}{section}{1.1 Graphs（1.1 图）}" in out
+    assert "\\addcontentsline{toc}{chapter}{1.1 Graphs（1.1 图）}" in out
     # elegantbook：不补 amsthm
     assert "\\usepackage{amsthm}" not in out
-    # 模板自带 theorem 的计数语义不由本工具控制；显式源编号不得自动包裹成双编号。
-    assert "\\begin{theorem}" not in out
-    assert "Theorem 1.1. A statement." in out
-    assert any("避免双编号" in item["reason"] for item in res.ambiguous)
+    # 原书编号作为 ElegantBook 无编号色块的标题参数，只显示一套编号。
+    assert "\\begin{theorem*}[1.1]" in out
+    assert "Theorem 1.1. A statement." not in out
+    assert not any("避免双编号" in item["reason"] for item in res.ambiguous)
     # 证明覆盖整段（Then 续段并入）
     i1 = out.index("\\begin{proof}")
     i2 = out.index("\\end{proof}")
@@ -139,7 +145,7 @@ def test_template_without_contents():
     res = run_pipeline(text, mode="rule", template="elegantbook")
     assert res.ok, res.report_md
     out = res.result
-    assert "\\tableofcontents" in out  # 无旧目录时在第一章前插入
+    assert "\\tableofcontents" not in out  # 不凭数字标题臆造目录
     assert "\\chapter*{1 Graphs}" in out
 
 
@@ -153,8 +159,8 @@ def test_template_verification_covers_original_and_preserves_crlf_export():
     assert res.original.startswith("\\documentclass{article}\n")
     assert res.verification["content_invariant"] is True
     assert "\r\n" in res.export_text and "\n" not in res.export_text.replace("\r\n", "")
-    assert "\\begin{theorem}" not in res.result
-    assert any("避免双编号" in item["reason"] for item in res.ambiguous)
+    assert "\\begin{theorem*}[1]" in res.result
+    assert not any("避免双编号" in item["reason"] for item in res.ambiguous)
 
 
 def test_template_ops_env_balance():
@@ -166,6 +172,200 @@ def test_template_ops_env_balance():
     assert not rejected, rejected[0].error if rejected else ""
     out, _, _ = apply_patches(lines, ok)
     assert check_env_balance("\n".join(out))["ok"] is True
+
+
+def test_professional_handout_is_fixed_reversible_style_layer():
+    text = """\\documentclass{article}
+\\usepackage{amsmath}
+\\title{Ramsey Theory}
+\\author{Lecture Notes}
+\\begin{document}
+\\maketitle
+\\tableofcontents
+\\section{Foundations}
+
+Theorem. Every finite graph has a Ramsey number.
+
+Proof. This is a test.
+\\end{document}
+"""
+    res = run_pipeline(text, mode="rule", template=PROFESSIONAL_HANDOUT)
+    assert res.ok, res.report_md
+    assert "\\documentclass{article}" in res.result
+    assert "% LaTeXStruct template: professional-handout begin" in res.result
+    assert "\\titleformat{\\section}" in res.result
+    assert "\\pagestyle{latexstructhandout}" in res.result
+    assert "\\tcolorboxenvironment{#1}" in res.result
+    assert "\\renewcommand{\\maketitle}" in res.result
+    assert "\\tableofcontents\n\\clearpage" in res.result
+    assert "\\begin{theorem}" in res.result
+    assert "Every finite graph has a Ramsey number." in res.result
+    assert res.verification["content_invariant"] is True
+    assert "模板排版（专业讲义（旧项目））" in res.report_md
+
+
+def test_professional_handout_uses_escaped_project_title_without_inventing_body():
+    text = """\\documentclass{article}
+\\begin{document}
+Body stays byte-for-byte.
+\\end{document}
+"""
+    res = run_pipeline(
+        text,
+        mode="rule",
+        template=PROFESSIONAL_HANDOUT,
+        template_context={"title": "Graphs & Proofs_100%"},
+    )
+    assert res.ok, res.report_md
+    assert r"Graphs \& Proofs\_100\%" in res.result
+    assert "Professional Lecture Notes" in res.result
+    assert "Body stays byte-for-byte." in res.result
+    assert res.verification["content_invariant"] is True
+
+
+def test_professional_handout_skips_unsupported_class_and_custom_boxes():
+    beamer = "\\documentclass{beamer}\n\\begin{document}\nText\n\\end{document}\n"
+    ops, notes = build_template_ops(beamer, template=PROFESSIONAL_HANDOUT)
+    assert ops == []
+    assert "安全名单" in notes[0]["reason"]
+
+    custom = """\\documentclass{article}
+\\usepackage{tcolorbox}
+\\newtcbtheorem{theorem}{Theorem}{}{}
+\\begin{document}
+Text
+\\end{document}
+"""
+    ops, _ = build_template_ops(custom, template=PROFESSIONAL_HANDOUT)
+    inserted = "\n".join(op.new for op in ops)
+    assert r"\LSHandoutStyleEnv{theorem}{LSBlue}" not in inserted
+    assert r"\LSHandoutStyleEnv{lemma}{LSBlue}" in inserted
+
+    ctex = "\\documentclass{ctexart}\n\\begin{document}\n正文\n\\end{document}\n"
+    ops, _ = build_template_ops(
+        ctex,
+        template=PROFESSIONAL_HANDOUT,
+        context={"title": "图论专题讲义"},
+    )
+    inserted = "\n".join(op.new for op in ops)
+    assert "专业讲义" in inserted
+    assert r"\usepackage{titlesec}" not in inserted
+
+
+def test_template_registry_and_professional_idempotence():
+    presets = list_template_presets()
+    assert {item["id"] for item in presets} == {ELEGANTBOOK}
+    assert normalize_template_id(PROFESSIONAL_HANDOUT) == PROFESSIONAL_HANDOUT
+    try:
+        normalize_template_id("free-form-ai-preamble")
+    except ValueError as exc:
+        assert "未知排版模板" in str(exc)
+    else:
+        raise AssertionError("未知模板必须被拒绝")
+
+    text = "\\documentclass{article}\n\\begin{document}\nText\n\\end{document}\n"
+    first = run_pipeline(text, template=PROFESSIONAL_HANDOUT)
+    second = run_pipeline(first.result, template=PROFESSIONAL_HANDOUT)
+    assert second.result.count("LaTeXStruct template: professional-handout begin") == 1
+
+
+def test_elegantbook_preserves_real_chapter_toc_and_is_idempotent():
+    text = """\\documentclass{book}
+\\title{Ramsey Theory}
+\\begin{document}
+\\tableofcontents
+\\chapter{Diagonal Ramsey Numbers}
+\\section{The probabilistic method}
+
+Theorem 2.4. A source-numbered statement.
+
+Remark. The original numbering must not be duplicated.
+\\end{document}
+"""
+    first = run_pipeline(text, mode="rule", template=ELEGANTBOOK)
+    assert first.ok, first.report_md
+    assert "\\chapter{Diagonal Ramsey Numbers}" in first.result
+    assert "\\section{The probabilistic method}" in first.result
+    assert "% LaTeXStruct: clean ElegantBook title page" in first.result
+    assert "example-image" not in first.result
+    assert "\\frontmatter\n\\tableofcontents" in first.result
+    assert "\\tableofcontents\n\\clearpage" in first.result
+    assert "\\clearpage\n\\mainmatter" in first.result
+    assert "\\refstepcounter{chapter}" not in first.result
+    assert "\\begin{theorem*}[2.4]" in first.result
+    assert "\\begin{remark*}" in first.result
+    assert first.result.count("LaTeXStruct template: elegantbook v4.7") == 1
+
+    second = run_pipeline(first.result, mode="rule", template=ELEGANTBOOK)
+    assert second.ok, second.report_md
+    assert second.result == first.result
+    assert second.result.count("\\documentclass") == 1
+    assert second.result.count("\\elegantnewtheorem{remark}") == 1
+    assert second.result.count("LaTeXStruct: clean ElegantBook title page") == 1
+
+
+def test_elegantbook_article_hierarchy_moves_up_without_number_guessing():
+    text = """\\documentclass{article}
+\\begin{document}
+\\section{First}
+\\subsection{First detail}
+\\subsubsection{Fine point}
+\\end{document}
+"""
+    result = run_pipeline(text, template=ELEGANTBOOK)
+    assert result.ok, result.report_md
+    assert "\\chapter{First}" in result.result
+    assert "\\section{First detail}" in result.result
+    assert "\\subsection{Fine point}" in result.result
+    assert "\\tableofcontents" not in result.result
+
+
+def test_professional_handout_compiles_when_xelatex_is_available():
+    from latexstruct.core.compilecheck import compile_latex
+
+    text = """\\documentclass{article}
+\\begin{document}
+\\section{One}
+Definition. A graph is a pair of sets.
+
+Theorem. The first result holds.
+
+Proof. Immediate.
+\\end{document}
+"""
+    result = run_pipeline(
+        text,
+        template=PROFESSIONAL_HANDOUT,
+        template_context={"title": "A Short Course in Graph Theory"},
+    )
+    compiled = compile_latex(result.result)
+    if compiled["available"]:
+        assert compiled["ok"], compiled["errors"]
+
+
+def test_professional_handout_preserves_book_chapters_and_toc_semantics():
+    from latexstruct.core.compilecheck import compile_latex
+
+    text = """\\documentclass{book}
+\\title{Algebraic Graph Theory}
+\\begin{document}
+\\maketitle
+\\tableofcontents
+\\chapter{Spectra of Graphs}
+\\section{Adjacency matrices}
+Theorem. Every real symmetric adjacency matrix is diagonalizable.
+\\end{document}
+"""
+    result = run_pipeline(text, template=PROFESSIONAL_HANDOUT)
+    assert result.ok, result.report_md
+    assert "\\documentclass{book}" in result.result
+    assert "\\titleformat{\\chapter}[display]" in result.result
+    assert "\\chapter{Spectra of Graphs}" in result.result
+    assert "\\tableofcontents\n\\clearpage" in result.result
+    assert result.verification["content_invariant"] is True
+    compiled = compile_latex(result.result)
+    if compiled["available"]:
+        assert compiled["ok"], compiled["errors"]
 
 
 def main():

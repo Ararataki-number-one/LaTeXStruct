@@ -32,6 +32,9 @@ include = ["latexstruct*"]
 include-package-data = true
 
 [tool.setuptools.package-data]
+"latexstruct" = [
+    "assets/elegantbook/*",
+]
 "latexstruct.server" = [
     "static/*",
     "static-react/*",

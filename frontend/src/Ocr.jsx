@@ -161,6 +161,9 @@ export default function Ocr({ onImport, onOpenSettings }) {
   const [liveTex, setLiveTex] = useState("");
   const [liveRevision, setLiveRevision] = useState(0);
   const [rawSaved, setRawSaved] = useState(null);
+  const [importMode, setImportMode] = useState("ai");
+  const importTemplate = "elegantbook";
+  const [importingProject, setImportingProject] = useState(false);
   const [msg, setMsg] = useState("");
   const [starting, setStarting] = useState(false);
   const [restoringJob, setRestoringJob] = useState(() => Boolean(rememberedOcrJobId()));
@@ -495,7 +498,8 @@ export default function Ocr({ onImport, onOpenSettings }) {
   };
 
   const importProject = async () => {
-    setMsg("正在运行结构化与安全检查……");
+    setImportingProject(true);
+    setMsg("正在创建项目；随后会进入工作台实时显示整理进度……");
     try {
       const sourceStem = String(file?.name || "OCR")
         .replace(/\.[^.]+$/, "")
@@ -506,7 +510,13 @@ export default function Ocr({ onImport, onOpenSettings }) {
         ? `-P${job.selected_start || 1}-${job.selected_end || job.source_total || 1}`
         : "";
       const projectName = `${sourceStem}-OCR${pageRange}`;
-      const r = await api(`/api/ocr/jobs/${job.id}/import?name=${encodeURIComponent(projectName)}`, {
+      const params = new URLSearchParams({
+        name: projectName,
+        title: sourceStem,
+        mode: importMode,
+        template: importTemplate,
+      });
+      const r = await api(`/api/ocr/jobs/${job.id}/import?${params.toString()}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
@@ -516,6 +526,8 @@ export default function Ocr({ onImport, onOpenSettings }) {
       onImport(id);
     } catch (e) {
       setMsg("无法进入审阅：" + e.message);
+    } finally {
+      setImportingProject(false);
     }
   };
 
@@ -1027,11 +1039,42 @@ export default function Ocr({ onImport, onOpenSettings }) {
           </div>
         )}
         <div className="status">{msg}</div>
+        {job?.status === "done" && (
+          <div className="ocr-import-options">
+            <label>
+              <span>结构化整理方式</span>
+              <select
+                value={importMode}
+                disabled={importingProject}
+                onChange={(event) => setImportMode(event.target.value)}
+              >
+                <option value="ai">AI 深度整理（推荐）</option>
+                <option value="rule">规则整理（快速）</option>
+              </select>
+            </label>
+            <div className="template-choice fixed-template" aria-label="固定排版方案">
+              <span>结构化后的成品</span>
+              <b>ElegantBook 专业讲义（固定）</b>
+            </div>
+            <small>
+              {importMode === "ai"
+                ? "AI 会判断章节、目录与定理边界，并产生额外 Token；不可用时安全降级为规则。"
+                : "规则模式无需额外 AI 调用，速度更快，适合结构已经清楚的 OCR。"}
+              {" "}章节、目录与定理先做结构校正，再套用固定 ElegantBook；安全检查失败时不会导出。
+            </small>
+          </div>
+        )}
         {(job?.status === "done" || job?.status === "partial") && (
           <div className="row">
             {job.status === "done" && (
-              <button className="primary" disabled={rawSaving || retryingPage !== null} onClick={importProject}>
-                进入结构化审阅（保留原始 OCR）
+              <button
+                className="primary"
+                disabled={importingProject || rawSaving || retryingPage !== null}
+                onClick={importProject}
+              >
+                {importingProject
+                  ? "正在创建项目……"
+                  : `进入${importMode === "ai" ? " AI 深度" : "规则"}整理（保留原始 OCR）`}
               </button>
             )}
             <button className="primary" type="button" disabled={rawSaving || retryingPage !== null} onClick={saveRawResult}>
