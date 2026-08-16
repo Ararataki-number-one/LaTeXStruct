@@ -22,6 +22,10 @@ SAMPLE = (
     "\\section*{1.1 The Method}\n\\begin{tcolorbox}\n\\section*{方法}\n\\end{tcolorbox}\n\n"
     "Theorem 1. A statement.\n\n\\end{document}\n"
 )
+COMMITTED_ELEGANT = (
+    "\\documentclass[lang=en,11pt]{elegantbook}\n"
+    "\\begin{document}\nVerified.\n\\end{document}\n"
+)
 
 _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -94,7 +98,7 @@ def test_health_and_project_flow():
         assert s["ok"] is True and s["applied"] >= 1
         # 结果与汇报
         result = c.get(f"/api/projects/{pid}/result").text
-        assert "\\begin{theorem}" in result and "（方法）" in result
+        assert "\\begin{theorem*}[1]" in result and "（方法）" in result
         report = c.get(f"/api/projects/{pid}/report").text
         assert "机器校验" in report and "内容不变校验：通过" in report
         # diff
@@ -104,6 +108,14 @@ def test_health_and_project_flow():
         # 导出
         e = c.get(f"/api/projects/{pid}/export")
         assert e.status_code == 200
+        package = c.get(f"/api/projects/{pid}/export-package")
+        assert package.status_code == 200 and "zip" in package.headers["content-type"]
+        with zipfile.ZipFile(io.BytesIO(package.content)) as zf:
+            assert zf.read("main.tex") == e.content
+            assert b"v4.7 ElegantBook document class" in zf.read("elegantbook.cls")
+            assert "ELEGANTBOOK-LICENSE.txt" in zf.namelist()
+            assert "ELEGANTBOOK-BUNDLE-README.md" in zf.namelist()
+            assert zf.read("LATEXSTRUCT-REPORT.md") == c.get(f"/api/projects/{pid}/report").content
         # 删除
         c.delete(f"/api/projects/{pid}")
         assert c.get(f"/api/projects/{pid}").status_code == 404
@@ -176,7 +188,16 @@ def test_export_requires_current_committed_verification_hash():
         missing = c.get(f"/api/projects/{pid}/export")
         assert missing.status_code == 409
 
-        committed_text = "VERIFIED\r\n"
+        # 安全 marker 不能把旧版非 ElegantBook 结果伪装成当前正式成品。
+        legacy_text = "\\documentclass{book}\n\\begin{document}\nOld\n\\end{document}\n"
+        store.set_result(
+            pid, legacy_text, "# report", [],
+            {"verification": {"safe_to_export": True}},
+        )
+        legacy = c.get(f"/api/projects/{pid}/export")
+        assert legacy.status_code == 409 and "ElegantBook" in legacy.json()["detail"]
+
+        committed_text = COMMITTED_ELEGANT.replace("\n", "\r\n")
         store.set_result(
             pid,
             committed_text,
@@ -205,7 +226,7 @@ def test_partial_result_write_cannot_reuse_previous_verification_marker():
         store = srv.get_store()
         store.set_result(
             pid,
-            "OLD",
+            COMMITTED_ELEGANT,
             "# old report",
             [],
             {"verification": {"safe_to_export": True}},
@@ -752,7 +773,7 @@ def test_decisions_and_reject():
         d = c.get(f"/api/projects/{pid}/decisions").json()
         items = d["items"]
         assert items, "决策清单为空"
-        theorem = next(i for i in items if i["env"] == "theorem" and i["status"] == "applied")
+        theorem = next(i for i in items if i["env"] == "theorem*" and i["status"] == "applied")
         assert "line" in theorem and "section" in theorem
         # 拒绝定理包裹 → 重新整理后该环境消失、内容不变校验仍通过
         r = c.post(f"/api/projects/{pid}/decisions/{theorem['candidate_id']}/reject")
@@ -760,7 +781,7 @@ def test_decisions_and_reject():
         rejected_items = c.get(f"/api/projects/{pid}/decisions").json()["items"]
         assert next(i for i in rejected_items if i["candidate_id"] == theorem["candidate_id"])["status"] == "rejected"
         result = c.get(f"/api/projects/{pid}/result").text
-        assert "\\begin{theorem}" not in result
+        assert "\\begin{theorem*}" not in result
         info = json.loads(Path(tmp, "projects", pid, "verification.json").read_text(encoding="utf-8"))
         assert info["verification"]["content_invariant"] is True
         # 双语合并等其他修改保留
@@ -769,7 +790,7 @@ def test_decisions_and_reject():
         r = c.post(f"/api/projects/{pid}/decisions/{theorem['candidate_id']}/unreject")
         assert r.status_code == 200
         result2 = c.get(f"/api/projects/{pid}/result").text
-        assert "\\begin{theorem}" in result2
+        assert "\\begin{theorem*}" in result2
         info2 = json.loads(Path(tmp, "projects", pid, "verification.json").read_text(encoding="utf-8"))
         assert info2["verification"]["content_invariant"] is True
         assert info2["verification"]["decisions_reused"] is True
@@ -780,6 +801,17 @@ def test_rulesets_and_folder_import():
         c = _client(tmp)
         r = c.get("/api/rulesets").json()
         assert "bilingual" in r["packs"] and "academic-paper" in r["packs"]
+        templates = c.get("/api/templates").json()
+        assert templates["ocr_default"] == "elegantbook"
+        assert templates["default"] == "elegantbook"
+        assert templates["export_default"] == "elegantbook"
+        assert templates["fixed"] is True
+        assert {item["id"] for item in templates["templates"]} == {"elegantbook"}
+        invalid = c.post("/api/projects", json={
+            "text": "\\documentclass{article}\n\\begin{document}\nX\n\\end{document}\n",
+            "template": "model-generated-preamble",
+        })
+        assert invalid.status_code == 400
         # 文件夹导入：main + chapters 两文件
         files = {
             "main.tex": "\\documentclass{book}\n\\begin{document}\n\\input{chapters/ch01}\n\\end{document}\n",
@@ -800,7 +832,10 @@ def test_rulesets_and_folder_import():
         assert z.status_code == 200 and "zip" in z.headers["content-type"]
         with zipfile.ZipFile(io.BytesIO(z.content)) as zf:
             assert zf.read("images/pixel.bin") == b"\x00\x01\x02\xff"
-            assert "\\begin{theorem}" in zf.read("chapters/ch01.tex").decode("utf-8")
+            assert "\\begin{theorem*}[1]" in zf.read("chapters/ch01.tex").decode("utf-8")
+            assert b"v4.7 ElegantBook document class" in zf.read("elegantbook.cls")
+            assert "ELEGANTBOOK-LICENSE.txt" in zf.namelist()
+            assert "ELEGANTBOOK-BUNDLE-README.md" in zf.namelist()
             assert zf.read("LATEXSTRUCT-REPORT.md") == c.get(f"/api/projects/{pid}/report").content
         # v1.1.2 的旧 marker 尚无 report_sha256；读取旧项目时继续兼容。
         store = srv.get_store()
@@ -1300,18 +1335,38 @@ def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_sepa
         assert state["pages"]["1"]["attempts"] == 2
         assert c.get(f"/api/ocr/jobs/{jid}/result").headers["x-latexstruct-ocr-complete"] == "true"
 
-        imported = c.post(f"/api/ocr/jobs/{jid}/import")
+        imported = c.post(f"/api/ocr/jobs/{jid}/import?mode=ai")
         assert imported.status_code == 200
         pid = imported.json()["id"]
+        assert imported.json()["process"]["status"] in {"running", "committing", "done"}
+        for _ in range(600):
+            process = c.get(f"/api/projects/{pid}/process/status").json()
+            if process["status"] not in {"running", "pausing", "paused", "committing"}:
+                break
+            time.sleep(0.02)
+        assert process["status"] == "done", process
         raw = c.get(f"/api/projects/{pid}/source").text
         structured = c.get(f"/api/projects/{pid}/result").text
         assert "Theorem 1." in raw and "\\begin{theorem}" not in raw
-        assert "\\begin{theorem}[1]" in structured
+        assert "% LaTeXStruct template: elegantbook v4.7" in structured
+        assert "\\documentclass[lang=en,11pt]{elegantbook}" in structured
+        assert "\\begin{theorem*}[1]" in structured
         assert "Theorem 1. A recovered statement." not in structured
         assert "\\begin{proof}" in structured
-        assert srv.get_store().get(pid)["kind"] == "ocr"
+        project = srv.get_store().get(pid)
+        assert project["kind"] == "ocr"
+        assert project["mode"] == "ai"
+        assert project["template"] == "elegantbook"
         job = srv._ocr_jobs.pop(jid, {})
         shutil.rmtree(job.get("dir", ""), ignore_errors=True)
+
+
+def test_ocr_import_rejects_unknown_structure_mode():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        response = c.post("/api/ocr/jobs/missing/import?mode=freeform-agent")
+        assert response.status_code == 400
+        assert "AI 或规则" in response.json()["detail"]
 
 
 def test_ocr_page_with_broken_display_is_done_but_marked_low_confidence():
@@ -1599,16 +1654,28 @@ def test_native_save_repairs_webview_download_and_never_overwrites():
         with patch("latexstruct.server.downloads.download_root", return_value=downloads):
             result_first = c.post(f"/api/projects/{pid}/exports/result/save")
             result_second = c.post(f"/api/projects/{pid}/exports/result/save")
+            package = c.post(f"/api/projects/{pid}/exports/package/save")
             report = c.post(f"/api/projects/{pid}/exports/report/save")
 
-        assert result_first.status_code == result_second.status_code == report.status_code == 200
+        assert (
+            result_first.status_code
+            == result_second.status_code
+            == package.status_code
+            == report.status_code
+            == 200
+        )
         assert result_first.json()["folder"] == "下载/LaTeXStruct"
         first_path = downloads / result_first.json()["filename"]
         second_path = downloads / result_second.json()["filename"]
+        package_path = downloads / package.json()["filename"]
         report_path = downloads / report.json()["filename"]
         assert first_path != second_path
         assert first_path.read_bytes() == c.get(f"/api/projects/{pid}/export").content
         assert second_path.read_bytes() == first_path.read_bytes()
+        with zipfile.ZipFile(package_path) as zf:
+            assert zf.read("main.tex") == first_path.read_bytes()
+            assert b"v4.7 ElegantBook document class" in zf.read("elegantbook.cls")
+            assert "ELEGANTBOOK-LICENSE.txt" in zf.namelist()
         assert report_path.read_bytes() == c.get(f"/api/projects/{pid}/report").content
 
 

@@ -505,6 +505,9 @@ def check_ocr_structure(text: str) -> dict:
         return {"checked": False, "ok": True, "issues": [], "expected": 0, "matched": 0}
     issues = []
     actual = _actual_headings(text)
+    class_match = re.search(r"\\documentclass(?:\[[^\]]*\])?\s*\{([^{}]+)\}", text)
+    actual_class = class_match.group(1).strip().lower() if class_match else ""
+    elegant_output = actual_class == "elegantbook"
     cursor = 0
     matched = 0
     for entry in metadata.get("outline", []):
@@ -518,7 +521,11 @@ def check_ocr_structure(text: str) -> dict:
             # 也不能额外写进目录列表本身。
             matched += 1
             continue
-        expected_cmd = _command_for(int(entry["level"]), metadata["kind"])
+        if elegant_output and metadata["kind"] == "article":
+            level = max(0, min(3, int(entry["level"])))
+            expected_cmd = ("chapter", "section", "subsection", "subsubsection")[level]
+        else:
+            expected_cmd = _command_for(int(entry["level"]), metadata["kind"])
         found = None
         for index in range(cursor, len(actual)):
             if _score_title(expected, actual[index]["normalized"]) >= 0.88:
@@ -553,10 +560,12 @@ def check_ocr_structure(text: str) -> dict:
                 ),
             })
 
-    class_match = re.search(r"\\documentclass(?:\[[^\]]*\])?\s*\{([^{}]+)\}", text)
     expected_class = metadata["kind"]
-    if not class_match or class_match.group(1).strip().lower() != expected_class:
-        issues.append({"line": 1, "reason": f"OCR 大纲需要 documentclass={expected_class}"})
+    if actual_class not in {expected_class, "elegantbook"}:
+        issues.append({
+            "line": 1,
+            "reason": f"OCR 大纲需要 documentclass={expected_class} 或固定 ElegantBook 成品",
+        })
 
     if metadata.get("source_has_toc"):
         if "\\tableofcontents" not in text:
@@ -567,7 +576,7 @@ def check_ocr_structure(text: str) -> dict:
     # 全文选页从第一页开始时，不允许 section/subsection 脱离父级。
     selected = metadata.get("pages") or []
     if not selected or min(selected) == 1:
-        base = "chapter" if metadata["kind"] == "book" else "section"
+        base = "chapter" if metadata["kind"] == "book" or elegant_output else "section"
         levels = {name: index for index, name in enumerate(
             ("chapter", "section", "subsection", "subsubsection")
             if base == "chapter" else ("section", "subsection", "subsubsection", "paragraph")

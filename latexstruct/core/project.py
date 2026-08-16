@@ -203,6 +203,7 @@ def process_project(
     ai_client=None,
     review_client=None,
     template: str = None,
+    template_context: dict = None,
     compile_check: bool = False,
     pack=None,
 ) -> ProjectResult:
@@ -217,6 +218,7 @@ def process_project(
     pr = run_pipeline(
         flat, mode=mode, rule_config=rule_config, ai_config=ai_config,
         ai_client=ai_client, review_client=review_client, template=template,
+        template_context=template_context,
         compile_check=compile_check, pack=pack,
     )
     per_file = split_project(pr.result)

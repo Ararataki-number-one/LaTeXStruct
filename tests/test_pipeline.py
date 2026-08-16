@@ -67,11 +67,20 @@ def test_cn_fragment_fast_mode():
     res = run_pipeline(read_sample("cn_fragment.tex"), mode="rule")
     assert res.ok, res.report_md
     out = res.result
-    # elegantbook 自带环境的计数语义无法证明安全；显式源编号全部保守保留。
-    for env in ("definition", "theorem", "proposition", "corollary", "lemma", "remark", "example"):
-        assert f"\\begin{{{env}}}" not in out, env
-    assert "定理 2.1（某某）. 结论陈述" in out
-    assert "定义 1.1. 设 $A$ 是集合" in out
+    # ElegantBook 内置的星号色块不会自动计数，可安全保留原书编号；没有可证明
+    # 星号版本的旧 remark/example 仍宁可保留原文，不冒险产生双编号。
+    for env, number in (
+        ("definition", "1.1"),
+        ("theorem", "2.1"),
+        ("proposition", "2.2"),
+        ("corollary", "2.3"),
+        ("lemma", "1"),
+    ):
+        assert f"\\begin{{{env}*}}[{number}]" in out, env
+    assert "定理 2.1（某某）. 结论陈述" not in out
+    assert "定义 1.1. 设 $A$ 是集合" not in out
+    assert "注 3. 一个注记" in out
+    assert "例 5. 一个例子" in out
     assert any("避免双编号" in item["reason"] for item in res.ambiguous)
     # 证明起始语剥离
     assert out.count("\\begin{proof}") == 2
@@ -597,6 +606,31 @@ def test_pdf_outline_recovers_inline_numbered_headings_and_allows_real_duplicate
         "toc_expected": False,
     }
     assert result.verification["content_invariant"] is True
+
+
+def test_ocr_article_outline_maps_to_elegantbook_book_hierarchy():
+    from latexstruct.ocr import merge_book
+
+    raw = merge_book(
+        [
+            "% Page 1\n\\section*{1 Foundations}\nOpening text.",
+            "% Page 2\n\\section*{2 Probabilistic method}\n\nTheorem 2.1. A result.",
+        ],
+        outline=[
+            {"level": 0, "title": "1 Foundations", "page": 1},
+            {"level": 0, "title": "2 Probabilistic method", "page": 2},
+        ],
+    )
+    assert r"\documentclass[11pt]{article}" in raw
+
+    result = run_pipeline(raw, mode="rule", template="elegantbook")
+    assert result.ok, result.report_md
+    assert r"\documentclass[lang=en,11pt]{elegantbook}" in result.result
+    assert r"\chapter{Foundations}" in result.result
+    assert r"\chapter{Probabilistic method}" in result.result
+    assert r"\begin{theorem*}[2.1]" in result.result
+    assert result.verification["ocr_structure"]["ok"] is True
+    assert result.verification["safe_to_export"] is True
 
 
 def test_unsafe_manual_toc_region_preserves_body_and_fails_closed():

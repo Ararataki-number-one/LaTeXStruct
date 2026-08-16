@@ -610,44 +610,43 @@ export default function Workspace({ pid }) {
         <button
           disabled={!canExport}
           className="primary"
-          title={canExport ? "可靠保存到系统下载/LaTeXStruct 文件夹" : "需先通过安全检查并完成审阅"}
-          onClick={() => saveToDownloads("result", "result.tex")}
+          title={canExport ? "保存已验证的 ElegantBook 主 TEX" : "需先通过安全检查并完成审阅"}
+          onClick={() => saveToDownloads("result", "ElegantBook TEX")}
         >
-          修复下载 result.tex
+          导出 ElegantBook TEX
         </button>
         <button
+          className="primary"
           disabled={!canExport}
-          title={canExport ? "若桌面保存不可用，可使用浏览器备用下载" : "需先通过安全检查并完成审阅"}
-          onClick={() => downloadFromApi(`/api/projects/${pid}/export`, "result.tex")}
+          title={canExport ? "包含主 TEX、图片/资源、elegantbook.cls、许可证和汇报" : "需先通过安全检查并完成审阅"}
+          onClick={() => saveToDownloads("package", "完整工程 ZIP")}
         >
-          浏览器下载（备用）
+          导出完整工程 ZIP
         </button>
         <button
           disabled={!canExport}
           title={canExport ? "复制已验证结果" : "需先通过安全检查并完成审阅"}
-          onClick={() => copyFromApi(`/api/projects/${pid}/export`, "result.tex")}
+          onClick={() => copyFromApi(`/api/projects/${pid}/export`, "ElegantBook TEX")}
         >
-          一键复制 result.tex
+          一键复制 TEX
         </button>
-        {graph && (
-          <>
+        <details className="export-fallbacks">
+          <summary>浏览器备用下载</summary>
+          <div className="row">
             <button
-              className="primary"
               disabled={!canExport}
-              title={canExport ? "可靠保存已验证多文件项目" : "需先通过安全检查并完成审阅"}
-              onClick={() => saveToDownloads("folder", "项目 ZIP")}
+              onClick={() => downloadFromApi(`/api/projects/${pid}/export`, "ElegantBook.tex")}
             >
-              修复下载项目 ZIP
+              TEX 备用下载
             </button>
             <button
               disabled={!canExport}
-              title={canExport ? "浏览器备用下载" : "需先通过安全检查并完成审阅"}
-              onClick={() => downloadFromApi(`/api/projects/${pid}/export-folder`, "LaTeXStruct-project.zip")}
+              onClick={() => downloadFromApi(`/api/projects/${pid}/export-package`, "ElegantBook-project.zip")}
             >
               ZIP 浏览器下载（备用）
             </button>
-          </>
-        )}
+          </div>
+        </details>
         <button disabled={taskActive} onClick={() => { if (confirm("撤销全部拒绝并重新应用所有修改？")) rerun(`/api/projects/${pid}/decisions/reset`, { method: "POST" }); }}>
           撤销全部拒绝
         </button>

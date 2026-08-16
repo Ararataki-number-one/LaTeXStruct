@@ -10,6 +10,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import latexstruct  # noqa: E402
 import latexstruct._version as ver  # noqa: E402
+from latexstruct.elegantbook import (  # noqa: E402
+    ELEGANTBOOK_COMMIT,
+    ELEGANTBOOK_VERSION,
+    elegantbook_class_bytes,
+    elegantbook_license_bytes,
+)
 
 
 def test_version_single_source():
@@ -34,8 +40,18 @@ def test_python_package_includes_bundled_frontends():
         content = f.read()
     assert "[tool.setuptools.package-data]" in content
     assert '"latexstruct.server"' in content
+    assert '"assets/elegantbook/*"' in content
     assert '"static/*"' in content
     assert '"static-react/assets/*"' in content
+
+
+def test_bundled_elegantbook_snapshot_is_present_and_hash_verified():
+    assert ELEGANTBOOK_VERSION == "4.7"
+    assert ELEGANTBOOK_COMMIT == "8b90c11e4a5ffd9d1e07174011303c133093d09c"
+    class_bytes = elegantbook_class_bytes()
+    license_bytes = elegantbook_license_bytes()
+    assert b"v4.7 ElegantBook document class" in class_bytes
+    assert b"The LaTeX Project Public License" in license_bytes
 
 
 def test_workspace_reuses_monaco_models_until_editor_widget_is_disposed():
@@ -80,10 +96,31 @@ def test_ci_installs_texlive_distribution_packages():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, ".github", "workflows", "build.yml"), encoding="utf-8") as f:
         workflow = f.read()
-    assert "install xetex amsmath amsfonts amscls geometry tcolorbox graphics" in workflow
+    assert "install xetex elegantbook amsmath amsfonts amscls geometry tcolorbox graphics" in workflow
+    assert "titlesec" in workflow
     assert "install amsmath amssymb amsthm" not in workflow
     assert "kpsewhich.exe" in workflow
     assert "amsthm.sty" in workflow and "amssymb.sty" in workflow
+    assert "titlesec.sty" in workflow
+    assert "elegantbook.cls" in workflow
+
+
+def test_elegantbook_is_the_fixed_frontend_export_template():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "frontend", "src", "Projects.jsx"), encoding="utf-8") as f:
+        projects = f.read()
+    with open(os.path.join(root, "frontend", "src", "Ocr.jsx"), encoding="utf-8") as f:
+        ocr = f.read()
+
+    assert 'const template = "elegantbook"' in projects
+    assert 'ElegantBook 专业讲义（固定）' in projects
+    assert 'const importTemplate = "elegantbook"' in ocr
+    assert 'ElegantBook 专业讲义（固定）' in ocr
+    assert 'const [importMode, setImportMode] = useState("ai")' in ocr
+    assert '<option value="ai">AI 深度整理（推荐）</option>' in ocr
+    assert '<option value="rule">规则整理（快速）</option>' in ocr
+    assert 'mode: importMode' in ocr
+    assert "章节、目录与定理先做结构校正" in ocr
 
 
 def test_release_metadata_matches_app_version():
@@ -133,7 +170,7 @@ def test_release_build_safety_guards():
     assert "http://127.0.0.1:8099$assetPath" in workflow
     assert '$pageResponse = Invoke-WebRequest "http://127.0.0.1:8099/"' in workflow
     assert "$home = Invoke-WebRequest" not in workflow
-    assert "v1.1.4 运行中 → 当前版本" in workflow
+    assert "v1.1.5 运行中 → 当前版本" in workflow
     assert "/api/update/result" in workflow
     assert "body_path: dist/RELEASE_NOTES.md" in workflow
 
@@ -143,6 +180,8 @@ def test_release_build_safety_guards():
     assert 'react_index.is_file()' in pyinstaller_spec
     assert 'react_assets_dir.is_dir()' in pyinstaller_spec
     assert '(str(react_static_dir), "latexstruct/server/static-react")' in pyinstaller_spec
+    assert 'elegantbook_class.is_file()' in pyinstaller_spec
+    assert '(str(elegantbook_assets_dir), "latexstruct/assets/elegantbook")' in pyinstaller_spec
     assert 'os.path.exists("../latexstruct/server/static-react")' not in pyinstaller_spec
 
     with open(os.path.join(root, "latexstruct", "server", "app.py"), encoding="utf-8") as f:

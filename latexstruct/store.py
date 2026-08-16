@@ -35,6 +35,7 @@ class ProjectStore:
         template: str = "",
         pack: str = "",
         kind: str = "",
+        template_title: str = "",
     ) -> str:
         pid = uuid.uuid4().hex[:12]
         d = self._dir(pid)
@@ -50,6 +51,8 @@ class ProjectStore:
         }
         if kind:
             meta["kind"] = kind
+        if template_title:
+            meta["template_title"] = str(template_title).strip()[:160]
         self._write_json(d, "meta.json", meta)
         self._write_text(d, "source.tex", text)
         return pid
@@ -97,6 +100,11 @@ class ProjectStore:
     def set_mode(self, pid: str, mode: str):
         meta = json.loads(self._read(os.path.join(self._dir(pid), "meta.json")))
         meta["mode"] = mode
+        self._write_json(self._dir(pid), "meta.json", meta)
+
+    def set_template(self, pid: str, template: str):
+        meta = json.loads(self._read(os.path.join(self._dir(pid), "meta.json")))
+        meta["template"] = str(template or "")
         self._write_json(self._dir(pid), "meta.json", meta)
 
     def set_result(
