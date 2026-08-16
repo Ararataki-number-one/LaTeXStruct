@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from .core.ai import LLMClient, LLMError, RoleConfig
+from .core.ocrstruct import encode_ocr_metadata, infer_document_kind
 from .core.parser import mask_comments
 
 OCR_SYSTEM_PROMPT = """你是「数学文档页面转写专家」。把给定书页图像**忠实**转写为 LaTeX 正文片段——
@@ -24,8 +25,9 @@ OCR_SYSTEM_PROMPT = """你是「数学文档页面转写专家」。把给定书
 硬性要求：
 1. 只输出 LaTeX 正文片段（不含 \\documentclass/\\begin{document}/导言区），用 ```latex 代码块包裹；
 2. 完整保留页面内容与顺序；标题行（如 "Theorem 2.7. ..."、"Proof. ..."、"1.1 Graphs"）
-   按原样作为独立文本行转写——**不要**为它们添加 theorem/lemma/proof/definition 等任何环境，
-   也不要把标题与正文合并改写；
+   按原样作为独立文本行转写——**不要**添加 theorem/lemma/proof/definition 环境，也不要使用
+   \\chapter/\\section/\\subsection/\\subsubsection、\\tableofcontents、\\dotfill 等结构命令；
+   不要把标题与正文合并改写（章节树与环境由后续引擎统一生成）；
 3. 数学公式：行内用 \\(...\\)，展示用 \\[...\\] 或 $$...$$（仅转写公式本身，不改变其内容）；
 4. 不增不减：不要臆造内容；无法辨认的符号用 \\textcolor{red}{[?]} 占位并加行内注释 % unsure；
 5. 正确转义特殊字符 # $ % & _ { } ~ ^ \\；中英混排保持数学符号规范
@@ -35,17 +37,19 @@ OCR_SYSTEM_PROMPT = """你是「数学文档页面转写专家」。把给定书
    并加注释 % figure: <图中内容简述>；
 7. 片段首行写 % Page <页码> 注释；长内容自然分段，段落之间空一行。"""
 
-ELEGANTBOOK_PREAMBLE = """\\documentclass[11pt]{elegantbook}
+OCR_PREAMBLE = """\\documentclass[11pt]{__DOCUMENT_CLASS__}
 
 \\usepackage{amsmath}
 \\usepackage{amssymb}
 \\usepackage{amsfonts}
+\\usepackage{bbm}
 \\usepackage{esint}
 \\usepackage{stmaryrd}
 \\usepackage{tcolorbox}
 \\usepackage{booktabs}
 \\usepackage{multirow}
 \\usepackage{graphicx}
+\\usepackage{caption}
 \\usepackage{tikz}
 \\usetikzlibrary{cd}
 \\usepackage{algorithm}
@@ -162,8 +166,8 @@ def iter_pdf_pages(pdf_path: str, pages: List[int], dpi: int = 150):
         doc.close()
 
 
-def pdf_page_count_bytes(pdf_bytes: bytes) -> int:
-    """从已上传的 PDF 字节安全读取总页数，不渲染页面。"""
+def pdf_document_info_bytes(pdf_bytes: bytes) -> dict:
+    """读取页数与 PDF 书签；书签只作为结构元数据，不执行其中任何文本。"""
     try:
         import fitz  # PyMuPDF
     except ImportError:
@@ -178,9 +182,27 @@ def pdf_page_count_bytes(pdf_bytes: bytes) -> int:
         total = doc.page_count
         if total < 1:
             raise ValueError("PDF 没有可处理的页面")
-        return total
+        outline = []
+        try:
+            for level, title, page, *_rest in doc.get_toc(simple=True):
+                title = str(title or "").strip()
+                if title and int(page) > 0:
+                    outline.append({
+                        "level": max(0, int(level) - 1),
+                        "title": title[:300],
+                        "page": int(page),
+                    })
+        except (AttributeError, TypeError, ValueError):
+            # 没有书签不影响 OCR；后续仅少一层确定性结构依据。
+            outline = []
+        return {"pages": total, "outline": outline[:500]}
     finally:
         doc.close()
+
+
+def pdf_page_count_bytes(pdf_bytes: bytes) -> int:
+    """从已上传的 PDF 字节安全读取总页数，不渲染页面。"""
+    return int(pdf_document_info_bytes(pdf_bytes)["pages"])
 
 
 def image_mime_type(image_bytes: bytes) -> str:
@@ -330,7 +352,9 @@ def transcribe_pdf(
                 usage[k] = usage.get(k, 0) + v
     if progress:
         progress(len(rendered), len(rendered), None)
-    tex = merge_book(chunks)
+    with open(pdf_path, "rb") as pdf_file:
+        info = pdf_document_info_bytes(pdf_file.read())
+    tex = merge_book(chunks, outline=info.get("outline"))
     return OcrResult(tex=tex, pages=[p for p, _ in rendered], errors=errors, usage=usage)
 
 
@@ -364,11 +388,55 @@ def transcribe_images(
     return OcrResult(tex=merge_book(chunks), pages=list(range(1, len(image_paths) + 1)), errors=errors, usage=usage)
 
 
-def merge_book(chunks: List[str]) -> str:
-    parts = [ELEGANTBOOK_PREAMBLE.rstrip()]
+def _chunk_pages(chunks: List[str]) -> List[int]:
+    pages = []
+    for chunk in chunks:
+        match = re.search(r"(?m)^\s*%\s*Page\s+(\d+)\s*$", chunk)
+        if match:
+            pages.append(int(match.group(1)))
+    return pages
+
+
+def _chunks_have_toc(chunks: List[str]) -> bool:
+    text = "\n".join(chunks)
+    return bool(
+        re.search(
+            r"(?im)^\s*(?:\\(?:section|chapter)\*?\s*\{\s*)?contents\s*\}?\s*$",
+            text,
+        )
+        or len(re.findall(r"\\dotfill\b", text)) >= 3
+    )
+
+
+def merge_book(chunks: List[str], outline: List[dict] = None) -> str:
+    """合并逐页片段，并携带不可执行的 PDF 大纲元数据。
+
+    文档类仅由书签与明确 Chapter 标题决定；不再无条件套用 elegantbook，
+    避免没有 chapter 时出现 0.1 以及内置定理计数冲突。
+    """
+    document_kind = infer_document_kind(outline, chunks)
+    selected_pages = _chunk_pages(chunks)
+    selected_page_set = set(selected_pages)
+    selected_outline = []
+    for item in list(outline or []):
+        try:
+            page = int(item.get("page", 0))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if not selected_page_set or page in selected_page_set:
+            selected_outline.append(item)
+    preamble = OCR_PREAMBLE.replace("__DOCUMENT_CLASS__", document_kind)
+    metadata = encode_ocr_metadata(
+        selected_outline,
+        document_kind,
+        selected_pages,
+        _chunks_have_toc(chunks),
+    )
+    parts = [preamble.rstrip(), metadata]
     for i, c in enumerate(chunks):
         parts.append("")
         if i > 0:
+            parts.append("\\clearpage")
             parts.append(f"%=== PAGE BREAK === 第 {i + 1} 段")
         parts.append(c.strip())
     parts.append("")

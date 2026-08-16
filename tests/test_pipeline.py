@@ -394,6 +394,298 @@ def test_real_godsil_section_1_7():
     assert res.verification["env_balance"]["ok"] is True
 
 
+def test_styled_ocr_titles_cross_math_and_page_boundaries():
+    text = r"""\documentclass{article}
+\begin{document}
+\textbf{Theorem 1.1.} \textit{There exists $\varepsilon>0$ such that}
+\[
+R(k) < (4-\varepsilon)^k.
+\]
+\textit{for every sufficiently large $k$.}
+
+This paragraph comments on the theorem and is not part of its statement.
+
+\textit{Proof.} Start with the recurrence.
+\[
+R(k)\leq 4^k.
+\]
+
+%=== PAGE BREAK === 第 2 段
+% Page 2
+Then improve the estimate. \hfill $\square$
+
+After the proof, a new discussion begins.
+
+\textbf{Question 1.2.} Is the bound sharp?
+\end{document}
+"""
+    result = run_pipeline(text, mode="rule")
+    assert result.ok, result.report_md
+    output = result.result
+    theorem_start = output.index(r"\begin{theorem}[1.1]")
+    theorem_end = output.index(r"\end{theorem}")
+    assert theorem_start < output.index(r"R(k) <") < theorem_end
+    assert theorem_start < output.index("for every sufficiently") < theorem_end
+    assert output.index("This paragraph comments") > theorem_end
+    assert r"\textbf{Theorem 1.1.}" not in output
+
+    proof_start = output.index(r"\begin{proof}")
+    proof_end = output.index(r"\end{proof}")
+    assert proof_start < output.index("Then improve the estimate") < proof_end
+    assert output.index("After the proof") > proof_end
+    assert r"\textit{Proof.}" not in output
+
+    assert r"\begin{question}[1.2]" in output
+    assert r"\newtheorem*{question}{Question}" in output
+
+
+def test_proof_of_decimal_theorem_number_becomes_one_proof_heading():
+    text = r"""\documentclass{article}
+\begin{document}
+\textit{Proof of the upper bound in Theorem 1.2.} Let $G$ be a graph. \hfill $\square$
+
+Proof of Theorem 2.7 up to a constant factor. The key idea follows. \hfill $\square$
+\end{document}
+"""
+    result = run_pipeline(text, mode="rule")
+    assert result.ok, result.report_md
+    output = result.result
+    assert r"\begin{proof}[Proof of the upper bound in Theorem 1.2]" in output
+    assert r"\begin{proof}[Proof of Theorem 2.7 up to a constant factor]" in output
+    assert r"\textit{Proof of the upper bound in Theorem 1.2.}" not in output
+    assert "Proof of Theorem 2.7 up to a constant factor." not in output
+    assert output.count(r"\begin{proof}") == 2
+
+
+def test_styled_theorem_and_proof_keep_style_without_duplicate_titles():
+    text = r"""\documentclass{article}
+\begin{document}
+\textbf{Theorem 4.2. Every graph has a useful ordering.}
+
+\textit{Proof. Choose a vertex of minimum degree.} \hfill $\square$
+\end{document}
+"""
+    result = run_pipeline(text, mode="rule")
+    assert result.ok, result.report_md
+    output = result.result
+    assert r"\begin{theorem}[4.2]" in output
+    assert r"\textbf{Every graph has a useful ordering.}" in output
+    assert r"\textbf{Theorem 4.2." not in output
+    assert r"\begin{proof}" in output
+    assert r"\textit{Choose a vertex of minimum degree.}" in output
+    assert r"\textit{Proof." not in output
+    assert result.verification["content_invariant"] is True
+    assert result.verification["env_balance"]["ok"] is True
+
+
+def test_standalone_styled_titles_are_removed_only_after_body_is_confirmed():
+    text = r"""\documentclass{article}
+\begin{document}
+\textbf{Lemma 3.1.}
+
+Every graph has an independent set.
+
+\textit{Proof.}
+
+Choose a maximal one. \hfill $\square$
+\end{document}
+"""
+    result = run_pipeline(text, mode="rule")
+    assert result.ok, result.report_md
+    output = result.result
+    assert r"\begin{lemma}[3.1]" in output
+    assert r"\textbf{Lemma 3.1.}" not in output
+    assert r"\begin{proof}" in output
+    assert r"\textit{Proof.}" not in output
+    assert "Every graph has an independent set." in output
+    assert "Choose a maximal one." in output
+    assert result.verification["content_invariant"] is True
+
+
+def test_pdf_outline_rebuilds_book_chapters_and_real_toc():
+    from latexstruct.ocr import merge_book
+
+    outline = [
+        {"level": 0, "title": "Introduction", "page": 2},
+        {"level": 0, "title": "Contents", "page": 3},
+        {"level": 0, "title": "Ramsey numbers", "page": 4},
+        {"level": 1, "title": "History", "page": 4},
+        {
+            "level": 1,
+            "title": "The off-diagonal problem and the exponent gap",
+            "page": 5,
+        },
+    ]
+    raw = merge_book(
+        [
+            "% Page 1\nA cover page.",
+            "% Page 2\n\\section*{Introduction}\nIntroductory text.",
+            (
+                "% Page 3\n\\section*{Contents}\n"
+                "\\textbf{1 Ramsey numbers} \\dotfill 1\n"
+                "\\textbf{1.1 History} \\dotfill 1"
+            ),
+            (
+                "% Page 4\n\\section*{Chapter 1}\n"
+                "\\section*{Ramsey numbers}\n"
+                "\\subsection*{1.1 History}\n"
+                "\\subsection*{Off-diagonal Ramsey numbers}\nHistory text."
+            ),
+            (
+                "% Page 5\n\\subsection*{Off-diagonal Ramsey numbers}\n"
+                "\\subsection*{1.2 The off-diagonal problem and the exponent gap}\n"
+                "More text."
+            ),
+        ],
+        outline=outline,
+    )
+    result = run_pipeline(raw, mode="rule")
+    assert result.ok, result.report_md
+    output = result.result
+    assert r"\documentclass[11pt]{book}" in output
+    assert r"\chapter*{Introduction}" in output
+    assert r"\addcontentsline{toc}{chapter}{Introduction}" in output
+    assert r"\tableofcontents" in output
+    assert r"\addcontentsline{toc}{chapter}{Contents}" not in output
+    assert r"\tableofcontents" + "\n" + r"\clearpage" in output
+    assert r"\dotfill" not in output
+    assert r"\chapter{Ramsey numbers}" in output
+    assert r"\section{History}" in output
+    assert r"\section{The off-diagonal problem and the exponent gap}" in output
+    assert "Chapter 1" not in output
+    assert r"\subsection*{Off-diagonal Ramsey numbers}" not in output
+    assert result.verification["ocr_structure"]["ok"] is True
+    assert result.verification["content_invariant"] is True
+
+
+def test_pdf_outline_recovers_inline_numbered_headings_and_allows_real_duplicates():
+    from latexstruct.ocr import merge_book
+
+    repeated = "Sampling and extracting the Ramsey bound"
+    outline = [
+        {"level": 0, "title": "1. First method", "page": 1},
+        {"level": 1, "title": f"1.1. {repeated}", "page": 1},
+        {"level": 0, "title": "2. Second method", "page": 2},
+        {"level": 1, "title": f"2.1. {repeated}", "page": 2},
+    ]
+    raw = merge_book(
+        [
+            (
+                "% Page 1\n\\section*{1. First method}\n"
+                f"1.1. {repeated}. This sentence is body text and must be preserved."
+            ),
+            (
+                "% Page 2\n\\section*{2. Second method}\n"
+                f"\\textbf{{2.1. {repeated}.}} More body text."
+            ),
+        ],
+        outline=outline,
+    )
+    result = run_pipeline(raw, mode="rule")
+    assert result.ok, result.report_md
+    output = result.result
+    assert output.count(r"\subsection{Sampling and extracting the Ramsey bound}") == 2
+    assert "This sentence is body text and must be preserved." in output
+    assert "More body text." in output
+    assert result.verification["ocr_structure"] == {
+        "checked": True,
+        "ok": True,
+        "issues": [],
+        "expected": 4,
+        "matched": 4,
+        "actual": 4,
+        "toc_expected": False,
+    }
+    assert result.verification["content_invariant"] is True
+
+
+def test_unsafe_manual_toc_region_preserves_body_and_fails_closed():
+    from latexstruct.ocr import merge_book
+
+    raw = merge_book(
+        [
+            (
+                "% Page 1\n\\section*{Contents}\n"
+                "\\textbf{1 First result} \\dotfill 2\n\n"
+                "This real paragraph shares the contents page and must not be deleted."
+            ),
+            "% Page 2\n\\section*{1 First result}\nActual section body.",
+        ],
+        outline=[
+            {"level": 0, "title": "Contents", "page": 1},
+            {"level": 0, "title": "1 First result", "page": 2},
+        ],
+    )
+    result = run_pipeline(raw, mode="rule")
+    assert "This real paragraph shares the contents page" in result.result
+    assert r"\dotfill" in result.result
+    assert r"\tableofcontents" not in result.result
+    assert result.verification["ocr_structure"]["ok"] is False
+    assert result.verification["safe_to_export"] is False
+    assert "手抄目录区混有无法确认的正文" in result.report_md
+
+
+def test_ocr_compile_gate_requires_success_when_engine_exists_but_allows_unavailable():
+    from unittest.mock import patch
+
+    text = r"""\documentclass{article}
+\begin{document}
+Plain OCR text.
+\end{document}
+"""
+    unavailable = {"available": False, "ok": None, "pages": 0, "errors": [], "log": ""}
+    with patch("latexstruct.core.compilecheck.compile_latex", side_effect=[unavailable, unavailable]):
+        result = run_pipeline(
+            text,
+            mode="rule",
+            compile_check=True,
+            require_compile_when_available=True,
+        )
+    assert result.ok
+    assert result.verification["compile"]["checked"] is False
+    assert "本机不可用" in result.report_md
+
+    failed = {
+        "available": True,
+        "ok": False,
+        "pages": 0,
+        "errors": ["Undefined control sequence"],
+        "log": "",
+    }
+    with patch("latexstruct.core.compilecheck.compile_latex", side_effect=[failed, failed]):
+        result = run_pipeline(
+            text,
+            mode="rule",
+            compile_check=True,
+            require_compile_when_available=True,
+        )
+    assert not result.ok
+    assert result.verification["compile"]["checked"] is True
+    assert result.verification["safe_to_export"] is False
+
+
+def test_required_ocr_image_resource_missing_blocks_export():
+    text = r"""\documentclass{article}
+\usepackage{graphicx}
+\begin{document}
+\includegraphics{images/definitely-missing-ocr-figure}
+\end{document}
+"""
+    result = run_pipeline(
+        text,
+        mode="rule",
+        resource_root=SAMPLES,
+        require_resources=True,
+    )
+    assert not result.ok
+    assert result.verification["resources"]["checked"] is True
+    assert result.verification["resources"]["ok"] is False
+    assert result.verification["resources"]["missing"] == [
+        "images/definitely-missing-ocr-figure"
+    ]
+    assert result.verification["safe_to_export"] is False
+
+
 def main():
     import traceback
 

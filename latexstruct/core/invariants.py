@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from pathlib import Path
 from typing import Dict, List
 
 from .parser import find_env_ranges
@@ -34,6 +35,9 @@ CITE_RE = re.compile(
     r"(?:\s*\[[^\]]*\]){0,2}\s*\{([^{}]*)\}"
 )
 IMG_RE = re.compile(r"\\includegraphics\*?(?:\s*\[[^\]]*\])?\s*\{([^{}]*)\}")
+GRAPHICSPATH_RE = re.compile(
+    r"\\graphicspath\s*\{((?:\s*\{[^{}]*\}\s*)+)\}"
+)
 
 
 def _norm(s: str) -> str:
@@ -107,3 +111,73 @@ def check_invariants(before: str, after: str) -> Dict:
     }
     out["ok"] = all(v["equal"] for v in out.values())
     return out
+
+
+def check_image_resources(text: str, root: str | None) -> Dict:
+    """确认每个 includegraphics 都能在项目根内解析到真实普通文件。"""
+    paths = image_paths(text)
+    if root is None:
+        return {
+            "checked": False,
+            "ok": True,
+            "count": len(paths),
+            "missing": [],
+            "unsafe": [],
+        }
+    base = Path(root).resolve()
+    missing, unsafe = [], []
+    search_roots = [base]
+    masked = _masked(text)
+    for match in GRAPHICSPATH_RE.finditer(masked):
+        for raw_dir in re.findall(r"\{([^{}]*)\}", match.group(1)):
+            normalized_dir = raw_dir.replace("\\", "/").strip()
+            relative_dir = Path(normalized_dir)
+            if (
+                not normalized_dir
+                or "://" in normalized_dir
+                or relative_dir.is_absolute()
+                or ".." in relative_dir.parts
+            ):
+                unsafe.append(f"graphicspath:{raw_dir}")
+                continue
+            candidate_root = (base / relative_dir).resolve()
+            try:
+                candidate_root.relative_to(base)
+            except ValueError:
+                unsafe.append(f"graphicspath:{raw_dir}")
+                continue
+            search_roots.append(candidate_root)
+    extensions = ("", ".pdf", ".png", ".jpg", ".jpeg", ".eps")
+    for raw in paths:
+        normalized = raw.replace("\\", "/").strip()
+        if not normalized or "://" in normalized:
+            unsafe.append(raw)
+            continue
+        relative = Path(normalized)
+        if relative.is_absolute() or any(part in ("", ".", "..") for part in relative.parts):
+            unsafe.append(raw)
+            continue
+        found = False
+        for search_root in search_roots:
+            for suffix in extensions:
+                candidate = (search_root / (normalized + suffix)).resolve()
+                try:
+                    candidate.relative_to(base)
+                except ValueError:
+                    unsafe.append(raw)
+                    found = True
+                    break
+                if candidate.is_file():
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            missing.append(raw)
+    return {
+        "checked": True,
+        "ok": not missing and not unsafe,
+        "count": len(paths),
+        "missing": sorted(set(missing))[:50],
+        "unsafe": sorted(set(unsafe))[:50],
+    }

@@ -120,7 +120,8 @@ def check_for_updates(
     if not tag:
         return UpdateInfo(False, error="Release 无 tag 信息")
     if compare_versions(tag, current_version) <= 0:
-        return UpdateInfo(False, latest=tag, error="")
+        # 重启后的“更新成功”界面仍需要当前 Release 的说明。
+        return UpdateInfo(False, latest=tag, notes=body, error="")
     asset = select_asset(assets, tag)
     if asset is None:
         return UpdateInfo(True, latest=tag, notes=body, error="未找到安装包资产")
@@ -376,7 +377,11 @@ def request_application_exit(delay: float = 0.8) -> None:
         os._exit(0)
 
 
-def download_update(info: UpdateInfo, tmpdir: Optional[str] = None) -> str:
+def download_update(
+    info: UpdateInfo,
+    tmpdir: Optional[str] = None,
+    progress: Optional[Callable[[int, int], None]] = None,
+) -> str:
     """下载并验证安装器，但不在当前进程仍占用 exe 时直接运行。"""
     if not info.url:
         raise ValueError("无安装包地址")
@@ -391,6 +396,7 @@ def download_update(info: UpdateInfo, tmpdir: Optional[str] = None) -> str:
     download_file(
         info.url,
         dest,
+        progress=progress,
         expected_size=info.size,
         expected_digest=info.digest,
     )

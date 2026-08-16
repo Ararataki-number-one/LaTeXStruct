@@ -19,6 +19,11 @@ from typing import Dict, List, Optional, Tuple
 
 from .ai import AIConfig, AI_KINDS, LLMClient, LLMError, decide_candidates
 from .parser import detect_newline, line_starts, normalize_newlines, offset_to_line, parse_latex
+from .ocrstruct import (
+    build_ocr_structure_ops,
+    check_ocr_structure,
+    is_ocr_document,
+)
 from .patch import (
     AMSTHM_BLOCK,
     AppliedPatch,
@@ -221,11 +226,11 @@ def _candidate_for_decision(decision: Decision, candidates_by_id: dict):
 
 
 def _normalize_theorem_wrap_start(decision: Decision, candidate) -> str:
-    """定理类包裹必须从扫描器确认的标题行开始，复查不得绕过该锚点。"""
+    """定理/证明包裹必须从扫描器确认的标题行开始，复查不得绕过锚点。"""
     if (
         decision.action != "wrap"
         or candidate is None
-        or candidate.kind != "theorem-like"
+        or candidate.kind not in ("theorem-like", "proof")
         or not decision.body_span
     ):
         return ""
@@ -242,18 +247,32 @@ def _restore_theorem_title_metadata(decision: Decision, candidate) -> None:
     if (
         decision.action != "wrap"
         or candidate is None
-        or candidate.kind != "theorem-like"
+        or candidate.kind not in ("theorem-like", "proof")
         or not decision.body_span
         or decision.body_span[0] != candidate.span.start_line
     ):
         return
-    prefix = candidate.payload.get("title_prefix", "")
-    remainder = candidate.title_text[len(prefix):].strip() if prefix else ""
-    number = candidate.payload.get("number") or ""
+    if candidate.kind == "proof":
+        prefix = candidate.payload.get("strip_prefix", "")
+        number = candidate.payload.get("proof_arg") or ""
+    else:
+        prefix = candidate.payload.get("title_prefix", "")
+        number = candidate.payload.get("number") or ""
+    remainder = str(candidate.payload.get("title_remainder", "")).strip()
+    title_line_old = candidate.payload.get("title_line_old", "")
+    title_line_new = candidate.payload.get("title_line_new", "")
     decision.optional_arg = str(number)[:120]
-    decision.keep_title_text = not (prefix and remainder)
+    has_body = bool(remainder) or decision.body_span[1] > decision.body_span[0]
+    can_rewrite = bool(title_line_old and title_line_new)
+    decision.keep_title_text = not ((prefix or can_rewrite) and has_body)
     decision.payload = dict(decision.payload)
-    decision.payload["title_prefix"] = prefix if prefix and remainder else ""
+    decision.payload["title_prefix"] = prefix if prefix and has_body else ""
+    decision.payload["title_line_old"] = (
+        title_line_old if can_rewrite and has_body else ""
+    )
+    decision.payload["title_line_new"] = (
+        title_line_new if can_rewrite and has_body else ""
+    )
 
 
 def _unsafe_numbered_theorem_reason(decision: Decision, candidate, ctx: PatchContext) -> str:
@@ -293,6 +312,10 @@ def run_pipeline(
     ai_notes_override: List[dict] = None,
     progress_callback=None,
     control_callback=None,
+    require_compile: bool = False,
+    require_compile_when_available: bool = False,
+    resource_root: str = None,
+    require_resources: bool = False,
 ) -> PipelineResult:
     def control():
         if control_callback:
@@ -307,6 +330,26 @@ def run_pipeline(
     source_newline = detect_newline(text)
     source_text = normalize_newlines(text)
     text = source_text
+    ocr_structure_notes: List[dict] = []
+    ocr_structure_patches: List[AppliedPatch] = []
+    if is_ocr_document(text):
+        emit("outline", 0.035, "正在根据 PDF 大纲校正章节与目录")
+        ocr_ops, ocr_structure_notes = build_ocr_structure_ops(text)
+        if ocr_ops:
+            ocr_lines = text.split("\n")
+            ok_planned, ocr_rejected = validate_ops(
+                ocr_lines,
+                [(Decision(candidate_id="ocr-outline", action="none"), ocr_ops)],
+            )
+            if not ocr_rejected:
+                out, ocr_structure_patches, _ = apply_patches(ocr_lines, ok_planned)
+                text = "\n".join(out)
+            else:
+                ocr_structure_notes.append({
+                    "line": 1,
+                    "status": "rejected",
+                    "reason": f"章节树补丁校验失败，已保留原文：{ocr_rejected[0].error}",
+                })
     template_notes: List[dict] = []
     template_applied = False
     template_patches: List[AppliedPatch] = []
@@ -328,6 +371,8 @@ def run_pipeline(
                 template_notes.append(
                     {"line": 1, "reason": f"模板转换编辑校验失败，已跳过：{t_rejected[0].error}"}
                 )
+
+    transformed_source_text = text
 
     emit("parse", 0.10, "正在解析 LaTeX 结构")
     doc = parse_latex(text)
@@ -556,36 +601,54 @@ def run_pipeline(
         ambiguous=len(ambiguous),
         usage=ai_usage,
     )
-    from .invariants import check_invariants
+    from .invariants import check_image_resources, check_invariants
 
     verification = {
         "content_invariant": content_invariant(
-            source_text.split("\n"), out, template_patches + applied
+            source_text.split("\n"),
+            out,
+            ocr_structure_patches + template_patches + applied,
         ),
-        "env_balance": compare_env_balance(source_text, result_text),
-        "braces": compare_braces(source_text, result_text),
-        "invariants": check_invariants(source_text, result_text),
+        "env_balance": compare_env_balance(transformed_source_text, result_text),
+        "braces": compare_braces(transformed_source_text, result_text),
+        "invariants": check_invariants(transformed_source_text, result_text),
         "known_issues": known_issues(result_text),
         "display_tags": check_display_tag_safety(result_text),
+        "ocr_structure": check_ocr_structure(result_text),
+        "resources": check_image_resources(result_text, resource_root),
         "ai_degraded": ai_degraded,
         "ai_usage": ai_usage,
         "decisions_reused": decisions_reused,
+        "compile_required": bool(require_compile),
+        "compile_required_when_available": bool(require_compile_when_available),
+        "resources_required": bool(require_resources),
     }
+    compile_check = bool(compile_check or require_compile or require_compile_when_available)
     if compile_check:
         emit("compile", 0.91, "正在比较编译结果")
         from .compilecheck import compile_latex
 
-        verification["compile_before"] = compile_latex(source_text)
+        verification["compile_before"] = compile_latex(transformed_source_text)
         verification["compile_after"] = compile_latex(result_text)
-    compile_safe = True
+    compile_safe = not require_compile
     if compile_check:
         cb = verification["compile_before"]
         ca = verification["compile_after"]
-        if cb.get("available") and ca.get("available"):
+        if require_compile:
+            compile_safe = bool(ca.get("available") and ca.get("ok"))
+        elif require_compile_when_available and ca.get("available"):
+            compile_safe = bool(ca.get("ok"))
+        elif cb.get("available") and ca.get("available"):
             compile_safe = bool(
                 ca.get("ok")
                 or (not cb.get("ok") and cb.get("errors", []) == ca.get("errors", []))
             )
+        else:
+            compile_safe = True
+    resources_safe = bool(
+        verification["resources"]["ok"]
+        and (verification["resources"]["checked"] or not require_resources)
+    )
     verification["compile"] = {
         "ok": compile_safe,
         "checked": bool(compile_check and verification.get("compile_before", {}).get("available")),
@@ -596,6 +659,8 @@ def run_pipeline(
         and verification["braces"]["ok"]
         and verification["invariants"]["ok"]
         and verification["display_tags"]["ok"]
+        and verification["ocr_structure"]["ok"]
+        and resources_safe
         and compile_safe
     )
     verification["checks"] = [
@@ -607,7 +672,22 @@ def run_pipeline(
         {"id": "refs", "label": "引用不变", "ok": verification["invariants"]["refs"]["equal"]},
         {"id": "images", "label": "图片路径不变", "ok": verification["invariants"]["images"]["equal"]},
         {"id": "display-math", "label": "展示公式语法合法", "ok": verification["display_tags"]["ok"]},
-        {"id": "compile", "label": "编译结果未恶化", "ok": compile_safe,
+        {
+            "id": "outline",
+            "label": "章节树与目录对应 PDF 大纲",
+            "ok": verification["ocr_structure"]["ok"],
+            "skipped": not verification["ocr_structure"]["checked"],
+        },
+        {
+            "id": "resources",
+            "label": "图片资源真实存在且位于项目内",
+            "ok": resources_safe,
+            "skipped": not verification["resources"]["checked"],
+        },
+        {"id": "compile", "label": (
+            "编译器可用时结果必须成功" if require_compile_when_available
+            else "编译结果未恶化"
+        ), "ok": compile_safe,
          "skipped": not verification["compile"]["checked"]},
     ]
     verification["safe_to_export"] = bool(ok)
@@ -619,6 +699,7 @@ def run_pipeline(
         applied, rejected, ambiguous, verification, mode,
         ai_notes=ai_notes, review=review_info,
         template_notes=template_notes, template_applied=template_applied,
+        ocr_structure_notes=ocr_structure_notes,
     )
     emit(
         "report", 0.97, "安全检查完成，正在生成审阅清单",

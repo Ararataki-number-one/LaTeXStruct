@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""编译校验（评审 P2 · Level 5）：本机存在 xelatex 时，对文本做一次真实编译，
-返回退出码/页数/错误摘要。整理前后各编译一次即可对比"错误不增加"。
+"""编译校验（评审 P2 · Level 5）：本机存在 xelatex 时执行真实编译，
+含目录/交叉引用时自动跑第二遍，使目录页码与书签目标进入验收范围。
 """
 
 from __future__ import annotations
@@ -48,10 +48,17 @@ def compile_latex(text: str, timeout: int = 240, extra_files: dict = None) -> Di
             with open(p, "wb") as f:
                 f.write(data)
         try:
-            proc = subprocess.run(
-                [exe, "-interaction=nonstopmode", "-halt-on-error", "main.tex"],
-                cwd=workdir, capture_output=True, timeout=timeout,
-            )
+            passes = 2 if any(token in text for token in (
+                "\\tableofcontents", "\\ref{", "\\pageref{", "\\cite{",
+            )) else 1
+            proc = None
+            for _ in range(passes):
+                proc = subprocess.run(
+                    [exe, "-interaction=nonstopmode", "-halt-on-error", "main.tex"],
+                    cwd=workdir, capture_output=True, timeout=timeout,
+                )
+                if proc.returncode != 0:
+                    break
         except subprocess.TimeoutExpired:
             return {"available": True, "ok": False, "pages": 0,
                     "errors": ["编译超时（>{}s）".format(timeout)], "log": ""}

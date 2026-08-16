@@ -18,15 +18,24 @@ from typing import Dict, List, Optional, Tuple
 
 AMSTHM_BLOCK = [
     "\\usepackage{amsthm}",
-    "\\newtheorem*{definition}{Definition}",
+    "\\theoremstyle{plain}",
     "\\newtheorem*{theorem}{Theorem}",
     "\\newtheorem*{lemma}{Lemma}",
     "\\newtheorem*{proposition}{Proposition}",
     "\\newtheorem*{corollary}{Corollary}",
+    "\\newtheorem*{conjecture}{Conjecture}",
+    "\\newtheorem*{claim}{Claim}",
+    "\\newtheorem*{fact}{Fact}",
     "\\theoremstyle{remark}",
     "\\newtheorem*{remark}{Remark}",
+    "\\newtheorem*{observation}{Observation}",
+    "\\newtheorem*{note}{Note}",
     "\\theoremstyle{definition}",
+    "\\newtheorem*{definition}{Definition}",
     "\\newtheorem*{example}{Example}",
+    "\\newtheorem*{problem}{Problem}",
+    "\\newtheorem*{question}{Question}",
+    "\\newtheorem*{exercise}{Exercise}",
 ]
 
 # 只识别真正的声明命令；``\\begin{theorem}`` 等环境使用不属于声明。
@@ -104,9 +113,16 @@ def build_ops(decision: Decision, lines: List[str], ctx: PatchContext) -> Tuple[
             PendingOp("insert_line", bs - 1, new=begin),
             PendingOp("insert_line", be, new=f"\\end{{{decision.env}}}"),
         ]
-        # 编号/标题词条剥离（keep_title_text=False 且给出可剥离前缀时）
+        # 编号/标题词条剥离。标题与正文同处 \textbf{...} 等样式命令时，
+        # 必须重写完整一行，避免删除半个命令后留下不配平花括号。
         prefix = decision.payload.get("title_prefix", "") if not decision.keep_title_text else ""
-        if prefix and lines[bs - 1].startswith(prefix):
+        title_line_old = decision.payload.get("title_line_old", "") if not decision.keep_title_text else ""
+        title_line_new = decision.payload.get("title_line_new", "") if not decision.keep_title_text else ""
+        if title_line_old and title_line_new:
+            if lines[bs - 1] != title_line_old:
+                return [], f"行 {bs} 的样式标题与扫描结果不符，保守放弃"
+            ops.append(PendingOp("replace_line", bs, old=title_line_old, new=title_line_new))
+        elif prefix and lines[bs - 1].startswith(prefix):
             ops.append(PendingOp("replace_prefix", bs, old=prefix, new=""))
         return ops, ""
 

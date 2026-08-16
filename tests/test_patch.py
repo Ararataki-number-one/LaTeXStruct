@@ -7,6 +7,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from latexstruct.core.patch import (  # noqa: E402
+    AMSTHM_BLOCK,
     AppliedPatch,
     Decision,
     Edit,
@@ -128,7 +129,7 @@ def test_preamble_add():
     ctx = PatchContext(preamble_anchor=3)
     d = Decision(candidate_id="pre", action="preamble-add", source="rule")
     ops, err = build_ops(d, lines, ctx)
-    assert not err and len(ops) == 10
+    assert not err and len(ops) == len(AMSTHM_BLOCK)
     out, applied, rejected = run(lines, d, ctx)
     assert rejected == []
     assert "\\usepackage{amsthm}" in out and "\\newtheorem*{theorem}{Theorem}" in out

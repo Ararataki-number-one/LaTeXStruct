@@ -355,18 +355,24 @@ def parse_decisions(
             # 编号/证明说明及可剥离前缀只能来自扫描器对原文的确定性提取，
             # 绝不采用模型生成的 optional_arg/keep_title_text。剥离条件与规则模式一致。
             strip_prefix = ""
+            title_line_old = ""
+            title_line_new = ""
             if c.kind == "proof":
                 source_optional = c.payload.get("proof_arg", "")
                 prefix = c.payload.get("strip_prefix", "")
-                remainder = c.title_text[len(prefix):].strip() if prefix else ""
-                if prefix and remainder and body[0] == c.span.start_line:
-                    strip_prefix = prefix
             else:
                 source_optional = c.payload.get("number", "")
                 prefix = c.payload.get("title_prefix", "")
-                remainder = c.title_text[len(prefix):].strip() if prefix else ""
-                if prefix and remainder and body[0] == c.span.start_line:
+            remainder = str(c.payload.get("title_remainder", "")).strip()
+            source_line_old = c.payload.get("title_line_old", "")
+            source_line_new = c.payload.get("title_line_new", "")
+            has_body = bool(remainder) or body[1] > body[0]
+            if body[0] == c.span.start_line and has_body:
+                if prefix:
                     strip_prefix = prefix
+                elif source_line_old and source_line_new:
+                    title_line_old = source_line_old
+                    title_line_new = source_line_new
             decisions.append(
                 Decision(
                     candidate_id=cid,
@@ -375,11 +381,15 @@ def parse_decisions(
                     body_span=body,
                     title_span=(body[0], body[0]),
                     optional_arg=str(source_optional or "")[:120],
-                    keep_title_text=not strip_prefix,
+                    keep_title_text=not (strip_prefix or title_line_new),
                     source="ai",
                     reason=str(item.get("reason", ""))[:120],
                     confidence=conf,
-                    payload={"title_prefix": strip_prefix},
+                    payload={
+                        "title_prefix": strip_prefix,
+                        "title_line_old": title_line_old,
+                        "title_line_new": title_line_new,
+                    },
                 )
             )
         else:  # move-boundary

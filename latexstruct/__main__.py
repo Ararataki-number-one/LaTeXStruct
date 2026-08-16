@@ -43,6 +43,11 @@ def main():
     ap = argparse.ArgumentParser(prog="latexstruct")
     ap.add_argument("--server", action="store_true", help="只启动本地服务（浏览器访问）")
     ap.add_argument("--port", type=int, default=0, help="端口（0=自动/默认）")
+    ap.add_argument(
+        "--updated-from",
+        default="",
+        help=argparse.SUPPRESS,
+    )
     args = ap.parse_args()
 
     import uvicorn
@@ -50,7 +55,7 @@ def main():
     from latexstruct.server.app import create_app
 
     try:
-        app = create_app()
+        app = create_app(updated_from=args.updated_from)
     except Exception as exc:  # noqa: BLE001
         if args.server:
             print(f"LaTeXStruct 启动失败: {exc}", file=sys.stderr)

@@ -27,7 +27,30 @@ from .scanner import (
     ScanResult,
     _first_nonempty_line,
     _match_title,
+    _semantic_view,
 )
+
+
+def _gap_is_blank_or_ocr_comments(doc: Document, end_line: int, next_line: int) -> bool:
+    lines = doc.text.split("\n")
+    for line_no in range(end_line + 1, next_line):
+        stripped = lines[line_no - 1].strip()
+        if stripped and not stripped.startswith("%"):
+            return False
+    return True
+
+
+def _proof_matches(proof_re, first: str) -> bool:
+    semantic, _wrapper = _semantic_view(first)
+    return bool(proof_re.match(semantic))
+
+
+def _is_ocr_page_separator(text: str) -> bool:
+    """Return true only for an isolated page-break command inserted by OCR merge."""
+    active = "\n".join(
+        line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("%")
+    ).strip()
+    return active in (r"\clearpage", r"\newpage")
 
 
 def _extend_proof_body(doc: Document, c, proof_re=None, continue_re=None) -> int:
@@ -50,21 +73,28 @@ def _extend_proof_body(doc: Document, c, proof_re=None, continue_re=None) -> int
     )
     if idx is None:
         return end
+    has_body = bool(str(c.payload.get("title_remainder", "")).strip())
     for b in blocks[idx + 1 :]:
         if b.span.start_line <= end:
             continue
-        if b.span.start_line > end + 2:
-            break  # 超过一个空行的间隔 → 结构断裂
+        if not _gap_is_blank_or_ocr_comments(doc, end, b.span.start_line):
+            break
         if b.kind == "displaymath":
             end = b.span.end_line
+            has_body = True
             continue
         if b.kind == "env":
             end = b.span.end_line  # 公式/盒子等环境整体并入
+            has_body = True
             continue
         if b.kind != "para":
             continue
+        if _is_ocr_page_separator(b.text):
+            end = b.span.end_line
+            continue
         if set(b.in_env) & BOX_ENVS:
             end = b.span.end_line  # 盒内中文译文并入
+            has_body = True
             continue
         first = _first_nonempty_line(b.text)
         if not first:
@@ -73,15 +103,98 @@ def _extend_proof_body(doc: Document, c, proof_re=None, continue_re=None) -> int
         if any(mk in b.text for mk in PROOF_END_MARKERS):
             end = b.span.end_line
             break
-        if _match_title(first) or proof_re.match(first) or SECTION_START_RE.match(first):
+        if _match_title(first) or _proof_matches(proof_re, first) or SECTION_START_RE.match(first):
             break
-        stripped = first.lstrip()
+        semantic, wrapper = _semantic_view(first)
+        stripped = semantic.lstrip()
+        # 配平环境会被 parser 归为 env；普通段落以 begin 开头说明源环境未闭合。
+        if stripped.startswith("\\begin"):
+            break
+        if not has_body:
+            # ``Proof.`` 独占一行时，后面的第一段才是证明正文；不能因其以
+            # 大写字母开头就误判为新的叙述段。
+            end = b.span.end_line
+            has_body = True
+            continue
         if (
             continue_re.match(stripped)
             or stripped[:1].islower()
+            or wrapper is not None
             or stripped.startswith(("\\(", "$", "\\[", "\\begin"))
         ):
             end = b.span.end_line
+            continue
+        break
+    return end
+
+
+def _extend_theorem_body(doc: Document, c, proof_re=None, continue_re=None) -> int:
+    """跨显示公式/列表/分页注释扩展定理陈述，遇到新结构立即停止。"""
+    proof_re = proof_re or PROOF_RE
+    continue_re = continue_re or PROOF_CONTINUE_RE
+    end = c.span.end_line
+    blocks = doc.blocks
+    idx = next(
+        (
+            i for i, block in enumerate(blocks)
+            if block.kind == "para" and block.span.start_line == c.span.start_line
+        ),
+        None,
+    )
+    if idx is None:
+        return end
+    has_body = bool(str(c.payload.get("title_remainder", "")).strip())
+    for block in blocks[idx + 1 :]:
+        if block.span.start_line <= end:
+            continue
+        if not _gap_is_blank_or_ocr_comments(doc, end, block.span.start_line):
+            break
+        if block.kind == "displaymath":
+            end = block.span.end_line
+            has_body = True
+            continue
+        if block.kind == "env":
+            # 展示公式与作为陈述组成部分的列表整体并入；proof/下一个定理环境
+            # 已在 scanner 的 skip 区域中，不会作为这里的裸标题候选出现。
+            if block.name in (
+                "equation", "equation*", "align", "align*", "alignat", "alignat*",
+                "gather", "gather*", "multline", "multline*", "itemize", "enumerate",
+                "description", "cases",
+            ):
+                end = block.span.end_line
+                has_body = True
+                continue
+            break
+        if block.kind != "para":
+            break
+        if _is_ocr_page_separator(block.text):
+            end = block.span.end_line
+            continue
+        first = _first_nonempty_line(block.text)
+        if not first:
+            end = block.span.end_line
+            continue
+        semantic, wrapper = _semantic_view(first)
+        if (
+            _match_title(first)
+            or _proof_matches(proof_re, first)
+            or SECTION_START_RE.match(first)
+        ):
+            break
+        stripped = semantic.lstrip()
+        if stripped.startswith("\\begin"):
+            break
+        if not has_body:
+            # 纯标题行后的第一段就是陈述正文。
+            end = block.span.end_line
+            has_body = True
+            continue
+        if (
+            wrapper is not None
+            or stripped[:1].islower()
+            or stripped.startswith(("\\(", "$", "\\[", "\\begin"))
+        ):
+            end = block.span.end_line
             continue
         break
     return end
@@ -164,14 +277,21 @@ def build_rule_decisions(
             # 纯标题行没有可保留的正文，仍原样保守保留。
             num = c.payload.get("number")
             prefix = c.payload.get("title_prefix", "")
-            remainder = c.title_text[len(prefix):].strip() if prefix else ""
-            keep = not (prefix and remainder)
+            remainder = str(c.payload.get("title_remainder", "")).strip()
+            title_line_old = c.payload.get("title_line_old", "")
+            title_line_new = c.payload.get("title_line_new", "")
+            body_end = _extend_theorem_body(
+                doc, c, proof_re=proof_re, continue_re=continue_re
+            )
+            has_body = bool(remainder) or body_end > c.span.start_line
+            can_rewrite = bool(title_line_old and title_line_new)
+            keep = not ((prefix or can_rewrite) and has_body)
             decisions.append(
                 Decision(
                     candidate_id=c.id,
                     action="wrap",
                     env=c.env_hint,
-                    body_span=(c.span.start_line, c.span.end_line),
+                    body_span=(c.span.start_line, body_end),
                     title_span=(c.span.start_line, c.span.start_line),
                     optional_arg=num or "",
                     keep_title_text=keep,
@@ -181,15 +301,23 @@ def build_rule_decisions(
                         if num else "裸写标题包裹为定理类环境（剥离重复标题词条）"
                     ) if not keep else "裸写标题包裹为定理类环境",
                     confidence=c.confidence,
-                    payload={"title_prefix": "" if keep else prefix},
+                    payload={
+                        "title_prefix": "" if keep else prefix,
+                        "title_line_old": "" if keep else title_line_old,
+                        "title_line_new": "" if keep else title_line_new,
+                    },
                 )
             )
         elif c.kind == "proof":
             strip = c.payload.get("strip_prefix", "")
             arg = c.payload.get("proof_arg", "")
-            remainder = c.title_text[len(strip):].strip() if strip else ""
-            keep = not strip or not remainder
+            remainder = str(c.payload.get("title_remainder", "")).strip()
+            title_line_old = c.payload.get("title_line_old", "")
+            title_line_new = c.payload.get("title_line_new", "")
             body_end = _extend_proof_body(doc, c, proof_re=proof_re, continue_re=continue_re)  # 整段证明
+            has_body = bool(remainder) or body_end > c.span.start_line
+            can_rewrite = bool(title_line_old and title_line_new)
+            keep = not ((strip or can_rewrite) and has_body)
             decisions.append(
                 Decision(
                     candidate_id=c.id,
@@ -201,7 +329,11 @@ def build_rule_decisions(
                     source="rule",
                     reason="证明起始语包裹为 proof 环境（覆盖整段证明）",
                     confidence=c.confidence,
-                    payload={"title_prefix": "" if keep else strip},
+                    payload={
+                        "title_prefix": "" if keep else strip,
+                        "title_line_old": "" if keep else title_line_old,
+                        "title_line_new": "" if keep else title_line_new,
+                    },
                 )
             )
         elif c.kind == "exercise-section":

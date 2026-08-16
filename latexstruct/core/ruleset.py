@@ -24,7 +24,7 @@ RULESETS_DIR = Path(__file__).resolve().parent.parent / "rulesets"
 CJK_RE = re.compile(r"^[\u4e00-\u9fff]+$")
 
 DEFAULT_PROOF_STARTS = [
-    r"Proof\.?(?:\s|$)",
+    r"Proof\s*[:.]?(?:\s|$)",
     r"Proof\s*\[[^\]]*\](?:\s*\.)?(?:\s|$)",
     r"Proof of\b",
     r"Sketch of the proof\.?(?:\s|$)",
@@ -53,6 +53,14 @@ DEFAULT_TITLE_PATTERNS = {
     "corollary": ["Corollary", "推论"],
     "remark": ["Remark", "注", "注记"],
     "example": ["Example", "例"],
+    "conjecture": ["Conjecture", "猜想"],
+    "problem": ["Problem", "问题"],
+    "question": ["Question"],
+    "claim": ["Claim"],
+    "fact": ["Fact"],
+    "observation": ["Observation"],
+    "note": ["Note"],
+    "exercise": ["Exercise"],
 }
 
 ACADEMIC_TITLE_PATTERNS = {

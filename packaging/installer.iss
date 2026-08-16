@@ -42,10 +42,10 @@ Name: "{group}\LaTeXStruct"; Filename: "{app}\LaTeXStruct.exe"
 Name: "{autodesktop}\LaTeXStruct"; Filename: "{app}\LaTeXStruct.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\LaTeXStruct.exe"; Description: "启动 LaTeXStruct"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\LaTeXStruct.exe"; Description: "启动 LaTeXStruct"; Parameters: "{code:UpdateLaunchParameters}"; Flags: nowait postinstall skipifsilent
 ; Silent initial installs stay silent. A silent upgrade (including the old v1.1.1
 ; updater command line) starts the newly installed version after replacement.
-Filename: "{app}\LaTeXStruct.exe"; Flags: nowait skipifnotsilent; Check: RestartAfterSilentUpdate
+Filename: "{app}\LaTeXStruct.exe"; Parameters: "{code:UpdateLaunchParameters}"; Flags: nowait skipifnotsilent; Check: RestartAfterSilentUpdate
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
@@ -53,11 +53,24 @@ Type: filesandordirs; Name: "{app}"
 [Code]
 var
   WasInstalledBefore: Boolean;
+  PreviousVersion: String;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if CurStep = ssInstall then
+  if CurStep = ssInstall then begin
     WasInstalledBefore := FileExists(ExpandConstant('{app}\LaTeXStruct.exe'));
+    PreviousVersion := '';
+    if WasInstalledBefore then
+      GetVersionNumbersString(ExpandConstant('{app}\LaTeXStruct.exe'), PreviousVersion);
+  end;
+end;
+
+function UpdateLaunchParameters(Param: String): String;
+begin
+  if WasInstalledBefore and (PreviousVersion <> '') then
+    Result := '--updated-from "' + PreviousVersion + '"'
+  else
+    Result := '';
 end;
 
 function RestartAfterSilentUpdate: Boolean;

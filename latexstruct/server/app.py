@@ -22,7 +22,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Optional
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -42,6 +42,8 @@ _ocr_jobs_lock = threading.RLock()
 _process_jobs = ProcessJobManager()
 _update_state_lock = threading.RLock()
 _update_preparing = False
+_update_jobs_lock = threading.RLock()
+_update_jobs: Dict[str, dict] = {}
 
 
 def _ocr_snapshot_preserved(job: dict) -> bool:
@@ -121,6 +123,108 @@ def _cancel_update_preparation():
     global _update_preparing
     with _update_state_lock:
         _update_preparing = False
+
+
+class _UpdateCancelled(Exception):
+    """用户在安装器完成校验前取消了下载。"""
+
+
+def _update_job_snapshot(job_id: str) -> dict:
+    with _update_jobs_lock:
+        job = _update_jobs.get(job_id)
+        if not job:
+            raise HTTPException(404, "更新任务不存在或已结束")
+        return {
+            key: deepcopy(value)
+            for key, value in job.items()
+            if key not in {"cancel_requested"}
+        }
+
+
+def _update_job_cancelled(job_id: str) -> bool:
+    with _update_jobs_lock:
+        job = _update_jobs.get(job_id)
+        return not job or bool(job.get("cancel_requested"))
+
+
+def _set_update_job(job_id: str, **values) -> None:
+    with _update_jobs_lock:
+        job = _update_jobs.get(job_id)
+        if job:
+            job.update(values)
+            job["updated_at"] = time.time()
+
+
+def _run_update_job(job_id: str, info) -> None:
+    """后台下载并校验安装器；只在校验完成后安排退出与安装。"""
+    from ..updater import (
+        download_update,
+        request_application_exit,
+        schedule_installer_after_exit,
+    )
+
+    try:
+        if _update_job_cancelled(job_id):
+            raise _UpdateCancelled
+        _set_update_job(
+            job_id,
+            status="downloading",
+            latest=info.latest,
+            notes=info.notes,
+            total_bytes=max(0, int(info.size or 0)),
+            message="正在下载安装包",
+        )
+
+        def on_progress(done: int, total: int) -> None:
+            if _update_job_cancelled(job_id):
+                raise _UpdateCancelled
+            safe_total = max(0, int(total or info.size or 0))
+            safe_done = max(0, int(done or 0))
+            progress = min(1.0, safe_done / safe_total) if safe_total else 0.0
+            _set_update_job(
+                job_id,
+                status="downloading",
+                downloaded_bytes=safe_done,
+                total_bytes=safe_total,
+                progress=progress,
+                message="正在下载安装包",
+            )
+
+        dest = download_update(info, progress=on_progress)
+        if _update_job_cancelled(job_id):
+            raise _UpdateCancelled
+        _set_update_job(
+            job_id,
+            status="verifying",
+            progress=1.0,
+            downloaded_bytes=max(0, int(info.size or 0)),
+            message="下载完成，安全校验已通过",
+        )
+        schedule_installer_after_exit(dest)
+        _set_update_job(
+            job_id,
+            status="restarting",
+            progress=1.0,
+            message="即将关闭并安装，新版本会自动启动",
+        )
+        # 给前端至少一次轮询机会，以显示“校验完成 / 即将重启”。
+        request_application_exit(delay=1.2)
+    except _UpdateCancelled:
+        _set_update_job(
+            job_id,
+            status="cancelled",
+            message="更新下载已取消，当前应用保持运行",
+            error="",
+        )
+        _cancel_update_preparation()
+    except Exception:  # noqa: BLE001
+        _set_update_job(
+            job_id,
+            status="error",
+            message="更新没有安装，当前应用保持运行",
+            error="更新包下载、校验或启动失败；请检查网络后重试",
+        )
+        _cancel_update_preparation()
 
 MAX_FOLDER_FILES = 1000
 MAX_FOLDER_FILE_BYTES = 25 * 1024 * 1024
@@ -372,8 +476,16 @@ class ConfigRequest(BaseModel):
     keyring: Optional[bool] = None
 
 
-def create_app() -> FastAPI:
+def _normalized_previous_version(value: str) -> str:
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?", (value or "").strip())
+    if not match:
+        return ""
+    return ".".join(match.groups()[:3])
+
+
+def create_app(updated_from: str = "") -> FastAPI:
     app = FastAPI(title="LaTeXStruct", docs_url="/api/docs")
+    previous_version = _normalized_previous_version(updated_from)
 
     @app.exception_handler(ValueError)
     async def value_error(_request: Request, exc: ValueError):
@@ -432,15 +544,21 @@ def create_app() -> FastAPI:
             "error": info.error,
         }
 
+    @app.get("/api/update/result")
+    def update_result():
+        """安装器启动新版本时提供一次会话级成功提示；不包含任何本地路径。"""
+        from .. import __version__
+
+        return {
+            "updated": bool(previous_version and previous_version != __version__),
+            "previous": previous_version,
+            "current": __version__,
+        }
+
     @app.post("/api/update/install")
-    def update_install(background_tasks: BackgroundTasks):
+    def update_install():
         from .. import UPDATE_REPO, __version__
-        from ..updater import (
-            check_for_updates,
-            download_update,
-            request_application_exit,
-            schedule_installer_after_exit,
-        )
+        from ..updater import check_for_updates
 
         _reserve_update_preparation()
         try:
@@ -451,22 +569,76 @@ def create_app() -> FastAPI:
                 raise HTTPException(409, "当前已经是最新版本，无需重复安装")
             if not info.url:
                 raise HTTPException(502, "新版发布中没有可用的 Windows 安装包")
-            dest = download_update(info)
-            schedule_installer_after_exit(dest)
         except HTTPException:
             _cancel_update_preparation()
             raise
         except Exception:  # noqa: BLE001
             _cancel_update_preparation()
             raise HTTPException(
-                502,
-                "更新包下载、校验或启动失败；当前应用不会关闭，请检查网络后重试",
+                502, "检查新版安装包失败；当前应用保持运行，请检查网络后重试"
             ) from None
-        background_tasks.add_task(request_application_exit)
-        return {
+
+        job_id = uuid.uuid4().hex
+        now = time.time()
+        with _update_jobs_lock:
+            for old_id, old_job in list(_update_jobs.items()):
+                if old_job.get("status") in {"cancelled", "error"}:
+                    _update_jobs.pop(old_id, None)
+            _update_jobs[job_id] = {
+                "id": job_id,
+                "status": "checking",
+                "progress": 0.0,
+                "downloaded_bytes": 0,
+                "total_bytes": max(0, int(info.size or 0)),
+                "latest": info.latest,
+                "notes": info.notes,
+                "message": "正在准备安全下载",
+                "error": "",
+                "cancel_requested": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+        try:
+            worker = threading.Thread(
+                target=_run_update_job,
+                args=(job_id, info),
+                daemon=True,
+                name=f"latexstruct-update-{job_id[:8]}",
+            )
+            worker.start()
+        except Exception:  # noqa: BLE001
+            with _update_jobs_lock:
+                _update_jobs.pop(job_id, None)
+            _cancel_update_preparation()
+            raise HTTPException(
+                500, "更新任务无法启动；当前应用保持运行，请稍后重试"
+            ) from None
+        return JSONResponse(status_code=202, content={
             "ok": True,
-            "note": "更新包已校验，应用即将关闭；安装完成后会自动启动新版本",
-        }
+            "job_id": job_id,
+            "note": "已开始安全下载；校验通过后应用会自动重启",
+        })
+
+    @app.get("/api/update/status/{job_id}")
+    def update_status(job_id: str):
+        return _update_job_snapshot(job_id)
+
+    @app.post("/api/update/status/{job_id}/cancel")
+    def update_cancel(job_id: str):
+        with _update_jobs_lock:
+            job = _update_jobs.get(job_id)
+            if not job:
+                raise HTTPException(404, "更新任务不存在或已结束")
+            status = job.get("status")
+            if status in {"cancelled", "error"}:
+                return {"ok": True, "status": status}
+            if status not in {"checking", "downloading", "cancelling"}:
+                raise HTTPException(409, "安装包已完成校验，应用即将重启，不能再取消")
+            job["cancel_requested"] = True
+            job["status"] = "cancelling"
+            job["message"] = "正在安全取消下载"
+            job["updated_at"] = time.time()
+        return {"ok": True, "status": "cancelling"}
 
     @app.get("/api/projects")
     def list_projects():
@@ -804,6 +976,7 @@ def create_app() -> FastAPI:
             prior = json.loads(info_path.read_text(encoding="utf-8"))
         cached = prior.get("decision_cache") if reuse_decisions else None
         overrides = [_decision_from_dict(item) for item in cached] if cached else None
+        is_ocr_project = p.get("kind") == "ocr"
         res = run_pipeline(
             text, mode=mode, ai_config=cfg.to_ai_config() if mode == "ai" else None,
             template=template, pack=pack, exclude=exclude or None,
@@ -812,6 +985,10 @@ def create_app() -> FastAPI:
             ai_notes_override=prior.get("ai_notes") if overrides else None,
             progress_callback=progress_callback,
             control_callback=control_callback,
+            compile_check=is_ocr_project,
+            require_compile_when_available=is_ocr_project,
+            resource_root=get_store()._dir(pid) if is_ocr_project else None,
+            require_resources=is_ocr_project,
         )
         extra_verification = {}
         if p.get("kind") == "folder":
@@ -1137,10 +1314,12 @@ def create_app() -> FastAPI:
             if not upload.startswith(b"%PDF-"):
                 raise HTTPException(400, "文件扩展名是 PDF，但内容不是有效 PDF")
             from ..core.ai import LLMError
-            from ..ocr import pdf_page_count_bytes
+            from ..ocr import pdf_document_info_bytes
 
             try:
-                source_total = pdf_page_count_bytes(upload)
+                pdf_info = pdf_document_info_bytes(upload)
+                source_total = int(pdf_info["pages"])
+                source_outline = list(pdf_info.get("outline") or [])
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from None
             except LLMError as exc:
@@ -1154,9 +1333,16 @@ def create_app() -> FastAPI:
             except LLMError as exc:
                 raise HTTPException(400, str(exc)) from None
             source_total = 1
-        return suffix, upload, source_total
+            source_outline = []
+        return suffix, upload, source_total, source_outline
 
-    def _create_ocr_job(suffix: str, upload: bytes, source_total: int, status: str):
+    def _create_ocr_job(
+        suffix: str,
+        upload: bytes,
+        source_total: int,
+        status: str,
+        source_outline: list[dict] = None,
+    ):
         tmpdir = tempfile.mkdtemp(prefix="ls-ocr-")
         target = os.path.join(tmpdir, f"scan{suffix}")
         try:
@@ -1171,6 +1357,7 @@ def create_app() -> FastAPI:
             "status": status,
             "source_type": "pdf" if suffix == ".pdf" else "image",
             "source_total": source_total,
+            "source_outline": list(source_outline or []),
             "progress": 0.0,
             "total": 0,
             "done": 0,
@@ -1306,7 +1493,7 @@ def create_app() -> FastAPI:
                     for page_no in job["selected_pages"]
                     if job["pages"][page_no]["status"] == "done"
                 ]
-                merged = merge_book(chunks)
+                merged = merge_book(chunks, outline=job.get("source_outline"))
                 job["raw_tex"] = merged
                 job["raw_ready"] = bool(chunks)
                 job["raw_chars"] = len(merged)
@@ -1396,8 +1583,10 @@ def create_app() -> FastAPI:
     async def ocr_inspect(file: UploadFile = File(...)):
         """上传一次 PDF/图片并创建不可猜测的待启动任务。"""
         _cleanup_ocr_jobs()
-        suffix, upload, source_total = await _read_ocr_upload(file)
-        job = _create_ocr_job(suffix, upload, source_total, "ready")
+        suffix, upload, source_total, source_outline = await _read_ocr_upload(file)
+        job = _create_ocr_job(
+            suffix, upload, source_total, "ready", source_outline=source_outline
+        )
         return {
             "id": job["id"],
             "source_type": job["source_type"],
@@ -1717,7 +1906,7 @@ def create_app() -> FastAPI:
                 raw_tex = job["raw_tex"]
         # 原始 OCR 永远作为 source.tex 保存；结构化结果单独写 result.tex，二者不混写。
         try:
-            pid = get_store().create(raw_tex, name, "rule", "")
+            pid = get_store().create(raw_tex, name, "rule", "", kind="ocr")
             with _ocr_jobs_lock:
                 current = _ocr_jobs.get(jid)
                 if (

@@ -25,7 +25,7 @@ from .patch import NEW_THEOREM_RE
 THEOREM_LIKE_ENVS = {
     "theorem", "lemma", "proposition", "corollary", "definition",
     "remark", "example", "conjecture", "problem", "claim",
-    "exercise", "problemset", "note",
+    "question", "fact", "observation", "exercise", "problemset", "note",
 }
 BOX_ENVS = {"tcolorbox", "mdframed", "framed", "quote", "quotation"}
 ITEM_ENVS = {"enumerate", "itemize", "description", "problemset", "exercise", "problem"}
@@ -47,7 +47,8 @@ EN_MAP = {
     "Definition": "definition", "Theorem": "theorem", "Lemma": "lemma",
     "Proposition": "proposition", "Corollary": "corollary", "Remark": "remark",
     "Example": "example", "Conjecture": "conjecture", "Problem": "problem",
-    "Claim": "claim",
+    "Question": "question", "Claim": "claim", "Fact": "fact",
+    "Observation": "observation", "Note": "note", "Exercise": "exercise",
     "定义": "definition", "定理": "theorem", "引理": "lemma",
     "命题": "proposition", "推论": "corollary", "注": "remark",
     "注记": "remark", "例": "example",
@@ -56,7 +57,7 @@ EN_MAP = {
 # 英文标题：关键词 + 可选编号 + 可选句点/冒号，后随空白/行尾/中文括号
 EN_TITLE_RE = re.compile(
     r"^(Definition|Theorem|Lemma|Proposition|Corollary|Remark|Example|"
-    r"Conjecture|Problem|Claim)\b"
+    r"Conjecture|Problem|Question|Claim|Fact|Observation|Note|Exercise)\b"
     r"(?:\s+(\d+(?:\.\d+)*))?\s*[.:]?\s*(?=\s|$|（|\()"
 )
 # 中文长关键词：关键词后必须跟 编号/标点/空白+内容/括号（防"定义域"类误匹配）
@@ -75,14 +76,25 @@ CN_TITLE_SHORT_RE = re.compile(
 CN_SHORT_NUM_RE = re.compile(r"^(注|例)\s*(\d+(?:\.\d+)*)\s*[:：.。]?\s*")
 
 PROOF_RE = re.compile(
-    r"^(?:Proof\.?(?:\s|$)|Proof\s*\[[^\]]*\](?:\s*\.)?(?:\s|$)|Proof of\b|"
+    r"^(?:Proof\s*[:.]?(?:\s|$)|Proof\s*\[[^\]]*\](?:\s*\.)?(?:\s|$)|Proof of\b|"
     r"Sketch of the proof\.?(?:\s|$)|"
     r"证明\s*[:：]\s*|证明\s*$|证明如下\s*[:：]?\s*)"
 )
 # 可安全剥离的证明起始前缀（剩余正文非空时才剥离）
 PROOF_BRACKET_RE = re.compile(r"^Proof\s*\[([^\]]*)\](?:\s*\.)?\s*")
 PROOF_SKETCH_RE = re.compile(r"^Sketch of the proof\.?\s*")
-PROOF_SIMPLE_RE = re.compile(r"^(?:Proof\.\s+|Proof\s+|证明[。：]\s*|证明如下[：:]\s*)")
+PROOF_SIMPLE_RE = re.compile(
+    r"^(?:Proof(?!\s+of\b)\s*[:.]\s*|Proof(?!\s+of\b)\s+|"
+    r"证明[。：]\s*|证明如下[：:]\s*)"
+)
+PROOF_OF_RE = re.compile(
+    r"^(Proof of\s+.+?)(?:[。:：]|\.(?=$|\s+(?=[A-Z\\$\(一-鿿])))\s*",
+    re.I,
+)
+STYLED_SEMANTIC_RE = re.compile(
+    r"^(?P<leading>\s*(?:\\noindent\s*)?)"
+    r"\\(?P<style>textbf|textit|emph|textsc)\s*\{"
+)
 
 # 证明范围扩展（规则模式启发式）
 SECTION_START_RE = re.compile(r"^\s*\\(chapter|section|subsection|subsubsection)\b")
@@ -152,12 +164,26 @@ def scan(doc: Document, pack=None) -> ScanResult:
         return c
 
     def match_title(first):
+        semantic, wrapper = _semantic_view(first)
         for env, pat in title_res:
-            m = pat.match(first)
+            m = pat.match(semantic)
             if m:
                 num = m.group(1) if m.groups() else None
-                return env, num, m.group(0)
+                raw_prefix = _raw_semantic_prefix(first, semantic, m.end(), wrapper)
+                replacement = _styled_semantic_replacement(first, m.end(), wrapper)
+                return (
+                    env,
+                    num,
+                    raw_prefix,
+                    semantic[m.end():].strip(),
+                    first if replacement else "",
+                    replacement,
+                )
         return None
+
+    def match_proof(first):
+        semantic, _wrapper = _semantic_view(first)
+        return proof_re.match(semantic)
 
     # 盒子索引（一次构建，全程复用）
     box_ranges = [r for r in doc.env_ranges if r[0] in BOX_ENVS]
@@ -184,7 +210,7 @@ def scan(doc: Document, pack=None) -> ScanResult:
             continue
         m = match_title(first)
         if m:
-            kind_env, num, prefix = m
+            kind_env, num, prefix, remainder, title_line_old, title_line_new = m
             add(
                 kind="theorem-like",
                 rule_id="bare-title",
@@ -197,14 +223,17 @@ def scan(doc: Document, pack=None) -> ScanResult:
                     "keyword": kind_env,
                     "number": num,
                     "title_prefix": prefix,
+                    "title_remainder": remainder,
+                    "title_line_old": title_line_old,
+                    "title_line_new": title_line_new,
                     "in_env": tuple(envs),
                     "section_path": b.section_path,
                     "text": b.text,
                 },
             )
             continue
-        if proof_re.match(first):
-            strip, arg = _proof_strip(first)
+        if match_proof(first):
+            strip, arg, remainder, title_line_old, title_line_new = _proof_metadata(first)
             add(
                 kind="proof",
                 rule_id="proof-start",
@@ -219,6 +248,9 @@ def scan(doc: Document, pack=None) -> ScanResult:
                     "text": b.text,
                     "strip_prefix": strip,
                     "proof_arg": arg,
+                    "title_remainder": remainder,
+                    "title_line_old": title_line_old,
+                    "title_line_new": title_line_new,
                 },
             )
             continue
@@ -300,7 +332,7 @@ def scan(doc: Document, pack=None) -> ScanResult:
                 starts_new_structure = bool(
                     SECTION_START_RE.match(first)
                     or match_title(first)
-                    or proof_re.match(first)
+                    or match_proof(first)
                 )
                 if not starts_new_structure:
                     add(
@@ -356,38 +388,153 @@ def _first_nonempty_line(text: str) -> str:
     return ""
 
 
+def _semantic_view(first: str) -> Tuple[str, Optional[dict]]:
+    """返回可匹配的可见文本，并记录安全可剥离的行首样式包装。"""
+    match = STYLED_SEMANTIC_RE.match(first)
+    if not match:
+        return first, None
+    opening = first.find("{", match.start())
+    depth = 0
+    escaped = False
+    closing = -1
+    for index in range(opening, len(first)):
+        char = first[index]
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                closing = index
+                break
+    if closing < 0:
+        return first, None
+    inner = first[opening + 1 : closing]
+    trailing = first[closing + 1 :]
+    return inner + trailing, {
+        "opening": opening,
+        "inner": inner,
+        "closing": closing,
+        "trailing": trailing,
+    }
+
+
+def _raw_semantic_prefix(
+    first: str,
+    semantic: str,
+    match_end: int,
+    wrapper: Optional[dict],
+) -> str:
+    if wrapper is None:
+        return semantic[:match_end]
+    inner = wrapper["inner"]
+    # 只在样式命令内部恰好只有标题词条时剥离整个包装；否则保留原行，
+    # 避免删除半个 \textbf{...} 后留下不配平花括号。
+    if inner[match_end:].strip():
+        return ""
+    end = int(wrapper["closing"]) + 1
+    while end < len(first) and first[end].isspace():
+        end += 1
+    return first[:end]
+
+
+def _styled_semantic_replacement(
+    first: str,
+    match_end: int,
+    wrapper: Optional[dict],
+) -> str:
+    """安全删除样式命令内部的标题前缀，同时保留样式和正文。"""
+    if wrapper is None:
+        return ""
+    inner = str(wrapper["inner"])
+    # 匹配若已经越过样式命令的右花括号，应走普通前缀删除；若样式命令
+    # 内没有正文，则也没有必要重写整行。
+    if match_end > len(inner) or not inner[match_end:].strip():
+        return ""
+    opening = int(wrapper["opening"])
+    remainder = inner[match_end:].lstrip()
+    return first[: opening + 1] + remainder + "}" + str(wrapper["trailing"])
+
+
 def _match_title(first: str):
     """返回 (关键词, 编号, 可剥离前缀)；无匹配返回 None。"""
-    m = EN_TITLE_RE.match(first)
+    semantic, wrapper = _semantic_view(first)
+    m = EN_TITLE_RE.match(semantic)
     if m:
-        return m.group(1), m.group(2), m.group(0)
-    m = CN_NUM_PREFIX_RE.match(first)
+        return (
+            m.group(1),
+            m.group(2),
+            _raw_semantic_prefix(first, semantic, m.end(), wrapper),
+        )
+    m = CN_NUM_PREFIX_RE.match(semantic)
     if m and m.group(2):
-        return m.group(1), m.group(2), m.group(0)
-    m = CN_TITLE_RE.match(first)
+        return (
+            m.group(1),
+            m.group(2),
+            _raw_semantic_prefix(first, semantic, m.end(), wrapper),
+        )
+    m = CN_TITLE_RE.match(semantic)
     if m:
-        return m.group(1), None, m.group(0)
-    m = CN_SHORT_NUM_RE.match(first)
+        return (
+            m.group(1),
+            None,
+            _raw_semantic_prefix(first, semantic, m.end(), wrapper),
+        )
+    m = CN_SHORT_NUM_RE.match(semantic)
     if m and m.group(2):
-        return m.group(1), m.group(2), m.group(0)
-    m = CN_TITLE_SHORT_RE.match(first)
+        return (
+            m.group(1),
+            m.group(2),
+            _raw_semantic_prefix(first, semantic, m.end(), wrapper),
+        )
+    m = CN_TITLE_SHORT_RE.match(semantic)
     if m:
-        return m.group(1), None, m.group(0)
+        return (
+            m.group(1),
+            None,
+            _raw_semantic_prefix(first, semantic, m.end(), wrapper),
+        )
     return None
 
 
+def _proof_metadata(first: str):
+    """返回证明标题的安全前缀、说明、正文及可选整行重写。"""
+    semantic, wrapper = _semantic_view(first)
+    m = PROOF_BRACKET_RE.match(semantic)
+    if m:
+        label = m.group(1)
+    else:
+        m = PROOF_SKETCH_RE.match(semantic)
+        if m:
+            label = "Sketch"
+        else:
+            m = PROOF_OF_RE.match(semantic)
+            if m:
+                label = m.group(1).rstrip(".。:：").strip()
+            else:
+                m = PROOF_SIMPLE_RE.match(semantic)
+                label = ""
+    if not m:
+        return "", "", "", "", ""
+    replacement = _styled_semantic_replacement(first, m.end(), wrapper)
+    return (
+        _raw_semantic_prefix(first, semantic, m.end(), wrapper),
+        label,
+        semantic[m.end():].strip(),
+        first if replacement else "",
+        replacement,
+    )
+
+
 def _proof_strip(first: str):
-    """返回 (可剥离前缀, 可选参数)。Proof of ... 等含语义的形式不剥离。"""
-    m = PROOF_BRACKET_RE.match(first)
-    if m:
-        return m.group(0), m.group(1)
-    m = PROOF_SKETCH_RE.match(first)
-    if m:
-        return m.group(0), "Sketch"
-    m = PROOF_SIMPLE_RE.match(first)
-    if m:
-        return m.group(0), ""
-    return "", ""
+    """兼容旧调用：返回 (可剥离前缀, 可选参数)。"""
+    prefix, label, _remainder, _old, _new = _proof_metadata(first)
+    return prefix, label
 
 
 def offset_to_line(doc: Document, off: int) -> int:

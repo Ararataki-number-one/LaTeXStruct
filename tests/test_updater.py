@@ -111,6 +111,13 @@ def test_check_for_updates_requires_github_asset_digest():
     assert info.url.endswith("LaTeXStruct-setup-1.2.3.exe")
     assert info.digest == asset["digest"]
 
+    # 新版启动后的成功弹窗仍需读取当前 Release 说明。
+    response = _DownloadResponse(json.dumps(payload).encode())
+    with patch("latexstruct.updater.urllib.request.urlopen", return_value=response):
+        current = check_for_updates("owner/repo", "1.2.3")
+    assert current.available is False
+    assert current.latest == "v1.2.3" and current.notes == "notes"
+
 
 def test_download_file_checks_size_and_sha256_atomically(tmp_path):
     import hashlib

@@ -56,6 +56,8 @@ except ImportError:  # 依赖未安装 → 跳过
 def _client(tmp):
     srv._process_jobs.clear()
     srv._cancel_update_preparation()
+    with srv._update_jobs_lock:
+        srv._update_jobs.clear()
     srv._active_pipeline_runs = 0
     srv._store = srv.ProjectStore(root=os.path.join(tmp, "projects"))
     srv._config = None
@@ -491,7 +493,14 @@ def test_pdf_ocr_inspects_once_then_processes_only_selected_original_pages():
             return "```latex\nThis is a sufficiently long faithful transcription for the selected page.\n```"
 
         try:
-            with patch("latexstruct.ocr.pdf_page_count_bytes", return_value=396):
+            source_outline = [
+                {"level": 0, "title": "Introduction", "page": 1},
+                {"level": 1, "title": "Selected method", "page": 88},
+            ]
+            with patch(
+                "latexstruct.ocr.pdf_document_info_bytes",
+                return_value={"pages": 396, "outline": source_outline},
+            ):
                 response = c.post(
                     "/api/ocr/inspect",
                     files={"file": ("book.pdf", fake_pdf, "application/pdf")},
@@ -502,6 +511,7 @@ def test_pdf_ocr_inspects_once_then_processes_only_selected_original_pages():
             assert info["total_pages"] == 396
             assert info["max_pages_per_job"] == srv.MAX_OCR_PAGES_PER_JOB
             assert srv._ocr_jobs[inspected]["status"] == "ready"
+            assert srv._ocr_jobs[inspected]["source_outline"] == source_outline
 
             invalid = c.post(
                 f"/api/ocr/jobs/{inspected}/start",
@@ -1287,9 +1297,10 @@ def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_sepa
         raw = c.get(f"/api/projects/{pid}/source").text
         structured = c.get(f"/api/projects/{pid}/result").text
         assert "Theorem 1." in raw and "\\begin{theorem}" not in raw
-        assert "\\begin{theorem}" not in structured
-        assert "Theorem 1. A recovered statement." in structured
+        assert "\\begin{theorem}[1]" in structured
+        assert "Theorem 1. A recovered statement." not in structured
         assert "\\begin{proof}" in structured
+        assert srv.get_store().get(pid)["kind"] == "ocr"
         job = srv._ocr_jobs.pop(jid, {})
         shutil.rmtree(job.get("dir", ""), ignore_errors=True)
 
@@ -1481,13 +1492,90 @@ def test_update_install_schedules_exit_only_after_verified_download():
             patch("latexstruct.updater.request_application_exit") as close_app,
         ):
             response = c.post("/api/update/install")
-        assert response.status_code == 200
+            assert response.status_code == 202
+            job_id = response.json()["job_id"]
+            for _ in range(100):
+                state = c.get(f"/api/update/status/{job_id}").json()
+                if state["status"] == "restarting":
+                    break
+                time.sleep(0.01)
         assert response.json()["ok"] is True
         assert "installer" not in response.json()  # 不向前端泄露本机临时路径
-        download.assert_called_once_with(info)
+        assert state["status"] == "restarting"
+        assert state["progress"] == 1.0
+        args, kwargs = download.call_args
+        assert args == (info,) and callable(kwargs["progress"])
         schedule.assert_called_once_with("C:/Temp/LaTeXStruct-setup-1.2.3.exe")
-        close_app.assert_called_once_with()
+        close_app.assert_called_once_with(delay=1.2)
         srv._cancel_update_preparation()
+
+
+def test_update_download_reports_progress_and_can_be_cancelled():
+    from latexstruct.updater import UpdateInfo
+
+    info = UpdateInfo(
+        True,
+        latest="v1.2.3",
+        url=(
+            "https://github.com/Ararataki-number-one/LaTeXStruct/"
+            "releases/download/v1.2.3/LaTeXStruct-setup-1.2.3.exe"
+        ),
+        notes="## 新增\n- 更新弹窗",
+        size=100,
+        digest="sha256:" + "a" * 64,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def waiting_download(_info, progress):
+        entered.set()
+        release.wait(timeout=2)
+        progress(25, 100)
+        raise AssertionError("取消后的进度回调必须先中止下载")
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        with (
+            patch("latexstruct.updater.check_for_updates", return_value=info),
+            patch("latexstruct.updater.download_update", side_effect=waiting_download),
+            patch("latexstruct.updater.schedule_installer_after_exit") as schedule,
+        ):
+            response = c.post("/api/update/install")
+            assert response.status_code == 202
+            job_id = response.json()["job_id"]
+            assert entered.wait(timeout=2)
+            cancelling = c.post(f"/api/update/status/{job_id}/cancel")
+            assert cancelling.status_code == 200
+            release.set()
+            for _ in range(100):
+                state = c.get(f"/api/update/status/{job_id}").json()
+                if state["status"] == "cancelled":
+                    break
+                time.sleep(0.01)
+
+        assert state["status"] == "cancelled"
+        assert "cancel_requested" not in state
+        assert srv._update_preparing is False
+        schedule.assert_not_called()
+
+
+def test_update_result_only_reports_a_real_installer_upgrade():
+    from latexstruct import __version__
+
+    current = srv.create_app(updated_from="v0.9.9.0")
+    with TestClient(current) as c:
+        result = c.get("/api/update/result")
+    assert result.status_code == 200
+    assert result.json() == {
+        "updated": True,
+        "previous": "0.9.9",
+        "current": __version__,
+    }
+    assert re.fullmatch(r"\d+\.\d+\.\d+", result.json()["current"])
+
+    invalid = srv.create_app(updated_from="not-a-version")
+    with TestClient(invalid) as c:
+        assert c.get("/api/update/result").json()["updated"] is False
 
 
 def test_native_save_repairs_webview_download_and_never_overwrites():

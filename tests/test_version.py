@@ -133,6 +133,9 @@ def test_release_build_safety_guards():
     assert "http://127.0.0.1:8099$assetPath" in workflow
     assert '$pageResponse = Invoke-WebRequest "http://127.0.0.1:8099/"' in workflow
     assert "$home = Invoke-WebRequest" not in workflow
+    assert "v1.1.4 运行中 → 当前版本" in workflow
+    assert "/api/update/result" in workflow
+    assert "body_path: dist/RELEASE_NOTES.md" in workflow
 
     with open(os.path.join(root, "packaging", "LaTeXStruct.spec"), encoding="utf-8") as f:
         pyinstaller_spec = f.read()
@@ -152,11 +155,41 @@ def test_release_build_safety_guards():
     assert "MessageBoxW" in launcher
     assert "请从官方发布页重新下载安装完整版本" in launcher
     assert "重新安装不会删除本地项目" in launcher
+    assert '"--updated-from"' in launcher
+
+    with open(os.path.join(root, "packaging", "installer.iss"), encoding="utf-8") as f:
+        installer = f.read()
+    assert "GetVersionNumbersString" in installer
+    assert "UpdateLaunchParameters" in installer
+    assert '--updated-from "' in installer
 
     with open(os.path.join(root, ".gitignore"), encoding="utf-8") as f:
         gitignore = f.read().splitlines()
     assert "*.pfx" in gitignore
     assert "*.p12" in gitignore
+
+
+def test_update_dialog_has_progress_cancel_and_success_states():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "frontend", "src", "App.jsx"), encoding="utf-8") as f:
+        app = f.read()
+    with open(os.path.join(root, "frontend", "src", "styles.css"), encoding="utf-8") as f:
+        styles = f.read()
+
+    for marker in (
+        "发现新版本",
+        "更新成功！",
+        "update-progress",
+        "/api/update/status/${updateJobId}",
+        "/api/update/status/${updateJobId}/cancel",
+        "/api/update/result",
+        "SHA-256",
+    ):
+        assert marker in app
+    assert 'role="dialog"' in app and 'aria-modal="true"' in app
+    assert ".update-overlay" in styles
+    assert ".update-dialog" in styles
+    assert ".update-progress.indeterminate" in styles
 
 
 def test_version_resource_sync_rejects_bad_versions():

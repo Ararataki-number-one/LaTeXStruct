@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from latexstruct.core.compilecheck import compile_latex  # noqa: E402
 from latexstruct.core.invariants import (  # noqa: E402
+    check_image_resources,
     check_invariants,
     cites,
     image_paths,
@@ -72,6 +73,28 @@ def test_label_ref_cite_image_collections():
     assert refs(spaced) == ["sec:spaced"]
     assert cites(spaced) == ["key"]
     assert image_paths(spaced) == ["figures/a b.png"]
+
+
+def test_image_resources_follow_safe_graphicspath_and_reject_escape():
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="ls-image-", dir=os.path.dirname(__file__)) as root:
+        image_dir = os.path.join(root, "images")
+        os.makedirs(image_dir)
+        with open(os.path.join(image_dir, "plot.png"), "wb") as stream:
+            stream.write(_tiny_png())
+        text = r"\graphicspath{{./images/}}\includegraphics{plot}"
+        check = check_image_resources(text, root)
+        assert check["ok"] is True and check["count"] == 1
+
+        escaped = check_image_resources(
+            r"\graphicspath{{../outside/}}\includegraphics{plot}", root
+        )
+        assert escaped["ok"] is False
+        assert "graphicspath:../outside/" in escaped["unsafe"]
+
+        missing = check_image_resources(r"\includegraphics{not-there}", root)
+        assert missing["ok"] is False and missing["missing"] == ["not-there"]
 
 
 def test_invariants_equal_on_same_text():

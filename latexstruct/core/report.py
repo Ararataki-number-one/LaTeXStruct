@@ -18,10 +18,12 @@ def build_report(
     review: Dict = None,
     template_notes: List[dict] = None,
     template_applied: bool = False,
+    ocr_structure_notes: List[dict] = None,
 ) -> str:
     ai_notes = ai_notes or []
     review = review or {}
     template_notes = template_notes or []
+    ocr_structure_notes = ocr_structure_notes or []
     L: List[str] = ["# LaTeXStruct 结构化整理汇报", ""]
     L.append(f"- 模式：{mode}")
     L.append(f"- 应用补丁：{len(applied)}；被拒绝：{len(rejected)}；歧义保留：{len(ambiguous)}")
@@ -132,6 +134,22 @@ def build_report(
             L.append("- 内容不变校验以模板转换后的文本为基准")
         L.append("")
 
+    if ocr_structure_notes:
+        section("OCR 章节树与目录")
+        mapped = [item for item in ocr_structure_notes if item.get("status") == "mapped"]
+        removed = [
+            item for item in ocr_structure_notes
+            if item.get("status") == "removed-header"
+        ]
+        missing = [
+            item for item in ocr_structure_notes
+            if item.get("status") in ("missing", "rejected")
+        ]
+        L.append(f"- 已映射大纲/目录：{len(mapped)} 项；移除重复页眉：{len(removed)} 项")
+        for item in missing[:20]:
+            L.append(f"- ⚠ 第 {item.get('line', '?')} 行：{item.get('reason', '')}")
+        L.append("")
+
     section("机器校验")
     ci = verification.get("content_invariant")
     eb = verification.get("env_balance", {})
@@ -139,6 +157,8 @@ def build_report(
     ki = verification.get("known_issues", [])
     inv = verification.get("invariants", {})
     display_tags = verification.get("display_tags", {})
+    ocr_structure = verification.get("ocr_structure", {})
+    resources = verification.get("resources", {})
     L.append(f"- 内容不变校验：{'通过（与原文逐字符一致）' if ci else '失败（已自动回退）'}")
     L.append(
         f"- 环境配平：{'通过' if eb.get('ok') else '失败（整理后异常：' + str(eb.get('after_unbalanced', [])) + '）'}"
@@ -173,6 +193,28 @@ def build_report(
                     reasons.append(reason)
             for reason in reasons[:3]:
                 L.append(f"  - {reason}")
+    if ocr_structure.get("checked"):
+        L.append(
+            "- PDF 大纲与目录："
+            + (
+                f"通过（{ocr_structure.get('matched', 0)}/"
+                f"{ocr_structure.get('expected', 0)} 个节点）"
+                if ocr_structure.get("ok")
+                else "失败（已阻止导出）"
+            )
+        )
+        for item in ocr_structure.get("issues", [])[:10]:
+            where = f"第 {item.get('line')} 行：" if item.get("line") else ""
+            L.append(f"  - {where}{item.get('reason', '')}")
+    if resources.get("checked"):
+        if resources.get("ok"):
+            L.append(f"- 图片资源：通过（{resources.get('count', 0)} 项）")
+        else:
+            L.append("- 图片资源：失败（缺失或路径不安全，已阻止导出）")
+            for path in resources.get("missing", [])[:10]:
+                L.append(f"  - 缺失：{path}")
+            for path in resources.get("unsafe", [])[:10]:
+                L.append(f"  - 不安全路径：{path}")
     cb = verification.get("compile_before")
     ca = verification.get("compile_after")
     if cb and ca and cb.get("available"):
@@ -183,6 +225,10 @@ def build_report(
         L.append(
             f"  - 整理后：{'成功 ' + str(ca.get('pages')) + ' 页' if ca.get('ok') else '失败 ' + '; '.join(ca.get('errors', [])[:2])}"
         )
+    elif verification.get("compile_required"):
+        L.append("- 编译校验（xelatex）：不可用；OCR 成品已按保守原则阻止导出")
+    elif verification.get("compile_required_when_available"):
+        L.append("- 编译校验（xelatex）：本机不可用；已执行静态公式、章节与资源安全检查")
     L.append(
         f"- 导出门禁：{'通过' if verification.get('safe_to_export') else '未通过（结果已回退且禁止危险导出）'}"
     )

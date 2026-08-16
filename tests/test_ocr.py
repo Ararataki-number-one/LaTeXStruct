@@ -21,6 +21,7 @@ from latexstruct.ocr import (  # noqa: E402
     merge_book,
     ocr_page_needs_retry,
     parse_page_range,
+    pdf_document_info_bytes,
     pdf_page_count_bytes,
     select_page_interval,
     transcribe_images,
@@ -79,22 +80,47 @@ def test_parse_page_range_rejects_oversized_interval_before_expansion():
 
 
 def test_pdf_page_count_bytes_reads_real_pdf_and_rejects_damage():
-    import fitz
+    class FakeDocument:
+        needs_pass = False
+        page_count = 2
 
-    document = fitz.open()
-    try:
-        document.new_page()
-        document.new_page()
-        payload = document.tobytes()
-    finally:
-        document.close()
-    assert pdf_page_count_bytes(payload) == 2
-    try:
-        pdf_page_count_bytes(b"%PDF-1.7\nbroken")
-    except ValueError as exc:
-        assert "损坏" in str(exc) or "无法读取" in str(exc)
-    else:
-        raise AssertionError("应拒绝损坏 PDF")
+        def __init__(self):
+            self.closed = False
+
+        def get_toc(self, simple=True):
+            assert simple is True
+            return [[1, "Introduction", 1], [2, "First result", 2]]
+
+        def close(self):
+            self.closed = True
+
+    document = FakeDocument()
+
+    class FakeFitz:
+        @staticmethod
+        def open(*, stream, filetype):
+            assert filetype == "pdf"
+            if stream.endswith(b"broken"):
+                raise RuntimeError("damaged")
+            return document
+
+    with patch.dict(sys.modules, {"fitz": FakeFitz}):
+        info = pdf_document_info_bytes(b"%PDF-1.7\nvalid")
+        assert info == {
+            "pages": 2,
+            "outline": [
+                {"level": 0, "title": "Introduction", "page": 1},
+                {"level": 1, "title": "First result", "page": 2},
+            ],
+        }
+        assert pdf_page_count_bytes(b"%PDF-1.7\nvalid") == 2
+        try:
+            pdf_page_count_bytes(b"%PDF-1.7\nbroken")
+        except ValueError as exc:
+            assert "损坏" in str(exc) or "无法读取" in str(exc)
+        else:
+            raise AssertionError("应拒绝损坏 PDF")
+    assert document.closed is True
 
 
 def test_clean_page_output():
@@ -256,10 +282,30 @@ def test_provider_error_redacts_api_key():
 
 def test_merge_book():
     tex = merge_book(["% Page 1\nTheorem 1. X.", "% Page 2\nProof. Y."])
-    assert tex.startswith("\\documentclass[11pt]{elegantbook}")
+    assert tex.startswith("\\documentclass[11pt]{article}")
+    assert "% LaTeXStruct-OCR-Metadata:" in tex
     assert "% Page 1" in tex and "% Page 2" in tex
     assert tex.rstrip().endswith("\\end{document}")
     assert "%=== PAGE BREAK ===" in tex
+    assert "\\clearpage" in tex
+
+
+def test_merge_book_keeps_only_outline_nodes_from_selected_pages():
+    from latexstruct.core.ocrstruct import parse_ocr_metadata
+
+    tex = merge_book(
+        ["% Page 88\n\\textbf{Selected method}"],
+        outline=[
+            {"level": 0, "title": "Introduction", "page": 1},
+            {"level": 1, "title": "Selected method", "page": 88},
+            {"level": 1, "title": "Later method", "page": 90},
+        ],
+    )
+    metadata = parse_ocr_metadata(tex)
+    assert metadata["pages"] == [88]
+    assert metadata["outline"] == [
+        {"level": 1, "title": "Selected method", "page": 88}
+    ]
 
 
 def _write_dummy_images(paths):
@@ -337,10 +383,9 @@ def test_ocr_pipeline_two_stages():
 
         pr = run_pipeline(ocr.tex, mode="rule")
         assert pr.ok
-        # OCR 默认导言区使用 elegantbook；其定理计数语义未知时，显式源编号宁可保留。
-        assert "\\begin{theorem}" not in pr.result
-        assert "Theorem 1. X." in pr.result
-        assert any("避免双编号" in item["reason"] for item in pr.ambiguous)
+        # 中性 article + 自动生成的无编号环境可安全保存源编号，且不会双编号。
+        assert "\\begin{theorem}[1]" in pr.result
+        assert "Theorem 1. X." not in pr.result
         assert "\\begin{proof}" in pr.result
     finally:
         shutil.rmtree(d, ignore_errors=True)
