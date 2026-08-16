@@ -258,6 +258,8 @@ jobs:
           }
 
           $upgradeDir = Join-Path $env:LOCALAPPDATA 'Programs\LaTeXStruct-Upgrade-Smoke'
+          $upgradeSetupLog = Join-Path $env:RUNNER_TEMP 'latexstruct-upgrade-setup.log'
+          $upgradeRestartLog = Join-Path $env:LOCALAPPDATA 'LaTeXStruct\update-restart.log'
           $currentSetup = Get-ChildItem dist/LaTeXStruct-setup-*.exe | Select-Object -First 1
           if (-not $currentSetup) { Write-Error '未找到当前版本安装器'; exit 1 }
           $oldProc = $null
@@ -287,7 +289,7 @@ jobs:
             $upgrade = Start-Process -FilePath $currentSetup.FullName -ArgumentList `
               '/VERYSILENT','/SUPPRESSMSGBOXES','/CLOSEAPPLICATIONS', `
               '/FORCECLOSEAPPLICATIONS','/NORESTART','/NORESTARTAPPLICATIONS', `
-              '/LATEXSTRUCTUPDATE=1',"/DIR=$upgradeDir" -PassThru
+              '/LATEXSTRUCTUPDATE=1',"/DIR=$upgradeDir","/LOG=$upgradeSetupLog" -PassThru
             $deadline = [DateTime]::UtcNow.AddSeconds(150)
             while (-not $upgrade.HasExited -and [DateTime]::UtcNow -lt $deadline) {
               Start-Sleep -Milliseconds 500
@@ -318,6 +320,16 @@ jobs:
               } catch {}
             }
             if (-not $newHealthy) {
+              if (Test-Path $upgradeRestartLog) {
+                Write-Host '--- update restart helper log ---'
+                Get-Content -LiteralPath $upgradeRestartLog -Tail 80
+              } else {
+                Write-Host 'Update restart helper did not create its first log line.'
+              }
+              if (Test-Path $upgradeSetupLog) {
+                Write-Host '--- Inno Setup upgrade log (tail) ---'
+                Get-Content -LiteralPath $upgradeSetupLog -Tail 120
+              }
               Write-Error "升级后未自动启动当前版本: expected=$env:APP_VERSION actual=$observed"
               exit 1
             }

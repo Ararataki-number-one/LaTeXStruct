@@ -89,10 +89,22 @@ try {
     Write-UpdateLog ("restart failed: " + $_.Exception.Message)
     try {
         Add-Type -AssemblyName System.Windows.Forms
+        # Windows PowerShell 5.1 reads UTF-8 files without a BOM through the
+        # active ANSI code page. Keep this script ASCII-only and decode the
+        # localized fallback text at runtime so every Windows locale parses it.
+        $dialogText = [Text.Encoding]::UTF8.GetString(
+            [Convert]::FromBase64String(
+                "5paw54mI5pys5bey57uP5a6J6KOF77yM5L2G5rKh5pyJ6Ieq5Yqo5ZCv5Yqo44CC6K+35LuO5qGM6Z2i5oiW5byA5aeL6I+c5Y2V6YeN5paw5omT5byAIExhVGVYU3RydWN044CCCgror4rmlq3ml6Xlv5fvvJp7TE9HfQ=="
+            )
+        ).Replace("{LOG}", $logPath)
+        $dialogTitle = [Text.Encoding]::UTF8.GetString(
+            [Convert]::FromBase64String(
+                "TGFUZVhTdHJ1Y3Qg5pu05paw5ZCO5ZCv5Yqo5aSx6LSl"
+            )
+        )
         [System.Windows.Forms.MessageBox]::Show(
-            "新版本已经安装，但没有自动启动。请从桌面或开始菜单重新打开 LaTeXStruct。`n`n" +
-            "诊断日志：$logPath",
-            "LaTeXStruct 更新后启动失败",
+            $dialogText,
+            $dialogTitle,
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Warning
         ) | Out-Null

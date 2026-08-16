@@ -220,11 +220,17 @@ def test_installer_script_force_closes_old_updater_and_restarts_only_upgrade():
     restart_script = os.path.join(
         os.path.dirname(os.path.dirname(__file__)), "packaging", "update_restart.ps1"
     )
+    restart_bytes = open(restart_script, "rb").read()
+    # Windows PowerShell 5.1 treats UTF-8 without a BOM as the active ANSI code
+    # page. Non-ASCII source can therefore swallow quotes and fail before the
+    # helper writes its first log line. Localized text is decoded at runtime.
+    assert all(byte < 128 for byte in restart_bytes)
     restart = open(restart_script, encoding="utf-8").read()
     assert "Wait-ForExpectedVersion" in restart
     assert "for ($attempt = 1; $attempt -le 2; $attempt++)" in restart
     assert "$observed -eq $ExpectedVersion" in restart
     assert "update-restart.log" in restart
+    assert "FromBase64String" in restart
 
 
 def main():
