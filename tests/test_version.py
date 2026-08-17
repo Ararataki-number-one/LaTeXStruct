@@ -108,6 +108,8 @@ def test_ci_installs_texlive_distribution_packages():
     with open(os.path.join(root, ".github", "workflows", "build.yml"), encoding="utf-8") as f:
         workflow = f.read()
     assert "install xetex elegantbook amsmath amsfonts amscls geometry tcolorbox graphics" in workflow
+    assert workflow.index("update --self") < workflow.index("install xetex elegantbook")
+    assert "TinyTeX 包管理器更新失败" in workflow
     assert "titlesec" in workflow
     assert "install amsmath amssymb amsthm" not in workflow
     assert "kpsewhich.exe" in workflow

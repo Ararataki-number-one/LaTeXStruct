@@ -64,10 +64,15 @@ jobs:
           Invoke-WebRequest $asset.browser_download_url -OutFile $exe
           $root = Join-Path $env:RUNNER_TEMP 'tinytex'
           & $exe -o"$root" -y
+          if ($LASTEXITCODE -ne 0) { Write-Error "TinyTeX 解压失败"; exit 1 }
           $tlmgr = Get-ChildItem -Path $root -Recurse -Filter tlmgr.bat | Select-Object -First 1
           if (-not $tlmgr) { Write-Error "解压后未找到 tlmgr"; exit 1 }
           $bin = $tlmgr.DirectoryName
           Add-Content $env:GITHUB_PATH $bin
+          # TinyTeX 发布包与滚动更新的软件仓库之间可能存在一个短暂版本差。
+          # TeX Live 要求先更新 tlmgr 自身，否则后续 install 会提前终止且可能返回 0。
+          & $tlmgr.FullName update --self
+          if ($LASTEXITCODE -ne 0) { Write-Error "TinyTeX 包管理器更新失败"; exit 1 }
           # amssymb.sty 属于 amsfonts，amsthm.sty 属于 amscls；这里必须使用
           # TeX Live 的发行包名，而不是 .sty 文件名。
           & $tlmgr.FullName install xetex elegantbook amsmath amsfonts amscls geometry tcolorbox graphics titlesec
