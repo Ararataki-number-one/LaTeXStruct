@@ -24,6 +24,7 @@ from latexstruct.ocr import (  # noqa: E402
     pdf_document_info_bytes,
     pdf_page_count_bytes,
     select_page_interval,
+    transcribe_page,
     transcribe_images,
 )
 
@@ -126,6 +127,46 @@ def test_pdf_page_count_bytes_reads_real_pdf_and_rejects_damage():
 def test_clean_page_output():
     assert _clean_page_output("```latex\nTheorem 1. X.\n```") == "Theorem 1. X."
     assert _clean_page_output("Theorem 1. X.") == "Theorem 1. X."
+
+
+def test_page_marker_is_written_once_by_program_not_vision_model():
+    client = FakeVisionClient(pages={1: "```latex\n% Page 999\nPage text.\n```"})
+    result = transcribe_page(client, b"\x89PNG\r\n\x1a\n" + b"0" * 16, 1)
+    assert result == "% Page 1\nPage text."
+    assert result.count("% Page") == 1
+
+
+def test_stage_a_rejects_model_generated_structure_commands():
+    forbidden = (
+        r"\documentclass{article}" + "\n" + r"\begin{document}" + "\nText.\n" + r"\end{document}",
+        r"\begin{document}" + "\nText.\n" + r"\end{document}",
+        r"\section{Introduction}" + "\nText.",
+        r"\tableofcontents" + "\nText.",
+        r"\begin{theorem}Statement.\end{theorem}",
+        r"\begin{proof}Argument.\end{proof}",
+    )
+    for page_text in forbidden:
+        client = FakeVisionClient(pages={1: f"```latex\n{page_text}\n```"})
+        try:
+            transcribe_page(client, b"\x89PNG\r\n\x1a\n" + b"0" * 16, 1)
+        except LLMError as exc:
+            assert "OCR 阶段已保守拒绝" in str(exc)
+        else:
+            raise AssertionError(f"Stage A 必须拒绝结构命令：{page_text}")
+
+
+def test_stage_a_allows_literal_headings_and_math_environments():
+    page_text = (
+        "1.2 Introduction\n\n"
+        "Theorem 3.1. For every x,\n"
+        "\\begin{equation}x=x\\tag{3.1}\\end{equation}\n"
+        "Proof. This is immediate."
+    )
+    client = FakeVisionClient(pages={1: f"```latex\n{page_text}\n```"})
+    result = transcribe_page(client, b"\x89PNG\r\n\x1a\n" + b"0" * 16, 1)
+    assert "1.2 Introduction" in result
+    assert "Theorem 3.1." in result
+    assert r"\begin{equation}" in result
 
 
 def test_clean_page_output_normalizes_single_line_tagged_display():

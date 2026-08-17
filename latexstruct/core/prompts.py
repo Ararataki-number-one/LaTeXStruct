@@ -24,6 +24,9 @@ SYSTEM_PROMPT = """你是「LaTeX 数学文档结构化整理引擎」。你的�
 1. 只改结构，不改内容：正文文字、数学公式、标点、段落顺序逐字不变。
 2. 最小改动：能不动就不动；无法确定时选择不动。
 3. 绝不重复包裹已正确的环境。
+4. 所有 body_span 都是“原始源文件行号”，不是修改后预览的行号。
+5. 环境边界必须服从 LaTeX 嵌套：绝不能把 \\end{theorem}/\\end{proof} 放在
+   尚未闭合的 \\[...\\]、equation、align、gather、multline 等数学环境内部。
 
 【候选点类型与决策】
 A. 定理类裸标题（行/段首：Definition/Theorem/Lemma/Proposition/Corollary/Remark/Example/
@@ -34,6 +37,9 @@ A. 定理类裸标题（行/段首：Definition/Theorem/Lemma/Proposition/Coroll
    - 正文可能跨多段：body_span 应覆盖该条目的全部正文段落与紧接的显示公式；
    - body_span 的起点必须是标题所在行，终点是该条目正文最后一个段落的末行，
      **不包含**其后的中文翻译框、图注、其他条目或后续叙述段。
+   - 定理陈述紧接的展示公式、公式后的限定语（如 “for all ...”）仍属于定理；
+     body_span 必须覆盖完整数学环境及限定语，不能在 \\begin{equation} 与
+     \\end{equation} 之间结束。
 B. 证明起始语（Proof./Proof/证明/证明：/Proof [Outline]/Proof [Theorem x.y.z]/
    Sketch of the proof.）：
    - 确为证明开始 → action=wrap, env=proof；附加说明（Outline 等）保留为 optional_arg；
@@ -41,12 +47,15 @@ B. 证明起始语（Proof./Proof/证明/证明：/Proof [Outline]/Proof [Theore
    - body_span 从证明起始语所在段开始，持续到下一个定理类标题/节标题/另一证明起始语之前；
      中间的中文翻译框、显示公式、align 等环境均属于证明，必须并入；
    - 若出现明确结束标记（□、证毕、"This completes the proof"），在标记所在段结束；
+   - ``\\hfill $\\square$``、``\\qed``、``\\qedhere`` 同样是硬结束标记；
    - 证明结束后紧跟的叙述性段落（如 "There is another interesting..."）不得并入。
 C. 已有环境范围错误（scope-fix 候选）：
    - 环境只包了标题、正文在外 → action=move-boundary，move_payload.new_end_line 扩到正文末尾；
    - 环境吞入后续无关说明/背景段落 → action=move-boundary，new_end_line 缩小；
    - theorem 后紧跟的显示公式属于定理陈述 → new_end_line 纳入公式；
    - 环境与正文均正确 → action=none。
+   - move_payload 行号仅作说明；程序只会采用源文件扫描器确认的原子块边界，
+     不会采用模型自行生成的边界坐标。
 
 【硬性排除：以下任何情况必须 action=none】
 - 候选位于任何 theorem 类/proof 环境内部；
@@ -99,10 +108,14 @@ REVIEW_SYSTEM_PROMPT = """你是「LaTeX 结构化整理复查引擎」。已完
 判定标准：
 - 误包：该处是引用性文字/普通说明/习题条目，不应包裹环境 → verdict=should-remove；
 - 环境类型错误 → verdict=wrong-env，fix.env 给出正确环境；
-- 范围错误（正文没收全/多吞了段落）→ verdict=wrong-range，fix.body_span 给出正确范围；
+- 范围错误（正文没收全/多吞了段落，尤其环境 closer 落进公式内部）→
+  verdict=wrong-range；只报告原因，不提供/猜测修复行号，程序会撤销该初次补丁，
+  保留原始正文交人工确认；
 - 修改正确 → verdict=ok；
-- 发现该处理但没处理的（参见"歧义/跳过清单"）→ verdict=missed-extra，fix 给出 wrap 决策。
-所有 fix 中的行号必须引用给出的行号范围内；无法给出可靠修正时 verdict=ok 并 reason 说明。"""
+- 发现该处理但没处理的（参见"歧义/跳过清单"）→ verdict=missed-extra；只报告，
+  不新增坐标补丁。
+复查看到的是“结果文本行号”，初次 Decision 保存的是“源文本行号”，两者不可互换。
+复查可自动执行的修正仅限 wrong-env，或撤销 should-remove/wrong-range。"""
 
 REVIEW_SCHEMA = """输出格式（严格 JSON）：
 {
@@ -110,8 +123,7 @@ REVIEW_SCHEMA = """输出格式（严格 JSON）：
     {
       "candidate_id": "c-0004",
       "verdict": "ok | wrong-env | wrong-range | should-remove | missed-extra",
-      "fix": {"action": "wrap", "env": "lemma", "body_span": {"start_line": 20, "end_line": 22},
-              "optional_arg": "", "move_payload": {"old_end_line": 0, "new_end_line": 0}},
+      "fix": {"env": "lemma"},
       "reason": "简短理由（≤40字）"
     }
   ]
@@ -166,16 +178,24 @@ def _numbered(lines: List[str], start: int, end: int, mark: tuple = ()) -> List[
 
 
 def build_decide_user(
-    doc: Document, candidates: List[Candidate], context_lines: int = 6
+    doc: Document,
+    candidates: List[Candidate],
+    context_lines: int = 6,
+    windows: Dict[str, tuple] = None,
+    incomplete_windows: set = None,
 ) -> str:
     lines = doc.text.split("\n")
     total = len(lines)
+    windows = windows or {}
+    incomplete_windows = incomplete_windows or set()
     parts: List[str] = [f"待决策候选共 {len(candidates)} 个。每个候选附上下文（行号范围即判定合法范围）。"]
     for c in candidates:
         s = c.span.start_line
         e = c.span.end_line
-        lo = max(1, s - context_lines)
-        hi = min(total, e + context_lines)
+        lo, hi = windows.get(
+            c.id,
+            (max(1, s - context_lines), min(total, e + context_lines)),
+        )
         parts.append(f"\n### 候选 {c.id}")
         parts.append(f"kind: {c.kind} | 规则提示: {c.rule_id} | 建议环境: {c.env_hint or '-'} | 置信度: {c.confidence:.2f}")
         parts.append(f"首行: {c.title_text[:80]!r}")
@@ -185,6 +205,11 @@ def build_decide_user(
                 f"{c.payload.get('next_kind', '-')} 起于第 {c.payload.get('next_line', '-')} 行"
             )
         parts.append(f"合法行号范围: {lo}..{hi}")
+        if c.id in incomplete_windows:
+            parts.append(
+                "安全提示: 下一个可靠结构停点超出本窗口；"
+                "必须 action=none，不得生成截断环境。"
+            )
         parts.append("上下文:")
         parts.extend(_numbered(lines, lo, hi, mark=tuple(range(s, e + 1))))
     return "\n".join(parts)
@@ -203,16 +228,23 @@ def build_review_user(
 ) -> str:
     parts: List[str] = [f"已应用的修改共 {len(applied_summaries)} 项。"]
     for i, s in enumerate(applied_summaries, 1):
-        bs, be = s.get("body_span", (1, 1))
-        lo = max(1, bs - context_lines)
-        hi = min(len(result_lines), be + context_lines)
+        source_bs, source_be = s.get("body_span", (1, 1))
+        result_bs, result_be = s.get("result_span", (source_bs, source_be))
+        lo = max(1, result_bs - context_lines)
+        hi = min(len(result_lines), result_be + context_lines)
         parts.append(f"\n### 修改 {i}（candidate {s.get('candidate_id')}）")
         parts.append(
             f"action={s.get('action')} env={s.get('env')} reason={s.get('reason')!r} "
-            f"body_span={bs}..{be}（原文行号）"
+            f"source_body_span={source_bs}..{source_be}（只读源锚点，不得改写） | "
+            f"result_span={result_bs}..{result_be}（下方预览行号）"
         )
-        parts.append("结果片段（结果文本行号；fix 中的行号请参照上文给出的原文行号）:")
-        parts.extend(_numbered(result_lines, lo, hi, mark=tuple(range(bs, be + 1))))
+        parts.append("结果片段（结果文本行号；只用于判断，不得写回 source_body_span）:")
+        parts.extend(_numbered(
+            result_lines,
+            lo,
+            hi,
+            mark=tuple(range(result_bs, result_be + 1)),
+        ))
     if ambiguous:
         parts.append("\n### 歧义/跳过清单（供 missed-extra 判断）")
         for a in ambiguous[:50]:

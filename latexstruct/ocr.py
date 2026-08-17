@@ -23,7 +23,7 @@ OCR_SYSTEM_PROMPT = """你是「数学文档页面转写专家」。把给定书
 你的唯一任务是"看清楚"，**不做任何结构判断**（结构整理由后续引擎完成）。
 
 硬性要求：
-1. 只输出 LaTeX 正文片段（不含 \\documentclass/\\begin{document}/导言区），用 ```latex 代码块包裹；
+1. 只输出 LaTeX 正文片段（不含 \\documentclass、\\begin{document}、\\end{document} 或导言区），用 ```latex 代码块包裹；
 2. 完整保留页面内容与顺序；标题行（如 "Theorem 2.7. ..."、"Proof. ..."、"1.1 Graphs"）
    按原样作为独立文本行转写——**不要**添加 theorem/lemma/proof/definition 环境，也不要使用
    \\chapter/\\section/\\subsection/\\subsubsection、\\tableofcontents、\\dotfill 等结构命令；
@@ -35,7 +35,8 @@ OCR_SYSTEM_PROMPT = """你是「数学文档页面转写专家」。把给定书
    1R→\\mathbb{R}，S^n→\\mathbb{S}^n，cos v→\\operatorname{conv} X，<x,y>→\\langle x,y\\rangle）；
 6. 页面中的插图：用 \\includegraphics[width=0.6\\linewidth]{images/page_<页码>_<序号>} 占位
    并加注释 % figure: <图中内容简述>；
-7. 片段首行写 % Page <页码> 注释；长内容自然分段，段落之间空一行。"""
+7. 不要输出 % Page 页码注释（程序会在校验后唯一写入权威页码标记）；
+   长内容自然分段，段落之间空一行。"""
 
 OCR_PREAMBLE = """\\documentclass[11pt]{__DOCUMENT_CLASS__}
 
@@ -225,6 +226,19 @@ _TAG_RE = re.compile(r"(?<!\\)\\tag\s*\{(?P<label>[^{}\r\n]+)\}")
 _DISPLAY_SAFETY_TOKEN_RE = re.compile(
     r"(?<!\\)\\(?P<delimiter>[\[\]])|(?<!\\)\\(?P<tag>tag)(?![A-Za-z@])"
 )
+_PAGE_MARKER_RE = re.compile(r"(?im)^\s*%\s*Page\s+\d+\s*(?:\r?\n|$)")
+_FORBIDDEN_STAGE_A_STRUCTURE_RE = re.compile(
+    r"\\documentclass(?:\s*\[[^\]\r\n]*\])?\s*\{"
+    r"|\\(?:part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?"
+    r"\s*(?:\[[^\]\r\n]*\]\s*)?\{"
+    r"|\\(?:tableofcontents|addcontentsline|frontmatter|mainmatter|backmatter)\b"
+    r"|\\(?:begin|end)\s*\{\s*(?:"
+    r"theorem\*?|lemma\*?|proposition\*?|corollary\*?|definition\*?|"
+    r"remark\*?|example\*?|exercise\*?|proof\*?|claim\*?|conjecture\*?|"
+    r"axiom\*?|problem\*?|solution\*?|notation\*?|observation\*?|fact\*?|document"
+    r")\s*\}",
+    re.I,
+)
 
 
 def _normalize_tagged_display_math(text: str) -> str:
@@ -267,7 +281,15 @@ def _clean_page_output(raw: str) -> str:
     m = re.search(r"```(?:latex)?\s*(.*?)```", text, re.S)
     if m:
         text = m.group(1).strip()
+    # 页码只能由 transcribe_page 在校验后写一次。视觉模型即使
+    # 忽略提示词自行输出 marker，也不得覆盖/制造假页码。
+    text = _PAGE_MARKER_RE.sub("", text).strip()
     return _normalize_tagged_display_math(text)
+
+
+def _has_forbidden_stage_a_structure(text: str) -> bool:
+    """Stage A 只允许转录；拒绝模型擅自生成结构补丁。"""
+    return bool(_FORBIDDEN_STAGE_A_STRUCTURE_RE.search(mask_comments(text)))
 
 
 def ocr_page_needs_retry(text: str) -> bool:
@@ -318,6 +340,11 @@ def transcribe_page(client: LLMClient, png_bytes: bytes, page_no: int) -> str:
     text = _clean_page_output(raw)
     if not text:
         raise LLMError(f"第 {page_no} 页转写为空")
+    if _has_forbidden_stage_a_structure(text):
+        raise LLMError(
+            f"第 {page_no} 页转写夹带了完整文档外壳或章节/定理/证明结构命令；"
+            "OCR 阶段已保守拒绝该页，将重试忠实转录"
+        )
     return f"% Page {page_no}\n{text}"
 
 
@@ -445,7 +472,7 @@ def merge_book(chunks: List[str], outline: List[dict] = None) -> str:
 
 
 def ocr_pipeline(pdf_path: str, client: LLMClient, cfg: OcrConfig = None,
-                 mode: str = "rule", pipeline_kwargs=None) -> Dict:
+                 mode: str = "ai", pipeline_kwargs=None) -> Dict:
     """两阶段：A 视觉忠实转写（不做结构判断）→ B 结构化流水线（扫描→决策→补丁→校验）。
 
     返回 {"ocr": OcrResult, "pipeline": PipelineResult}。

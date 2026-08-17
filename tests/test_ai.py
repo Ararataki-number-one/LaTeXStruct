@@ -112,6 +112,16 @@ def test_parse_decisions_validation():
     }]}
     ds3, amb3, _ = parse_decisions(bad_env, cands, windows, doc)
     assert ds3 == [] and amb3
+    # 候选种类与环境不可互换；否则 proof 完整性门可被换成 theorem 绕过。
+    wrong_kind = {"decisions": [{
+        "candidate_id": c.id,
+        "action": "wrap",
+        "env": "proof",
+        "body_span": {"start_line": c.span.start_line, "end_line": c.span.end_line},
+        "confidence": 0.99,
+    }]}
+    ds_kind, amb_kind, _ = parse_decisions(wrong_kind, cands, windows, doc)
+    assert ds_kind == [] and any("候选冲突" in item["reason"] for item in amb_kind)
     # none → 说明项
     none = {"decisions": [{"candidate_id": c.id, "action": "none", "reason": "引用性文字"}]}
     ds4, amb4, notes4 = parse_decisions(none, cands, windows, doc)
@@ -495,13 +505,19 @@ def test_cached_review_decisions_do_not_call_ai_again():
     assert second.verification["decisions_reused"] is True
 
 
-def test_ai_mode_without_key_degrades_to_rules():
-    res = run_pipeline(read_sample("basic_book.tex"), mode="ai",
-                       ai_config=AIConfig(decide=RoleConfig(api_key=""), review_enabled=False))
-    assert res.ok
-    assert res.verification["ai_degraded"] is True
-    assert "\\begin{theorem}" in res.result  # 规则降级仍然包裹
-    assert "AI 不可用" in res.report_md
+def test_ai_mode_without_key_fails_closed_instead_of_impersonating_ai():
+    try:
+        run_pipeline(
+            read_sample("basic_book.tex"),
+            mode="ai",
+            ai_config=AIConfig(decide=RoleConfig(api_key=""), review_enabled=False),
+        )
+    except LLMError as exc:
+        message = str(exc)
+        assert "AI 结构化未完成" in message
+        assert "未使用规则模式替代" in message
+    else:
+        raise AssertionError("AI 模式缺少 Key 时必须明确失败，不能静默降级")
 
 
 def test_review_wrong_env_auto_fix():
@@ -519,6 +535,44 @@ def test_review_wrong_env_auto_fix():
     assert "\\begin{lemma}" in out.result
     assert out.verification["content_invariant"] is True
     assert any(f["verdict"] == "wrong-env" for f in out.review["findings"])
+
+
+def test_review_cannot_turn_proof_candidate_into_theorem_environment():
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "Proof. The argument is complete. \\hfill $\\square$\n"
+        "\\end{document}\n"
+    )
+    doc = parse_latex(text)
+    proof = next(c for c in scan(doc).candidates if c.kind == "proof")
+    decide = FakeClient({"decisions": [{
+        "candidate_id": proof.id,
+        "action": "wrap",
+        "env": "proof",
+        "body_span": {"start_line": proof.span.start_line, "end_line": proof.span.end_line},
+        "confidence": 0.99,
+    }]})
+    review = FakeClient({"findings": [{
+        "candidate_id": proof.id,
+        "verdict": "wrong-env",
+        "fix": {"env": "theorem"},
+        "reason": "malicious incompatible rewrite",
+    }]})
+    result = run_pipeline(
+        text,
+        mode="ai",
+        ai_config=AIConfig(
+            decide=RoleConfig(api_key="t"),
+            review=RoleConfig(api_key="t"),
+            review_enabled=True,
+            review_max_rounds=1,
+        ),
+        ai_client=decide,
+        review_client=review,
+    )
+    assert result.ok
+    assert r"\begin{theorem}" not in result.result
+    assert any("证明候选只能使用 proof" in item["reason"] for item in result.ambiguous)
 
 
 def test_review_wrong_range_cannot_expand_before_numbered_theorem_title():
@@ -563,9 +617,10 @@ def test_review_wrong_range_cannot_expand_before_numbered_theorem_title():
         ai_client=fake_decide, review_client=fake_review,
     )
     assert result.ok, result.report_md
-    assert "Intro paragraph.\n\n\\begin{theorem}[7]" in result.result
-    assert "Theorem 7. A numbered statement." not in result.result
-    assert result.result.count("\\begin{theorem}[7]") == 1
+    assert "Intro paragraph." in result.result
+    assert "Theorem 7. A numbered statement." in result.result
+    assert r"\begin{theorem}" not in result.result
+    assert any("已撤销" in item["reason"] for item in result.ambiguous)
 
 
 def test_review_should_remove():
@@ -585,7 +640,7 @@ def test_review_should_remove():
     assert out.verification["content_invariant"] is True
 
 
-def test_review_missed_extra_adds_wrap():
+def test_review_missed_extra_is_report_only_without_source_anchor():
     text = read_sample("basic_book.tex")
     doc = parse_latex(text)
     res = scan(doc)
@@ -601,12 +656,14 @@ def test_review_missed_extra_adds_wrap():
     cfg = AIConfig(decide=RoleConfig(api_key="t"), review=RoleConfig(api_key="t"), review_enabled=True)
     out = run_pipeline(text, mode="ai", ai_config=cfg, ai_client=fake_decide, review_client=fake_review)
     assert out.ok, out.report_md
-    assert out.result.count("\\begin{definition}") == 2
+    # 复查看到的是结果文本行号，不能用它凭空创建源文本补丁。
+    assert out.result.count("\\begin{definition}") == 1
+    assert any("疑似漏项" in item["reason"] for item in out.ambiguous)
     assert out.verification["content_invariant"] is True
 
 
 def test_review_missed_extra_from_ai_none():
-    # 决策判 none 的候选进入复查清单，复查可 missed-extra 反悔补包
+    # 决策判 none 的候选进入复查清单；复查只报告 missed-extra，不跨坐标系补包。
     text = read_sample("basic_book.tex")
     doc = parse_latex(text)
     res = scan(doc)
@@ -627,8 +684,251 @@ def test_review_missed_extra_from_ai_none():
     cfg = AIConfig(decide=RoleConfig(api_key="t"), review=RoleConfig(api_key="t"), review_enabled=True)
     out = run_pipeline(text, mode="ai", ai_config=cfg, ai_client=fake_decide, review_client=fake_review)
     assert out.ok, out.report_md
-    assert f"\\begin{{{target.env_hint}}}" in out.result
+    assert f"\\begin{{{target.env_hint}}}" not in out.result
+    assert any("疑似漏项" in item["reason"] for item in out.ambiguous)
     assert out.verification["content_invariant"] is True
+
+
+def test_review_result_coordinates_cannot_move_theorem_closer_into_equation():
+    text = r"""\documentclass{book}
+\usepackage{amsmath}
+\begin{document}
+Theorem 1. For every $x$ one has
+\begin{equation}
+f(x)=x^2. \tag{1}
+\end{equation}
+for all real $x$.
+
+The next paragraph is not part of the theorem.
+\end{document}
+"""
+    doc = parse_latex(text)
+    target = next(c for c in scan(doc).candidates if c.kind == "theorem-like")
+    decide = FakeClient({"decisions": [{
+        "candidate_id": target.id,
+        "action": "wrap",
+        "env": "theorem",
+        "body_span": {"start_line": target.span.start_line, "end_line": 8},
+        "confidence": 0.99,
+        "reason": "完整陈述含公式与限定语",
+    }]})
+    # 这些数字属于结果预览坐标；旧实现会直接写回源 Decision，导致 closer
+    # 落到 equation 内。现在只能报告，不能自动改 span。
+    review = FakeClient({"findings": [{
+        "candidate_id": target.id,
+        "verdict": "wrong-range",
+        "fix": {"body_span": {"start_line": 5, "end_line": 6}},
+        "reason": "模拟错误的结果坐标",
+    }]})
+    result = run_pipeline(
+        text,
+        mode="ai",
+        ai_config=AIConfig(
+            decide=RoleConfig(api_key="test"),
+            review=RoleConfig(api_key="test"),
+            review_enabled=True,
+            review_max_rounds=1,
+        ),
+        ai_client=decide,
+        review_client=review,
+    )
+    assert result.ok, result.report_md
+    output = result.result
+    # 复查已明确判范围错，不能让静态校验刚好通过的错包裹继续导出。
+    # 由于结果坐标不能安全写回，最保守的修复是撤销整个初次补丁。
+    assert r"\begin{theorem}" not in output
+    assert r"\end{theorem}" not in output
+    assert r"f(x)=x^2. \tag{1}" in output
+    assert any("范围问题" in item["reason"] for item in result.ambiguous)
+
+
+def test_ai_span_ending_inside_equation_snaps_closer_after_full_math():
+    text = r"""\documentclass{book}
+\usepackage{amsmath}
+\begin{document}
+Theorem 2. For every real number,
+\begin{equation}
+f(x)=x^2. \tag{2}
+\end{equation}
+
+This paragraph is outside.
+\end{document}
+"""
+    target = next(c for c in scan(parse_latex(text)).candidates if c.kind == "theorem-like")
+    decide = FakeClient({"decisions": [{
+        "candidate_id": target.id,
+        "action": "wrap",
+        "env": "theorem",
+        # 故意停在 equation 内的公式行。
+        "body_span": {"start_line": target.span.start_line, "end_line": 6},
+        "confidence": 0.99,
+        "reason": "定理含展示公式",
+    }]})
+    result = run_pipeline(
+        text,
+        mode="ai",
+        ai_config=AIConfig(decide=RoleConfig(api_key="test"), review_enabled=False),
+        ai_client=decide,
+    )
+    assert result.ok, result.report_md
+    output = result.result
+    assert output.index(r"\end{equation}") < output.index(r"\end{theorem}")
+    assert output.index(r"\end{theorem}") < output.index("This paragraph is outside")
+    assert r"f(x)=x^2. \tag{2}" in output
+
+
+def test_ai_span_ending_inside_matrix_snaps_proof_closer_after_bracket_display():
+    text = r"""\documentclass{book}
+\usepackage{amsmath}
+\begin{document}
+Proof. Consider
+\[
+\begin{pmatrix}
+a & b \\
+c & d
+\end{pmatrix}
+\]
+
+The next discussion is outside.
+\end{document}
+"""
+    target = next(c for c in scan(parse_latex(text)).candidates if c.kind == "proof")
+    decide = FakeClient({"decisions": [{
+        "candidate_id": target.id,
+        "action": "wrap",
+        "env": "proof",
+        # 故意停在 pmatrix 内部。
+        "body_span": {"start_line": target.span.start_line, "end_line": 8},
+        "confidence": 0.99,
+        "reason": "证明含矩阵",
+    }]})
+    result = run_pipeline(
+        text,
+        mode="ai",
+        ai_config=AIConfig(decide=RoleConfig(api_key="test"), review_enabled=False),
+        ai_client=decide,
+    )
+    assert result.ok, result.report_md
+    output = result.result
+    # 文档尾是唯一结构停点，而模型没有覆盖后面的普通叙述。程序无法证明该叙述
+    # 属于 proof 内还是 proof 外，因此宁可完全不包裹，也不截断/误吞正文。
+    assert r"\begin{proof}" not in output and r"\end{proof}" not in output
+    assert any("避免生成被截断的 proof" in item["reason"] for item in result.ambiguous)
+    assert "a & b" in output and "c & d" in output
+
+
+def test_long_multiparagraph_proof_window_reaches_next_structure():
+    paragraphs = [f"Step {index}. The argument continues." for index in range(1, 31)]
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "Proof. We prove the assertion.\n\n"
+        + "\n\n".join(paragraphs)
+        + "\n\nTheorem 2. The next result.\n\\end{document}\n"
+    )
+    doc = parse_latex(text)
+    candidates = scan(doc).candidates
+    proof = next(c for c in candidates if c.kind == "proof")
+    theorem = next(c for c in candidates if c.kind == "theorem-like")
+    proof_end = theorem.span.start_line - 1
+    decide = FakeClient({"decisions": [{
+        "candidate_id": proof.id,
+        "action": "wrap",
+        "env": "proof",
+        "body_span": {
+            "start_line": proof.span.start_line,
+            "end_line": proof_end,
+        },
+        "confidence": 0.99,
+        "reason": "完整长证明到下一定理之前",
+    }]})
+    result = run_pipeline(
+        text,
+        mode="ai",
+        ai_config=AIConfig(decide=RoleConfig(api_key="test"), review_enabled=False),
+        ai_client=decide,
+    )
+    assert result.ok, result.report_md
+    # 候选首段到下一定理超过固定 20 行；请求仍必须展示真正停点。
+    prompt = decide.calls[0][1]
+    assert f"[{theorem.span.start_line:4d}]" in prompt
+    output = result.result
+    assert output.index("Step 30.") < output.index(r"\end{proof}")
+    assert output.index(r"\end{proof}") < output.index("Theorem 2.")
+
+
+def test_complete_window_cannot_accept_model_truncated_proof():
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "Proof. First step.\n\n"
+        "Second step remains part of the proof.\n\n"
+        "Final step remains part of the proof.\n\n"
+        "Theorem 2. Reliable stop.\n"
+        "\\end{document}\n"
+    )
+    doc = parse_latex(text)
+    candidates = scan(doc).candidates
+    proof = next(c for c in candidates if c.kind == "proof")
+    decide = FakeClient({"decisions": [{
+        "candidate_id": proof.id,
+        "action": "wrap",
+        "env": "proof",
+        # 窗口完整，但模型只选第一段：过去会生成一个看似合法的半截 proof。
+        "body_span": {
+            "start_line": proof.span.start_line,
+            "end_line": proof.span.end_line,
+        },
+        "confidence": 0.99,
+        "reason": "incorrectly short",
+    }]})
+    result = run_pipeline(
+        text,
+        mode="ai",
+        ai_config=AIConfig(decide=RoleConfig(api_key="test"), review_enabled=False),
+        ai_client=decide,
+    )
+    assert result.ok and result.verification["safe_to_export"] is True
+    output = result.result
+    assert output.index("Final step remains") < output.index(r"\end{proof}")
+    assert output.index(r"\end{proof}") < output.index("Theorem 2.")
+
+
+def test_overlong_candidate_window_rejects_partial_proof():
+    paragraphs = [f"Step {index}. Still proving." for index in range(1, 12)]
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "Proof. Start.\n\n"
+        + "\n\n".join(paragraphs)
+        + "\n\nTheorem 3. Stop.\n\\end{document}\n"
+    )
+    doc = parse_latex(text)
+    candidates = scan(doc).candidates
+    proof = next(c for c in candidates if c.kind == "proof")
+    decide = FakeClient({"decisions": [{
+        "candidate_id": proof.id,
+        "action": "wrap",
+        "env": "proof",
+        "body_span": {
+            "start_line": proof.span.start_line,
+            "end_line": proof.span.start_line + 4,
+        },
+        "confidence": 0.99,
+        "reason": "故意截断",
+    }]})
+    result = run_pipeline(
+        text,
+        mode="ai",
+        ai_config=AIConfig(
+            decide=RoleConfig(api_key="test"),
+            review_enabled=False,
+            context_lines=2,
+            max_candidate_lines=5,
+        ),
+        ai_client=decide,
+    )
+    assert result.ok, result.report_md
+    assert r"\begin{proof}" not in result.result
+    assert any("超过 AI 安全窗口" in item["reason"] for item in result.ambiguous)
+    assert "必须 action=none" in decide.calls[0][1]
 
 
 def test_review_missed_extra_cannot_bypass_numbered_environment_guard():
@@ -687,7 +987,7 @@ def test_review_missed_extra_cannot_bypass_numbered_environment_guard():
     assert "\\begin{theorem}" not in result.result
     assert "Theorem 7. A statement with its own number." in result.result
     assert "\\begin{proof}\nA separate proof paragraph." in result.result
-    assert any("避免双编号" in item["reason"] for item in result.ambiguous)
+    assert any("疑似漏项" in item["reason"] for item in result.ambiguous)
 
 
 def test_review_batching():
@@ -705,6 +1005,48 @@ def test_review_batching():
     assert fake_decide.calls and len(fake_review.calls) == 3
 
 
+def test_review_batch_cannot_modify_candidate_from_another_batch():
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "Theorem 1. First statement.\n\n"
+        "Theorem 2. Second statement.\n"
+        "\\end{document}\n"
+    )
+    doc = parse_latex(text)
+    scanned = scan(doc)
+    theorem_ids = [c.id for c in scanned.candidates if c.kind == "theorem-like"]
+    assert len(theorem_ids) == 2
+    fake_decide = FakeClient(build_fake_decide_response(doc, scanned))
+    fake_review = FakeClient([
+        {
+            "findings": [{
+                # 第一个 batch 恶意引用第二个 batch 的真实 ID。
+                "candidate_id": theorem_ids[1],
+                "verdict": "should-remove",
+                "reason": "cross-batch attempt",
+            }],
+        },
+        {"findings": []},
+    ])
+    cfg = AIConfig(
+        decide=RoleConfig(api_key="t"),
+        review=RoleConfig(api_key="t"),
+        review_enabled=True,
+        review_batch=1,
+        review_max_rounds=1,
+    )
+    out = run_pipeline(
+        text,
+        mode="ai",
+        ai_config=cfg,
+        ai_client=fake_decide,
+        review_client=fake_review,
+    )
+    assert out.ok, out.report_md
+    assert out.result.count("\\begin{theorem}") == 2
+    assert any("未知修改项" in item["reason"] for item in out.review["invalid"])
+
+
 def test_prompt_builders():
     text = read_sample("basic_book.tex")
     doc = parse_latex(text)
@@ -715,9 +1057,11 @@ def test_prompt_builders():
     assert f"[{cands[0].span.start_line:4d}]" in user
     ruser = build_review_user(doc.text.split("\n"),
                               [{"candidate_id": "c-1", "action": "wrap", "env": "theorem",
-                                "reason": "包裹", "body_span": (20, 21)}],
+                                "reason": "包裹", "body_span": (20, 21),
+                                "result_span": (22, 24)}],
                               [], context_lines=4)
-    assert "修改 1" in ruser and "body_span=20..21" in ruser
+    assert "修改 1" in ruser and "source_body_span=20..21" in ruser
+    assert "result_span=22..24" in ruser
 
 
 def main():

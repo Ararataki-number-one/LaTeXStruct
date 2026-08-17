@@ -186,11 +186,15 @@ def test_crlf_export_preserved():
     assert res.export_text.startswith("\\documentclass{book}\r\n")
 
 
-def test_ai_mode_without_key_degrades():
-    res = run_pipeline(read_sample("basic_book.tex"), mode="ai")
-    assert res.ok
-    assert res.verification["ai_degraded"] is True
-    assert "\\begin{theorem}" in res.result  # 规则降级仍然包裹
+def test_ai_mode_without_key_fails_closed():
+    from latexstruct.core.ai import LLMError
+
+    try:
+        run_pipeline(read_sample("basic_book.tex"), mode="ai")
+    except LLMError as exc:
+        assert "未使用规则模式替代" in str(exc)
+    else:
+        raise AssertionError("AI 模式缺少 Key 时不得静默执行规则模式")
 
 
 def test_real_godsil_excerpt():

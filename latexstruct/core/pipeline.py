@@ -6,7 +6,7 @@
 
 - mode="rule"：确定性规则（无 Key 降级路径）；
 - mode="ai"：定理类/proof/范围修正候选交 AI 决策，双语标题/习题节/导言区仍走确定性规则；
-  AI 不可用（无 Key/调用失败）时自动降级为规则决策（ai_degraded=True）。
+  AI 不可用（无 Key/调用失败）时明确失败并保留原项目，绝不静默伪装成 AI 结果。
 任何校验失败 → 返回原始文本，绝不导出被改坏的内容。
 """
 
@@ -201,7 +201,11 @@ def _apply_decisions(doc, decisions: List[Decision], ctx: PatchContext, ambiguou
     rejected: List[AppliedPatch] = []
     for d in decisions:
         candidate = _candidate_for_decision(d, candidates_by_id or {})
-        unsafe_reason = _normalize_theorem_wrap_start(d, candidate)
+        unsafe_reason = _unsafe_candidate_env_reason(d, candidate)
+        if not unsafe_reason:
+            unsafe_reason = str(getattr(d, "_legalize_error", "") or "")
+        if not unsafe_reason:
+            unsafe_reason = _normalize_theorem_wrap_start(d, candidate)
         if not unsafe_reason:
             _restore_theorem_title_metadata(d, candidate)
             _adapt_elegantbook_theorem_env(d, candidate, ctx)
@@ -227,6 +231,17 @@ def _apply_decisions(doc, decisions: List[Decision], ctx: PatchContext, ambiguou
     planned, dropped = resolve_overlaps(planned, lines)
     out, applied, rejected2 = apply_patches(lines, planned)
     return out, applied, rejected + rejected2, dropped
+
+
+def _unsafe_candidate_env_reason(decision: Decision, candidate) -> str:
+    """最终应用门：复查/缓存也不能把 proof 候选改成定理，反之亦然。"""
+    if decision.action != "wrap" or candidate is None:
+        return ""
+    if candidate.kind == "proof" and decision.env != "proof":
+        return "证明候选只能使用 proof 环境；不兼容的 AI/复查环境已保守跳过"
+    if candidate.kind == "theorem-like" and decision.env == "proof":
+        return "定理类候选不能改成 proof 环境；不兼容的 AI/复查环境已保守跳过"
+    return ""
 
 
 def _candidate_for_decision(decision: Decision, candidates_by_id: dict):
@@ -509,11 +524,16 @@ def run_pipeline(
                     client.last_usage,
                     getattr(client.cfg, "model", ""),
                 )
-            fallback, amb2 = build_rule_decisions(doc, scan_res, rule_config, kinds=AI_KINDS, pack=pack)
-            decisions = rule_decisions + fallback
-            ambiguous += amb2
-            ai_degraded = True
-            ai_notes.append({"candidate_id": "-", "line": 1, "reason": f"AI 不可用，已降级为规则决策：{e}"})
+            emit(
+                "error",
+                0.24,
+                "AI 结构化未完成，原项目保持不变",
+                usage=ai_usage,
+            )
+            raise LLMError(
+                "AI 结构化未完成，未使用规则模式替代；请检查 API Key、模型与网络后重试："
+                f"{e}"
+            ) from None
     else:
         emit("decide", 0.48, "正在用保守规则生成修改建议")
         decisions, ambiguous = build_rule_decisions(doc, scan_res, rule_config, pack=pack)
@@ -614,6 +634,13 @@ def run_pipeline(
             rejected = review_info["rejected"]
             decisions = review_info["decisions"]
             ai_usage["review"] = review_info["usage"]
+            for escalation in review_info.get("escalations", []):
+                if not any(
+                    old.get("candidate_id") == escalation.get("candidate_id")
+                    and old.get("reason") == escalation.get("reason")
+                    for old in ambiguous
+                ):
+                    ambiguous.append(escalation)
         except LLMError as e:
             if rclient.last_usage:
                 from ..pricing import add_usage
@@ -623,8 +650,16 @@ def run_pipeline(
                     rclient.last_usage,
                     getattr(rclient.cfg, "model", ""),
                 )
-            review_info = {"error": str(e)}
-            ai_notes.append({"candidate_id": "-", "line": 1, "reason": f"AI 复查失败，沿用初次结果：{e}"})
+            emit(
+                "error",
+                0.69,
+                "AI 复查未完成，原项目保持不变",
+                usage=ai_usage,
+            )
+            raise LLMError(
+                "AI 复查未完成，未保存未经完整复查的草稿；请检查复查模型与网络后重试："
+                f"{e}"
+            ) from None
 
     result_text = "\n".join(out)
     emit(

@@ -64,10 +64,15 @@ jobs:
           Invoke-WebRequest $asset.browser_download_url -OutFile $exe
           $root = Join-Path $env:RUNNER_TEMP 'tinytex'
           & $exe -o"$root" -y
+          if ($LASTEXITCODE -ne 0) { Write-Error "TinyTeX 解压失败"; exit 1 }
           $tlmgr = Get-ChildItem -Path $root -Recurse -Filter tlmgr.bat | Select-Object -First 1
           if (-not $tlmgr) { Write-Error "解压后未找到 tlmgr"; exit 1 }
           $bin = $tlmgr.DirectoryName
           Add-Content $env:GITHUB_PATH $bin
+          # TinyTeX 发布包与滚动更新的软件仓库之间可能存在一个短暂版本差。
+          # TeX Live 要求先更新 tlmgr 自身，否则后续 install 会提前终止且可能返回 0。
+          & $tlmgr.FullName update --self
+          if ($LASTEXITCODE -ne 0) { Write-Error "TinyTeX 包管理器更新失败"; exit 1 }
           # amssymb.sty 属于 amsfonts，amsthm.sty 属于 amscls；这里必须使用
           # TeX Live 的发行包名，而不是 .sty 文件名。
           & $tlmgr.FullName install xetex elegantbook amsmath amsfonts amscls geometry tcolorbox graphics titlesec
@@ -120,7 +125,7 @@ jobs:
           python -c "import latexstruct; assert latexstruct.__version__=='$v', f'版本不匹配: {latexstruct.__version__} vs $v'"
           echo "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
       - name: 安装依赖
-        run: python -m pip install -r requirements.txt pyinstaller
+        run: python -m pip install -r requirements.txt pyinstaller "Pillow>=10,<12"
       - name: 生成图标与版本资源
         shell: pwsh
         run: |
@@ -230,35 +235,38 @@ jobs:
           }
           if (-not $gone) { Write-Error "静默卸载后残留文件"; exit 1 }
           Write-Host "安装器冒烟测试通过（安装→运行→卸载）"
-      - name: 上一版自动更新冒烟（v1.1.6 运行中 → 当前版本）
+      - name: 上一版自动更新冒烟（运行中 → 当前版本）
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          # 只需在发布时更换这一处基线。测试下面的完整链路：
+          # schedule_installer_after_exit -> 旧应用退出 -> 安装 -> 新应用重启。
+          $previousVersion = '1.1.7'
+          $previousTag = "v$previousVersion"
           $headers = @{
             'User-Agent' = 'latexstruct-upgrade-smoke'
             'Authorization' = "Bearer $env:GITHUB_TOKEN"
             'Accept' = 'application/vnd.github+json'
           }
           $release = Invoke-RestMethod -Headers $headers `
-            'https://api.github.com/repos/Ararataki-number-one/LaTeXStruct/releases/tags/v1.1.6'
+            "https://api.github.com/repos/Ararataki-number-one/LaTeXStruct/releases/tags/$previousTag"
           $asset = $release.assets | Where-Object {
-            $_.name -eq 'LaTeXStruct-setup-1.1.6.exe'
+            $_.name -eq "LaTeXStruct-setup-$previousVersion.exe"
           } | Select-Object -First 1
-          if (-not $asset) { Write-Error '公开 v1.1.6 安装器不存在'; exit 1 }
+          if (-not $asset) { Write-Error "公开 $previousTag 安装器不存在"; exit 1 }
           $oldSetup = Join-Path $env:RUNNER_TEMP $asset.name
           Invoke-WebRequest -Headers $headers -Uri $asset.browser_download_url -OutFile $oldSetup
           if ($asset.digest -notmatch '^sha256:([0-9a-fA-F]{64})$') {
-            Write-Error 'v1.1.6 安装器缺少 SHA-256 摘要'; exit 1
+            Write-Error "$previousTag 安装器缺少 SHA-256 摘要"; exit 1
           }
           $expectedOldHash = $Matches[1]
           $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $oldSetup).Hash
           if ($actual -ne $expectedOldHash) {
-            Write-Error 'v1.1.6 安装器摘要校验失败'; exit 1
+            Write-Error "$previousTag 安装器摘要校验失败"; exit 1
           }
 
           $upgradeDir = Join-Path $env:LOCALAPPDATA 'Programs\LaTeXStruct-Upgrade-Smoke'
-          $upgradeSetupLog = Join-Path $env:RUNNER_TEMP 'latexstruct-upgrade-setup.log'
           $upgradeRestartLog = Join-Path $env:LOCALAPPDATA 'LaTeXStruct\update-restart.log'
           $currentSetup = Get-ChildItem dist/LaTeXStruct-setup-*.exe | Select-Object -First 1
           if (-not $currentSetup) { Write-Error '未找到当前版本安装器'; exit 1 }
@@ -267,57 +275,80 @@ jobs:
             Start-Process -FilePath $oldSetup -ArgumentList `
               '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$upgradeDir" -Wait
             if (-not (Test-Path "$upgradeDir\LaTeXStruct.exe")) {
-              Write-Error 'v1.1.6 安装失败'; exit 1
+              Write-Error "$previousTag 安装失败"; exit 1
             }
-            $oldProc = Start-Process -FilePath "$upgradeDir\LaTeXStruct.exe" `
+            $installedExe = (Resolve-Path -LiteralPath "$upgradeDir\LaTeXStruct.exe").Path
+            $oldProc = Start-Process -FilePath $installedExe `
               -ArgumentList '--server','--port','8100' -PassThru
             $oldHealthy = $false
             foreach ($i in 1..30) {
               Start-Sleep -Seconds 2
               try {
                 $health = Invoke-RestMethod 'http://127.0.0.1:8100/api/health' -TimeoutSec 3
-                if ($health.ok -and [string]$health.version -eq '1.1.6') {
+                if ($health.ok -and [string]$health.version -eq $previousVersion) {
                   $oldHealthy = $true
                   break
                 }
               } catch {}
             }
-            if (-not $oldHealthy) { Write-Error '运行中的 v1.1.6 健康检查失败'; exit 1 }
-
-            # 使用 v1.1.6 updater 的完整安装器参数；/DIR 仅隔离 CI 安装目录。
-            # CI 保留运行中的旧进程，同时覆盖 Restart Manager 的强制关闭兜底。
-            $upgrade = Start-Process -FilePath $currentSetup.FullName -ArgumentList `
-              '/VERYSILENT','/SUPPRESSMSGBOXES','/CLOSEAPPLICATIONS', `
-              '/FORCECLOSEAPPLICATIONS','/NORESTART','/NORESTARTAPPLICATIONS', `
-              '/LATEXSTRUCTUPDATE=1',"/DIR=$upgradeDir","/LOG=$upgradeSetupLog" -PassThru
-            $deadline = [DateTime]::UtcNow.AddSeconds(150)
-            while (-not $upgrade.HasExited -and [DateTime]::UtcNow -lt $deadline) {
-              Start-Sleep -Milliseconds 500
-              $upgrade.Refresh()
-            }
-            if (-not $upgrade.HasExited) {
-              Stop-Process -Id $upgrade.Id -Force -ErrorAction SilentlyContinue
-              Write-Error '升级安装器超时，疑似停在文件占用/重试/忽略对话框'; exit 1
-            }
-            if ($upgrade.ExitCode -ne 0) {
-              Write-Error "升级安装器退出码异常: $($upgrade.ExitCode)"; exit 1
-            }
-            if (Get-Process -Id $oldProc.Id -ErrorAction SilentlyContinue) {
-              Write-Error '旧版 PyInstaller 主进程仍未退出'; exit 1
+            if (-not $oldHealthy) {
+              Write-Error "运行中的 $previousTag 健康检查失败"; exit 1
             }
 
-            # silent upgrade 的 [Run] 应自动启动新版本桌面应用（默认本地端口 8765）。
+            # 这是应用内“点击更新”的真实第一阶段，不再直接运行安装器。
+            # 路径通过环境变量传入，避免将 runner 路径拼接成可执行脚本。
+            $env:LATEXSTRUCT_SMOKE_INSTALLER = $currentSetup.FullName
+            $env:LATEXSTRUCT_SMOKE_OLD_PID = [string]$oldProc.Id
+            $env:LATEXSTRUCT_SMOKE_TARGET = $installedExe
+            $helperOutput = python -c "import os; from latexstruct.updater import schedule_installer_after_exit; print(schedule_installer_after_exit(os.environ['LATEXSTRUCT_SMOKE_INSTALLER'], app_pid=int(os.environ['LATEXSTRUCT_SMOKE_OLD_PID']), target_executable=os.environ['LATEXSTRUCT_SMOKE_TARGET'], previous_version='1.1.7', expected_version=os.environ['APP_VERSION']).pid)"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error '应用内更新 helper 调度失败'; exit 1
+            }
+            $helperPidText = [string]($helperOutput | Select-Object -Last 1)
+            $helperPid = 0
+            if (-not [int]::TryParse($helperPidText.Trim(), [ref]$helperPid) -or $helperPid -le 0) {
+              Write-Error "更新 helper 没有返回有效 PID: $helperPidText"; exit 1
+            }
+
+            # 模拟 schedule 成功后桌面应用执行 WM_CLOSE。PyInstaller 是父子
+            # 进程，所以只关闭这一安装路径的旧进程，不伤及 runner 上其它任务。
+            $oldProcessIds = @(
+              Get-CimInstance Win32_Process -Filter "Name = 'LaTeXStruct.exe'" |
+                Where-Object { [string]$_.ExecutablePath -ieq $installedExe } |
+                ForEach-Object { [int]$_.ProcessId }
+              [int]$oldProc.Id
+            ) | Sort-Object -Unique
+            foreach ($processId in $oldProcessIds) {
+              Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+            }
+            $oldExited = $false
+            foreach ($i in 1..30) {
+              if (-not (Get-Process -Id $oldProc.Id -ErrorAction SilentlyContinue)) {
+                $oldExited = $true
+                break
+              }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not $oldExited) { Write-Error '旧版 PyInstaller 主进程仍未退出'; exit 1 }
+
+            # 必须连续多次健康，防止“刚启动一次就崩溃”也被误判为成功。
             $newHealthy = $false
+            $consecutiveHealthy = 0
             $observed = '<未响应>'
-            foreach ($i in 1..45) {
+            foreach ($i in 1..75) {
               Start-Sleep -Seconds 2
               try {
                 $health = Invoke-RestMethod 'http://127.0.0.1:8765/api/health' -TimeoutSec 3
                 if ($health.ok) {
                   $observed = [string]$health.version
-                  if ($observed -eq $env:APP_VERSION) { $newHealthy = $true; break }
+                  if ($observed -eq $env:APP_VERSION) {
+                    $consecutiveHealthy += 1
+                    if ($consecutiveHealthy -ge 4) { $newHealthy = $true; break }
+                  } else {
+                    $consecutiveHealthy = 0
+                  }
                 }
-              } catch {}
+              } catch { $consecutiveHealthy = 0 }
             }
             if (-not $newHealthy) {
               if (Test-Path $upgradeRestartLog) {
@@ -326,20 +357,45 @@ jobs:
               } else {
                 Write-Host 'Update restart helper did not create its first log line.'
               }
-              if (Test-Path $upgradeSetupLog) {
-                Write-Host '--- Inno Setup upgrade log (tail) ---'
-                Get-Content -LiteralPath $upgradeSetupLog -Tail 120
-              }
               Write-Error "升级后未自动启动当前版本: expected=$env:APP_VERSION actual=$observed"
               exit 1
             }
+
+            # 更新后必须仍是 React 工作台，且 HTML 引用的带 hash JS/CSS 均能真实读取。
+            $upgradePage = Invoke-WebRequest 'http://127.0.0.1:8765/' `
+              -UseBasicParsing -TimeoutSec 10
+            if ($upgradePage.Content -notmatch '<div\s+id=["'']root["'']') {
+              Write-Error '升级后没有提供 React 工作台'; exit 1
+            }
+            $upgradeAssetMatches = [regex]::Matches(
+              $upgradePage.Content,
+              '(?:src|href)=["''](/assets/[^"'']+\.(?:js|css))["'']'
+            )
+            $upgradeAssetPaths = @(
+              $upgradeAssetMatches | ForEach-Object { $_.Groups[1].Value } |
+                Sort-Object -Unique
+            )
+            if ($upgradeAssetPaths.Count -lt 2) {
+              Write-Error '升级后 React 首页缺少带 hash 的 JS/CSS 资源'; exit 1
+            }
+            foreach ($assetPath in $upgradeAssetPaths) {
+              if ($assetPath -notmatch '^/assets/.+-[A-Za-z0-9_-]{6,}\.(?:js|css)$') {
+                Write-Error "升级后 React 资源名未带内容 hash: $assetPath"; exit 1
+              }
+              $upgradeAsset = Invoke-WebRequest "http://127.0.0.1:8765$assetPath" `
+                -UseBasicParsing -TimeoutSec 10
+              if ($upgradeAsset.StatusCode -ne 200 -or $upgradeAsset.RawContentLength -le 0) {
+                Write-Error "升级后 React 资源不可用: $assetPath"; exit 1
+              }
+            }
+
             $updated = Invoke-RestMethod 'http://127.0.0.1:8765/api/update/result' -TimeoutSec 5
-            if (-not $updated.updated -or [string]$updated.previous -ne '1.1.6' -or
+            if (-not $updated.updated -or [string]$updated.previous -ne $previousVersion -or
                 [string]$updated.current -ne $env:APP_VERSION) {
               Write-Error "升级成功提示状态错误: $($updated | ConvertTo-Json -Compress)"
               exit 1
             }
-            Write-Host "上一版自动更新通过：v1.1.6 → v$env:APP_VERSION"
+            Write-Host "上一版自动更新通过：$previousTag → v$env:APP_VERSION"
           } finally {
             Get-Process LaTeXStruct -ErrorAction SilentlyContinue | Stop-Process -Force
             Start-Sleep -Seconds 2

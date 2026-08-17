@@ -11,6 +11,7 @@ latexstruct/server/static-react/
 
 # 本地数据与调试
 .tmp/
+tmp/
 output/
 debug_tpl.txt
 spot.txt
@@ -33,6 +34,9 @@ corpus/
 .env
 .env.*
 !.env.example
+*.env
+*.env.*
+!*.env.example
 secrets/
 secrets.json
 *.secret

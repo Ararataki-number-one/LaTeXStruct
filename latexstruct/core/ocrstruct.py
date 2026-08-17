@@ -17,6 +17,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from .parser import find_env_ranges, mask_comments, mask_inline_verb, mask_protected
 from .patch import PendingOp
 
 META_PREFIX = "% LaTeXStruct-OCR-Metadata: "
@@ -43,6 +44,27 @@ FRONT_MATTER = {
     "abstract", "acknowledgements", "acknowledgments", "contents", "foreword",
     "introduction", "notation", "preface", "references", "bibliography",
 }
+OUTER_TEXT_ENVS = {
+    "theorem", "theorem*", "lemma", "lemma*", "proposition", "proposition*",
+    "corollary", "corollary*", "definition", "definition*", "remark", "remark*",
+    "example", "example*", "exercise", "exercise*", "proof",
+}
+MATH_ENVS = {
+    "equation", "equation*", "align", "align*", "gather", "gather*",
+    "multline", "multline*", "flalign", "flalign*", "alignat", "alignat*",
+    "eqnarray", "eqnarray*",
+}
+EXACT_ENV_LINE_RE = re.compile(
+    r"^\s*\\(?P<kind>begin|end)\{(?P<name>[^{}\s]+)\}"
+    r"(?:\s*\[[^\]\r\n]*\])?\s*$"
+)
+MATH_EVENT_RE = re.compile(
+    r"\\(?P<delimiter>[\[\]])"
+    r"|\\(?P<kind>begin|end)\{(?P<name>"
+    + "|".join(re.escape(name) for name in sorted(MATH_ENVS, key=len, reverse=True))
+    + r")\}"
+)
+ACTIVE_TOC_RE = re.compile(r"\\tableofcontents(?![A-Za-z@])")
 
 
 @dataclass
@@ -195,6 +217,7 @@ def _candidate_from_line(line: str, line_no: int, page: Optional[int]) -> Option
             )
     stripped = line.strip()
     stripped = re.sub(r"^(?:\\(?:huge|Huge|LARGE|Large|large)\s*)+", "", stripped)
+    stripped = re.sub(r"^\\noindent\s*", "", stripped)
     # OCR 有时把小节标题与首段正文拼在同一行，例如
     # ``3.2. A construction. The proof starts ...``。标题必须仍由 PDF 大纲和
     # 页码共同确认；这里仅拆出可供匹配的候选，不会凭编号自行创建章节。
@@ -207,7 +230,9 @@ def _candidate_from_line(line: str, line_no: int, page: Optional[int]) -> Option
             trailing=(match.group("trailing") or "").strip(),
             kind="plain",
         )
-    if stripped and len(stripped) <= 220 and not stripped.startswith(("%", "\\begin", "\\end")):
+    # 其余以反斜杠开头的内容是版面/分页/宏命令，不是普通标题候选。
+    # 把 ``\clearpage`` 当成重复页眉会删掉真实换页，破坏目录布局。
+    if stripped and len(stripped) <= 220 and not stripped.startswith(("%", "\\")):
         return HeadingCandidate(line_no, page, stripped, "", "plain")
     return None
 
@@ -227,7 +252,10 @@ def _plain_text(value: str) -> str:
 
 def _title_without_number(value: str) -> str:
     value = re.sub(r"^\s*Chapter\s+\d+\s*[:.\-]?\s*", "", value, flags=re.I)
-    return NUMBER_PREFIX_RE.sub("", value).strip()
+    value = NUMBER_PREFIX_RE.sub("", value).strip()
+    # 编号与标题之间的视觉空白命令不是标题内容。若保留在章节参数里，
+    # ``\section{\quad Title}`` 会污染目录与 PDF 书签。
+    return re.sub(r"^(?:\\(?:quad|qquad|,|;|!| )\s*)+", "", value).strip()
 
 
 def _score_title(expected: str, candidate: str) -> float:
@@ -250,13 +278,35 @@ def _command_for(level: int, kind: str) -> str:
     return names[min(max(level, 0), len(names) - 1)]
 
 
+def _authoritative_page_markers(lines: List[str]) -> Dict[int, int]:
+    """只采信每个合并页段的第一个 Page 标记。
+
+    ``merge_book`` 已在段首写入真实 PDF 页码，但视觉模型偶尔又把印刷页码转成
+    ``% Page N``。旧逻辑会被第二个注释覆盖，导致后续标题与 PDF 大纲错开数页。
+    """
+    has_breaks = any(PAGE_BREAK_RE.match(line) for line in lines)
+    accept_next = True
+    markers = {}
+    for index, line in enumerate(lines, start=1):
+        if PAGE_BREAK_RE.match(line):
+            accept_next = True
+            continue
+        match = PAGE_RE.match(line)
+        if not match:
+            continue
+        if not has_breaks or accept_next:
+            markers[index] = int(match.group(1))
+            accept_next = False
+    return markers
+
+
 def _page_map(lines: List[str]) -> Dict[int, Optional[int]]:
     current: Optional[int] = None
     out = {}
+    markers = _authoritative_page_markers(lines)
     for index, line in enumerate(lines, start=1):
-        match = PAGE_RE.match(line)
-        if match:
-            current = int(match.group(1))
+        if index in markers:
+            current = markers[index]
         out[index] = current
     return out
 
@@ -265,11 +315,30 @@ def _page_line_positions(lines: List[str]) -> Dict[int, int]:
     """返回每行距当前 ``% Page`` 标记的行数，用于保守识别运行页眉。"""
     start = 0
     out = {}
+    markers = _authoritative_page_markers(lines)
     for index, line in enumerate(lines, start=1):
-        if PAGE_RE.match(line):
+        if index in markers:
             start = index
         out[index] = index - start if start else 10_000
     return out
+
+
+def _active_latex(text: str) -> str:
+    """等长屏蔽注释、保护环境与 inline verb，只保留会执行的 LaTeX。"""
+    active = mask_comments(text)
+    ranges, _, _ = find_env_ranges(active)
+    return mask_inline_verb(mask_protected(active, ranges))
+
+
+def _near_page_segment_end(lines: List[str], line_no: int, lookahead: int = 7) -> bool:
+    """该行之后很快就是 OCR 页段边界；用于限定印刷页码清理范围。"""
+    upper = min(len(lines), line_no + max(1, lookahead))
+    return any(
+        PAGE_RE.match(lines[index - 1])
+        or PAGE_BREAK_RE.match(lines[index - 1])
+        or lines[index - 1].strip() in {r"\clearpage", r"\newpage", r"\end{document}"}
+        for index in range(line_no + 1, upper + 1)
+    )
 
 
 def _manual_toc_region_is_safe(lines: List[str], start: int, stop: int) -> bool:
@@ -289,6 +358,14 @@ def _manual_toc_region_is_safe(lines: List[str], start: int, stop: int) -> bool:
         visible = re.sub(r"\\textbf\s*\{([^{}]*)\}", r"\1", stripped).strip()
         if re.fullmatch(r"[ivxlcdm]+|\d+", visible, re.I):
             continue
+        if re.fullmatch(
+            r"\\(?:hbox|mbox|centerline)\s*\{\s*(?:[ivxlcdm]+|\d+)\s*\}",
+            stripped,
+            re.I,
+        ):
+            continue
+        if re.fullmatch(r"\\hfill\s*(?:[ivxlcdm]+|\d+)", stripped, re.I):
+            continue
         # 未知活动文本可能是真实正文；整段不改，交给最终目录门禁拦截。
         return False
     return dotfill >= 1
@@ -306,12 +383,82 @@ def _front_matter(title: str) -> bool:
     return _plain_text(title) in {_plain_text(item) for item in FRONT_MATTER}
 
 
+def _update_math_stack(stack: List[str], line: str) -> None:
+    active = line.split("%", 1)[0]
+    for token in MATH_EVENT_RE.finditer(active):
+        delimiter = token.group("delimiter")
+        if delimiter == "[":
+            stack.append("bracket-display")
+        elif delimiter == "]":
+            if stack and stack[-1] == "bracket-display":
+                stack.pop()
+        elif token.group("kind") == "begin":
+            stack.append(token.group("name"))
+        elif stack and stack[-1] == token.group("name"):
+            stack.pop()
+
+
+def _find_math_close(lines: List[str], start: int, initial: List[str]) -> int:
+    stack = list(initial)
+    # 只移动到附近可证明的闭合点，避免跨段猜测环境边界。
+    for line_no in range(start, min(len(lines), start + 30) + 1):
+        _update_math_stack(stack, lines[line_no - 1])
+        if not stack:
+            return line_no
+    return 0
+
+
+def _build_syntax_repair_ops(lines: List[str]) -> Tuple[List[PendingOp], List[dict]]:
+    """修复 OCR 唯一可证明的外层环境/数学环境交叉闭合。
+
+    只移动一条完整的 ``\\end{theorem}``（及同类环境），公式和正文逐字不改；
+    所有改动仍通过 PendingOp 进入可逆补丁与内容不变校验。
+    """
+    outer_stack: List[Tuple[str, int]] = []
+    math_stack: List[str] = []
+    operations = []
+    notes = []
+    for line_no, line in enumerate(lines, start=1):
+        env = EXACT_ENV_LINE_RE.match(line.split("%", 1)[0])
+        if env and env.group("name") in OUTER_TEXT_ENVS:
+            kind, name = env.group("kind"), env.group("name")
+            if kind == "begin":
+                outer_stack.append((name, line_no))
+            elif outer_stack and outer_stack[-1][0] == name:
+                if math_stack:
+                    close_line = _find_math_close(lines, line_no + 1, math_stack)
+                    if close_line:
+                        anchor = close_line
+                        if anchor < len(lines) and re.match(
+                            r"^\s*\\(?:textit|emph)\s*\{.*\}\s*$",
+                            lines[anchor],
+                        ):
+                            anchor += 1
+                        operations.extend([
+                            PendingOp("delete_line", line_no, old=line),
+                            PendingOp("insert_line", anchor, new=line.strip()),
+                        ])
+                        notes.append({
+                            "line": line_no,
+                            "status": "repaired-syntax",
+                            "reason": (
+                                f"将过早的 \\end{{{name}}} 移到数学环境闭合后"
+                                f"（原第 {line_no} 行 → 第 {anchor} 行后）"
+                            ),
+                        })
+                outer_stack.pop()
+        _update_math_stack(math_stack, line)
+    return operations, notes
+
+
 def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
     """把 PDF 大纲映射为章节命令；所有改动都通过可逆 PendingOp 表达。"""
     metadata = parse_ocr_metadata(text)
-    if not metadata or not metadata.get("outline"):
-        return [], []
     lines = text.split("\n")
+    if not metadata or not metadata.get("outline"):
+        # 即使 PDF 没有书签，OCR 仍可能把 theorem/proof 的结束命令放进
+        # 尚未闭合的公式中。该修复不依赖大纲，且只移动可证明的完整结束行。
+        return _build_syntax_repair_ops(lines)
     pages = _page_map(lines)
     page_positions = _page_line_positions(lines)
     kind = metadata["kind"]
@@ -320,12 +467,13 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
         if (hit := _candidate_from_line(line, index, pages[index])) is not None
     ]
     used: set[int] = set()
-    operations: Dict[Tuple[int, str], PendingOp] = {}
+    operations: Dict[Tuple, PendingOp] = {}
     notes: List[dict] = []
     matched_lines: set[int] = set()
 
     def set_op(op: PendingOp):
-        operations[(op.line, op.kind)] = op
+        key = (op.line, op.kind, op.new) if op.kind == "insert_line" else (op.line, op.kind)
+        operations[key] = op
 
     for entry in metadata["outline"]:
         expected_page = int(entry["page"])
@@ -430,10 +578,11 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
                 "reason": "手抄目录区混有无法确认的正文，已完整保留并阻止自动导出",
             })
 
-    # 只有重复且未映射到 PDF 大纲的“章节命令”才可确定为运行页眉污染。
+    # 重复、靠近段首且未映射到 PDF 大纲的短文本可确定为运行页眉污染。
+    # OCR 既可能把它写成 section*，也可能只是普通文本/\noindent 文本。
     unmatched_commands = [
         hit for hit in candidates
-        if hit.kind == "command" and hit.line not in matched_lines
+        if hit.kind in {"command", "plain", "styled"} and hit.line not in matched_lines
         and _plain_text(hit.visible) not in ("contents", "")
     ]
     near_top = [
@@ -459,6 +608,42 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
                 "reason": f"移除跨页重复运行页眉：{hit.visible}",
             })
 
+    # 只删除位于页段末尾、形态完全明确的印刷页码。正文中的普通数字不动。
+    for line_no, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not _near_page_segment_end(lines, line_no):
+            continue
+        if re.fullmatch(r"\\hfill\s*(?:\d+|[ivxlcdm]+)", stripped, re.I):
+            set_op(PendingOp("delete_line", line_no, old=line))
+            notes.append({
+                "line": line_no,
+                "status": "removed-footer",
+                "reason": "移除页段末尾由 \\hfill 排版的印刷页码",
+            })
+            continue
+        if re.fullmatch(r"\\centerline\{\s*(?:\d+|[ivxlcdm]+)\s*\}", stripped, re.I):
+            set_op(PendingOp("delete_line", line_no, old=line))
+            notes.append({
+                "line": line_no,
+                "status": "removed-footer",
+                "reason": "移除页段末尾的印刷页码",
+            })
+            continue
+        if not re.fullmatch(r"(?:\d+|[ivxlcdm]+)", stripped, re.I):
+            continue
+        center_open, center_close = _center_bounds(lines, line_no)
+        if not center_open:
+            continue
+        for target_line in range(center_open, center_close + 1):
+            set_op(PendingOp("delete_line", target_line, old=lines[target_line - 1]))
+        if center_open > 1 and lines[center_open - 2].strip() == r"\hrule":
+            set_op(PendingOp("delete_line", center_open - 1, old=lines[center_open - 2]))
+        notes.append({
+            "line": line_no,
+            "status": "removed-footer",
+            "reason": "移除页段末尾的居中印刷页码",
+        })
+
     # 老 OCR 书稿使用 elegantbook；有可靠大纲后按真实层级切回中性的 article/book。
     for line_no, line in enumerate(lines, start=1):
         match = DOCUMENTCLASS_RE.match(line)
@@ -475,6 +660,11 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
                     "reason": f"OCR 文档类按大纲层级改为 {target}，避免 0.1 与定理计数冲突",
                 })
             break
+
+    syntax_ops, syntax_notes = _build_syntax_repair_ops(lines)
+    for op in syntax_ops:
+        set_op(op)
+    notes.extend(syntax_notes)
 
     return sorted(operations.values(), key=lambda op: (op.line, op.kind)), notes
 
@@ -505,7 +695,11 @@ def check_ocr_structure(text: str) -> dict:
         return {"checked": False, "ok": True, "issues": [], "expected": 0, "matched": 0}
     issues = []
     actual = _actual_headings(text)
-    class_match = re.search(r"\\documentclass(?:\[[^\]]*\])?\s*\{([^{}]+)\}", text)
+    active_text = _active_latex(text)
+    active_toc_count = len(ACTIVE_TOC_RE.findall(active_text))
+    class_match = re.search(
+        r"\\documentclass(?:\[[^\]]*\])?\s*\{([^{}]+)\}", active_text,
+    )
     actual_class = class_match.group(1).strip().lower() if class_match else ""
     elegant_output = actual_class == "elegantbook"
     cursor = 0
@@ -515,7 +709,7 @@ def check_ocr_structure(text: str) -> dict:
         if (
             expected == "contents"
             and metadata.get("source_has_toc")
-            and "\\tableofcontents" in text
+            and active_toc_count == 1
         ):
             # 标准目录命令会自行生成 Contents 标题；它不应再被伪造为普通章节，
             # 也不能额外写进目录列表本身。
@@ -568,10 +762,51 @@ def check_ocr_structure(text: str) -> dict:
         })
 
     if metadata.get("source_has_toc"):
-        if "\\tableofcontents" not in text:
+        if active_toc_count == 0:
             issues.append({"reason": "源文档含目录，但结果没有 \\tableofcontents"})
-        if re.search(r"\\dotfill\b", text):
+        elif active_toc_count > 1:
+            issues.append({"reason": f"结果含 {active_toc_count} 个活动 \\tableofcontents，必须且只能保留一个"})
+        if re.search(r"\\dotfill\b", active_text):
             issues.append({"reason": "结果仍含手抄目录的 \\dotfill 与旧页码"})
+
+    # 运行页眉/页脚不属于正文；若自动清理器未能证明并删除，最终安全门必须
+    # fail closed，不能让“章节正确”掩盖仍存在的版面噪声。
+    lines = text.split("\n")
+    pages = _page_map(lines)
+    positions = _page_line_positions(lines)
+    near_top = []
+    for line_no, line in enumerate(lines, start=1):
+        hit = _candidate_from_line(line, line_no, pages[line_no])
+        if hit is None or hit.kind not in {"plain", "styled"}:
+            continue
+        normalized = _plain_text(hit.visible)
+        if positions.get(line_no, 10_000) <= 3 and len(normalized) >= 6:
+            near_top.append((line_no, hit.page, normalized, hit.visible))
+    top_counts = Counter(item[2] for item in near_top)
+    for line_no, _page, normalized, visible in near_top:
+        distinct_pages = {item[1] for item in near_top if item[2] == normalized}
+        if top_counts[normalized] >= 2 and len(distinct_pages) >= 2:
+            issues.append({
+                "line": line_no,
+                "reason": f"仍有跨页重复运行页眉：{visible}",
+            })
+            break
+    for line_no, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if (
+            _near_page_segment_end(lines, line_no)
+            and re.fullmatch(r"\\hfill\s*(?:\d+|[ivxlcdm]+)", stripped, re.I)
+        ):
+            issues.append({"line": line_no, "reason": "仍有由 \\hfill 排版的印刷页码页脚"})
+            break
+        if re.fullmatch(r"\\centerline\{\s*(?:\d+|[ivxlcdm]+)\s*\}", stripped, re.I):
+            issues.append({"line": line_no, "reason": "仍有印刷页码页脚"})
+            break
+        if re.fullmatch(r"(?:\d+|[ivxlcdm]+)", stripped, re.I):
+            center_open, _center_close = _center_bounds(lines, line_no)
+            if center_open:
+                issues.append({"line": line_no, "reason": "仍有居中印刷页码页脚"})
+                break
 
     # 全文选页从第一页开始时，不允许 section/subsection 脱离父级。
     selected = metadata.get("pages") or []

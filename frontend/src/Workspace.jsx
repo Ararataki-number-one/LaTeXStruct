@@ -22,7 +22,7 @@ const KINDS = [
 ];
 
 const ACTIVE_TASKS = new Set(["running", "pausing", "paused", "cancelling", "committing"]);
-const TERMINAL_TASKS = new Set(["done", "error", "cancelled"]);
+const TERMINAL_TASKS = new Set(["done", "blocked", "error", "cancelled"]);
 // @monaco-editor/react 4.7 disposes DiffEditor models before its widget during
 // unmount unless keepCurrent* is enabled. Reuse one stable pair across the sole
 // Workspace instance so route switches dispose the widget first without leaking
@@ -49,6 +49,37 @@ function processIssueGuidance(job) {
     return "原文已保留；可点击“重新分析”重试，并根据上面的错误详情定位具体规则。";
   }
   return "原项目没有被覆盖；可点击“重新分析”重试，若仍失败请保留上面的错误详情。";
+}
+
+function needsAiSettings(job) {
+  const detail = String(job?.error || job?.message || "");
+  return /api\s*key|api\s*base|base\s*url|endpoint|鉴权|认证|unauthori[sz]ed|forbidden|http\s*(401|403)|模型|\bmodel\b/i.test(detail);
+}
+
+function VerificationFailures({ failures = [], persisted = false }) {
+  return (
+    <div className="verification-failures" role="alert">
+      <b>
+        {persisted
+          ? "这是上次未通过检查的诊断草稿；原项目和上一次安全结果均未覆盖。"
+          : "本次结果没有保存；原项目和上一次安全结果均未覆盖。"}
+      </b>
+      {failures.length ? failures.map((failure, failureIndex) => (
+        <details key={failure.id || `failure-${failureIndex}`} open>
+          <summary>{failure.label || "安全检查"}：{failure.summary || "检查未通过"}</summary>
+          {Array.isArray(failure.details) && failure.details.slice(0, 5).map((detail, index) => {
+            const text = typeof detail === "string"
+              ? detail
+              : detail?.reason || detail?.message || detail?.path || "请按下方建议检查此项";
+            return <p key={`${failure.id || failureIndex}-${index}`}>{text}</p>;
+          })}
+          <small>下一步：{failure.action || "修复上述问题后点击“重新分析”。"}</small>
+        </details>
+      )) : (
+        <small>失败详情暂时不可用；请点击“重新分析”重试，原项目仍保持不变。</small>
+      )}
+    </div>
+  );
 }
 
 function inlineMarkdown(text, keyPrefix) {
@@ -134,7 +165,7 @@ function MarkdownReport({ markdown }) {
   );
 }
 
-export default function Workspace({ pid }) {
+export default function Workspace({ pid, onOpenSettings }) {
   const [info, setInfo] = useState(null);
   const [source, setSource] = useState("");
   const [result, setResult] = useState("");
@@ -144,6 +175,7 @@ export default function Workspace({ pid }) {
   const [savedExport, setSavedExport] = useState(null);
   const [job, setJob] = useState(null);
   const [livePreview, setLivePreview] = useState("");
+  const [failedAttempt, setFailedAttempt] = useState(null);
   const [pollGeneration, setPollGeneration] = useState(0);
   const [decisions, setDecisions] = useState([]);
   const [verification, setVerification] = useState(null);
@@ -190,8 +222,12 @@ export default function Workspace({ pid }) {
       setResult("");
       setReport("尚未分析。点击上方「开始分析」。");
     }
+    let decisionsResponse = null;
+    let decisionsLoaded = false;
     try {
       const d = await (await api(`/api/projects/${pid}/decisions`)).json();
+      decisionsLoaded = true;
+      decisionsResponse = d;
       const items = d.items || [];
       setDecisions(items);
       setSelected((previous) =>
@@ -200,6 +236,23 @@ export default function Workspace({ pid }) {
     } catch {
       setDecisions([]);
       setVerification(null);
+    }
+    if (decisionsResponse?.attempt === "blocked") {
+      try {
+        const failed = await (await api(`/api/projects/${pid}/failed-draft`)).json();
+        if (failed?.attempt !== "blocked" || typeof failed?.draft !== "string") {
+          throw new Error("诊断草稿格式无效");
+        }
+        setFailedAttempt(failed);
+        setLivePreview(failed.draft);
+        setReport(failed.report || "本次草稿未通过安全检查；原项目保持不变。");
+        setFocusPreview(true);
+      } catch (error) {
+        setFailedAttempt(null);
+        setStatus(`安全检查未通过，但诊断草稿无法读取：${error.message}。原项目仍保持不变。`);
+      }
+    } else if (decisionsLoaded) {
+      setFailedAttempt(null);
     }
     try {
       const g = await (await api(`/api/projects/${pid}/graph`)).json();
@@ -218,6 +271,7 @@ export default function Workspace({ pid }) {
     setSelected(null);
     setJob(null);
     setLivePreview("");
+    setFailedAttempt(null);
     setFileAction("");
     setSavedExport(null);
     setFocusPreview(false);
@@ -256,7 +310,7 @@ export default function Workspace({ pid }) {
         const previewRevision = Number(state.preview_revision);
         const hasNewPreview = !Number.isFinite(previewRevision)
           || previewVersionRef.current.revision !== previewRevision;
-        if (state.preview_ready && ACTIVE_TASKS.has(state.status) && hasNewPreview) {
+        if (state.preview_ready && (ACTIVE_TASKS.has(state.status) || state.status === "blocked") && hasNewPreview) {
           try {
             const response = await api(`/api/projects/${pid}/process/preview`);
             const preview = await response.text();
@@ -276,13 +330,17 @@ export default function Workspace({ pid }) {
           schedule((state.preview_chars || 0) > 1_000_000 ? 1500 : 650);
         } else if (TERMINAL_TASKS.has(state.status) && !terminalLoaded) {
           terminalLoaded = true;
-          setLivePreview("");
+          if (state.status !== "blocked") setLivePreview("");
           await load();
           if (state.status === "done") {
             const summary = state.result || {};
             setStatus((summary.ok ? "安全检查通过" : "安全检查未通过，已回退并禁止导出") +
               `：补丁 ${summary.applied || 0} · 拒绝 ${summary.rejected || 0} · 歧义 ${summary.ambiguous || 0}` +
               (summary.degraded ? "（AI 已降级为规则）" : ""));
+          } else if (state.status === "blocked") {
+            const summary = state.result || {};
+            setStatus(`安全检查未通过，失败草稿已保留供检查：${summary.failure_summary || state.message || "原项目保持不变"}`);
+            setFocusPreview(true);
           } else if (state.status === "cancelled") {
             setStatus("任务已取消；未验证草稿未保存，原项目保持不变");
           } else {
@@ -330,6 +388,7 @@ export default function Workspace({ pid }) {
     try {
       const state = await (await api(`/api/projects/${pid}/process/start`, { method: "POST" })).json();
       setReviewed(new Set());
+      setFailedAttempt(null);
       setJob(state);
       autoFocusedJobRef.current = state.id || null;
       setFocusPreview(true);
@@ -481,10 +540,20 @@ export default function Workspace({ pid }) {
   const lowConfidenceCount = applied.filter((d) => (d.confidence || 0) < 0.9).length;
   const safeToExport = verification?.safe_to_export === true;
   const taskActive = ACTIVE_TASKS.has(job?.status);
-  const reportReady = Boolean(info?.has_result && report && !taskActive);
+  const showingFailedDraft = !taskActive
+    && Boolean(livePreview)
+    && (job?.status === "blocked" || failedAttempt?.attempt === "blocked");
+  const failedAttemptDetails = failedAttempt?.details || {};
+  const failureDetails = Array.isArray(job?.result?.failures)
+    ? job.result.failures
+    : Array.isArray(failedAttemptDetails.failures)
+      ? failedAttemptDetails.failures
+      : [];
+  const reportReady = Boolean(info?.has_result && report && !taskActive && !showingFailedDraft);
   const reviewComplete = applied.length === 0 || reviewedCount === applied.length;
-  const canExport = safeToExport && reviewComplete && !taskActive;
-  const displayResult = taskActive && livePreview ? livePreview : result;
+  const canExport = safeToExport && reviewComplete && !taskActive && !showingFailedDraft;
+  const reviewLocked = taskActive || showingFailedDraft;
+  const displayResult = (taskActive || showingFailedDraft) && livePreview ? livePreview : result;
   const largeDiff = source.length + displayResult.length > 1_000_000;
   const showDiffEditor = view === "side" && !largeDiff;
   const tokenTotal = job?.cost?.total_tokens || 0;
@@ -519,10 +588,12 @@ export default function Workspace({ pid }) {
   };
 
   const accept = (d) => {
+    if (reviewLocked) return;
     setReviewed((prev) => new Set(prev).add(d.candidate_id));
   };
 
   const acceptSimilar = (d) => {
+    if (reviewLocked) return;
     setReviewed((prev) => {
       const next = new Set(prev);
       applied.filter((x) => x.kind === d.kind && x.env === d.env)
@@ -532,6 +603,7 @@ export default function Workspace({ pid }) {
   };
 
   const acceptAll = () => {
+    if (reviewLocked) return;
     if (lowConfidenceCount > 0 && !confirm(`其中有 ${lowConfidenceCount} 条低置信修改，仍要全部确认保留吗？`)) {
       return;
     }
@@ -543,8 +615,10 @@ export default function Workspace({ pid }) {
   };
 
   const reject = async (d) => {
-    if (ACTIVE_TASKS.has(job?.status)) {
-      setStatus("请等待当前处理完成或先取消任务，再修改审阅结论");
+    if (reviewLocked) {
+      setStatus(showingFailedDraft
+        ? "失败草稿仅供检查，不能应用审阅操作；请先重新分析。"
+        : "请等待当前处理完成或先取消任务，再修改审阅结论");
       return;
     }
     const ok = await rerun(`/api/projects/${pid}/decisions/${d.candidate_id}/reject`, { method: "POST" });
@@ -552,6 +626,12 @@ export default function Workspace({ pid }) {
   };
 
   const undo = async () => {
+    if (reviewLocked) {
+      setStatus(showingFailedDraft
+        ? "失败草稿仅供检查，不能撤销或应用修改；请先重新分析。"
+        : "请等待当前处理完成或先取消任务，再修改审阅结论");
+      return;
+    }
     const cid = undoStack.current.pop();
     if (!cid) {
       setStatus("没有可撤销的拒绝");
@@ -579,7 +659,7 @@ export default function Workspace({ pid }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, flat, view, job?.status]);
+  }, [selected, flat, view, job?.status, showingFailedDraft]);
 
   if (!pid) return <section className="card">请在「项目」页选择或创建一个项目。</section>;
 
@@ -591,7 +671,7 @@ export default function Workspace({ pid }) {
       <section className="card toolbar">
         <b>{info ? `${info.name}（${info.mode}）` : pid}</b>
         <button className="primary" disabled={taskActive} onClick={runProcess}>
-          {taskActive ? "正在处理" : result ? "重新分析" : "开始分析"}
+          {taskActive ? "正在处理" : result || failedAttempt ? "重新分析" : "开始分析"}
         </button>
         {job?.status === "paused" ? (
           <button className="primary" onClick={() => controlTask("resume")}>▶ 继续</button>
@@ -647,12 +727,12 @@ export default function Workspace({ pid }) {
             </button>
           </div>
         </details>
-        <button disabled={taskActive} onClick={() => { if (confirm("撤销全部拒绝并重新应用所有修改？")) rerun(`/api/projects/${pid}/decisions/reset`, { method: "POST" }); }}>
+        <button disabled={reviewLocked} onClick={() => { if (confirm("撤销全部拒绝并重新应用所有修改？")) rerun(`/api/projects/${pid}/decisions/reset`, { method: "POST" }); }}>
           撤销全部拒绝
         </button>
         <span className="progress">
           已审阅 {reviewedCount}/{applied.length}
-          <button onClick={acceptAll} disabled={!applied.length}>全部接受</button>
+          <button onClick={acceptAll} disabled={!applied.length || reviewLocked}>全部接受</button>
         </span>
         <div className="filters">
           {KINDS.map(([k, label]) => (
@@ -714,6 +794,7 @@ export default function Workspace({ pid }) {
             <div className="process-summary">
               <div>
                 <b>{job.status === "paused" ? "已暂停" : job.status === "done" ? "处理完成" :
+                  job.status === "blocked" ? "安全检查未通过" :
                   job.status === "error" ? "处理未完成" : job.status === "cancelled" ? "已取消" :
                   job.status === "pausing" ? "正在安全暂停" : job.status === "cancelling" ? "正在取消" :
                   job.status === "committing" ? "正在安全保存" : "正在处理"}</b>
@@ -756,14 +837,50 @@ export default function Workspace({ pid }) {
               </ol>
             )}
             {job.error && (
-              <p className="process-error-message">{job.error}。{processIssueGuidance(job)}</p>
+              <>
+                <p className="process-error-message">{job.error}。{processIssueGuidance(job)}</p>
+                <div className="failure-action-row">
+                  <button className="primary" type="button" disabled={taskActive} onClick={runProcess}>重新分析</button>
+                  {needsAiSettings(job) && onOpenSettings && (
+                    <button type="button" onClick={onOpenSettings}>打开设置</button>
+                  )}
+                </div>
+              </>
+            )}
+            {job.status === "blocked" && (
+              <>
+                <VerificationFailures failures={failureDetails} />
+                <div className="failure-action-row">
+                  <button className="primary" type="button" onClick={runProcess}>重新分析</button>
+                  {onOpenSettings && <button type="button" onClick={onOpenSettings}>打开设置</button>}
+                </div>
+              </>
             )}
             {job.status === "cancelled" && (
               <p className="muted">{processIssueGuidance(job)}</p>
             )}
           </div>
         )}
-        {verification?.checks && (
+        {showingFailedDraft && job?.status !== "blocked" && (
+          <div className="process-card process-blocked persisted-failure-card">
+            <div className="process-summary">
+              <div>
+                <b>上次安全检查未通过</b>
+                <span>失败草稿已恢复，只能用于定位问题</span>
+              </div>
+              <strong>未保存</strong>
+            </div>
+            <p className="process-current-action">
+              下一步：查看下方失败位置，修复输入或 AI 设置后点击“重新分析”。
+            </p>
+            <div className="failure-action-row">
+              <button className="primary" type="button" onClick={runProcess}>重新分析</button>
+              {onOpenSettings && <button type="button" onClick={onOpenSettings}>打开设置</button>}
+            </div>
+            <VerificationFailures failures={failureDetails} persisted />
+          </div>
+        )}
+        {verification?.checks && !showingFailedDraft && (
           <span className={`safety ${safeToExport ? "safe" : "unsafe"}`}>
             安全检查：{verification.checks.map((c) =>
               `${c.ok ? "✓" : "✗"}${c.label}${c.skipped ? "（未运行）" : ""}`).join(" · ")}
@@ -772,7 +889,11 @@ export default function Workspace({ pid }) {
         {safeToExport && !reviewComplete && (
           <span className="warning">完成全部审阅后才可导出。</span>
         )}
-        <span className="kbd-hint">↑↓ 切换 · A 确认保留 · R 拒绝 · Ctrl+Z 撤销上次拒绝</span>
+        <span className="kbd-hint">
+          {showingFailedDraft
+            ? "失败草稿仅供检查：↑↓ 可定位问题；审阅、应用与导出已锁定"
+            : "↑↓ 切换 · A 确认保留 · R 拒绝 · Ctrl+Z 撤销上次拒绝"}
+        </span>
       </section>
       <div className={`review-main ${focusPreview ? "focus-preview" : ""}`}>
         <aside className="col tree" ref={treeRef}>
@@ -803,10 +924,10 @@ export default function Workspace({ pid }) {
           {!flat.length && <p className="muted">没有匹配当前过滤条件的决策。</p>}
         </aside>
         <main className="col diff">
-          {taskActive && (
-            <div className="live-preview-label">
-              <span className="live-dot" /> 实时成果：{job?.preview_label || "正在准备草稿"}
-              <small>未通过安全检查前仅供查看，不会覆盖正式结果</small>
+          {(taskActive || showingFailedDraft) && (
+            <div className={`live-preview-label ${showingFailedDraft ? "failed-draft" : ""}`}>
+              <span className="live-dot" /> {showingFailedDraft ? "失败草稿（仅供定位问题）" : `实时成果：${job?.preview_label || "正在准备草稿"}`}
+              <small>{showingFailedDraft ? "不能导出；原项目保持不变" : "未通过安全检查前仅供查看，不会覆盖正式结果"}</small>
             </div>
           )}
           {showDiffEditor ? (
@@ -860,18 +981,21 @@ export default function Workspace({ pid }) {
               </dl>
               <div className="actions">
                 {selApplied && !selReviewed && (
-                  <button className="primary" onClick={() => accept(selected)}>A 确认保留</button>
+                  <button className="primary" disabled={reviewLocked} onClick={() => accept(selected)}>A 确认保留</button>
                 )}
                 {selApplied && (
-                  <button disabled={taskActive} onClick={() => reject(selected)}>R 拒绝此修改</button>
+                  <button disabled={reviewLocked} onClick={() => reject(selected)}>R 拒绝此修改</button>
                 )}
                 {selApplied && (
-                  <button onClick={() => acceptSimilar(selected)}>同类全部保留</button>
+                  <button disabled={reviewLocked} onClick={() => acceptSimilar(selected)}>同类全部保留</button>
                 )}
                 {selected.status === "rejected" && (
-                  <button disabled={taskActive} onClick={() => rerun(`/api/projects/${pid}/decisions/${selected.candidate_id}/unreject`, { method: "POST" })}>
+                  <button disabled={reviewLocked} onClick={() => rerun(`/api/projects/${pid}/decisions/${selected.candidate_id}/unreject`, { method: "POST" })}>
                     撤销拒绝（恢复此修改）
                   </button>
+                )}
+                {showingFailedDraft && (
+                  <span className="warning">失败草稿仅供检查，不能接受、拒绝或应用修改。</span>
                 )}
               </div>
             </>
@@ -882,7 +1006,7 @@ export default function Workspace({ pid }) {
           <section className={`result-overview ${safeToExport ? "safe" : "pending"}`}>
             <div className="result-overview-heading">
               <h3>结果概览</h3>
-              <span>{safeToExport ? "安全检查通过" : verification ? "暂不可导出" : "等待分析"}</span>
+              <span>{showingFailedDraft ? "本次未通过，正在查看失败草稿" : safeToExport ? "安全检查通过" : verification ? "暂不可导出" : "等待分析"}</span>
             </div>
             <div className="result-overview-grid">
               <span><b>{applied.length}</b> 已应用</span>
@@ -890,7 +1014,9 @@ export default function Workspace({ pid }) {
               <span><b>{ambiguousCount}</b> 待确认</span>
               <span><b>{reviewedCount}/{applied.length}</b> 已审阅</span>
             </div>
-            {verification?.checks?.length ? (
+            {showingFailedDraft ? (
+              <p className="warning">本次失败详情显示在进度卡中；当前编辑器是未保存的诊断草稿，不能导出。</p>
+            ) : verification?.checks?.length ? (
               <ul className="safety-check-list" aria-label="安全检查清单">
                 {verification.checks.map((check) => (
                   <li key={check.id} className={check.ok ? "ok" : "failed"}>

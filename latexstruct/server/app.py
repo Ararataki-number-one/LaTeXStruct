@@ -45,6 +45,274 @@ _update_preparing = False
 _update_jobs_lock = threading.RLock()
 _update_jobs: Dict[str, dict] = {}
 
+OCR_IMAGE_REF_RE = re.compile(
+    r"\\includegraphics\*?(?:\s*\[(?P<opts>[^\]]*)\])?\s*\{"
+    r"(?P<path>images/page_(?P<page>\d+)_(?P<index>\d+)(?P<ext>\.(?:png|jpe?g))?)"
+    r"\}",
+    re.I,
+)
+MAX_PRESERVED_OCR_IMAGE_BYTES = 25 * 1024 * 1024
+MAX_PRESERVED_OCR_ASSET_BYTES = 100 * 1024 * 1024
+OCR_PAGE_BREAK_RE = re.compile(r"(?m)^\s*%===\s*PAGE BREAK\s*===.*$")
+OCR_PAGE_MARKER_RE = re.compile(r"(?m)^\s*%\s*Page\s+(?P<page>\d+)\s*$", re.I)
+
+
+def _ocr_image_references(text: str) -> list[dict]:
+    references = []
+    seen = set()
+    # ``transcribe_page`` prepends the physical PDF page to every OCR chunk.  The
+    # visual model may then copy the printed page number from the footer and may
+    # also use that printed number in the suggested image filename.  Therefore
+    # only the first Page marker in each PAGE BREAK chunk is authoritative.
+    for chunk in OCR_PAGE_BREAK_RE.split(text):
+        page_marker = OCR_PAGE_MARKER_RE.search(chunk)
+        for match in OCR_IMAGE_REF_RE.finditer(chunk):
+            path = match.group("path").replace("\\", "/")
+            if path in seen:
+                continue
+            seen.add(path)
+            printed_page = int(match.group("page"))
+            options = match.group("opts") or ""
+            width_match = re.search(
+                r"\bwidth\s*=\s*(?P<width>\d+(?:\.\d+)?)\s*\\(?:line|text)width\b",
+                options,
+                re.I,
+            )
+            references.append({
+                "path": path,
+                "page": printed_page,
+                "source_page": (
+                    int(page_marker.group("page")) if page_marker else printed_page
+                ),
+                "index": int(match.group("index")),
+                "ext": (match.group("ext") or "").lower(),
+                "width_hint": float(width_match.group("width")) if width_match else None,
+            })
+    return references
+
+
+def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
+    """把 OCR ``includegraphics`` 占位绑定到原上传中的真实图片。
+
+    不生成空白图或整页截图冒充插图。无法从原文件可靠匹配的引用明确列入
+    ``unresolved``，由资源安全门阻止导出并展示具体相对路径。
+    """
+    references = _ocr_image_references(raw_tex)
+    result = {"assets": [], "unresolved": [], "errors": []}
+    if not references:
+        return result
+    target = Path(str(job.get("target") or ""))
+    if not target.is_file():
+        result["unresolved"] = [item["path"] for item in references]
+        result["errors"].append("原始上传文件已不可用，无法提取 OCR 插图")
+        return result
+
+    extracted: dict[str, tuple[bytes, str, int]] = {}
+    if job.get("source_type") == "image":
+        # 单张图片只有在正文只有一个图引用时才存在一一对应关系。
+        if len(references) == 1 and references[0]["source_page"] == 1:
+            data = target.read_bytes()
+            suffix = target.suffix.lower()
+            if suffix in {".png", ".jpg", ".jpeg"}:
+                extracted[references[0]["path"]] = (data, suffix, 1)
+    elif job.get("source_type") == "pdf":
+        document = None
+        try:
+            import fitz
+
+            document = fitz.open(str(target))
+            by_page: dict[int, list[dict]] = {}
+            for reference in references:
+                by_page.setdefault(reference["source_page"], []).append(reference)
+            for page_no, page_references in by_page.items():
+                if page_no < 1 or page_no > int(document.page_count):
+                    continue
+                page = document[page_no - 1]
+                # 优先按页面版面提取真实图块。这样既保留嵌入位图，也能把 PDF 中
+                # 由矢量线条组成、没有独立 xref 的数学插图裁成 PNG。
+                clipped = []
+                try:
+                    page_rect = page.rect
+                    page_area = max(1.0, float(page_rect.width * page_rect.height))
+                    image_boxes = []
+                    for block in (page.get_text("dict") or {}).get("blocks", []):
+                        if int(block.get("type", 0)) == 1 and block.get("bbox"):
+                            box = fitz.Rect(block["bbox"])
+                            area = max(0.0, float(box.width * box.height))
+                            if box.width < 36 or box.height < 24 or area < 1200:
+                                continue
+                            # 扫描版 PDF 往往只有一张整页背景图；它不能冒充
+                            # OCR 生成的局部插图引用。
+                            if area / page_area > 0.72:
+                                continue
+                            image_boxes.append(box)
+                    drawing_boxes = []
+                    cluster_drawings = getattr(page, "cluster_drawings", None)
+                    if callable(cluster_drawings):
+                        drawing_boxes.extend(fitz.Rect(box) for box in cluster_drawings())
+                    filtered_drawings = []
+                    for box in drawing_boxes:
+                        area = max(0.0, float(box.width * box.height))
+                        if box.width < 36 or box.height < 24 or area < 1200:
+                            continue
+                        # 扫描版 PDF 的整页背景不是“页面中的插图”，不能整页回填。
+                        if area / page_area > 0.72:
+                            continue
+                        # 彩色提示框、整段 boxed text 等页面装饰不是插图。它们通常
+                        # 横跨正文且高度也很大；之前会被误配给后面真正的图。
+                        if (
+                            box.width / max(1.0, float(page_rect.width)) > 0.68
+                            and box.height / max(1.0, float(page_rect.height)) > 0.08
+                        ):
+                            continue
+                        duplicate = False
+                        for previous in filtered_drawings:
+                            intersection = box & previous
+                            union = area + previous.width * previous.height - (
+                                intersection.width * intersection.height
+                            )
+                            if union > 0 and intersection.width * intersection.height / union > 0.75:
+                                duplicate = True
+                                break
+                        if not duplicate:
+                            filtered_drawings.append(box)
+
+                    # 同一行的多个矢量图块既可能对应多个并排引用（0.4\linewidth
+                    # + 0.4\linewidth），也可能共同组成一个宽图（0.8\linewidth）。
+                    # 按引用的宽度提示保守决定逐个裁切还是合并裁切。
+                    rows = []
+                    for box in sorted(
+                        filtered_drawings,
+                        key=lambda item: (round(item.y0, 2), round(item.x0, 2)),
+                    ):
+                        placed = False
+                        for row in rows:
+                            row_y0 = min(item.y0 for item in row)
+                            row_y1 = max(item.y1 for item in row)
+                            overlap = max(0.0, min(row_y1, box.y1) - max(row_y0, box.y0))
+                            if overlap >= 0.3 * min(row_y1 - row_y0, box.height):
+                                row.append(box)
+                                placed = True
+                                break
+                        if not placed:
+                            rows.append([box])
+
+                    box_groups = [([box], box.y0) for box in image_boxes]
+                    box_groups.extend((row, min(box.y0 for box in row)) for row in rows)
+                    box_groups.sort(key=lambda item: item[1])
+                    selected_boxes = []
+                    reference_offset = 0
+                    for group, _y0 in box_groups:
+                        if reference_offset >= len(page_references):
+                            break
+                        group.sort(key=lambda box: box.x0)
+                        small_refs = 0
+                        for reference in page_references[reference_offset:]:
+                            hint = reference.get("width_hint")
+                            if hint is None or hint > 0.55:
+                                break
+                            small_refs += 1
+                        if len(group) > 1 and small_refs >= len(group):
+                            selected_boxes.extend(group)
+                            reference_offset += len(group)
+                        else:
+                            union = fitz.Rect(group[0])
+                            for box in group[1:]:
+                                union |= box
+                            selected_boxes.append(union)
+                            reference_offset += 1
+
+                    for box in selected_boxes:
+                        # 矢量图的文字标签通常是独立文本对象，不在 drawing bbox 内。
+                        # 留足约 24pt 边距，避免 x/y/L、节点编号和图下注释被裁断。
+                        padding = 24
+                        box = fitz.Rect(
+                            max(page_rect.x0, box.x0 - padding),
+                            max(page_rect.y0, box.y0 - padding),
+                            min(page_rect.x1, box.x1 + padding),
+                            min(page_rect.y1, box.y1 + padding),
+                        )
+                        pixmap = page.get_pixmap(clip=box, dpi=200, alpha=False)
+                        data = pixmap.tobytes("png")
+                        if data:
+                            clipped.append(data)
+                except Exception:  # noqa: BLE001 - 老版 PyMuPDF 回退到 xref 提取
+                    clipped = []
+                if len(clipped) >= len(page_references):
+                    for reference, data in zip(page_references, clipped):
+                        if not reference["ext"] or reference["ext"] == ".png":
+                            extracted[reference["path"]] = (data, ".png", reference["index"])
+                    continue
+                xrefs = []
+                for image in page.get_images(full=True):
+                    try:
+                        xref = int(image[0])
+                    except (IndexError, TypeError, ValueError):
+                        continue
+                    if xref > 0 and xref not in xrefs:
+                        xrefs.append(xref)
+                # 引用按正文出现顺序、嵌入图按 PDF 页面顺序一一绑定；不信任模型
+                # 偶尔生成的 0/1 基序号，也不在图片数不足时复用或伪造图片。
+                for reference, xref in zip(page_references, xrefs):
+                    image = document.extract_image(xref) or {}
+                    data = image.get("image")
+                    extension = "." + str(image.get("ext") or "").lower().lstrip(".")
+                    if not isinstance(data, bytes) or not data:
+                        continue
+                    if extension not in {".png", ".jpg", ".jpeg"}:
+                        try:
+                            data = fitz.Pixmap(document, xref).tobytes("png")
+                            extension = ".png"
+                        except Exception:  # noqa: BLE001 - 保守留给资源门报告
+                            continue
+                    if reference["ext"] and reference["ext"] != extension:
+                        # 不能只改扩展名伪装格式；当前提示生成的引用默认没有扩展名。
+                        continue
+                    extracted[reference["path"]] = (data, extension, xref)
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(
+                "无法从原 PDF 提取插图：" + type(exc).__name__
+            )
+        finally:
+            if document is not None:
+                document.close()
+
+    total = 0
+    project_dir = project_dir.resolve()
+    for reference in references:
+        hit = extracted.get(reference["path"])
+        if hit is None:
+            result["unresolved"].append(reference["path"])
+            continue
+        data, extension, source_index = hit
+        if len(data) > MAX_PRESERVED_OCR_IMAGE_BYTES:
+            result["unresolved"].append(reference["path"])
+            result["errors"].append(f"插图过大，未导入：{reference['path']}")
+            continue
+        total += len(data)
+        if total > MAX_PRESERVED_OCR_ASSET_BYTES:
+            result["unresolved"].append(reference["path"])
+            result["errors"].append("OCR 插图总大小超过 100 MB，后续图片未导入")
+            continue
+        relative = reference["path"] + extension
+        target_path = (project_dir / Path(relative)).resolve()
+        try:
+            target_path.relative_to(project_dir)
+        except ValueError:
+            result["unresolved"].append(reference["path"])
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(data)
+        result["assets"].append({
+            "path": relative.replace("\\", "/"),
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "source_page": reference["source_page"],
+            "printed_page": reference["page"],
+            "source_index": source_index,
+        })
+    return result
+
 
 def _ocr_snapshot_preserved(job: dict) -> bool:
     """最新正文、逐页状态和计费状态是否由同一次保存/导入共同保全。"""
@@ -200,7 +468,13 @@ def _run_update_job(job_id: str, info) -> None:
             downloaded_bytes=max(0, int(info.size or 0)),
             message="下载完成，安全校验已通过",
         )
-        schedule_installer_after_exit(dest)
+        from .. import __version__
+
+        schedule_installer_after_exit(
+            dest,
+            previous_version=__version__,
+            expected_version=info.latest,
+        )
         _set_update_job(
             job_id,
             status="restarting",
@@ -477,7 +751,7 @@ def get_config() -> AppConfig:
 class CreateRequest(BaseModel):
     text: str = ""
     name: str = ""
-    mode: str = "rule"
+    mode: str = "ai"
     template: str = ""
     pack: str = ""
 
@@ -485,7 +759,7 @@ class CreateRequest(BaseModel):
 class FolderRequest(BaseModel):
     files: dict  # {相对路径: 内容}
     name: str = ""
-    mode: str = "rule"
+    mode: str = "ai"
     template: str = ""
     pack: str = ""
     defer_process: bool = False
@@ -717,6 +991,7 @@ def create_app(updated_from: str = "") -> FastAPI:
 
         normalize_template_id(template)
         template = ELEGANTBOOK
+        mode = mode or "ai"
 
         tmpdir = tempfile.mkdtemp(prefix="ls-folder-")
         pid = None
@@ -728,7 +1003,6 @@ def create_app(updated_from: str = "") -> FastAPI:
             main_rel = discover_main(Path(tmpdir))
             if main_rel is None:
                 raise ValueError("文件夹中未找到 .tex 主文件")
-            mode = mode or "rule"
             if defer_process:
                 flattened, graph_obj = flatten_project(Path(tmpdir), main_rel)
                 pr = None
@@ -803,7 +1077,7 @@ def create_app(updated_from: str = "") -> FastAPI:
     async def import_archive(
         file: UploadFile = File(...),
         name: str = Form(""),
-        mode: str = Form("rule"),
+        mode: str = Form("ai"),
         template: str = Form(""),
         pack: str = Form(""),
         defer_process: bool = Form(True),
@@ -944,6 +1218,33 @@ def create_app(updated_from: str = "") -> FastAPI:
                     )
             else:
                 zf.writestr("main.tex", result_bytes)
+                if meta.get("kind") == "ocr":
+                    resource_info = meta.get("ocr_resources") or {}
+                    unresolved = list(resource_info.get("unresolved") or [])
+                    if unresolved:
+                        raise HTTPException(
+                            409,
+                            "仍有 OCR 图片未能从原 PDF 可靠提取："
+                            + "、".join(str(item) for item in unresolved[:5]),
+                        )
+                    project_dir = Path(get_store()._dir(pid)).resolve()
+                    for asset in resource_info.get("assets") or []:
+                        rel = safe_project_relpath(str(asset.get("path") or ""))
+                        if rel in reserved or rel == "main.tex":
+                            raise HTTPException(409, f"OCR 图片路径与工程文件冲突：{rel}")
+                        asset_path = (project_dir / Path(rel)).resolve()
+                        try:
+                            asset_path.relative_to(project_dir)
+                            data = asset_path.read_bytes()
+                        except (ValueError, OSError):
+                            raise HTTPException(409, f"OCR 图片丢失，已阻止打包：{rel}") from None
+                        expected_hash = str(asset.get("sha256") or "")
+                        if not expected_hash or not hmac.compare_digest(
+                            expected_hash,
+                            hashlib.sha256(data).hexdigest(),
+                        ):
+                            raise HTTPException(409, f"OCR 图片校验失败，已阻止打包：{rel}")
+                        zf.writestr(rel, data)
             existing = set(zf.namelist())
             for rel, data in reserved.items():
                 if rel not in existing:
@@ -965,7 +1266,7 @@ def create_app(updated_from: str = "") -> FastAPI:
         return export_package(pid)
 
     @app.post("/api/projects/upload")
-    async def upload_project(file: bytes = None, name: str = "", mode: str = "rule"):
+    async def upload_project(file: bytes = None, name: str = "", mode: str = "ai"):
         # 简化 multipart：由前端读文件后走 /api/projects
         raise HTTPException(400, "请使用 /api/projects 提交文本")
 
@@ -996,13 +1297,35 @@ def create_app(updated_from: str = "") -> FastAPI:
             raise HTTPException(404, "尚未处理")
         return PlainTextResponse(r)
 
+    @app.get("/api/projects/{pid}/failed-draft")
+    def failed_draft(pid: str):
+        """读取哈希校验通过的最近失败草稿；该接口永不参与正式导出。"""
+        _ensure(pid)
+        failed = get_store().read_failed_attempt(pid)
+        if failed is None:
+            # 文件缺失、marker 损坏和内容被改写都统一 fail closed，避免 UI 把
+            # 不完整/被篡改的诊断草稿当成本次真实处理结果。
+            raise HTTPException(404, "没有可恢复的失败草稿")
+        return JSONResponse(
+            {
+                "attempt": "blocked",
+                "created": failed.get("created"),
+                "draft": failed.get("draft", ""),
+                "report": failed.get("report", ""),
+                "details": failed.get("details") or {},
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.get("/api/projects/{pid}/report")
     def report(pid: str):
         _ensure(pid)
-        r = get_store().read_report(pid)
+        failed = get_store().read_failed_attempt(pid)
+        r = failed.get("report") if failed is not None else get_store().read_report(pid)
         if r is None:
             raise HTTPException(404, "尚未处理")
-        return PlainTextResponse(r, media_type="text/markdown")
+        headers = {"X-LaTeXStruct-Attempt": "blocked"} if failed is not None else None
+        return PlainTextResponse(r, media_type="text/markdown", headers=headers)
 
     @app.get("/api/projects/{pid}/export-report")
     def export_report(pid: str):
@@ -1085,6 +1408,14 @@ def create_app(updated_from: str = "") -> FastAPI:
         # OCR is noisy enough to require an actual final compile when TeX is installed.
         # Ordinary imported TEX keeps the fast path; its report states that compile was not run.
         template_compile_guard = is_ocr_project
+        latest_draft = {"text": ""}
+
+        def capture_progress(phase, progress, message, data):
+            if phase == "draft" and isinstance((data or {}).get("preview"), str):
+                latest_draft["text"] = data["preview"]
+            if progress_callback:
+                progress_callback(phase, progress, message, data)
+
         res = run_pipeline(
             text, mode=mode, ai_config=cfg.to_ai_config() if mode == "ai" else None,
             template=template, pack=pack, exclude=exclude or None,
@@ -1092,7 +1423,7 @@ def create_app(updated_from: str = "") -> FastAPI:
             decisions_override=overrides,
             ambiguous_override=prior.get("ambiguous") if overrides else None,
             ai_notes_override=prior.get("ai_notes") if overrides else None,
-            progress_callback=progress_callback,
+            progress_callback=capture_progress,
             control_callback=control_callback,
             compile_check=is_ocr_project or template_compile_guard,
             require_compile_when_available=is_ocr_project or template_compile_guard,
@@ -1154,6 +1485,55 @@ def create_app(updated_from: str = "") -> FastAPI:
             }
             for ap in res.applied
         ]
+        from ..core.verify import verification_failures
+
+        failures = verification_failures(res.verification)
+        res.verification["failures"] = failures
+        if not res.ok:
+            failed_checks = [item["id"] for item in failures]
+            failure_summary = "；".join(item["summary"] for item in failures[:3])
+            if not failure_summary:
+                failure_summary = "安全检查未通过；原项目和上一次安全结果均未覆盖"
+            report_lines = [
+                "",
+                "## 为什么没有保存本次结果",
+                "",
+                "本次结构化草稿未通过安全检查，已作为诊断草稿保留；"
+                "原项目和上一次通过检查的结果均未覆盖。",
+                "",
+            ]
+            for item in failures:
+                report_lines.extend([
+                    f"- ❌ **{item['label']}**：{item['summary']}",
+                    f"  - 下一步：{item['action']}",
+                ])
+            res.report_md += "\n".join(report_lines)
+            failed_draft = latest_draft["text"] or res.result or text
+            get_store().record_failed_attempt(
+                pid,
+                failed_draft,
+                res.report_md,
+                {
+                    "verification": res.verification,
+                    "failures": failures,
+                    "items": res.decision_items,
+                    "ambiguous": res.ambiguous,
+                    "decision_cache": decision_cache,
+                },
+            )
+            return {
+                "ok": False,
+                "safe_to_export": False,
+                "applied": len(res.applied),
+                "rejected": len(res.rejected),
+                "ambiguous": len(res.ambiguous),
+                "degraded": res.verification.get("ai_degraded", False),
+                "usage": res.verification.get("ai_usage", {}),
+                "failed_checks": failed_checks,
+                "failure_summary": failure_summary,
+                "failures": failures,
+                "preview_preserved": True,
+            }
         if control_callback:
             control_callback()
         if commit_callback:
@@ -1281,6 +1661,16 @@ def create_app(updated_from: str = "") -> FastAPI:
     @app.get("/api/projects/{pid}/decisions")
     def decisions(pid: str):
         _ensure(pid)
+        failed = get_store().read_failed_attempt(pid)
+        if failed is not None:
+            details = failed.get("details") or {}
+            return {
+                "items": details.get("items", []),
+                "excludes": get_store().get(pid).get("excludes", []),
+                "verification": details.get("verification"),
+                "attempt": "blocked",
+                "failures": details.get("failures", []),
+            }
         info_path = Path(get_store()._dir(pid)) / "verification.json"
         if not info_path.exists():
             return {"items": [], "excludes": get_store().get(pid).get("excludes", []),
@@ -1350,7 +1740,8 @@ def create_app(updated_from: str = "") -> FastAPI:
     def diff(pid: str):
         _ensure(pid)
         old = get_store().read_source(pid).replace("\r\n", "\n").replace("\r", "\n").split("\n")
-        new_text = get_store().read_result(pid)
+        failed = get_store().read_failed_attempt(pid)
+        new_text = failed.get("draft") if failed is not None else get_store().read_result(pid)
         if new_text is None:
             raise HTTPException(404, "尚未处理")
         new = new_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -1381,12 +1772,16 @@ def create_app(updated_from: str = "") -> FastAPI:
                 for k in range(j2 - j1):
                     rows.append({"type": "ins", "old": None, "new": j1 + k + 1,
                                  "text": new[j1 + k]})
-        info = json.loads(
-            (Path(get_store()._dir(pid)) / "verification.json").read_text(encoding="utf-8")
-        )
+        if failed is not None:
+            info = failed.get("details") or {}
+        else:
+            info = json.loads(
+                (Path(get_store()._dir(pid)) / "verification.json").read_text(encoding="utf-8")
+            )
         return {"rows": rows, "compact": compact, "applied": info.get("applied", []),
                 "ambiguous": info.get("ambiguous", []),
-                "verification": info.get("verification", {})}
+                "verification": info.get("verification", {}),
+                "attempt": "blocked" if failed is not None else "committed"}
 
     @app.get("/api/config")
     def get_cfg():
@@ -1985,7 +2380,7 @@ def create_app(updated_from: str = "") -> FastAPI:
     def ocr_import(
         jid: str,
         name: str = "OCR 转写项目",
-        mode: str = "rule",
+        mode: str = "ai",
         template: str = "elegantbook",
         title: str = "",
     ):
@@ -2043,6 +2438,11 @@ def create_app(updated_from: str = "") -> FastAPI:
                 kind="ocr",
                 template_title=title or name,
             )
+            project_dir = Path(get_store()._dir(pid))
+            resource_result = _preserve_ocr_resources(job, raw_tex, project_dir)
+            meta = json.loads((project_dir / "meta.json").read_text(encoding="utf-8"))
+            meta["ocr_resources"] = resource_result
+            get_store()._write_json(str(project_dir), "meta.json", meta)
             with _ocr_jobs_lock:
                 current = _ocr_jobs.get(jid)
                 if (

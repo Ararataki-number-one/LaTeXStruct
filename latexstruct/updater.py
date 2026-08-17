@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -209,7 +210,52 @@ _WINDOWS_UPDATE_HELPER = r"""
 $ErrorActionPreference = 'Stop'
 $appProcessId = [int]$env:LATEXSTRUCT_UPDATE_PID
 $target = $env:LATEXSTRUCT_UPDATE_TARGET
+$expectedVersion = $env:LATEXSTRUCT_UPDATE_EXPECTED
+$previousVersion = $env:LATEXSTRUCT_UPDATE_PREVIOUS
+$logRoot = Join-Path $env:LOCALAPPDATA 'LaTeXStruct'
+$logPath = Join-Path $logRoot 'update-install.log'
+
+function Write-InstallLog([string]$Message) {
+  try {
+    New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+    Add-Content -LiteralPath $logPath `
+      -Value ((Get-Date -Format o) + ' ' + $Message) -Encoding UTF8
+  } catch {
+  }
+}
+
+function Get-RunningVersion {
+  try {
+    $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8765/api/health' `
+      -TimeoutSec 2 -ErrorAction Stop
+    if ($health.ok) { return [string]$health.version }
+  } catch {
+  }
+  return ''
+}
+
+function Wait-ForExpectedVersion([int]$Seconds) {
+  $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
+  while ([DateTime]::UtcNow -lt $deadline) {
+    if ((Get-RunningVersion) -eq $expectedVersion) { return $true }
+    Start-Sleep -Milliseconds 500
+  }
+  return $false
+}
+
+function Start-UpdatedTarget {
+  $workingDirectory = Split-Path -Parent $target
+  if ([string]::IsNullOrWhiteSpace($previousVersion)) {
+    Start-Process -FilePath $target -WorkingDirectory $workingDirectory | Out-Null
+  } else {
+    Start-Process -FilePath $target `
+      -ArgumentList @('--updated-from', $previousVersion) `
+      -WorkingDirectory $workingDirectory | Out-Null
+  }
+}
+
 try {
+  Write-InstallLog "update helper started; expected=$expectedVersion"
   $processDeadline = [DateTime]::UtcNow.AddSeconds(12)
   while ((Get-Process -Id $appProcessId -ErrorAction SilentlyContinue) -and
          ([DateTime]::UtcNow -lt $processDeadline)) {
@@ -246,10 +292,36 @@ try {
   $setup = Start-Process -FilePath $env:LATEXSTRUCT_UPDATE_INSTALLER `
     -ArgumentList $arguments -PassThru -Wait
   if ($setup.ExitCode -ne 0) { throw 'installer failed' }
+  Write-InstallLog 'installer completed'
+
+  # New installers also carry their own restart helper so older clients can
+  # upgrade safely.  The current helper verifies that hand-off and takes over
+  # when it did not happen, instead of leaving the application closed.
+  if (-not [string]::IsNullOrWhiteSpace($expectedVersion)) {
+    if (Wait-ForExpectedVersion 15) {
+      Write-InstallLog 'installer restart is healthy'
+      exit 0
+    }
+    $staleDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ((-not [string]::IsNullOrWhiteSpace((Get-RunningVersion))) -and
+           ([DateTime]::UtcNow -lt $staleDeadline)) {
+      Start-Sleep -Milliseconds 500
+    }
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+      Write-InstallLog "starting updated target; attempt=$attempt"
+      Start-UpdatedTarget
+      if (Wait-ForExpectedVersion 45) {
+        Write-InstallLog "updated target is healthy; version=$expectedVersion"
+        exit 0
+      }
+    }
+    throw 'updated target did not become healthy'
+  }
 } catch {
+  Write-InstallLog ('update failed: ' + $_.Exception.Message)
   if ((-not (Get-Process -Id $appProcessId -ErrorAction SilentlyContinue)) -and
       (Test-Path -LiteralPath $target -PathType Leaf)) {
-    Start-Process -FilePath $target
+    Start-UpdatedTarget
   }
   exit 34
 }
@@ -308,7 +380,11 @@ def _powershell_executable() -> str:
 
 
 def schedule_installer_after_exit(
-    path: str, app_pid: Optional[int] = None, target_executable: Optional[str] = None
+    path: str,
+    app_pid: Optional[int] = None,
+    target_executable: Optional[str] = None,
+    previous_version: str = "",
+    expected_version: str = "",
 ) -> subprocess.Popen:
     """启动独立 helper：等本进程和单文件 bootloader 释放 exe 后再安装。"""
     if sys.platform != "win32":
@@ -322,12 +398,16 @@ def schedule_installer_after_exit(
         "LATEXSTRUCT_UPDATE_INSTALLER": installer,
         "LATEXSTRUCT_UPDATE_TARGET": target,
         "LATEXSTRUCT_UPDATE_PID": str(app_pid or os.getpid()),
+        "LATEXSTRUCT_UPDATE_PREVIOUS": previous_version.strip().lstrip("vV"),
+        "LATEXSTRUCT_UPDATE_EXPECTED": expected_version.strip().lstrip("vV"),
     })
     flags = (
-        getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
         | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     )
+    encoded_helper = base64.b64encode(
+        _WINDOWS_UPDATE_HELPER.encode("utf-16le")
+    ).decode("ascii")
     return subprocess.Popen(
         [
             _powershell_executable(),
@@ -336,8 +416,8 @@ def schedule_installer_after_exit(
             "-NonInteractive",
             "-WindowStyle",
             "Hidden",
-            "-Command",
-            _WINDOWS_UPDATE_HELPER,
+            "-EncodedCommand",
+            encoded_helper,
         ],
         cwd=os.path.dirname(installer) or None,
         env=env,
@@ -406,5 +486,11 @@ def download_update(
 def download_and_install(info: UpdateInfo, tmpdir: Optional[str] = None) -> str:
     """兼容入口：下载后安排在本进程退出、exe 解锁后安装。"""
     dest = download_update(info, tmpdir)
-    schedule_installer_after_exit(dest)
+    from . import __version__
+
+    schedule_installer_after_exit(
+        dest,
+        previous_version=__version__,
+        expected_version=info.latest,
+    )
     return dest

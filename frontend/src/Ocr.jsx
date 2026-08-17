@@ -1048,8 +1048,8 @@ export default function Ocr({ onImport, onOpenSettings }) {
                 disabled={importingProject}
                 onChange={(event) => setImportMode(event.target.value)}
               >
-                <option value="ai">AI 深度整理（推荐）</option>
-                <option value="rule">规则整理（快速）</option>
+                <option value="ai">AI 深度整理（默认，重点维护）</option>
+                <option value="rule">旧规则兼容模式（不再主动优化）</option>
               </select>
             </label>
             <div className="template-choice fixed-template" aria-label="固定排版方案">
@@ -1058,9 +1058,9 @@ export default function Ocr({ onImport, onOpenSettings }) {
             </div>
             <small>
               {importMode === "ai"
-                ? "AI 会判断章节、目录与定理边界，并产生额外 Token；不可用时安全降级为规则。"
-                : "规则模式无需额外 AI 调用，速度更快，适合结构已经清楚的 OCR。"}
-              {" "}章节、目录与定理先做结构校正，再套用固定 ElegantBook；安全检查失败时不会导出。
+                ? "AI 会判断章节层级、删除 OCR 粘贴的目录页并插入真正的 \\tableofcontents，同时校正定理与证明边界。AI 不可用时会明确停止，不会悄悄换成规则结果。"
+                : "旧规则模式仅为已有项目保留，不使用额外 AI 调用，也不再作为主要整理流程。"}
+              {" "}结构校正通过后才套用固定 ElegantBook；任何安全检查失败都会保留原文并阻止导出。
             </small>
           </div>
         )}

@@ -24,6 +24,7 @@ from .parser import Document
 from .patch import Decision
 from .prompts import build_decide_system, build_decide_user, build_meta
 from .scanner import Candidate
+from .legalize import _next_stop_line
 
 ALLOWED_WRAP_ENVS = {
     "theorem", "lemma", "proposition", "corollary", "definition",
@@ -65,10 +66,15 @@ class AIConfig:
     decide: RoleConfig = field(default_factory=RoleConfig)
     review: RoleConfig = field(default_factory=lambda: RoleConfig(model="deepseek-v4-pro"))
     review_enabled: bool = True
-    batch_size: int = 30
-    context_lines: int = 6
+    # 数学讲义中的一个定理/证明常跨多个展示公式。较小批次配合更完整的
+    # 源文本窗口，比一次塞入几十个只有六行上下文的候选更可靠。
+    batch_size: int = 10
+    context_lines: int = 20
+    # 长证明必须看到下一个可靠结构停点，不能因固定 20 行窗口
+    # 被截成半个 proof。超过此上限则 fail-closed，交人工确认。
+    max_candidate_lines: int = 240
     review_max_rounds: int = 2
-    review_batch: int = 25  # 复查分块大小（整本书时避免单次调用超上下文）
+    review_batch: int = 12  # 复查分块大小（整本书时避免单次调用超上下文）
 
 
 class LLMClient:
@@ -302,6 +308,7 @@ def parse_decisions(
     candidates: List[Candidate],
     windows: Dict[str, Tuple[int, int]],
     doc: Document,
+    incomplete_windows: Optional[set] = None,
 ) -> Tuple[List[Decision], List[dict], List[dict]]:
     """校验 AI 输出并转换为 Decision；越界/非法项转入歧义清单。"""
     decisions: List[Decision] = []
@@ -312,6 +319,7 @@ def parse_decisions(
     if not isinstance(raw, list):
         return [], [{"candidate_id": "-", "line": 1, "reason": "AI 响应缺少 decisions 数组"}], []
     seen = set()
+    incomplete_windows = incomplete_windows or set()
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -337,6 +345,22 @@ def parse_decisions(
             if env not in ALLOWED_WRAP_ENVS:
                 ambiguous.append({"candidate_id": cid, "line": c.span.start_line,
                                   "reason": f"非法环境 {env!r}，保守保留"})
+                continue
+            if (c.kind == "proof" and env != "proof") or (
+                c.kind == "theorem-like" and env == "proof"
+            ):
+                ambiguous.append({
+                    "candidate_id": cid,
+                    "line": c.span.start_line,
+                    "reason": "模型给出的环境类型与扫描器确认的证明/定理候选冲突，保守保留",
+                })
+                continue
+            if cid in incomplete_windows:
+                ambiguous.append({
+                    "candidate_id": cid,
+                    "line": c.span.start_line,
+                    "reason": "候选正文超过 AI 安全窗口，无法证明环境完整，已保守保留",
+                })
                 continue
             body = _span(item.get("body_span") or {}, lo, hi)
             if body is None:
@@ -393,16 +417,18 @@ def parse_decisions(
                 )
             )
         else:  # move-boundary
-            mp = item.get("move_payload") or {}
-            old_end = mp.get("old_end_line")
-            new_end = mp.get("new_end_line")
-            if not isinstance(old_end, int) or not isinstance(new_end, int):
+            # 模型只决定“是否移动”；真正坐标必须来自扫描器在源文本上解析出的
+            # 环境与相邻原子块。接受模型生成的行号会把 closer 插进 equation，
+            # 也会在模板/预览增加行后混淆 source/result 两套坐标。
+            old_end = c.span.end_line
+            new_end = c.payload.get("next_end_line")
+            if not isinstance(new_end, int):
                 ambiguous.append({"candidate_id": cid, "line": c.span.start_line,
-                                  "reason": "move_payload 缺失，保守保留"})
+                                  "reason": "扫描器没有可证明的目标边界，保守保留"})
                 continue
             if not (lo <= old_end <= new_end <= hi):
                 ambiguous.append({"candidate_id": cid, "line": c.span.start_line,
-                                  "reason": "move_payload 行号越出上下文范围，保守保留"})
+                                  "reason": "扫描器目标边界越出上下文范围，保守保留"})
                 continue
             conf = _confidence(item)
             if conf < MIN_AI_CONFIDENCE:
@@ -444,20 +470,46 @@ def decide_candidates(
         if control_callback:
             control_callback()
         batch = candidates[i : i + ai_config.batch_size]
-        windows = {
-            c.id: (
-                max(1, c.span.start_line - ai_config.context_lines),
-                min(doc.text.count("\n") + 1, c.span.end_line + ai_config.context_lines),
+        windows = {}
+        incomplete_windows = set()
+        total_lines = doc.text.count("\n") + 1
+        for candidate in batch:
+            lo = max(1, candidate.span.start_line - ai_config.context_lines)
+            normal_hi = min(
+                total_lines,
+                candidate.span.end_line + ai_config.context_lines,
             )
-            for c in batch
-        }
-        user = build_decide_user(doc, batch, ai_config.context_lines)
+            hi = normal_hi
+            if candidate.kind in {"theorem-like", "proof"}:
+                stop = _next_stop_line(doc, candidate.span.start_line)
+                semantic_hi = stop if stop is not None else total_lines
+                safe_hi = min(
+                    total_lines,
+                    candidate.span.start_line + max(1, ai_config.max_candidate_lines),
+                )
+                hi = max(normal_hi, min(semantic_hi, safe_hi))
+                if semantic_hi > safe_hi:
+                    incomplete_windows.add(candidate.id)
+            windows[candidate.id] = (lo, hi)
+        user = build_decide_user(
+            doc,
+            batch,
+            ai_config.context_lines,
+            windows=windows,
+            incomplete_windows=incomplete_windows,
+        )
         obj, usage = client.chat_json(system, user)
         model = getattr(client, "cfg", None) and client.cfg.model or ""
         from ..pricing import add_usage
 
         add_usage(usage_total, usage, model)
-        ds, am, nt = parse_decisions(obj, batch, windows, doc)
+        ds, am, nt = parse_decisions(
+            obj,
+            batch,
+            windows,
+            doc,
+            incomplete_windows=incomplete_windows,
+        )
         decisions.extend(ds)
         ambiguous.extend(am)
         notes.extend(nt)

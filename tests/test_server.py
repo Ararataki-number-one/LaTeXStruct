@@ -217,7 +217,7 @@ def test_export_requires_current_committed_verification_hash():
         assert stale.status_code == 409 and "不一致" in stale.json()["detail"]
 
 
-def test_partial_result_write_cannot_reuse_previous_verification_marker():
+def test_partial_result_write_restores_previous_complete_commit():
     with WorkspaceTmp() as tmp:
         c = _client(tmp)
         pid = c.post(
@@ -253,9 +253,11 @@ def test_partial_result_write_cannot_reuse_previous_verification_marker():
             else:
                 raise AssertionError("部分写入必须向调用方报告失败")
 
-        assert store.read_result(pid) == "NEW"
-        blocked = c.get(f"/api/projects/{pid}/export")
-        assert blocked.status_code == 409 and "不一致" in blocked.json()["detail"]
+        assert store.read_result(pid) == COMMITTED_ELEGANT
+        assert store.read_report(pid) == "# old report"
+        restored = c.get(f"/api/projects/{pid}/export")
+        assert restored.status_code == 200
+        assert restored.text == COMMITTED_ELEGANT
 
 
 def test_config_masked():
@@ -1425,15 +1427,48 @@ def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_sepa
         assert state["pages"]["1"]["attempts"] == 2
         assert c.get(f"/api/ocr/jobs/{jid}/result").headers["x-latexstruct-ocr-complete"] == "true"
 
-        imported = c.post(f"/api/ocr/jobs/{jid}/import?mode=ai")
-        assert imported.status_code == 200
-        pid = imported.json()["id"]
-        assert imported.json()["process"]["status"] in {"running", "committing", "done"}
-        for _ in range(600):
-            process = c.get(f"/api/projects/{pid}/process/status").json()
-            if process["status"] not in {"running", "pausing", "paused", "committing"}:
-                break
-            time.sleep(0.02)
+        def fake_structure_ai(_self, system, user):
+            if '"findings"' in system:
+                return {"findings": []}, {"total_tokens": 4}
+            decisions = []
+            for block in re.split(r"(?=### 候选 c-\d+)", user):
+                header = re.search(r"### 候选 (c-\d+).*?kind: ([^ |]+).*?建议环境: ([^ |]+)", block, re.S)
+                if header is None:
+                    continue
+                candidate_id, kind, env = header.groups()
+                marked = [int(value) for value in re.findall(r">>>\[\s*(\d+)\]", block)]
+                if kind not in {"theorem-like", "proof"} or not marked:
+                    decisions.append({
+                        "candidate_id": candidate_id,
+                        "action": "none",
+                        "reason": "离线测试无需处理",
+                    })
+                    continue
+                decisions.append({
+                    "candidate_id": candidate_id,
+                    "action": "wrap",
+                    "env": "proof" if kind == "proof" else env,
+                    "body_span": {
+                        "start_line": min(marked),
+                        "end_line": max(marked),
+                    },
+                    "confidence": 0.99,
+                    "reason": "离线假模型确认结构",
+                })
+            return {"decisions": decisions}, {"total_tokens": 8}
+
+        # AI 模式现在 fail-closed，此离线端到端测试必须显式提供
+        # 决策/复查假模型，不再依赖旧版“无 Key 静默降级规则”行为。
+        with patch("latexstruct.core.ai.LLMClient.chat_json", fake_structure_ai):
+            imported = c.post(f"/api/ocr/jobs/{jid}/import?mode=ai")
+            assert imported.status_code == 200
+            pid = imported.json()["id"]
+            assert imported.json()["process"]["status"] in {"running", "committing", "done"}
+            for _ in range(600):
+                process = c.get(f"/api/projects/{pid}/process/status").json()
+                if process["status"] not in {"running", "pausing", "paused", "committing"}:
+                    break
+                time.sleep(0.02)
         assert process["status"] == "done", process
         raw = c.get(f"/api/projects/{pid}/source").text
         structured = c.get(f"/api/projects/{pid}/result").text
@@ -1659,7 +1694,11 @@ def test_update_install_schedules_exit_only_after_verified_download():
         assert state["progress"] == 1.0
         args, kwargs = download.call_args
         assert args == (info,) and callable(kwargs["progress"])
-        schedule.assert_called_once_with("C:/Temp/LaTeXStruct-setup-1.2.3.exe")
+        schedule.assert_called_once_with(
+            "C:/Temp/LaTeXStruct-setup-1.2.3.exe",
+            previous_version="1.1.8",
+            expected_version="v1.2.3",
+        )
         close_app.assert_called_once_with(delay=1.2)
         srv._cancel_update_preparation()
 
