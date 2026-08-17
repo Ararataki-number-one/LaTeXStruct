@@ -76,8 +76,16 @@ def compile_latex(text: str, timeout: int = 240, extra_files: dict = None) -> Di
         for i, line in enumerate(lines):
             if line.startswith("!"):
                 msg = line[1:].strip() or "（错误详情见下行）"
-                if i + 1 < len(lines) and lines[i + 1].startswith("l."):
-                    msg += " @" + lines[i + 1].strip()
+                # TeX 常在错误与 ``l.<行号>`` 之间插入 `<inserted text>` 等说明，
+                # 只检查紧邻下一行会丢掉用户最需要的定位信息。
+                for detail in lines[i + 1 : i + 9]:
+                    line_match = re.match(r"^l\.(\d+)\s*(.*)$", detail)
+                    if line_match:
+                        source = line_match.group(2).strip()
+                        msg += f" @l.{line_match.group(1)}"
+                        if source:
+                            msg += ": " + source[:80]
+                        break
                 errors.append(msg[:140])
         errors = errors[:5]
         m = PAGES_RE.search(log)

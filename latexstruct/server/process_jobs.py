@@ -12,7 +12,7 @@ from typing import Dict, Optional
 from ..pricing import summarize_ai_usage
 
 
-TERMINAL_STATUSES = {"done", "error", "cancelled"}
+TERMINAL_STATUSES = {"done", "blocked", "error", "cancelled"}
 ACTIVE_STATUSES = {"running", "pausing", "paused", "cancelling", "committing"}
 
 
@@ -134,16 +134,25 @@ class ProcessJobManager:
             if not job or job.get("status") in TERMINAL_STATUSES:
                 return
             data = data or {}
+            previous_safe_to_export = job.get("safe_to_export")
             job["phase"] = phase
             job["phase_label"] = message
             job["message"] = message
             job["progress"] = round(max(job.get("progress", 0.0), min(1.0, progress)), 4)
-            if isinstance(data.get("preview"), str):
+            preserve_failed_draft = bool(
+                (data.get("safe_to_export") is False or previous_safe_to_export is False)
+                and phase in {"report", "ready"}
+                and isinstance(job.get("preview"), str)
+                and bool(job.get("preview"))
+            )
+            if isinstance(data.get("preview"), str) and not preserve_failed_draft:
                 preview = data["preview"]
                 if preview != job.get("preview", ""):
                     job["preview"] = preview
                     job["preview_revision"] = job.get("preview_revision", 0) + 1
                 job["preview_label"] = data.get("preview_label") or "处理中草稿"
+            elif preserve_failed_draft:
+                job["preview_label"] = "未通过安全检查的结构化草稿（仅供检查，不能导出）"
             if isinstance(data.get("usage"), dict):
                 job["usage"] = data["usage"]
                 job["cost"] = summarize_ai_usage(data["usage"])
@@ -236,17 +245,25 @@ class ProcessJobManager:
             job = self._jobs.get(jid)
             if not job:
                 return
-            job["status"] = "done"
-            job["phase"] = "done"
-            job["phase_label"] = "处理完成"
-            job["message"] = "安全检查通过" if result.get("ok") else "安全检查未通过，已回退原文"
+            passed = bool(result.get("ok"))
+            job["status"] = "done" if passed else "blocked"
+            job["phase"] = "done" if passed else "verification_failed"
+            job["phase_label"] = "处理完成" if passed else "安全检查未通过"
+            job["message"] = (
+                "安全检查通过"
+                if passed else str(result.get("failure_summary") or "安全检查未通过；失败草稿已保留供检查")[:500]
+            )
             job["progress"] = 1.0
             job["result"] = result
             if isinstance(result.get("usage"), dict):
                 job["usage"] = result["usage"]
                 job["cost"] = summarize_ai_usage(result["usage"])
             job["finished"] = job["updated"] = time.time()
-            job["events"].append({"at": job["updated"], "phase": "done", "message": job["message"]})
+            job["events"].append({
+                "at": job["updated"],
+                "phase": job["phase"],
+                "message": job["message"],
+            })
             self._changed.notify_all()
 
     def cancelled(self, jid: str):

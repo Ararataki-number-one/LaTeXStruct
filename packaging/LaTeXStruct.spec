@@ -11,6 +11,7 @@ from PyInstaller.utils.hooks import collect_submodules
 # silently omitting the React build when CI invokes this spec from the repository root.
 repo_root = Path(SPECPATH).resolve().parent
 packaging_dir = repo_root / "packaging"
+app_icon = packaging_dir / "icon.ico"
 legacy_static_dir = repo_root / "latexstruct" / "server" / "static"
 react_static_dir = repo_root / "latexstruct" / "server" / "static-react"
 react_index = react_static_dir / "index.html"
@@ -25,6 +26,8 @@ if not react_index.is_file() or not react_assets_dir.is_dir():
     )
 if not elegantbook_class.is_file() or not elegantbook_license.is_file():
     raise SystemExit("Bundled ElegantBook class or LPPL license is missing")
+if not app_icon.is_file():
+    raise SystemExit("Windows application icon is missing")
 
 datas = [
     (str(legacy_static_dir), "latexstruct/server/static"),
@@ -74,6 +77,6 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
-    icon=str(packaging_dir / "icon.ico"),
+    icon=str(app_icon),
     version=str(packaging_dir / "version_info.txt"),
 )

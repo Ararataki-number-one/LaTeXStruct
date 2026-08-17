@@ -119,8 +119,6 @@ def build_report(
                 L.append(f"  - {f.get('candidate_id', '-')}：{f.get('reason', '')}")
         if rev:
             L.append(f"- 复查模型：{rev.get('model', '')}；tokens：{rev.get('total_tokens', 0)}")
-        if verification.get("ai_degraded"):
-            L.append("- **AI 不可用，已降级为规则决策**")
         if ai_notes:
             L.append("- AI 说明：")
             for note in ai_notes:

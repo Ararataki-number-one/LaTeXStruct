@@ -51,7 +51,8 @@ def test_proof_span_stops_before_next_title():
                  body_span=(proof.span.start_line, 11))  # 越过 Theorem 2（第 10 行）
     legalize_wrap(doc, d, proof)
     # 终点必须落在下一停点（Theorem 2）之前，且吸附到"More argument."段尾
-    assert d.body_span == (proof.span.start_line, 9)
+    expected_end = text.split("\n").index("More argument.") + 1
+    assert d.body_span == (proof.span.start_line, expected_end)
 
 
 def test_proof_span_snapped_to_block_end():
@@ -73,7 +74,51 @@ def test_proof_span_snapped_to_block_end():
     assert d.body_span[1] == blk.span.end_line
 
 
-def test_rule_and_review_sources_untouched():
+def test_partial_proof_span_extends_to_first_explicit_qed():
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n\n"
+        "Proof. First step.\n\n"
+        "Second step.\n\n"
+        "Final step. \\hfill $\\square$\n\n"
+        "After the proof, we discuss the bound.\n\n"
+        "Theorem 2. A new result.\n"
+        "\\end{document}\n"
+    )
+    doc = parse_latex(text)
+    proof = next(c for c in scan(doc).candidates if c.kind == "proof")
+    d = Decision(
+        candidate_id=proof.id,
+        action="wrap",
+        env="proof",
+        source="ai",
+        # 模型只选了第一段；程序不能把它当成完整证明。
+        body_span=(proof.span.start_line, proof.span.end_line),
+    )
+    legalize_wrap(doc, d, proof)
+    lines = text.split("\n")
+    qed_line = lines.index("Final step. \\hfill $\\square$") + 1
+    narration_line = lines.index("After the proof, we discuss the bound.") + 1
+    assert d.body_span[1] == qed_line
+    assert d.body_span[1] < narration_line
+    assert not hasattr(d, "_legalize_error")
+
+
+def test_proof_fragment_without_reliable_end_is_fail_closed():
+    text = "Proof. First step.\n\nThe argument continues on a missing page."
+    doc = parse_latex(text)
+    proof = next(c for c in scan(doc).candidates if c.kind == "proof")
+    d = Decision(
+        candidate_id=proof.id,
+        action="wrap",
+        env="proof",
+        source="ai",
+        body_span=(proof.span.start_line, proof.span.end_line),
+    )
+    legalize_wrap(doc, d, proof)
+    assert "避免生成被截断的 proof" in getattr(d, "_legalize_error", "")
+
+
+def test_rule_source_is_untouched_but_review_source_is_revalidated():
     doc = parse_latex(read_sample("godsil_1_7.tex"))
     res = scan(doc)
     c = [c for c in res.candidates if c.kind == "theorem-like"][0]
@@ -81,7 +126,8 @@ def test_rule_and_review_sources_untouched():
     d_rule = Decision(candidate_id=c.id, action="wrap", env="theorem", source="rule", body_span=span)
     d_review = Decision(candidate_id=c.id, action="wrap", env="theorem", source="review", body_span=span)
     legalize_decisions(doc, [d_rule, d_review], {c.id: c})
-    assert d_rule.body_span == span and d_review.body_span == span
+    assert d_rule.body_span == span
+    assert d_review.body_span == (c.span.start_line, c.span.end_line)
 
 
 def main():

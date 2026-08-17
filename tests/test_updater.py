@@ -2,6 +2,7 @@
 """主动更新模块测试（逻辑层，无网络）。"""
 
 import os
+import subprocess
 import sys
 from io import BytesIO
 from unittest.mock import patch
@@ -202,6 +203,17 @@ def test_windows_helper_waits_for_process_and_exclusive_unlock(tmp_path):
     assert kwargs["env"]["LATEXSTRUCT_UPDATE_PID"] == "4321"
     assert kwargs["env"]["LATEXSTRUCT_UPDATE_TARGET"] == str(target)
     assert kwargs["env"]["LATEXSTRUCT_UPDATE_INSTALLER"] == str(setup)
+    # helper 必须与父进程解耦；否则桌面窗口退出时会一起杀掉更新。
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.DEVNULL
+    assert kwargs["close_fds"] is True
+    flags = kwargs["creationflags"]
+    assert flags & 0x00000008  # DETACHED_PROCESS
+    assert flags & 0x00000200  # CREATE_NEW_PROCESS_GROUP
+    assert flags & 0x08000000  # CREATE_NO_WINDOW
+    for argument in WINDOWS_INSTALLER_ARGS:
+        assert f"'{argument}'" in script
     for key in secret_env:
         assert key not in kwargs["env"]
 
@@ -234,7 +246,10 @@ def test_installer_script_force_closes_old_updater_and_restarts_only_upgrade():
 
 
 def main():
+    import inspect
+    import tempfile
     import traceback
+    from pathlib import Path
 
     tests = [
         (k, v)
@@ -244,7 +259,11 @@ def main():
     failed = 0
     for name, fn in tests:
         try:
-            fn()
+            if "tmp_path" in inspect.signature(fn).parameters:
+                with tempfile.TemporaryDirectory(prefix="latexstruct-updater-test-") as tmp:
+                    fn(Path(tmp))
+            else:
+                fn()
             print(f"PASS {name}")
         except Exception:
             failed += 1

@@ -4,6 +4,7 @@
 import os
 import json
 import re
+import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -124,13 +125,52 @@ def test_elegantbook_is_the_fixed_frontend_export_template():
 
     assert 'const template = "elegantbook"' in projects
     assert 'ElegantBook 专业讲义（固定）' in projects
+    assert 'const [mode, setMode] = useState("ai")' in projects
+    assert 'AI 深度整理（默认，章节 + 定理 + 复查）' in projects
     assert 'const importTemplate = "elegantbook"' in ocr
     assert 'ElegantBook 专业讲义（固定）' in ocr
     assert 'const [importMode, setImportMode] = useState("ai")' in ocr
-    assert '<option value="ai">AI 深度整理（推荐）</option>' in ocr
-    assert '<option value="rule">规则整理（快速）</option>' in ocr
+    assert '<option value="ai">AI 深度整理（默认，重点维护）</option>' in ocr
+    assert '<option value="rule">旧规则兼容模式（不再主动优化）</option>' in ocr
     assert 'mode: importMode' in ocr
-    assert "章节、目录与定理先做结构校正" in ocr
+    assert "目录页并插入真正的 \\\\tableofcontents" in ocr
+    assert "不会悄悄换成规则结果" in ocr
+
+
+def test_every_user_import_entry_defaults_to_ai_but_keeps_rule_compatibility():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "latexstruct", "server", "app.py"), encoding="utf-8") as f:
+        server = f.read()
+
+    assert re.search(r"class CreateRequest.*?mode: str = \"ai\"", server, re.S)
+    assert re.search(r"class FolderRequest.*?mode: str = \"ai\"", server, re.S)
+    assert 'mode = mode or "ai"' in server
+    assert 'mode: str = Form("ai")' in server
+    assert re.search(r"def ocr_import\(.*?mode: str = \"ai\"", server, re.S)
+    assert 'mode not in {"rule", "ai"}' in server
+
+
+def test_workspace_keeps_blocked_draft_visible_and_actionable():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "frontend", "src", "Workspace.jsx"), encoding="utf-8") as f:
+        workspace = f.read()
+    with open(os.path.join(root, "frontend", "src", "Projects.jsx"), encoding="utf-8") as f:
+        projects = f.read()
+    with open(os.path.join(root, "frontend", "src", "App.jsx"), encoding="utf-8") as f:
+        app = f.read()
+
+    assert 'new Set(["done", "blocked", "error", "cancelled"])' in workspace
+    assert 'state.status === "blocked"' in workspace
+    assert 'api(`/api/projects/${pid}/failed-draft`)' in workspace
+    assert 'failedAttempt?.attempt === "blocked"' in workspace
+    assert "失败草稿（仅供定位问题）" in workspace
+    assert "VerificationFailures" in workspace
+    assert "reviewLocked" in workspace
+    assert "失败草稿仅供检查，不能接受、拒绝或应用修改" in workspace
+    assert "打开设置" in workspace and "重新分析" in workspace
+    assert '<Workspace pid={currentPid} onOpenSettings={() => setTab("settings")} />' in app
+    assert "!showingFailedDraft" in workspace
+    assert 'blocked: "安全检查未通过"' in projects
 
 
 def test_release_metadata_matches_app_version():
@@ -162,6 +202,71 @@ def test_release_metadata_matches_app_version():
     assert "npm" in build_script and "run build" in build_script
 
 
+def test_product_icon_assets_are_multisize_and_wired_into_every_surface():
+    """The approved artwork must reach the EXE, installer, browser and app header."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def png_size(relative_path):
+        with open(os.path.join(root, relative_path), "rb") as f:
+            header = f.read(24)
+        assert header[:8] == b"\x89PNG\r\n\x1a\n"
+        assert header[12:16] == b"IHDR"
+        return struct.unpack(">II", header[16:24])
+
+    assert png_size("packaging/icon-source.png")[0] >= 1024
+    assert png_size("packaging/icon-source.png")[1] >= 1024
+    assert png_size("packaging/icon.png") == (512, 512)
+    for size, name in (
+        (32, "favicon-32.png"),
+        (64, "app-icon-64.png"),
+        (180, "app-icon-180.png"),
+        (192, "app-icon-192.png"),
+        (512, "app-icon-512.png"),
+    ):
+        assert png_size(os.path.join("frontend", "public", name)) == (size, size)
+
+    with open(os.path.join(root, "packaging", "icon.ico"), "rb") as f:
+        ico = f.read()
+    reserved, resource_type, count = struct.unpack_from("<HHH", ico)
+    assert (reserved, resource_type, count) == (0, 1, 9)
+    sizes = []
+    for index in range(count):
+        width, height, _, _, _, bpp, length, offset = struct.unpack_from(
+            "<BBBBHHII", ico, 6 + index * 16
+        )
+        size = width or 256
+        assert (height or 256) == size
+        assert bpp == 32
+        assert 0 < length <= len(ico) - offset
+        assert ico[offset : offset + 8] == b"\x89PNG\r\n\x1a\n"
+        sizes.append(size)
+    assert sizes == [16, 20, 24, 32, 40, 48, 64, 128, 256]
+
+    with open(os.path.join(root, "packaging", "LaTeXStruct.spec"), encoding="utf-8") as f:
+        pyinstaller_spec = f.read()
+    assert 'app_icon = packaging_dir / "icon.ico"' in pyinstaller_spec
+    assert 'icon=str(app_icon)' in pyinstaller_spec
+    assert 'if not app_icon.is_file()' in pyinstaller_spec
+
+    with open(os.path.join(root, "packaging", "installer.iss"), encoding="utf-8") as f:
+        installer = f.read()
+    assert "SetupIconFile=..\\packaging\\icon.ico" in installer
+    assert "UninstallDisplayIcon={app}\\LaTeXStruct.exe" in installer
+
+    with open(os.path.join(root, "frontend", "index.html"), encoding="utf-8") as f:
+        index_html = f.read()
+    for asset in ("favicon-32.png", "app-icon-180.png", "app-icon-192.png"):
+        assert f'href="/{asset}"' in index_html
+    assert "data:image/svg+xml" not in index_html
+
+    with open(os.path.join(root, "frontend", "src", "App.jsx"), encoding="utf-8") as f:
+        app = f.read()
+    assert 'className="brand-icon" src="/app-icon-64.png"' in app
+    assert 'alt="" aria-hidden="true"' in app
+    assert '<img src="/app-icon-64.png" alt="" />' in app
+    assert 'className="update-icon-status"' in app
+
+
 def test_release_build_safety_guards():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, "scripts", "build.ps1"), encoding="utf-8-sig") as f:
@@ -175,18 +280,33 @@ def test_release_build_safety_guards():
     with open(os.path.join(root, ".github", "workflows", "build.yml"), encoding="utf-8") as f:
         workflow = f.read()
     assert "$observedVersion -eq $env:APP_VERSION" in workflow
+    assert 'pyinstaller "Pillow>=10,<12"' in workflow
     assert "安装版没有提供 React 工作台" in workflow
     assert "React 资源名未带内容哈希" in workflow
     assert "http://127.0.0.1:8099$assetPath" in workflow
     assert '$pageResponse = Invoke-WebRequest "http://127.0.0.1:8099/"' in workflow
     assert "$home = Invoke-WebRequest" not in workflow
-    assert "v1.1.6 运行中 → 当前版本" in workflow
+    assert "上一版自动更新冒烟（运行中 → 当前版本）" in workflow
     assert "v1.1.5" not in workflow
     assert "v1.1.4" not in workflow
     assert "name: LaTeXStruct-v${{ env.APP_VERSION }}" in workflow
     assert "name: LaTeXStruct-${{ github.ref_name }}" not in workflow
-    assert "                if ($health.ok -and [string]$health.version -eq '1.1.6')" in workflow
+    assert "$previousVersion = '1.1.7'" in workflow
+    assert "[string]$health.version -eq $previousVersion" in workflow
     assert "            if (-not $oldHealthy)" in workflow
+    # 升级冒烟必须走应用内真实的独立 helper，不能绕过第一阶段
+    # 直接启动当前安装器。
+    assert "from latexstruct.updater import schedule_installer_after_exit" in workflow
+    assert "LATEXSTRUCT_SMOKE_INSTALLER" in workflow
+    assert "LATEXSTRUCT_SMOKE_OLD_PID" in workflow
+    assert "target_executable=os.environ['LATEXSTRUCT_SMOKE_TARGET']" in workflow
+    assert "Start-Process -FilePath $currentSetup.FullName -ArgumentList" not in workflow
+    assert "if (-not $oldExited)" in workflow
+    # 新应用需持续健康，React 首页和带 hash 资源也必须可读。
+    assert "$consecutiveHealthy -ge 4" in workflow
+    assert "$upgradePage = Invoke-WebRequest 'http://127.0.0.1:8765/'" in workflow
+    assert 'Invoke-WebRequest "http://127.0.0.1:8765$assetPath"' in workflow
+    assert "升级后 React 资源不可用" in workflow
     assert "            if (-not $updated.updated" in workflow
     assert "/api/update/result" in workflow
     assert "body_path: dist/RELEASE_NOTES.md" in workflow

@@ -16,7 +16,7 @@ LaTeX 数学书结构化整理本地客户端（Windows 优先，安装版 + 主
   更新源默认 `Ararataki-number-one/LaTeXStruct`（可用环境变量 `LATEXSTRUCT_UPDATE_REPO` 覆盖）。
 - **OCR 转写**：OCR 页签上传 PDF/图片 → 读取 PDF 总页数、书签树并选择起止页 → 视觉模型逐页忠实
   转写（支持 DPI、原页码/任务序号进度、失败页重试）→ 完成后把原始 OCR 导入独立项目，
-  明确选择“AI 深度整理/规则整理”；成品统一使用固定 ElegantBook 专业讲义模板，随后立即进入可暂停的后台工作台，
+  默认直接进入“AI 深度整理”；成品统一使用固定 ElegantBook 专业讲义模板，随后立即进入可暂停的后台工作台，
   按批次显示不断增长的结构化 TeX 草稿；Token 与费用只统计实际调用；
   原始转写与结构化结果分开保存；书签仅用于所选页的章节/目录映射，没有可靠书签时不会
   凭空臆造缺失层级；
@@ -26,7 +26,7 @@ LaTeX 数学书结构化整理本地客户端（Windows 优先，安装版 + 主
   （如 DigiCert/Sectigo），拿到 pfx 后按上述方式配置即可；
 - 安装器界面默认**简体中文**（`packaging/installer.iss` 使用官方 ChineseSimplified 语言包）；
 - AI 设置默认只需选择平台并填写一次 API Key；Qwen 可同时用于文字判断、复查和 OCR，
-  DeepSeek 用于文字判断/复查；无 Key 时 AI 模式自动降级规则模式。
+  DeepSeek 用于文字判断/复查；未配置 Key 时会明确提示并保留原文，不会用规则结果冒充 AI 整理。
 
 ## Qwen 视觉模型配置
 
@@ -76,7 +76,7 @@ git push origin "v$version"
 # 3) 已安装客户端下次启动自动提示更新
 ```
 
-## 当前状态（v1.1.7，能力边界仍冻结）
+## 当前状态（v1.1.8，能力边界仍冻结）
 
 - 核心流水线已具备解析、扫描、保守决策、可逆补丁和统一安全检查；正文、数学、
   label/ref、图片路径、环境、花括号、项目文件集合与可选编译对比共同决定能否导出；
@@ -93,6 +93,10 @@ git push origin "v$version"
   再由用户明确启动分析；
 - 分阶段进度卡显示当前动作、候选进度、按 AI 批次更新的实时草稿、Token 与约人民币费用；
   处理任务支持安全暂停、继续和取消，未验证草稿永不写入正式结果；
+- 新项目和 OCR 导入默认走 AI 深度整理；视觉阶段只忠实转录，章节、真实目录命令和定理/证明
+  边界由后续结构阶段统一处理。AI 决策或复查失败会明确停止并保留原文，旧规则模式仅作兼容；
+- 最终安全检查未通过时会保存独立诊断草稿和逐项修复建议，重启后仍可查看；诊断草稿不能参与
+  审阅应用或导出，也不会覆盖原项目及上一份已验证结果；
 - OCR 保持“选择 1-based 起止页 → 原始逐页转写 → 人工检查/失败重试 → 结构化流水线”
   分层；整本累积草稿和单页原图/LaTeX 可随时切换，部分失败不会伪装成功；页签切换后会
   恢复当前任务，未保存的付费结果不会被自动清理或被更新过程静默丢弃；
@@ -125,7 +129,7 @@ latexstruct/
 │   │   ├── scanner.py            # 规则扫描引擎
 │   │   ├── patch.py              # 补丁模型 + 内容不变校验
 │   │   ├── verify.py             # 环境/花括号配平 + 已知问题报告
-│   │   ├── rules.py              # 规则模式决策（无 Key 降级）
+│   │   ├── rules.py              # 旧规则兼容模式决策
 │   │   ├── ai.py                 # AI 决策引擎（OpenAI 兼容客户端）
 │   │   ├── review.py             # AI 复查引擎
 │   │   ├── prompts.py            # 母提示词 v3 + Schema + 上下文组装
@@ -142,10 +146,12 @@ latexstruct/
 ├── packaging/
 │   ├── LaTeXStruct.spec          # PyInstaller 单文件 exe
 │   ├── installer.iss             # Inno Setup 安装器
-│   ├── generate_icon.py          # 图标生成（纯标准库）
+│   ├── icon-source.png           # 用户确认的高分辨率品牌原图
+│   ├── icon.ico / icon.png       # Windows 多尺寸图标与标准 PNG
+│   ├── generate_icon.py          # 从原图生成 Windows/Web 多尺寸资源
 │   └── run.py                    # 打包入口
 ├── scripts/build.ps1             # 本地构建脚本
-├── tests/                        # 20 个测试套件 + 合成/真实摘录语料
+├── tests/                        # 自动化测试套件 + 合成/真实摘录语料
 ├── tools/                        # 真实书稿摸底/抽查脚本
 ├── requirements.txt
 └── pyproject.toml

@@ -90,6 +90,9 @@ def test_set_result_failure_restores_previous_commit_marker():
         store = ProjectStore(root=tmp)
         pid = store.create("SOURCE")
         store.set_result(pid, "OLD RESULT", "# OLD REPORT", [], {"ok": True})
+        project_dir = Path(tmp) / pid
+        committed_names = ("result.tex", "report.md", "decisions.json", "verification.json")
+        previous_bytes = {name: (project_dir / name).read_bytes() for name in committed_names}
         marker_path = os.path.join(tmp, pid, "verification.json")
         with open(marker_path, encoding="utf-8") as f:
             previous_marker = json.load(f)
@@ -112,6 +115,8 @@ def test_set_result_failure_restores_previous_commit_marker():
         with open(marker_path, encoding="utf-8") as f:
             restored_marker = json.load(f)
         assert restored_marker == previous_marker
+        restored_bytes = {name: (project_dir / name).read_bytes() for name in committed_names}
+        assert restored_bytes == previous_bytes
         assert not any(name.endswith(".previous") for name in os.listdir(os.path.join(tmp, pid)))
 
 

@@ -87,7 +87,8 @@ function ReleaseNotes({ notes, emptyText = "本次更新包含稳定性与使用
 function UpdateIcon({ success = false }) {
   return (
     <span className={`update-icon ${success ? "success" : ""}`} aria-hidden="true">
-      {success ? "✓" : "↻"}
+      <img src="/app-icon-64.png" alt="" />
+      <span className="update-icon-status">{success ? "✓" : "↻"}</span>
     </span>
   );
 }
@@ -353,8 +354,13 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <h1>LaTeXStruct</h1>
-        <span className="sub">数学 LaTeX 安全结构化重构器 · v{version}</span>
+        <div className="brand">
+          <img className="brand-icon" src="/app-icon-64.png" alt="" aria-hidden="true" />
+          <div className="brand-copy">
+            <h1>LaTeXStruct</h1>
+            <span className="sub">数学 LaTeX 安全结构化重构器 · v{version}</span>
+          </div>
+        </div>
         <nav>
           {updateInfo && !updateDialogOpen && (
             <button className="update-chip" onClick={() => setUpdateDialogOpen(true)}>
@@ -371,7 +377,7 @@ export default function App() {
         {tab === "projects" && <Projects onOpen={openProject} />}
         {tab === "workspace" && (
           <Suspense fallback={<section className="card">正在加载审阅工作台……</section>}>
-            <Workspace pid={currentPid} />
+            <Workspace pid={currentPid} onOpenSettings={() => setTab("settings")} />
           </Suspense>
         )}
         {tab === "ocr" && (

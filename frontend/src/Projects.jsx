@@ -12,6 +12,7 @@ const TASK_LABELS = {
   cancelling: "取消中",
   committing: "保存中",
   done: "处理完成",
+  blocked: "安全检查未通过",
   error: "处理失败",
   cancelled: "已取消",
 };
@@ -99,7 +100,7 @@ export default function Projects({ onOpen }) {
   const [projects, setProjects] = useState([]);
   const [packs, setPacks] = useState([]);
   const [name, setName] = useState("");
-  const [mode, setMode] = useState("rule");
+  const [mode, setMode] = useState("ai");
   const [pack, setPack] = useState("bilingual");
   const template = "elegantbook";
   const [text, setText] = useState("");
@@ -341,8 +342,8 @@ export default function Projects({ onOpen }) {
           <summary>粘贴源码或调整处理方式</summary>
           <div className="row">
             <select value={mode} onChange={(event) => setMode(event.target.value)}>
-              <option value="rule">规则模式（默认，无需 API Key）</option>
-              <option value="ai">AI 模式（判断 + 复查）</option>
+              <option value="ai">AI 深度整理（默认，章节 + 定理 + 复查）</option>
+              <option value="rule">旧规则兼容模式（不使用 AI）</option>
             </select>
             <select value={pack} onChange={(event) => setPack(event.target.value)}>
               {packs.map((item) => <option key={item} value={item}>{item}</option>)}
@@ -353,7 +354,8 @@ export default function Projects({ onOpen }) {
             </div>
           </div>
           <p className="template-description">
-            {FALLBACK_TEMPLATES[0].description} 模型不自由改写导言区；安全检查失败时不会导出。
+            {FALLBACK_TEMPLATES[0].description} AI 只提交可审阅的结构补丁，不自由改写正文；
+            目录统一使用 LaTeX 的 \tableofcontents，安全检查失败时不会导出。
           </p>
           <textarea
             placeholder="也可以在这里粘贴 .tex 全文……"
