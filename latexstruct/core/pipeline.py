@@ -358,6 +358,7 @@ def run_pipeline(
     require_compile_when_available: bool = False,
     resource_root: str = None,
     require_resources: bool = False,
+    compile_extra_files: dict = None,
 ) -> PipelineResult:
     def control():
         if control_callback:
@@ -706,8 +707,14 @@ def run_pipeline(
                 "log": "", "skipped": True,
             }
         else:
-            verification["compile_before"] = compile_latex(transformed_source_text)
-        verification["compile_after"] = compile_latex(result_text)
+            verification["compile_before"] = compile_latex(
+                transformed_source_text,
+                extra_files=compile_extra_files,
+            )
+        verification["compile_after"] = compile_latex(
+            result_text,
+            extra_files=compile_extra_files,
+        )
     compile_safe = not require_compile
     if compile_check:
         cb = verification["compile_before"]

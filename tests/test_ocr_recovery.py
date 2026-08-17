@@ -24,7 +24,7 @@ from latexstruct.core.verify import (
     compare_env_balance,
     verification_failures,
 )
-from latexstruct.server.app import _preserve_ocr_resources
+from latexstruct.server.app import _ocr_bundle_bytes, _preserve_ocr_resources
 import latexstruct.server.app as server_app
 from latexstruct.server.process_jobs import ProcessJobManager
 from latexstruct.store import ProjectStore
@@ -41,6 +41,11 @@ def _apply_structure_ops(text: str) -> str:
     out, applied, rejected = apply_patches(lines, planned)
     assert applied and rejected == []
     return "\n".join(out)
+
+
+def _png_bytes(label: bytes = b"page") -> bytes:
+    # Resource preservation identifies the actual raster format from its magic.
+    return b"\x89PNG\r\n\x1a\n" + label
 
 
 def test_duplicate_model_page_comment_does_not_corrupt_outline_or_manual_toc():
@@ -293,6 +298,87 @@ def test_pdf_resource_import_uses_physical_chunk_page_and_preserves_real_images(
         assert [item["printed_page"] for item in result["assets"]] == [8, 8, 15]
 
 
+def test_explicit_png_reference_is_preserved_exactly_once_with_source_preview():
+    raw = "\n".join(
+        [
+            r"% Page 1",
+            r"\includegraphics{images/page_1_1.png}",
+        ]
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp, "source.png")
+        source.write_bytes(_png_bytes(b"source"))
+        page = Path(tmp, "page-1.img")
+        page.write_bytes(_png_bytes(b"preview"))
+        project = Path(tmp, "project")
+        project.mkdir()
+
+        result = _preserve_ocr_resources(
+            {
+                "source_type": "image",
+                "target": str(source),
+                "selected_pages": [1],
+                "pages": {1: {"png": str(page)}},
+            },
+            raw,
+            project,
+        )
+
+        assert result["unresolved"] == []
+        assert [item["path"] for item in result["assets"]] == [
+            "images/page_1_1.png"
+        ]
+        assert not Path(project, "images", "page_1_1.png.png").exists()
+        assert Path(project, "images", "page_1_1.png").read_bytes() == source.read_bytes()
+        assert result["source_pages"][0]["path"] == "source-pages/page_0001.png"
+        assert result["source_pages"][0]["sha256"] == hashlib.sha256(
+            page.read_bytes()
+        ).hexdigest()
+
+
+def test_missing_figure_uses_hash_marked_source_page_fallback_and_bundle():
+    raw = "\n".join(
+        [
+            r"% Page 3",
+            r"\includegraphics{images/page_99_1}",
+        ]
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        page = Path(tmp, "page-3.img")
+        page.write_bytes(_png_bytes(b"physical-page-3"))
+        job = {
+            "source_type": "pdf",
+            "target": str(Path(tmp, "unavailable.pdf")),
+            "status": "done",
+            "selected_start": 3,
+            "selected_end": 3,
+            "selected_pages": [3],
+            "raw_revision": 4,
+            "usage_revision": 2,
+            "page_revision": 5,
+            "pages": {3: {"png": str(page)}},
+        }
+        project = Path(tmp, "project")
+        project.mkdir()
+
+        result = _preserve_ocr_resources(job, raw, project)
+        assert result["unresolved"] == []
+        assert result["assets"][0]["kind"] == "page_fallback"
+        assert result["assets"][0]["source_page"] == 3
+        assert result["assets"][0]["path"] == "images/page_99_1.png"
+        assert Path(project, "images", "page_99_1.png").read_bytes() == page.read_bytes()
+
+        bundle, manifest = _ocr_bundle_bytes(job, raw)
+        with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+            assert archive.read("ocr.tex").decode("utf-8") == raw
+            assert archive.read("images/page_99_1.png") == page.read_bytes()
+            assert archive.read("source-pages/page_0003.png") == page.read_bytes()
+            disk_manifest = json.loads(archive.read("OCR-MANIFEST.json"))
+        assert disk_manifest == manifest
+        assert manifest["resources"]["assets"][0]["kind"] == "page_fallback"
+        assert manifest["resources"]["unresolved"] == []
+
+
 def test_failed_attempt_does_not_replace_previous_verified_commit():
     with tempfile.TemporaryDirectory() as tmp:
         store = ProjectStore(tmp)
@@ -366,11 +452,54 @@ def test_failed_draft_endpoint_survives_restart_but_never_replaces_export():
         assert exported.status_code == 200
         assert exported.text == verified_result
 
+        current_tex = client.get(f"/api/projects/{pid}/export-current")
+        assert current_tex.status_code == 200
+        assert current_tex.headers["x-latexstruct-verified"] == "false"
+        assert current_tex.text == "latest unsafe draft"
+        current_report = client.get(f"/api/projects/{pid}/export-current-report")
+        assert current_report.status_code == 200
+        assert current_report.headers["x-latexstruct-verified"] == "false"
+        assert current_report.text == "actionable failure report"
+        current_package = client.get(f"/api/projects/{pid}/export-current-package")
+        assert current_package.status_code == 200
+        assert current_package.headers["x-latexstruct-verified"] == "false"
+        with zipfile.ZipFile(io.BytesIO(current_package.content)) as archive:
+            assert archive.read("main.tex") == b"latest unsafe draft"
+            assert archive.read("LATEXSTRUCT-REPORT.md") == b"actionable failure report"
+            assert "LATEXSTRUCT-UNVERIFIED.txt" in archive.namelist()
+
+        native_dir = Path(tmp, "native-current")
+
+        def save_current(data, filename):
+            native_dir.mkdir()
+            path = native_dir / filename
+            path.write_bytes(data)
+            return path
+
+        for artifact, extension in (
+            ("current", ".tex"),
+            ("current-report", ".md"),
+            ("current-package", ".zip"),
+        ):
+            with patch(
+                "latexstruct.server.downloads.save_unique_download",
+                save_current,
+            ):
+                native = client.post(f"/api/projects/{pid}/exports/{artifact}/save")
+            assert native.status_code == 200
+            assert native.json()["verified"] is False
+            assert native.json()["filename"].endswith(extension)
+            # Allow the next artifact helper invocation to create its isolated directory.
+            for item in native_dir.iterdir():
+                item.unlink()
+            native_dir.rmdir()
+
         Path(tmp, pid, "last-failed-draft.tex").write_text(
             "tampered diagnostic", encoding="utf-8"
         )
         assert client.get(f"/api/projects/{pid}/failed-draft").status_code == 404
         assert client.get(f"/api/projects/{pid}/result").text == verified_result
+        assert client.get(f"/api/projects/{pid}/export-current").status_code == 409
 
 
 def test_ocr_package_contains_hash_verified_preserved_images():
@@ -428,6 +557,15 @@ def test_ocr_package_contains_hash_verified_preserved_images():
         assert package.status_code == 200, package.text
         with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
             assert archive.read("images/page_08_01.png") == image
+
+        current = client.get(f"/api/projects/{pid}/export-current")
+        assert current.status_code == 200
+        assert current.headers["x-latexstruct-verified"] == "true"
+        current_package = client.get(f"/api/projects/{pid}/export-current-package")
+        assert current_package.status_code == 200
+        assert current_package.headers["x-latexstruct-verified"] == "true"
+        with zipfile.ZipFile(io.BytesIO(current_package.content)) as archive:
+            assert "LATEXSTRUCT-UNVERIFIED.txt" not in archive.namelist()
 
         image_path.write_bytes(b"tampered")
         blocked = client.get(f"/api/projects/{pid}/export-package")

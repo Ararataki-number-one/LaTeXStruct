@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import { DiffEditor, Editor, loader } from "@monaco-editor/react";
-import { api, apiText } from "./api";
+import { api } from "./api";
 
 // 本地 Monaco（无 CDN）。本模块由 App 按页加载，因此导入/OCR/设置页无需先解析编辑器。
 self.MonacoEnvironment = {
@@ -61,8 +61,8 @@ function VerificationFailures({ failures = [], persisted = false }) {
     <div className="verification-failures" role="alert">
       <b>
         {persisted
-          ? "这是上次未通过检查的诊断草稿；原项目和上一次安全结果均未覆盖。"
-          : "本次结果没有保存；原项目和上一次安全结果均未覆盖。"}
+          ? "这是上次未通过检查的诊断草稿；可带警告导出，原项目和上一次安全结果均未覆盖。"
+          : "本次结果未通过全部机器检查；可带警告导出当前草稿，原项目和上一次通过检查的结果均未覆盖。"}
       </b>
       {failures.length ? failures.map((failure, failureIndex) => (
         <details key={failure.id || `failure-${failureIndex}`} open>
@@ -173,6 +173,7 @@ export default function Workspace({ pid, onOpenSettings }) {
   const [status, setStatus] = useState("");
   const [fileAction, setFileAction] = useState("");
   const [savedExport, setSavedExport] = useState(null);
+  const [projectLoaded, setProjectLoaded] = useState(false);
   const [job, setJob] = useState(null);
   const [livePreview, setLivePreview] = useState("");
   const [failedAttempt, setFailedAttempt] = useState(null);
@@ -199,75 +200,138 @@ export default function Workspace({ pid, onOpenSettings }) {
   const previewVersionRef = useRef({ jobId: null, revision: null });
   const pollFailuresRef = useRef(0);
   const autoFocusedJobRef = useRef(null);
+  const activePidRef = useRef(pid);
+  const loadGenerationRef = useRef(0);
+  const loadAbortRef = useRef(null);
 
-  const load = async () => {
-    if (!pid) return;
-    let project = null;
+  const load = async (targetPid = pid) => {
+    if (!targetPid || activePidRef.current !== targetPid) return false;
+    if (loadAbortRef.current) loadAbortRef.current.abort();
+    const controller = new AbortController();
+    const generation = loadGenerationRef.current + 1;
+    loadGenerationRef.current = generation;
+    loadAbortRef.current = controller;
+    const isCurrent = () => (
+      !controller.signal.aborted
+      && activePidRef.current === targetPid
+      && loadGenerationRef.current === generation
+    );
+    const readText = async (path) => (await api(path, { signal: controller.signal })).text();
+
     try {
-      project = await (await api(`/api/projects/${pid}`)).json();
-      setInfo(project);
-    } catch {
-      setInfo(null);
-    }
-    setSource(await apiText(`/api/projects/${pid}/source`));
-    if (project?.has_result) {
+      let project = null;
       try {
-        setResult(await apiText(`/api/projects/${pid}/result`));
-        setReport(await apiText(`/api/projects/${pid}/report`));
+        project = await (await api(`/api/projects/${targetPid}`, { signal: controller.signal })).json();
       } catch {
-        setResult("");
-        setReport("结果读取失败，请重新分析；原始内容仍已保留。");
+        if (!isCurrent()) return false;
       }
-    } else {
-      setResult("");
-      setReport("尚未分析。点击上方「开始分析」。");
-    }
-    let decisionsResponse = null;
-    let decisionsLoaded = false;
-    try {
-      const d = await (await api(`/api/projects/${pid}/decisions`)).json();
-      decisionsLoaded = true;
-      decisionsResponse = d;
-      const items = d.items || [];
-      setDecisions(items);
-      setSelected((previous) =>
-        previous ? items.find((item) => item.candidate_id === previous.candidate_id) || null : null);
-      setVerification(d.verification || null);
-    } catch {
-      setDecisions([]);
-      setVerification(null);
-    }
-    if (decisionsResponse?.attempt === "blocked") {
+      if (!isCurrent()) return false;
+      setInfo(project);
+
       try {
-        const failed = await (await api(`/api/projects/${pid}/failed-draft`)).json();
-        if (failed?.attempt !== "blocked" || typeof failed?.draft !== "string") {
-          throw new Error("诊断草稿格式无效");
-        }
-        setFailedAttempt(failed);
-        setLivePreview(failed.draft);
-        setReport(failed.report || "本次草稿未通过安全检查；原项目保持不变。");
-        setFocusPreview(true);
+        const nextSource = await readText(`/api/projects/${targetPid}/source`);
+        if (!isCurrent()) return false;
+        setSource(nextSource);
       } catch (error) {
-        setFailedAttempt(null);
-        setStatus(`安全检查未通过，但诊断草稿无法读取：${error.message}。原项目仍保持不变。`);
+        if (!isCurrent()) return false;
+        setStatus("项目原文读取失败：" + error.message);
+        return false;
       }
-    } else if (decisionsLoaded) {
-      setFailedAttempt(null);
-    }
-    try {
-      const g = await (await api(`/api/projects/${pid}/graph`)).json();
-      setGraph(g.graph);
-    } catch {
-      setGraph(null);
+
+      if (project?.has_result) {
+        try {
+          const nextResult = await readText(`/api/projects/${targetPid}/result`);
+          const nextReport = await readText(`/api/projects/${targetPid}/report`);
+          if (!isCurrent()) return false;
+          setResult(nextResult);
+          setReport(nextReport);
+        } catch {
+          if (!isCurrent()) return false;
+          setResult("");
+          setReport("结果读取失败，请重新分析；原始内容仍已保留。");
+        }
+      } else {
+        setResult("");
+        setReport("尚未分析。点击上方「开始分析」。");
+      }
+
+      let decisionsResponse = null;
+      let decisionsLoaded = false;
+      try {
+        const d = await (await api(`/api/projects/${targetPid}/decisions`, {
+          signal: controller.signal,
+        })).json();
+        if (!isCurrent()) return false;
+        decisionsLoaded = true;
+        decisionsResponse = d;
+        const items = d.items || [];
+        setDecisions(items);
+        setSelected((previous) =>
+          previous ? items.find((item) => item.candidate_id === previous.candidate_id) || null : null);
+        setVerification(d.verification || null);
+      } catch {
+        if (!isCurrent()) return false;
+        setDecisions([]);
+        setVerification(null);
+      }
+      if (decisionsResponse?.attempt === "blocked") {
+        try {
+          const failed = await (await api(`/api/projects/${targetPid}/failed-draft`, {
+            signal: controller.signal,
+          })).json();
+          if (!isCurrent()) return false;
+          if (failed?.attempt !== "blocked" || typeof failed?.draft !== "string") {
+            throw new Error("诊断草稿格式无效");
+          }
+          setFailedAttempt(failed);
+          setLivePreview(failed.draft);
+          setReport(failed.report || "本次草稿未通过安全检查；原项目保持不变。");
+          setFocusPreview(true);
+        } catch (error) {
+          if (!isCurrent()) return false;
+          setFailedAttempt(null);
+          setStatus(`安全检查未通过，但诊断草稿无法读取：${error.message}。原项目仍保持不变。`);
+        }
+      } else if (decisionsLoaded) {
+        setFailedAttempt(null);
+      }
+      try {
+        const g = await (await api(`/api/projects/${targetPid}/graph`, {
+          signal: controller.signal,
+        })).json();
+        if (!isCurrent()) return false;
+        setGraph(g.graph);
+      } catch {
+        if (!isCurrent()) return false;
+        setGraph(null);
+      }
+      const loaded = isCurrent();
+      if (loaded) setProjectLoaded(true);
+      return loaded;
+    } finally {
+      if (loadAbortRef.current === controller) loadAbortRef.current = null;
     }
   };
 
   useEffect(() => {
+    if (loadAbortRef.current) loadAbortRef.current.abort();
+    loadAbortRef.current = null;
+    loadGenerationRef.current += 1;
+    activePidRef.current = pid;
+    setProjectLoaded(false);
     try {
       setReviewed(new Set(JSON.parse(localStorage.getItem(`ls-reviewed-${pid}`) || "[]")));
     } catch {
       setReviewed(new Set());
     }
+    setInfo(null);
+    setSource("");
+    setResult("");
+    setReport("");
+    setStatus("");
+    setDecisions([]);
+    setVerification(null);
+    setGraph(null);
     setSelected(null);
     setJob(null);
     setLivePreview("");
@@ -279,7 +343,13 @@ export default function Workspace({ pid, onOpenSettings }) {
     pollFailuresRef.current = 0;
     autoFocusedJobRef.current = null;
     undoStack.current = [];
-    load();
+    load(pid);
+    return () => {
+      if (activePidRef.current === pid) activePidRef.current = null;
+      loadGenerationRef.current += 1;
+      if (loadAbortRef.current) loadAbortRef.current.abort();
+      loadAbortRef.current = null;
+    };
   }, [pid]);
 
   useEffect(() => {
@@ -331,10 +401,11 @@ export default function Workspace({ pid, onOpenSettings }) {
         } else if (TERMINAL_TASKS.has(state.status) && !terminalLoaded) {
           terminalLoaded = true;
           if (state.status !== "blocked") setLivePreview("");
-          await load();
+          const loaded = await load(pid);
+          if (stopped || !loaded) return;
           if (state.status === "done") {
             const summary = state.result || {};
-            setStatus((summary.ok ? "安全检查通过" : "安全检查未通过，已回退并禁止导出") +
+            setStatus((summary.ok ? "安全检查通过" : "安全检查未通过；当前草稿可带警告导出") +
               `：补丁 ${summary.applied || 0} · 拒绝 ${summary.rejected || 0} · 歧义 ${summary.ambiguous || 0}` +
               (summary.degraded ? "（AI 已降级为规则）" : ""));
           } else if (state.status === "blocked") {
@@ -371,14 +442,17 @@ export default function Workspace({ pid, onOpenSettings }) {
   }, [reviewed, pid]);
 
   const rerun = async (path, opts) => {
+    const actionPid = pid;
     setStatus("重新整理并校验中……");
     try {
       await api(path, opts);
-      await load();
+      if (activePidRef.current !== actionPid) return false;
+      const loaded = await load(actionPid);
+      if (!loaded || activePidRef.current !== actionPid) return false;
       setStatus("已完成并重新校验");
       return true;
     } catch (e) {
-      setStatus("失败：" + e.message);
+      if (activePidRef.current === actionPid) setStatus("失败：" + e.message);
       return false;
     }
   };
@@ -453,7 +527,7 @@ export default function Workspace({ pid, onOpenSettings }) {
   };
 
   const copyFromApi = async (path, label) => {
-    setFileAction(`正在读取已验证的 ${label}……`);
+    setFileAction(`正在读取 ${label}……`);
     try {
       const response = await api(path);
       const text = await response.text();
@@ -538,7 +612,6 @@ export default function Workspace({ pid, onOpenSettings }) {
   const ambiguousCount = decisions.filter((d) => d.status === "ambiguous").length;
   const reviewedCount = applied.filter((d) => reviewed.has(d.candidate_id)).length;
   const lowConfidenceCount = applied.filter((d) => (d.confidence || 0) < 0.9).length;
-  const safeToExport = verification?.safe_to_export === true;
   const taskActive = ACTIVE_TASKS.has(job?.status);
   const showingFailedDraft = !taskActive
     && Boolean(livePreview)
@@ -549,9 +622,25 @@ export default function Workspace({ pid, onOpenSettings }) {
     : Array.isArray(failedAttemptDetails.failures)
       ? failedAttemptDetails.failures
       : [];
-  const reportReady = Boolean(info?.has_result && report && !taskActive && !showingFailedDraft);
+  const safeToExport = verification?.safe_to_export === true;
   const reviewComplete = applied.length === 0 || reviewedCount === applied.length;
-  const canExport = safeToExport && reviewComplete && !taskActive && !showingFailedDraft;
+  const projectStateReady = projectLoaded && activePidRef.current === pid;
+  const verifiedExportReady = projectStateReady && safeToExport && !taskActive && !showingFailedDraft;
+  const exportSnapshot = showingFailedDraft ? livePreview : (result || source);
+  const canExport = projectStateReady && Boolean(exportSnapshot) && !taskActive;
+  const exportArtifact = verifiedExportReady ? "result" : "current";
+  const packageArtifact = verifiedExportReady ? "package" : "current-package";
+  const reportArtifact = verifiedExportReady ? "report" : "current-report";
+  const exportTexPath = verifiedExportReady
+    ? `/api/projects/${pid}/export`
+    : `/api/projects/${pid}/export-current`;
+  const exportPackagePath = verifiedExportReady
+    ? `/api/projects/${pid}/export-package`
+    : `/api/projects/${pid}/export-current-package`;
+  const exportReportPath = verifiedExportReady
+    ? `/api/projects/${pid}/export-report`
+    : `/api/projects/${pid}/export-current-report`;
+  const reportReady = projectStateReady && Boolean(exportSnapshot) && !taskActive;
   const reviewLocked = taskActive || showingFailedDraft;
   const displayResult = (taskActive || showingFailedDraft) && livePreview ? livePreview : result;
   const largeDiff = source.length + displayResult.length > 1_000_000;
@@ -563,6 +652,10 @@ export default function Workspace({ pid, onOpenSettings }) {
   const priceText = estimatedCny == null
     ? (tokenTotal ? "自定义/未知模型，暂不估价" : "尚无模型费用")
     : `约 ¥${estimatedCny < 0.01 ? estimatedCny.toFixed(4) : estimatedCny.toFixed(2)}`;
+
+  const confirmCurrentExport = () => verifiedExportReady || window.confirm(
+    "当前 TEX 尚未通过全部安全检查或尚未完成审阅，导出的文件可能无法编译。仍要导出当前快照吗？",
+  );
 
   const select = (d, scroll = true) => {
     setSelected(d);
@@ -682,49 +775,85 @@ export default function Workspace({ pid, onOpenSettings }) {
           <button
             className="danger-button"
             disabled={job?.status === "cancelling"}
-            onClick={() => { if (confirm("取消本次处理？已验证的旧结果会保留，当前草稿不会保存。")) controlTask("cancel"); }}
+            onClick={() => { if (confirm("取消本次处理？上一次通过机器检查的结果会保留，当前草稿不会保存。")) controlTask("cancel"); }}
           >
             取消
           </button>
         )}
         <button
           disabled={!canExport}
-          className="primary"
-          title={canExport ? "保存已验证的 ElegantBook 主 TEX" : "需先通过安全检查并完成审阅"}
-          onClick={() => saveToDownloads("result", "ElegantBook TEX")}
+          className={verifiedExportReady ? "primary" : "warning-button"}
+          title={verifiedExportReady
+            ? "保存已通过机器检查的 ElegantBook 主 TEX"
+            : "导出当前快照；文件会明确标记为未验证，可能无法编译"}
+          onClick={() => {
+            if (confirmCurrentExport()) {
+              saveToDownloads(exportArtifact, verifiedExportReady ? "ElegantBook TEX" : "当前 TEX（未验证）");
+            }
+          }}
         >
-          导出 ElegantBook TEX
+          {verifiedExportReady ? "导出 ElegantBook TEX" : "导出当前 TEX（未验证）"}
         </button>
         <button
-          className="primary"
+          className={verifiedExportReady ? "primary" : "warning-button"}
           disabled={!canExport}
-          title={canExport ? "包含主 TEX、图片/资源、elegantbook.cls、许可证和汇报" : "需先通过安全检查并完成审阅"}
-          onClick={() => saveToDownloads("package", "完整工程 ZIP")}
+          title={verifiedExportReady
+            ? "包含主 TEX、图片/资源、elegantbook.cls、许可证和汇报"
+            : "包含当前 TEX、原始图片/资源、当前汇报和未验证说明"}
+          onClick={() => {
+            if (confirmCurrentExport()) {
+              saveToDownloads(packageArtifact, verifiedExportReady ? "完整工程 ZIP" : "当前工程 ZIP（未验证）");
+            }
+          }}
         >
-          导出完整工程 ZIP
+          {verifiedExportReady ? "导出完整工程 ZIP" : "导出当前工程 ZIP（未验证）"}
         </button>
         <button
           disabled={!canExport}
-          title={canExport ? "复制已验证结果" : "需先通过安全检查并完成审阅"}
-          onClick={() => copyFromApi(`/api/projects/${pid}/export`, "ElegantBook TEX")}
+          title={verifiedExportReady ? "复制已通过机器检查的结果" : "复制当前未验证快照"}
+          onClick={() => {
+            if (confirmCurrentExport()) {
+              copyFromApi(exportTexPath, verifiedExportReady ? "ElegantBook TEX" : "当前 TEX（未验证）");
+            }
+          }}
         >
-          一键复制 TEX
+          {verifiedExportReady ? "一键复制 TEX" : "复制当前 TEX"}
         </button>
         <details className="export-fallbacks">
           <summary>浏览器备用下载</summary>
           <div className="row">
             <button
               disabled={!canExport}
-              onClick={() => downloadFromApi(`/api/projects/${pid}/export`, "ElegantBook.tex")}
+              onClick={() => {
+                if (confirmCurrentExport()) {
+                  downloadFromApi(exportTexPath, verifiedExportReady ? "ElegantBook.tex" : "LaTeXStruct-UNVERIFIED.tex");
+                }
+              }}
             >
               TEX 备用下载
             </button>
             <button
               disabled={!canExport}
-              onClick={() => downloadFromApi(`/api/projects/${pid}/export-package`, "ElegantBook-project.zip")}
+              onClick={() => {
+                if (confirmCurrentExport()) {
+                  downloadFromApi(exportPackagePath, verifiedExportReady
+                    ? "ElegantBook-project.zip"
+                    : "LaTeXStruct-UNVERIFIED-project.zip");
+                }
+              }}
             >
               ZIP 浏览器下载（备用）
             </button>
+            {showingFailedDraft && info?.has_result && (
+              <>
+                <button onClick={() => downloadFromApi(`/api/projects/${pid}/export`, "ElegantBook-last-verified.tex") }>
+                  上一次机器检查通过的 TEX
+                </button>
+                <button onClick={() => downloadFromApi(`/api/projects/${pid}/export-package`, "ElegantBook-last-verified.zip") }>
+                  上一次机器检查通过的 ZIP
+                </button>
+              </>
+            )}
           </div>
         </details>
         <button disabled={reviewLocked} onClick={() => { if (confirm("撤销全部拒绝并重新应用所有修改？")) rerun(`/api/projects/${pid}/decisions/reset`, { method: "POST" }); }}>
@@ -866,9 +995,9 @@ export default function Workspace({ pid, onOpenSettings }) {
             <div className="process-summary">
               <div>
                 <b>上次安全检查未通过</b>
-                <span>失败草稿已恢复，只能用于定位问题</span>
+                <span>失败草稿已恢复，可检查并带警告导出</span>
               </div>
-              <strong>未保存</strong>
+              <strong>未验证</strong>
             </div>
             <p className="process-current-action">
               下一步：查看下方失败位置，修复输入或 AI 设置后点击“重新分析”。
@@ -887,11 +1016,11 @@ export default function Workspace({ pid, onOpenSettings }) {
           </span>
         )}
         {safeToExport && !reviewComplete && (
-          <span className="warning">完成全部审阅后才可导出。</span>
+          <span className="warning">审阅尚未完成；机器检查通过的 TEX 与工程仍可导出，建议完成抽查后再交付。</span>
         )}
         <span className="kbd-hint">
           {showingFailedDraft
-            ? "失败草稿仅供检查：↑↓ 可定位问题；审阅、应用与导出已锁定"
+            ? "失败草稿：↑↓ 可定位问题；审阅与应用已锁定，但可导出未验证快照"
             : "↑↓ 切换 · A 确认保留 · R 拒绝 · Ctrl+Z 撤销上次拒绝"}
         </span>
       </section>
@@ -927,7 +1056,7 @@ export default function Workspace({ pid, onOpenSettings }) {
           {(taskActive || showingFailedDraft) && (
             <div className={`live-preview-label ${showingFailedDraft ? "failed-draft" : ""}`}>
               <span className="live-dot" /> {showingFailedDraft ? "失败草稿（仅供定位问题）" : `实时成果：${job?.preview_label || "正在准备草稿"}`}
-              <small>{showingFailedDraft ? "不能导出；原项目保持不变" : "未通过安全检查前仅供查看，不会覆盖正式结果"}</small>
+              <small>{showingFailedDraft ? "可带警告导出；原项目保持不变" : "未通过安全检查前仅供查看，不会覆盖正式结果"}</small>
             </div>
           )}
           {showDiffEditor ? (
@@ -1006,7 +1135,7 @@ export default function Workspace({ pid, onOpenSettings }) {
           <section className={`result-overview ${safeToExport ? "safe" : "pending"}`}>
             <div className="result-overview-heading">
               <h3>结果概览</h3>
-              <span>{showingFailedDraft ? "本次未通过，正在查看失败草稿" : safeToExport ? "安全检查通过" : verification ? "暂不可导出" : "等待分析"}</span>
+              <span>{showingFailedDraft ? "本次未通过，可导出未验证草稿" : safeToExport ? "安全检查通过" : verification ? "检查未通过，可导出当前快照" : "等待分析"}</span>
             </div>
             <div className="result-overview-grid">
               <span><b>{applied.length}</b> 已应用</span>
@@ -1015,7 +1144,7 @@ export default function Workspace({ pid, onOpenSettings }) {
               <span><b>{reviewedCount}/{applied.length}</b> 已审阅</span>
             </div>
             {showingFailedDraft ? (
-              <p className="warning">本次失败详情显示在进度卡中；当前编辑器是未保存的诊断草稿，不能导出。</p>
+              <p className="warning">本次失败详情显示在进度卡中；当前编辑器是未验证诊断草稿，可导出用于继续修复，但可能无法编译。</p>
             ) : verification?.checks?.length ? (
               <ul className="safety-check-list" aria-label="安全检查清单">
                 {verification.checks.map((check) => (
@@ -1031,25 +1160,28 @@ export default function Workspace({ pid, onOpenSettings }) {
         <details className="report-panel">
           <summary>整理汇报（展开查看）</summary>
           <div className="report-heading-row">
-            <span className="muted">安全渲染的结果说明与操作记录</span>
+            <span className="muted">当前汇报与操作记录（包含机器检查结果）</span>
             <div className="report-actions">
               <button
                 className="primary"
                 disabled={!reportReady}
-                onClick={() => saveToDownloads("report", "汇报 Markdown")}
+                onClick={() => saveToDownloads(reportArtifact, "汇报 Markdown")}
               >
                 修复下载
               </button>
               <button
                 disabled={!reportReady}
-                onClick={() => copyFromApi(`/api/projects/${pid}/export-report`, "汇报")}
+                onClick={() => copyFromApi(exportReportPath, "汇报")}
               >
                 一键复制
               </button>
               <button
                 disabled={!reportReady}
                 title="若桌面保存不可用，可使用浏览器备用下载"
-                onClick={() => downloadFromApi(`/api/projects/${pid}/export-report`, "LaTeXStruct-report.md")}
+                onClick={() => downloadFromApi(
+                  exportReportPath,
+                  verifiedExportReady ? "LaTeXStruct-report.md" : "LaTeXStruct-UNVERIFIED-report.md",
+                )}
               >
                 浏览器下载（备用）
               </button>

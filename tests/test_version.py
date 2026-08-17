@@ -163,7 +163,7 @@ def test_workspace_keeps_blocked_draft_visible_and_actionable():
 
     assert 'new Set(["done", "blocked", "error", "cancelled"])' in workspace
     assert 'state.status === "blocked"' in workspace
-    assert 'api(`/api/projects/${pid}/failed-draft`)' in workspace
+    assert 'api(`/api/projects/${targetPid}/failed-draft`' in workspace
     assert 'failedAttempt?.attempt === "blocked"' in workspace
     assert "失败草稿（仅供定位问题）" in workspace
     assert "VerificationFailures" in workspace

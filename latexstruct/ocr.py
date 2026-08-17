@@ -288,8 +288,17 @@ def _clean_page_output(raw: str) -> str:
 
 
 def _has_forbidden_stage_a_structure(text: str) -> bool:
-    """Stage A 只允许转录；拒绝模型擅自生成结构补丁。"""
+    """Stage A 只允许转录；标记模型擅自生成的结构命令。
+
+    非空转写不能因为模型没有完全遵守 Stage A 格式而被整页丢弃。
+    调用方应将这种页面标为需审阅，同时保留模型返回的全部文本。
+    """
     return bool(_FORBIDDEN_STAGE_A_STRUCTURE_RE.search(mask_comments(text)))
+
+
+def ocr_page_needs_review(text: str) -> bool:
+    """检测页面是否需要人工确认，但不丢弃已识别文本。"""
+    return _has_forbidden_stage_a_structure(text)
 
 
 def ocr_page_needs_retry(text: str) -> bool:
@@ -340,11 +349,6 @@ def transcribe_page(client: LLMClient, png_bytes: bytes, page_no: int) -> str:
     text = _clean_page_output(raw)
     if not text:
         raise LLMError(f"第 {page_no} 页转写为空")
-    if _has_forbidden_stage_a_structure(text):
-        raise LLMError(
-            f"第 {page_no} 页转写夹带了完整文档外壳或章节/定理/证明结构命令；"
-            "OCR 阶段已保守拒绝该页，将重试忠实转录"
-        )
     return f"% Page {page_no}\n{text}"
 
 

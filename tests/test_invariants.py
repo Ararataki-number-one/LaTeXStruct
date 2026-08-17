@@ -97,6 +97,25 @@ def test_image_resources_follow_safe_graphicspath_and_reject_escape():
         assert missing["ok"] is False and missing["missing"] == ["not-there"]
 
 
+def test_explicit_image_suffix_does_not_accept_a_double_suffix_file():
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="ls-image-", dir=os.path.dirname(__file__)) as root:
+        image_dir = os.path.join(root, "images")
+        os.makedirs(image_dir)
+        with open(os.path.join(image_dir, "plot.png.png"), "wb") as stream:
+            stream.write(_tiny_png())
+
+        explicit = check_image_resources(
+            r"\includegraphics{images/plot.png}", root
+        )
+        assert explicit["ok"] is False
+        assert explicit["missing"] == ["images/plot.png"]
+
+        extensionless = check_image_resources(r"\includegraphics{images/plot}", root)
+        assert extensionless["ok"] is False
+
+
 def test_invariants_equal_on_same_text():
     out = check_invariants(SIMPLE, SIMPLE)
     assert out["ok"] is True

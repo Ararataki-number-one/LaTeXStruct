@@ -409,6 +409,8 @@ th { color: var(--muted); }
 
 button:disabled { cursor: not-allowed; opacity: 0.5; }
 .danger-button { color: #b91c1c; border-color: #fecaca; background: #fff7f7; }
+.warning-button { color: #92400e; border-color: #fbbf24; background: #fffbeb; }
+.warning-button:hover:not(:disabled) { border-color: #f59e0b; background: #fef3c7; }
 
 /* 新手导入 */
 .import-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
@@ -452,6 +454,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 /* 处理进度与实时成果 */
 .toolbar > button, .toolbar > a, .toolbar > b, .toolbar > .progress { margin: 0 6px 8px 0; }
 .process-card { width: 100%; margin: 10px 0; padding: 13px 14px; border: 1px solid #bfdbfe; border-radius: 10px; background: #f7faff; }
+.process-pausing,
 .process-paused { border-color: #fcd34d; background: #fffbeb; }
 .process-card.process-error, .process-card.process-cancelled, .process-card.process-blocked { border-color: #fecaca; background: #fef2f2; }
 .process-done { border-color: #bbf7d0; background: #f0fdf4; }
@@ -462,8 +465,10 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .process-track { height: 10px; margin: 9px 0; background: #dbe4f3; overflow: hidden; border-radius: 999px; }
 .process-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #3b82f6, #6366f1); transition: width 0.35s ease; }
 .process-paused .process-track span { background: #f59e0b; }
+.process-pausing .process-track span { background: #f59e0b; }
 .process-done .process-track span { background: #22c55e; }
 .process-metrics { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; color: #475569; }
+.ocr-control-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 11px; }
 .process-events { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); list-style: none; padding: 0; margin: 12px 0 0; counter-reset: stage; }
 .process-events li { position: relative; padding: 16px 8px 0 0; color: var(--muted); font-size: 11px; border-top: 2px solid #cbd5e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .process-events li::before { content: ""; position: absolute; top: -5px; left: 0; width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; }

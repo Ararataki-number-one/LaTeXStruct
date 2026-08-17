@@ -39,11 +39,109 @@ _store: Optional[ProjectStore] = None
 _config: Optional[AppConfig] = None
 _ocr_jobs: Dict[str, dict] = {}
 _ocr_jobs_lock = threading.RLock()
+_ocr_jobs_changed = threading.Condition(_ocr_jobs_lock)
 _process_jobs = ProcessJobManager()
 _update_state_lock = threading.RLock()
 _update_preparing = False
 _update_jobs_lock = threading.RLock()
 _update_jobs: Dict[str, dict] = {}
+
+OCR_ACTIVE_STATUSES = {"starting", "running", "pausing", "paused"}
+
+
+def _bump_ocr_state(job: dict) -> None:
+    """递增 OCR 公开快照版本，防止旧轮询响应覆盖新的控制状态。"""
+    job["state_revision"] = int(job.get("state_revision") or 0) + 1
+    job["updated"] = time.time()
+
+
+def _ocr_error_is_retryable(message: str) -> bool:
+    """仅对明确的暂时性/截断/空响应执行页面层重试。"""
+    lower = (message or "").lower()
+    return any(token in lower for token in (
+        "暂时性", "临时", "网络错误", "连接失败", "timed out", "timeout",
+        "connection", "temporarily", "temporary", "try again", "rate limit",
+        "too many requests", "overloaded", "限流",
+        "http 408", "http 409", "http 425", "http 429", "http 500", "http 502",
+        "http 503", "http 504", "max_tokens", "被截断", "转写为空",
+    ))
+
+
+def _ocr_retry_wait(attempt: int) -> None:
+    """页面层短指数退避；独立函数便于测试替换。"""
+    time.sleep(min(4.0, 0.5 * (2 ** max(0, attempt - 1))))
+
+
+def _public_ocr_job(job: dict) -> dict:
+    """在同一把锁中生成可供轮询/控制端点共用的完整快照。"""
+    with _ocr_jobs_lock:
+        job_busy = (
+            job.get("status") in OCR_ACTIVE_STATUSES
+            or bool(job.get("importing"))
+            or bool(job.get("saving"))
+        )
+        retry_available = (
+            not job_busy
+            and job.get("client") is not None
+            and callable(job.get("_transcribe_one"))
+            and callable(job.get("_render_one"))
+        )
+        pages_summary = {
+            str(n): {
+                "status": page.get("status", "pending"),
+                "low_conf": bool(page.get("low_conf")),
+                "needs_review": page.get("needs_review", False),
+                "error": str(page.get("error") or "")[:120],
+                "attempts": page.get("attempts", 0),
+                "task_index": page.get("task_index", 0),
+                "retrying": page.get("retrying", False),
+                "can_retry": retry_available and not page.get("retrying", False),
+                "preview_ready": os.path.isfile(str(page.get("png") or "")),
+            }
+            for n, page in job.get("pages", {}).items()
+        }
+        public = {
+            key: deepcopy(value)
+            for key, value in job.items()
+            if key not in (
+                "raw_tex", "pages", "client", "dir", "target", "suffix",
+                "pause_requested",
+                "_transcribe_one", "_refresh_raw_preview", "_merge_job", "_render_one",
+                "_mark_page_error",
+            )
+        }
+        public["raw_revision"] = int(job.get("raw_revision") or 0)
+        public["raw_chars"] = int(job.get("raw_chars") or len(job.get("raw_tex") or ""))
+        public["state_revision"] = int(job.get("state_revision") or 0)
+        public["can_pause"] = job.get("status") == "running"
+        public["can_resume"] = job.get("status") in {"pausing", "paused"}
+        public["can_cancel"] = False
+        public["pages"] = pages_summary
+        return public
+
+
+def _ocr_control(job: dict) -> None:
+    """在页边界安全暂停；当前已发出的模型请求不被强行中断。"""
+    with _ocr_jobs_changed:
+        if not job.get("pause_requested"):
+            if job.get("status") in {"pausing", "paused"}:
+                job["status"] = "running"
+                job["phase"] = "已继续 OCR"
+                _bump_ocr_state(job)
+                _ocr_jobs_changed.notify_all()
+            return
+        if job.get("status") != "paused":
+            job["status"] = "paused"
+            job["phase"] = "OCR 已安全暂停"
+            _bump_ocr_state(job)
+            _ocr_jobs_changed.notify_all()
+        while job.get("pause_requested"):
+            _ocr_jobs_changed.wait(timeout=1.0)
+        if job.get("status") == "paused":
+            job["status"] = "running"
+            job["phase"] = "已继续 OCR"
+            _bump_ocr_state(job)
+            _ocr_jobs_changed.notify_all()
 
 OCR_IMAGE_REF_RE = re.compile(
     r"\\includegraphics\*?(?:\s*\[(?P<opts>[^\]]*)\])?\s*\{"
@@ -53,8 +151,110 @@ OCR_IMAGE_REF_RE = re.compile(
 )
 MAX_PRESERVED_OCR_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_PRESERVED_OCR_ASSET_BYTES = 100 * 1024 * 1024
+MAX_PRESERVED_SOURCE_PAGE_PREVIEWS = 8
 OCR_PAGE_BREAK_RE = re.compile(r"(?m)^\s*%===\s*PAGE BREAK\s*===.*$")
 OCR_PAGE_MARKER_RE = re.compile(r"(?m)^\s*%\s*Page\s+(?P<page>\d+)\s*$", re.I)
+
+
+def _canonical_image_extension(extension: str) -> str:
+    extension = "." + str(extension or "").lower().lstrip(".")
+    return ".jpg" if extension == ".jpeg" else extension
+
+
+def _raster_extension(data: bytes) -> str:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    return ""
+
+
+def _job_page_raster(job: dict, page_no: int) -> tuple[bytes, str] | None:
+    pages = job.get("pages") or {}
+    page = pages.get(page_no) or pages.get(str(page_no)) or {}
+    page_path = Path(str(page.get("png") or ""))
+    try:
+        data = page_path.read_bytes()
+    except OSError:
+        return None
+    extension = _raster_extension(data)
+    if not data or extension not in {".png", ".jpg"}:
+        return None
+    return data, extension
+
+
+def _raster_for_reference(
+    data: bytes,
+    extension: str,
+    requested_extension: str,
+) -> tuple[bytes, str, bool]:
+    """Return bytes whose real format matches an optional explicit TEX suffix."""
+    requested_extension = str(requested_extension or "").lower()
+    if not requested_extension:
+        return data, extension, True
+    if _canonical_image_extension(extension) == _canonical_image_extension(requested_extension):
+        return data, requested_extension, True
+    try:
+        import fitz
+
+        document = fitz.open(stream=data)
+        try:
+            pixmap = document[0].get_pixmap(alpha=False)
+            output = "png" if requested_extension == ".png" else "jpg"
+            converted = pixmap.tobytes(output)
+        finally:
+            document.close()
+        if converted:
+            return converted, requested_extension, True
+    except Exception:  # noqa: BLE001 - caller records the conservative fallback
+        pass
+    # A real source-page image is still preferable to a dangling reference.  The
+    # manifest marks the format mismatch so the review/export warning remains
+    # honest on installations whose image converter is unavailable.
+    return data, requested_extension, False
+
+
+def _preserve_source_page_previews(
+    job: dict,
+    project_dir: Path,
+    page_numbers,
+    remaining_bytes: int,
+) -> tuple[list[dict], int]:
+    """Keep a bounded, hash-addressed sample of the actual OCR input pages."""
+    previews = []
+    used = 0
+    seen = set()
+    for raw_page in page_numbers:
+        try:
+            page_no = int(raw_page)
+        except (TypeError, ValueError):
+            continue
+        if page_no in seen or len(previews) >= MAX_PRESERVED_SOURCE_PAGE_PREVIEWS:
+            continue
+        seen.add(page_no)
+        raster = _job_page_raster(job, page_no)
+        if raster is None:
+            continue
+        data, extension = raster
+        if len(data) > MAX_PRESERVED_OCR_IMAGE_BYTES or used + len(data) > remaining_bytes:
+            continue
+        relative = f"source-pages/page_{page_no:04d}{extension}"
+        target_path = (project_dir / Path(relative)).resolve()
+        try:
+            target_path.relative_to(project_dir)
+        except ValueError:
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(data)
+        previews.append({
+            "path": relative,
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "source_page": page_no,
+            "kind": "source_page_preview",
+        })
+        used += len(data)
+    return previews, used
 
 
 def _ocr_image_references(text: str) -> list[dict]:
@@ -94,28 +294,32 @@ def _ocr_image_references(text: str) -> list[dict]:
 def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
     """把 OCR ``includegraphics`` 占位绑定到原上传中的真实图片。
 
-    不生成空白图或整页截图冒充插图。无法从原文件可靠匹配的引用明确列入
-    ``unresolved``，由资源安全门阻止导出并展示具体相对路径。
+    优先提取真实图块。提取数量不足时，使用 OCR 实际看过的源页栅格作为
+    明确标注的 ``page_fallback``，从而不会把悬空图片路径带入分析/审阅。
     """
     references = _ocr_image_references(raw_tex)
-    result = {"assets": [], "unresolved": [], "errors": []}
+    result = {"assets": [], "source_pages": [], "unresolved": [], "errors": []}
+    project_dir = project_dir.resolve()
     if not references:
+        preview_pages = job.get("selected_pages") or sorted((job.get("pages") or {}).keys())
+        previews, _used = _preserve_source_page_previews(
+            job, project_dir, preview_pages, MAX_PRESERVED_OCR_ASSET_BYTES
+        )
+        result["source_pages"] = previews
         return result
     target = Path(str(job.get("target") or ""))
     if not target.is_file():
-        result["unresolved"] = [item["path"] for item in references]
-        result["errors"].append("原始上传文件已不可用，无法提取 OCR 插图")
-        return result
+        result["errors"].append("原始上传文件已不可用，改用已保存的 OCR 源页预览")
 
     extracted: dict[str, tuple[bytes, str, int]] = {}
-    if job.get("source_type") == "image":
+    if target.is_file() and job.get("source_type") == "image":
         # 单张图片只有在正文只有一个图引用时才存在一一对应关系。
         if len(references) == 1 and references[0]["source_page"] == 1:
             data = target.read_bytes()
             suffix = target.suffix.lower()
             if suffix in {".png", ".jpg", ".jpeg"}:
                 extracted[references[0]["path"]] = (data, suffix, 1)
-    elif job.get("source_type") == "pdf":
+    elif target.is_file() and job.get("source_type") == "pdf":
         document = None
         try:
             import fitz
@@ -265,7 +469,11 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
                             extension = ".png"
                         except Exception:  # noqa: BLE001 - 保守留给资源门报告
                             continue
-                    if reference["ext"] and reference["ext"] != extension:
+                    if (
+                        reference["ext"]
+                        and _canonical_image_extension(reference["ext"])
+                        != _canonical_image_extension(extension)
+                    ):
                         # 不能只改扩展名伪装格式；当前提示生成的引用默认没有扩展名。
                         continue
                     extracted[reference["path"]] = (data, extension, xref)
@@ -278,23 +486,32 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
                 document.close()
 
     total = 0
-    project_dir = project_dir.resolve()
     for reference in references:
         hit = extracted.get(reference["path"])
+        asset_kind = "extracted"
         if hit is None:
-            result["unresolved"].append(reference["path"])
-            continue
+            raster = _job_page_raster(job, reference["source_page"])
+            if raster is not None:
+                data, extension = raster
+                hit = (data, extension, reference["index"])
+                asset_kind = "page_fallback"
+            else:
+                result["unresolved"].append(reference["path"])
+                continue
         data, extension, source_index = hit
+        data, extension, format_matches = _raster_for_reference(
+            data, extension, reference["ext"]
+        )
         if len(data) > MAX_PRESERVED_OCR_IMAGE_BYTES:
             result["unresolved"].append(reference["path"])
             result["errors"].append(f"插图过大，未导入：{reference['path']}")
             continue
-        total += len(data)
-        if total > MAX_PRESERVED_OCR_ASSET_BYTES:
+        if total + len(data) > MAX_PRESERVED_OCR_ASSET_BYTES:
             result["unresolved"].append(reference["path"])
             result["errors"].append("OCR 插图总大小超过 100 MB，后续图片未导入")
             continue
-        relative = reference["path"] + extension
+        total += len(data)
+        relative = reference["path"] if reference["ext"] else reference["path"] + extension
         target_path = (project_dir / Path(relative)).resolve()
         try:
             target_path.relative_to(project_dir)
@@ -310,8 +527,121 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
             "source_page": reference["source_page"],
             "printed_page": reference["page"],
             "source_index": source_index,
+            "kind": asset_kind,
+            "format_matches_extension": format_matches,
         })
+    preview_pages = [item["source_page"] for item in references]
+    preview_pages.extend(job.get("selected_pages") or [])
+    previews, preview_bytes = _preserve_source_page_previews(
+        job,
+        project_dir,
+        preview_pages,
+        max(0, MAX_PRESERVED_OCR_ASSET_BYTES - total),
+    )
+    result["source_pages"] = previews
+    total += preview_bytes
+    result["total_bytes"] = total
+    fallback_count = sum(item.get("kind") == "page_fallback" for item in result["assets"])
+    if fallback_count:
+        result["errors"].append(
+            f"{fallback_count} 个插图未能可靠裁切，已绑定对应 OCR 源页预览并在清单中标注"
+        )
     return result
+
+
+def _ocr_bundle_bytes(job: dict, raw_tex: str) -> tuple[bytes, dict]:
+    """Build a self-contained raw OCR snapshot without mutating project state."""
+    with tempfile.TemporaryDirectory(prefix="ls-ocr-bundle-") as tmp:
+        bundle_root = Path(tmp).resolve()
+        resources = _preserve_ocr_resources(job, raw_tex, bundle_root)
+        manifest = {
+            "format": "latexstruct-ocr-bundle-v1",
+            "source_type": str(job.get("source_type") or ""),
+            "status": str(job.get("status") or ""),
+            "selected_start": int(job.get("selected_start") or 1),
+            "selected_end": int(job.get("selected_end") or job.get("selected_start") or 1),
+            "raw_revision": int(job.get("raw_revision") or 0),
+            "usage_revision": int(job.get("usage_revision") or 0),
+            "page_revision": int(job.get("page_revision") or 0),
+            "resources": resources,
+        }
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("ocr.tex", raw_tex.encode("utf-8"))
+            for item in [
+                *(resources.get("assets") or []),
+                *(resources.get("source_pages") or []),
+            ]:
+                relative = str(item.get("path") or "").replace("\\", "/")
+                source = (bundle_root / Path(relative)).resolve()
+                try:
+                    source.relative_to(bundle_root)
+                    data = source.read_bytes()
+                except (ValueError, OSError):
+                    continue
+                archive.writestr(relative, data)
+            archive.writestr(
+                "OCR-MANIFEST.json",
+                json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+            )
+        return output.getvalue(), manifest
+
+
+def _snapshot_ocr_bundle_job(job: dict) -> dict:
+    """Copy only immutable/bundle-relevant OCR fields while holding the job lock."""
+    return {
+        "source_type": str(job.get("source_type") or ""),
+        "target": str(job.get("target") or ""),
+        "status": str(job.get("status") or ""),
+        "selected_start": int(job.get("selected_start") or 1),
+        "selected_end": int(job.get("selected_end") or job.get("selected_start") or 1),
+        "selected_pages": [int(page) for page in (job.get("selected_pages") or [])],
+        "raw_revision": int(job.get("raw_revision") or 0),
+        "usage_revision": int(job.get("usage_revision") or 0),
+        "page_revision": int(job.get("page_revision") or 0),
+        "pages": {
+            page_no: {"png": str(page.get("png") or "")}
+            for page_no, page in (job.get("pages") or {}).items()
+        },
+    }
+
+
+def _verified_ocr_resource_bytes(
+    project_dir: Path,
+    resource_info: dict,
+    *,
+    include_source_pages: bool = False,
+) -> dict[str, bytes]:
+    """Read only manifest-listed, in-project OCR resources with matching hashes."""
+    from ..core.project import safe_project_relpath
+
+    project_dir = project_dir.resolve()
+    groups = [resource_info.get("assets") or []]
+    if include_source_pages:
+        groups.append(resource_info.get("source_pages") or [])
+    files: dict[str, bytes] = {}
+    for item in [entry for group in groups for entry in group]:
+        rel = safe_project_relpath(str(item.get("path") or ""))
+        path = (project_dir / Path(rel)).resolve()
+        try:
+            path.relative_to(project_dir)
+            data = path.read_bytes()
+        except (ValueError, OSError):
+            raise ValueError(f"OCR 图片丢失：{rel}") from None
+        expected_size = item.get("bytes")
+        if expected_size is not None and int(expected_size) != len(data):
+            raise ValueError(f"OCR 图片大小校验失败：{rel}")
+        expected_hash = str(item.get("sha256") or "")
+        if not expected_hash or not hmac.compare_digest(
+            expected_hash,
+            hashlib.sha256(data).hexdigest(),
+        ):
+            raise ValueError(f"OCR 图片哈希校验失败：{rel}")
+        previous = files.get(rel)
+        if previous is not None and previous != data:
+            raise ValueError(f"OCR 图片路径冲突：{rel}")
+        files[rel] = data
+    return files
 
 
 def _ocr_snapshot_preserved(job: dict) -> bool:
@@ -363,7 +693,7 @@ def _reserve_update_preparation():
             unpreserved_ocr = 0
             for job in _ocr_jobs.values():
                 if (
-                    job.get("status") in {"starting", "running"}
+                    job.get("status") in OCR_ACTIVE_STATUSES
                     or job.get("importing") or job.get("saving")
                 ):
                     active_ocr += 1
@@ -652,7 +982,7 @@ def _cleanup_ocr_jobs(now: float = None):
     with _ocr_jobs_lock:
         for jid, job in list(_ocr_jobs.items()):
             if (
-                job.get("status") in ("running", "starting")
+                job.get("status") in OCR_ACTIVE_STATUSES
                 or job.get("importing") or job.get("saving")
             ):
                 continue
@@ -1156,6 +1486,154 @@ def create_app(updated_from: str = "") -> FastAPI:
                 raise HTTPException(409, "汇报与安全检查记录不一致，请重新处理项目")
         return report_bytes
 
+    def _current_record(pid: str) -> dict:
+        """Return the newest hash-verified attempt, even when TEX validation failed."""
+        _ensure(pid)
+        directory = Path(get_store()._dir(pid))
+        failure_paths = (
+            directory / "last-failure.json",
+            directory / "last-failed-draft.tex",
+            directory / "last-failure-report.md",
+        )
+        failure_present = any(path.exists() for path in failure_paths)
+        committed_marker = directory / "verification.json"
+        # A successful commit clears the old failure triplet.  If cleanup itself
+        # was interrupted, the newer committed marker still wins; otherwise a
+        # stale diagnostic draft could shadow a later successful run forever.
+        failure_is_current = failure_present and (
+            not committed_marker.exists()
+            or max(path.stat().st_mtime_ns for path in failure_paths if path.exists())
+            > committed_marker.stat().st_mtime_ns
+        )
+        if failure_is_current:
+            failed = get_store().read_failed_attempt(pid)
+            if failed is None:
+                raise HTTPException(
+                    409,
+                    "当前未验证草稿或汇报的哈希校验失败，已阻止导出；请重新分析",
+                )
+            return {
+                "info": failed.get("details") or {},
+                "result": str(failed.get("draft") or "").encode("utf-8"),
+                "report": str(failed.get("report") or "").encode("utf-8"),
+                "verified": False,
+                "attempt": "blocked",
+                "directory": directory,
+            }
+
+        result_path = directory / "result.tex"
+        marker_path = directory / "verification.json"
+        if result_path.exists() or marker_path.exists():
+            info, result_bytes, _directory = _committed_record(pid)
+            report_bytes = _committed_report(pid)
+            verification = info.get("verification") if isinstance(info, dict) else None
+            return {
+                "info": info,
+                "result": result_bytes,
+                "report": report_bytes,
+                "verified": bool(
+                    isinstance(verification, dict)
+                    and verification.get("safe_to_export") is True
+                ),
+                "attempt": "committed",
+                "directory": directory,
+            }
+
+        # A task can fail before producing a structured draft (for example an AI
+        # transport error).  The imported source is still a useful current TEX
+        # artifact and remains exportable with an explicit unverified marker.
+        source_bytes = get_store().read_source(pid).encode("utf-8")
+        report_bytes = (
+            "# LaTeXStruct 当前导出\n\n"
+            "本次分析尚未产生可校验的结构化草稿；此包保留原始导入 TEX。\n"
+        ).encode("utf-8")
+        return {
+            "info": {},
+            "result": source_bytes,
+            "report": report_bytes,
+            "verified": False,
+            "attempt": "source",
+            "directory": directory,
+        }
+
+    def _write_ocr_package_resources(zf, pid: str, meta: dict, reserved: dict) -> None:
+        resource_info = meta.get("ocr_resources") or {}
+        project_dir = Path(get_store()._dir(pid)).resolve()
+        try:
+            resource_files = _verified_ocr_resource_bytes(
+                project_dir,
+                resource_info,
+                include_source_pages=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        for rel, data in resource_files.items():
+            if rel in reserved or rel == "main.tex":
+                raise HTTPException(409, f"OCR 图片路径与工程文件冲突：{rel}")
+            zf.writestr(rel, data)
+        zf.writestr(
+            "OCR-RESOURCES.json",
+            json.dumps(resource_info, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+
+    def _current_package_bytes(pid: str) -> tuple[bytes, bool]:
+        """Build a portable package for the newest attempt without claiming it is valid."""
+        from ..core.project import safe_project_relpath
+        from ..elegantbook import elegantbook_bundle_assets
+
+        current = _current_record(pid)
+        if current["verified"] and current["attempt"] == "committed":
+            return _export_package_bytes(pid), True
+
+        meta = json.loads(
+            (Path(get_store()._dir(pid)) / "meta.json").read_text(encoding="utf-8")
+        )
+        warning = (
+            "This is the newest LaTeXStruct draft, exported at the user's request.\n"
+            "It did not pass every verification/compile check. Read LATEXSTRUCT-REPORT.md.\n"
+        ).encode("utf-8")
+        reserved = {
+            **elegantbook_bundle_assets(),
+            "LATEXSTRUCT-REPORT.md": current["report"],
+            "LATEXSTRUCT-UNVERIFIED.txt": warning,
+        }
+        info = current.get("info") or {}
+        per_file = info.get("per_file") if isinstance(info, dict) else None
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
+            written = set()
+            if meta.get("kind") == "folder" and isinstance(per_file, dict) and per_file:
+                graph = meta.get("graph") or {}
+                main_rel = safe_project_relpath(str(graph.get("main_rel") or "main.tex"))
+                zf.writestr(main_rel, str(per_file.get("", "")).encode("utf-8"))
+                written.add(main_rel)
+                for rel, content in per_file.items():
+                    if not rel:
+                        continue
+                    safe_rel = safe_project_relpath(rel)
+                    zf.writestr(safe_rel, str(content).encode("utf-8"))
+                    written.add(safe_rel)
+            else:
+                zf.writestr("main.tex", current["result"])
+                written.add("main.tex")
+
+            original_zip = Path(get_store()._dir(pid)) / "original-files.zip"
+            if original_zip.exists():
+                with zipfile.ZipFile(original_zip, "r") as source_zip:
+                    for member in source_zip.infolist():
+                        rel = safe_project_relpath(member.filename)
+                        if member.is_dir() or rel in written or rel in reserved:
+                            continue
+                        zf.writestr(rel, source_zip.read(member))
+                        written.add(rel)
+            if meta.get("kind") == "ocr":
+                _write_ocr_package_resources(zf, pid, meta, reserved)
+            existing = set(zf.namelist())
+            for rel, data in reserved.items():
+                if rel not in existing:
+                    zf.writestr(rel, data)
+        return output.getvalue(), False
+
     def _export_package_bytes(pid: str) -> bytes:
         """Build a portable ElegantBook package from the same committed result marker."""
         from ..core.project import safe_project_relpath
@@ -1227,24 +1705,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                             "仍有 OCR 图片未能从原 PDF 可靠提取："
                             + "、".join(str(item) for item in unresolved[:5]),
                         )
-                    project_dir = Path(get_store()._dir(pid)).resolve()
-                    for asset in resource_info.get("assets") or []:
-                        rel = safe_project_relpath(str(asset.get("path") or ""))
-                        if rel in reserved or rel == "main.tex":
-                            raise HTTPException(409, f"OCR 图片路径与工程文件冲突：{rel}")
-                        asset_path = (project_dir / Path(rel)).resolve()
-                        try:
-                            asset_path.relative_to(project_dir)
-                            data = asset_path.read_bytes()
-                        except (ValueError, OSError):
-                            raise HTTPException(409, f"OCR 图片丢失，已阻止打包：{rel}") from None
-                        expected_hash = str(asset.get("sha256") or "")
-                        if not expected_hash or not hmac.compare_digest(
-                            expected_hash,
-                            hashlib.sha256(data).hexdigest(),
-                        ):
-                            raise HTTPException(409, f"OCR 图片校验失败，已阻止打包：{rel}")
-                        zf.writestr(rel, data)
+                    _write_ocr_package_resources(zf, pid, meta, reserved)
             existing = set(zf.namelist())
             for rel, data in reserved.items():
                 if rel not in existing:
@@ -1345,18 +1806,73 @@ def create_app(updated_from: str = "") -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="{pid}-structured.tex"'},
         )
 
-    def _download_artifact(pid: str, artifact: str) -> tuple[bytes, str]:
+    @app.get("/api/projects/{pid}/export-current")
+    def export_current(pid: str):
+        current = _current_record(pid)
+        verified = bool(current["verified"])
+        suffix = "" if verified else "-UNVERIFIED"
+        return Response(
+            content=current["result"],
+            media_type="application/x-tex",
+            headers={
+                "Content-Disposition": f'attachment; filename="{pid}-current{suffix}.tex"',
+                "X-LaTeXStruct-Verified": "true" if verified else "false",
+            },
+        )
+
+    @app.get("/api/projects/{pid}/export-current-report")
+    def export_current_report(pid: str):
+        current = _current_record(pid)
+        verified = bool(current["verified"])
+        suffix = "" if verified else "-UNVERIFIED"
+        return Response(
+            content=current["report"],
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{pid}-current-report{suffix}.md"',
+                "X-LaTeXStruct-Verified": "true" if verified else "false",
+            },
+        )
+
+    @app.get("/api/projects/{pid}/export-current-package")
+    def export_current_package(pid: str):
+        data, verified = _current_package_bytes(pid)
+        suffix = "" if verified else "-UNVERIFIED"
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{pid}-current{suffix}.zip"',
+                "X-LaTeXStruct-Verified": "true" if verified else "false",
+            },
+        )
+
+    def _download_artifact(pid: str, artifact: str) -> tuple[bytes, str, bool]:
         project = get_store().get(pid)
         if project is None:
             raise HTTPException(404, "项目不存在")
         project_name = str(project.get("name") or "LaTeXStruct")
         if artifact == "result":
             _info, data = _committed_export(pid)
-            return data, f"{project_name}-ElegantBook.tex"
+            return data, f"{project_name}-ElegantBook.tex", True
         if artifact == "report":
-            return _committed_report(pid), f"{project_name}-report.md"
+            return _committed_report(pid), f"{project_name}-report.md", True
         if artifact in {"package", "folder"}:
-            return _export_package_bytes(pid), f"{project_name}-ElegantBook-project.zip"
+            return _export_package_bytes(pid), f"{project_name}-ElegantBook-project.zip", True
+        if artifact == "current":
+            current = _current_record(pid)
+            verified = bool(current["verified"])
+            marker = "" if verified else "-UNVERIFIED"
+            return current["result"], f"{project_name}-current{marker}.tex", verified
+        if artifact == "current-report":
+            current = _current_record(pid)
+            verified = bool(current["verified"])
+            marker = "" if verified else "-UNVERIFIED"
+            return current["report"], f"{project_name}-current-report{marker}.md", verified
+        if artifact == "current-package":
+            data, verified = _current_package_bytes(pid)
+            marker = "" if verified else "-UNVERIFIED"
+            return data, f"{project_name}-current{marker}.zip", verified
         raise HTTPException(404, "不支持的下载类型")
 
     @app.post("/api/projects/{pid}/exports/{artifact}/save")
@@ -1364,13 +1880,14 @@ def create_app(updated_from: str = "") -> FastAPI:
         """桌面 WebView 下载被拦截时，可靠保存到固定的用户下载目录。"""
         from .downloads import save_unique_download
 
-        data, filename = _download_artifact(pid, artifact)
+        data, filename, verified = _download_artifact(pid, artifact)
         saved = save_unique_download(data, filename)
         return {
             "ok": True,
             "filename": saved.name,
             "folder": "下载/LaTeXStruct",
             "bytes": len(data),
+            "verified": verified,
         }
 
     @app.post("/api/exports/open-folder")
@@ -1408,6 +1925,12 @@ def create_app(updated_from: str = "") -> FastAPI:
         # OCR is noisy enough to require an actual final compile when TeX is installed.
         # Ordinary imported TEX keeps the fast path; its report states that compile was not run.
         template_compile_guard = is_ocr_project
+        compile_extra_files = None
+        if is_ocr_project:
+            compile_extra_files = _verified_ocr_resource_bytes(
+                Path(get_store()._dir(pid)),
+                p.get("ocr_resources") or {},
+            )
         latest_draft = {"text": ""}
 
         def capture_progress(phase, progress, message, data):
@@ -1429,6 +1952,7 @@ def create_app(updated_from: str = "") -> FastAPI:
             require_compile_when_available=is_ocr_project or template_compile_guard,
             resource_root=get_store()._dir(pid) if is_ocr_project else None,
             require_resources=is_ocr_project,
+            compile_extra_files=compile_extra_files,
         )
         extra_verification = {}
         if p.get("kind") == "folder":
@@ -1519,6 +2043,8 @@ def create_app(updated_from: str = "") -> FastAPI:
                     "items": res.decision_items,
                     "ambiguous": res.ambiguous,
                     "decision_cache": decision_cache,
+                    "applied": applied,
+                    **extra_verification,
                 },
             )
             return {
@@ -1887,6 +2413,10 @@ def create_app(updated_from: str = "") -> FastAPI:
             "error": "",
             "usage": {},
             "created": time.time(),
+            "updated": time.time(),
+            "state_revision": 1,
+            "pause_requested": False,
+            "retrying_failed": False,
             "pages": {},
             "dir": tmpdir,
             "target": target,
@@ -1915,6 +2445,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "error": "",
                 "png": os.path.join(job["dir"], f"page-{page_no}.img"),
                 "low_conf": False,
+                "needs_review": False,
                 "attempts": 0,
                 "task_index": index,
                 "retrying": False,
@@ -1931,62 +2462,121 @@ def create_app(updated_from: str = "") -> FastAPI:
         api_key: str,
     ):
         def _transcribe_one(job, client, page_no: int, png_path: str, max_attempts: int = 2):
-            """转写单页并更新 job.pages；暂时性失败自动再试一次。"""
-            from ..ocr import ocr_page_needs_retry, transcribe_page
+            """转写单页；非空结果始终保留，仅明确暂时性失败自动重试。"""
+            from ..ocr import ocr_page_needs_retry, ocr_page_needs_review, transcribe_page
 
             page = job["pages"][page_no]
             with _ocr_jobs_lock:
                 page["status"] = "running"
                 page["error"] = ""
+                page["needs_review"] = False
+                _bump_ocr_state(job)
             with open(png_path, "rb") as image_file:
                 png = image_file.read()
             for attempt in range(1, max_attempts + 1):
+                if attempt > 1:
+                    # 上一次模型调用期间收到暂停请求时，不继续消耗下一次调用。
+                    _ocr_control(job)
                 with _ocr_jobs_lock:
                     page["attempts"] = page.get("attempts", 0) + 1
+                    _bump_ocr_state(job)
                 client.last_usage = {}
                 try:
                     tex = transcribe_page(client, png, page_no)
+                    needs_review = ocr_page_needs_review(tex)
                     low_conf = (
                         "[?]" in tex
                         or "% unsure" in tex
                         or len(tex.strip()) < 40
                         or ocr_page_needs_retry(tex)
+                        or needs_review
                     )
                     with _ocr_jobs_lock:
                         page["tex"] = tex
                         page["status"] = "done"
                         page["error"] = ""
                         page["low_conf"] = low_conf
+                        page["needs_review"] = needs_review
                         job["page_revision"] = int(job.get("page_revision") or 0) + 1
+                        _bump_ocr_state(job)
                     return True
                 except Exception as exc:  # noqa: BLE001
                     message = _safe_task_error(exc)
                     with _ocr_jobs_lock:
                         page["error"] = message
-                    if any(token in message.lower() for token in (
-                        "未配置 api key", "http 401", "http 403", "http 400", "http 404",
-                    )):
+                        _bump_ocr_state(job)
+                    if attempt >= max_attempts or not _ocr_error_is_retryable(message):
                         break
-                    if attempt >= max_attempts:
-                        break
+                    _ocr_retry_wait(attempt)
                 finally:
-                    if client.last_usage:
+                    usage = client.last_usage if isinstance(client.last_usage, dict) else {}
+                    if usage:
                         from ..pricing import add_usage, summarize_ai_usage
 
                         with _ocr_jobs_lock:
                             add_usage(
-                                job["usage"], client.last_usage,
+                                job["usage"], usage,
                                 getattr(client.cfg, "model", ""),
                             )
                             job["cost"] = summarize_ai_usage({"ocr": job["usage"]})
                             job["usage_revision"] = (
                                 int(job.get("usage_revision") or 0) + 1
                             )
+                            _bump_ocr_state(job)
             with _ocr_jobs_lock:
                 page["status"] = "error"
                 page["low_conf"] = True
                 job["page_revision"] = int(job.get("page_revision") or 0) + 1
+                _bump_ocr_state(job)
             return False
+
+        def _render_one(job, page_no: int) -> str:
+            """渲染单页到原有页面路径，供首轮与失败页重试共用。"""
+            from ..ocr import iter_pdf_pages
+
+            page = job["pages"][page_no]
+            if job["source_type"] == "pdf":
+                rendered = iter(iter_pdf_pages(
+                    job["target"], [page_no], int(job.get("dpi") or dpi),
+                ))
+                try:
+                    rendered_page, image_bytes = next(rendered)
+                except StopIteration:
+                    raise RuntimeError(f"原 PDF 第 {page_no} 页未生成图像") from None
+                if int(rendered_page) != page_no:
+                    raise RuntimeError(f"原 PDF 第 {page_no} 页渲染结果页码不一致")
+            else:
+                if page_no != 1:
+                    raise RuntimeError("单张图片任务仅有第 1 页")
+                with open(job["target"], "rb") as image_file:
+                    image_bytes = image_file.read()
+            if not image_bytes:
+                raise RuntimeError(f"第 {page_no} 页渲染结果为空")
+            tmp_path = f"{page['png']}.{uuid.uuid4().hex}.tmp"
+            try:
+                with open(tmp_path, "wb") as stream:
+                    stream.write(image_bytes)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(tmp_path, page["png"])
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            return page["png"]
+
+        def _mark_page_error(job, page_no: int, exc: Exception | str):
+            message = _safe_task_error(exc) if isinstance(exc, Exception) else str(exc)[:500]
+            if "No module named 'fitz'" in message:
+                message = "缺少 PDF 渲染组件 PyMuPDF，请重新安装完整版本后重试"
+            with _ocr_jobs_lock:
+                page = job["pages"][page_no]
+                page["status"] = "error"
+                page["low_conf"] = True
+                page["needs_review"] = False
+                page["error"] = message
+                job["page_revision"] = int(job.get("page_revision") or 0) + 1
+                _bump_ocr_state(job)
+            return message
 
         def _refresh_raw_preview(job):
             from ..ocr import merge_book
@@ -2002,31 +2592,40 @@ def create_app(updated_from: str = "") -> FastAPI:
                 job["raw_ready"] = bool(chunks)
                 job["raw_chars"] = len(merged)
                 job["raw_revision"] = int(job.get("raw_revision") or 0) + 1
+                _bump_ocr_state(job)
 
         def _merge_job(job, complete_progress: bool = True):
-            errors = []
-            for page_no in job["selected_pages"]:
-                page = job["pages"][page_no]
-                if page["status"] != "done":
-                    errors.append({
-                        "page": page_no,
-                        "task_index": page["task_index"],
-                        "reason": page["error"] or page["status"],
-                    })
             with _ocr_jobs_lock:
+                errors = []
+                for page_no in job["selected_pages"]:
+                    page = job["pages"][page_no]
+                    if page["status"] != "done":
+                        errors.append({
+                            "page": page_no,
+                            "task_index": page["task_index"],
+                            "reason": page["error"] or page["status"],
+                        })
                 job["errors"] = errors
                 job["status"] = "done" if not errors else "partial"
                 job["phase"] = "原始 OCR 已就绪" if not errors else "部分页面失败，等待重试"
+                job["error"] = "" if not errors else str(errors[0]["reason"])
+                job["pause_requested"] = False
                 if complete_progress:
                     job["progress"] = 1.0
+                _bump_ocr_state(job)
+                _ocr_jobs_changed.notify_all()
 
-        job["_transcribe_one"] = _transcribe_one
-        job["_refresh_raw_preview"] = _refresh_raw_preview
-        job["_merge_job"] = _merge_job
+        with _ocr_jobs_lock:
+            job["_transcribe_one"] = _transcribe_one
+            job["_refresh_raw_preview"] = _refresh_raw_preview
+            job["_merge_job"] = _merge_job
+            job["_render_one"] = _render_one
+            job["_mark_page_error"] = _mark_page_error
+            job["dpi"] = dpi
+            _bump_ocr_state(job)
 
         def worker():
             from ..core.ai import LLMClient, RoleConfig
-            from ..ocr import iter_pdf_pages
 
             try:
                 cfg = get_config()
@@ -2040,48 +2639,73 @@ def create_app(updated_from: str = "") -> FastAPI:
                 ):
                     selected_key = configured_role.api_key
                 client = LLMClient(RoleConfig(selected_base_url, selected_model, selected_key))
-                job["client"] = client
-                job["model"] = selected_model
-                if job["source_type"] == "pdf":
-                    rendered = iter_pdf_pages(job["target"], page_nos, dpi)
-                else:
-                    with open(job["target"], "rb") as image_file:
-                        rendered = [(1, image_file.read())]
-                job["phase"] = "逐页渲染与忠实转写"
-                for index, (page_no, image_bytes) in enumerate(rendered, start=1):
+                with _ocr_jobs_lock:
+                    job["client"] = client
+                    job["model"] = selected_model
+                    job["phase"] = "逐页渲染与忠实转写"
+                    _bump_ocr_state(job)
+                for index, page_no in enumerate(page_nos, start=1):
+                    _ocr_control(job)
                     page = job["pages"][page_no]
-                    with open(page["png"], "wb") as stream:
-                        stream.write(image_bytes)
-                    job["page"] = page_no
-                    job["current_index"] = index
-                    job["phase"] = (
-                        f"正在转写原 PDF 第 {page_no} 页"
-                        if job["source_type"] == "pdf" else "正在转写图片"
-                    )
-                    job["progress"] = round((index - 1) / max(1, len(page_nos)), 3)
+                    with _ocr_jobs_lock:
+                        job["page"] = page_no
+                        job["current_index"] = index
+                        job["phase"] = (
+                            f"正在转写原 PDF 第 {page_no} 页"
+                            if job["source_type"] == "pdf" else "正在转写图片"
+                        )
+                        job["progress"] = round((index - 1) / max(1, len(page_nos)), 3)
+                        _bump_ocr_state(job)
+                    try:
+                        _render_one(job, page_no)
+                    except Exception as exc:  # noqa: BLE001
+                        _mark_page_error(job, page_no, exc)
+                        with _ocr_jobs_lock:
+                            job["done"] = index
+                            job["progress"] = round(index / max(1, len(page_nos)), 3)
+                            _bump_ocr_state(job)
+                        if index < len(page_nos):
+                            _ocr_control(job)
+                        continue
+                    # 渲染也可能较慢；在真正发起付费视觉请求前再设一个安全点。
+                    _ocr_control(job)
                     page_ok = _transcribe_one(job, client, page_no, page["png"])
                     if page_ok:
                         _refresh_raw_preview(job)
-                    job["done"] = index
-                    job["progress"] = round(index / max(1, len(page_nos)), 3)
+                    with _ocr_jobs_lock:
+                        job["done"] = index
+                        job["progress"] = round(index / max(1, len(page_nos)), 3)
+                        _bump_ocr_state(job)
+                    if index < len(page_nos):
+                        _ocr_control(job)
                 _merge_job(job)
             except Exception as exc:  # noqa: BLE001
                 message = _safe_task_error(exc)
                 if "No module named 'fitz'" in message:
                     message = "缺少 PDF 渲染组件 PyMuPDF，请重新安装完整版本后重试"
-                if any(
+                with _ocr_jobs_lock:
+                    unfinished = [
+                        page_no for page_no, page in job.get("pages", {}).items()
+                        if page.get("status") in {"pending", "running"}
+                    ]
+                for page_no in unfinished:
+                    _mark_page_error(job, page_no, message)
+                has_done = any(
                     page.get("status") == "done" for page in job.get("pages", {}).values()
-                ):
-                    _merge_job(job, complete_progress=False)
-                    job["status"] = "partial"
-                    job["phase"] = "后续页面处理失败，已保留完成页"
+                )
+                _merge_job(job, complete_progress=False)
+                with _ocr_jobs_lock:
+                    job["status"] = "partial" if has_done else "error"
+                    job["phase"] = (
+                        "后续页面处理失败，已保留完成页"
+                        if has_done else "准备或渲染失败"
+                    )
                     job["error"] = message
-                else:
-                    job["status"] = "error"
-                    job["phase"] = "准备或渲染失败"
-                    job["error"] = message
+                    _bump_ocr_state(job)
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(
+            target=worker, daemon=True, name=f"latexstruct-ocr-{job['id'][:12]}",
+        ).start()
 
     @app.post("/api/ocr/inspect")
     async def ocr_inspect(file: UploadFile = File(...)):
@@ -2145,6 +2769,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 job["status"] = "starting"
                 _set_ocr_selection(job, page_nos)
                 job["status"] = "running"
+                _bump_ocr_state(job)
         _launch_ocr_job(job, page_nos, dpi, base_url, model, api_key)
         return {"id": jid, "reused": False, "status": "running"}
 
@@ -2157,7 +2782,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 if job is None:
                     return {"ok": True}
                 if (
-                    job.get("status") in {"starting", "running"}
+                    job.get("status") in OCR_ACTIVE_STATUSES
                     or job.get("importing") or job.get("saving")
                 ):
                     raise HTTPException(409, "运行中的 OCR 任务不能删除")
@@ -2180,28 +2805,47 @@ def create_app(updated_from: str = "") -> FastAPI:
             job = _ocr_jobs.get(jid)
             if job is None:
                 raise HTTPException(404, "任务不存在")
-            pages_summary = {
-                str(n): {
-                    "status": p["status"],
-                    "low_conf": p["low_conf"],
-                    "error": p["error"][:120],
-                    "attempts": p.get("attempts", 0),
-                    "task_index": p.get("task_index", 0),
-                    "retrying": p.get("retrying", False),
-                }
-                for n, p in job.get("pages", {}).items()
-            }
-            public = {
-                k: deepcopy(v)
-                for k, v in job.items()
-                if k not in (
-                    "raw_tex", "pages", "client", "dir", "target", "suffix",
-                    "_transcribe_one", "_refresh_raw_preview", "_merge_job",
-                )
-            }
-            public["raw_revision"] = int(job.get("raw_revision") or 0)
-            public["raw_chars"] = int(job.get("raw_chars") or len(job.get("raw_tex") or ""))
-        return public | {"pages": pages_summary}
+            return _public_ocr_job(job)
+
+    @app.post("/api/ocr/jobs/{jid}/pause")
+    def ocr_pause(jid: str):
+        """请求在渲染后或当前页面完成后的安全边界暂停。"""
+        with _update_state_lock:
+            _raise_if_update_preparing()
+            with _ocr_jobs_changed:
+                job = _ocr_jobs.get(jid)
+                if job is None:
+                    raise HTTPException(404, "任务不存在")
+                status = str(job.get("status") or "")
+                if status == "running":
+                    job["pause_requested"] = True
+                    job["status"] = "pausing"
+                    job["phase"] = "正在完成当前步骤，随后安全暂停"
+                    _bump_ocr_state(job)
+                    _ocr_jobs_changed.notify_all()
+                elif status not in {"pausing", "paused"}:
+                    raise HTTPException(409, "当前 OCR 任务不在运行，不能暂停")
+                return _public_ocr_job(job)
+
+    @app.post("/api/ocr/jobs/{jid}/resume")
+    def ocr_resume(jid: str):
+        """继续一个正在安全暂停或已经暂停的 OCR 任务。"""
+        with _update_state_lock:
+            _raise_if_update_preparing()
+            with _ocr_jobs_changed:
+                job = _ocr_jobs.get(jid)
+                if job is None:
+                    raise HTTPException(404, "任务不存在")
+                status = str(job.get("status") or "")
+                if status in {"pausing", "paused"}:
+                    job["pause_requested"] = False
+                    job["status"] = "running"
+                    job["phase"] = "已继续 OCR"
+                    _bump_ocr_state(job)
+                    _ocr_jobs_changed.notify_all()
+                elif status != "running":
+                    raise HTTPException(409, "当前 OCR 任务没有暂停")
+                return _public_ocr_job(job)
 
     @app.get("/api/ocr/jobs/{jid}/preview")
     def ocr_preview(jid: str):
@@ -2243,7 +2887,7 @@ def create_app(updated_from: str = "") -> FastAPI:
 
     @app.post("/api/ocr/jobs/{jid}/pages/{n}/retry")
     def ocr_page_retry(jid: str, n: int):
-        """单页重试：重新转写该页并重合并。"""
+        """单页重试；若页面预览缺失，先从原 PDF 按原 DPI 重渲染。"""
         with _update_state_lock:
             _raise_if_update_preparing()
             with _ocr_jobs_lock:
@@ -2255,45 +2899,159 @@ def create_app(updated_from: str = "") -> FastAPI:
                     raise HTTPException(409, "OCR 结果正在导入项目，暂时不能重试页面")
                 if job.get("saving"):
                     raise HTTPException(409, "OCR 结果正在保存，完成后再重试页面")
-                if job.get("status") == "running" or page.get("retrying"):
+                if job.get("status") in OCR_ACTIVE_STATUSES or page.get("retrying"):
                     raise HTTPException(409, "该页正在处理，请勿重复点击重试")
                 client = job.get("client")
                 if client is None:
                     raise HTTPException(400, "任务尚未初始化")
-                if not os.path.exists(page.get("png", "")):
-                    raise HTTPException(409, "本页预览尚未准备好，暂时不能重试")
+                required = (
+                    "_transcribe_one", "_refresh_raw_preview", "_merge_job",
+                    "_render_one", "_mark_page_error",
+                )
+                if not all(callable(job.get(name)) for name in required):
+                    raise HTTPException(409, "OCR 任务版本过旧，请重新上传后再试")
                 page["retrying"] = True
                 job["status"] = "running"
+                job["pause_requested"] = False
                 job["page"] = n
                 job["current_index"] = page.get("task_index", 0)
                 job["phase"] = (
                     f"重试原 PDF 第 {n} 页"
                     if job.get("source_type") == "pdf" else "重试图片"
                 )
+                _bump_ocr_state(job)
+        ok = False
         try:
             try:
+                if not os.path.isfile(str(page.get("png") or "")):
+                    job["_render_one"](job, n)
+                _ocr_control(job)
                 ok = job["_transcribe_one"](job, client, n, page["png"])
             except Exception as exc:  # noqa: BLE001
-                ok = False
-                with _ocr_jobs_lock:
-                    page["status"] = "error"
-                    page["low_conf"] = True
-                    page["error"] = _safe_task_error(exc)
-                    job["page_revision"] = int(job.get("page_revision") or 0) + 1
+                job["_mark_page_error"](job, n, exc)
             if ok:
                 job["_refresh_raw_preview"](job)
         finally:
+            with _ocr_jobs_lock:
+                page["retrying"] = False
+                _bump_ocr_state(job)
+            job["_merge_job"](job)
+        snapshot = _public_ocr_job(job)
+        snapshot["ok"] = ok
+        snapshot["retried_page"] = n
+        return snapshot
+
+    @app.post("/api/ocr/jobs/{jid}/retry-failed")
+    def ocr_retry_failed(jid: str):
+        """后台顺序重试全部失败页，并立即返回可轮询的完整任务快照。"""
+        with _update_state_lock:
+            _raise_if_update_preparing()
+            with _ocr_jobs_lock:
+                job = _ocr_jobs.get(jid)
+                if job is None:
+                    raise HTTPException(404, "任务不存在")
+                if job.get("importing"):
+                    raise HTTPException(409, "OCR 结果正在导入项目，暂时不能批量重试")
+                if job.get("saving"):
+                    raise HTTPException(409, "OCR 结果正在保存，完成后再批量重试")
+                if job.get("status") in OCR_ACTIVE_STATUSES or job.get("retrying_failed"):
+                    raise HTTPException(409, "OCR 任务正在处理，请勿重复启动批量重试")
+                client = job.get("client")
+                if client is None:
+                    raise HTTPException(400, "任务尚未初始化")
+                required = (
+                    "_transcribe_one", "_refresh_raw_preview", "_merge_job",
+                    "_render_one", "_mark_page_error",
+                )
+                if not all(callable(job.get(name)) for name in required):
+                    raise HTTPException(409, "OCR 任务版本过旧，请重新上传后再试")
+                targets = [
+                    page_no for page_no in job.get("selected_pages", [])
+                    if job["pages"][page_no].get("status") != "done"
+                ]
+                if not targets:
+                    return _public_ocr_job(job)
+                job["retrying_failed"] = True
+                job["retry_total"] = len(targets)
+                job["retry_done"] = 0
+                job["status"] = "running"
+                job["pause_requested"] = False
+                job["phase"] = f"准备顺序重试 {len(targets)} 个失败页面"
+                job["error"] = ""
+                for page_no in targets:
+                    job["pages"][page_no]["retrying"] = True
+                completed = sum(
+                    page.get("status") == "done" for page in job["pages"].values()
+                )
+                job["done"] = completed
+                job["progress"] = round(completed / max(1, len(job["pages"])), 3)
+                _bump_ocr_state(job)
+
+        def retry_failed_worker():
+            current_page = None
             try:
-                job["_merge_job"](job)
+                for retry_index, page_no in enumerate(targets, start=1):
+                    current_page = page_no
+                    _ocr_control(job)
+                    page = job["pages"][page_no]
+                    with _ocr_jobs_lock:
+                        job["page"] = page_no
+                        job["current_index"] = page.get("task_index", 0)
+                        job["phase"] = (
+                            f"批量重试原 PDF 第 {page_no} 页"
+                            if job.get("source_type") == "pdf" else "批量重试图片"
+                        )
+                        _bump_ocr_state(job)
+                    try:
+                        if not os.path.isfile(str(page.get("png") or "")):
+                            job["_render_one"](job, page_no)
+                        # 暂停若发生在渲染期间，不再继续发出新的视觉模型请求。
+                        _ocr_control(job)
+                        ok = job["_transcribe_one"](
+                            job, client, page_no, page["png"]
+                        )
+                        if ok:
+                            job["_refresh_raw_preview"](job)
+                    except Exception as exc:  # noqa: BLE001
+                        job["_mark_page_error"](job, page_no, exc)
+                    finally:
+                        with _ocr_jobs_lock:
+                            page["retrying"] = False
+                            job["retry_done"] = retry_index
+                            completed = sum(
+                                item.get("status") == "done"
+                                for item in job["pages"].values()
+                            )
+                            job["done"] = completed
+                            job["progress"] = round(
+                                completed / max(1, len(job["pages"])), 3
+                            )
+                            _bump_ocr_state(job)
+                    if retry_index < len(targets):
+                        _ocr_control(job)
+            except Exception as exc:  # noqa: BLE001
+                message = _safe_task_error(exc)
+                if current_page is not None:
+                    current = job["pages"].get(current_page)
+                    if current and current.get("status") in {"pending", "running"}:
+                        job["_mark_page_error"](job, current_page, message)
+                with _ocr_jobs_lock:
+                    job["error"] = message
+                    _bump_ocr_state(job)
             finally:
                 with _ocr_jobs_lock:
-                    page["retrying"] = False
-        return {
-            "ok": ok,
-            "page": n,
-            "task_index": page.get("task_index", 0),
-            "status": job["status"],
-        }
+                    for page_no in targets:
+                        job["pages"][page_no]["retrying"] = False
+                    job["retrying_failed"] = False
+                    _bump_ocr_state(job)
+                job["_merge_job"](job)
+
+        threading.Thread(
+            target=retry_failed_worker,
+            daemon=True,
+            name=f"latexstruct-ocr-retry-{jid[:12]}",
+        ).start()
+        return _public_ocr_job(job)
 
     @app.get("/api/ocr/jobs/{jid}/result")
     def ocr_result(jid: str):
@@ -2308,9 +3066,32 @@ def create_app(updated_from: str = "") -> FastAPI:
             headers={"X-LaTeXStruct-OCR-Complete": "true" if status == "done" else "false"},
         )
 
+    @app.get("/api/ocr/jobs/{jid}/package")
+    def ocr_package(jid: str):
+        """Download raw OCR TEX together with its real images and hash manifest."""
+        with _ocr_jobs_lock:
+            job = _ocr_jobs.get(jid)
+            if job is None or job.get("status") not in ("done", "partial"):
+                raise HTTPException(404, "原始 OCR 尚未生成")
+            raw_tex = str(job.get("raw_tex") or "")
+            if not raw_tex:
+                raise HTTPException(409, "原始 OCR 结果为空，请先重试失败页面")
+            snapshot = _snapshot_ocr_bundle_job(job)
+        data, _manifest = _ocr_bundle_bytes(snapshot, raw_tex)
+        status = snapshot["status"]
+        partial_label = "-partial" if status == "partial" else ""
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="OCR{partial_label}-{jid}.zip"',
+                "X-LaTeXStruct-OCR-Complete": "true" if status == "done" else "false",
+            },
+        )
+
     @app.post("/api/ocr/jobs/{jid}/save")
     def save_ocr_result(jid: str):
-        """可靠保存终态 OCR；成功落盘后才把该 revision 标记为已保全。"""
+        """可靠保存终态 OCR 工程包；成功落盘后才标记 revision 已保全。"""
         from .downloads import save_unique_download
 
         with _update_state_lock:
@@ -2333,14 +3114,15 @@ def create_app(updated_from: str = "") -> FastAPI:
                 start = int(job.get("selected_start") or 1)
                 end = int(job.get("selected_end") or start)
                 source_type = str(job.get("source_type") or "image")
+                snapshot = _snapshot_ocr_bundle_job(job)
                 job["saving"] = True
         range_label = f"-P{start}-{end}" if source_type == "pdf" else ""
         partial_label = "-partial" if status == "partial" else ""
-        data = raw_tex.encode("utf-8")
         try:
+            data, manifest = _ocr_bundle_bytes(snapshot, raw_tex)
             saved = save_unique_download(
                 data,
-                f"OCR{range_label}{partial_label}-{jid}.tex",
+                f"OCR{range_label}{partial_label}-{jid}.zip",
             )
             with _ocr_jobs_lock:
                 current = _ocr_jobs.get(jid)
@@ -2369,6 +3151,13 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "usage_revision": usage_revision,
                 "page_revision": page_revision,
                 "preserved": True,
+                "assets": len((manifest.get("resources") or {}).get("assets") or []),
+                "source_pages": len(
+                    (manifest.get("resources") or {}).get("source_pages") or []
+                ),
+                "unresolved": list(
+                    (manifest.get("resources") or {}).get("unresolved") or []
+                ),
             }
         finally:
             with _ocr_jobs_lock:
@@ -2440,6 +3229,22 @@ def create_app(updated_from: str = "") -> FastAPI:
             )
             project_dir = Path(get_store()._dir(pid))
             resource_result = _preserve_ocr_resources(job, raw_tex, project_dir)
+            unresolved = [
+                str(path) for path in (resource_result.get("unresolved") or []) if str(path)
+            ]
+            if unresolved:
+                # Never open the analysis/review workspace with dangling image
+                # references.  This project was created only for this import, so
+                # remove the incomplete staging directory and leave the OCR job
+                # intact for retry or bundle download.
+                get_store().delete(pid)
+                preview = "、".join(unresolved[:5])
+                suffix = "……" if len(unresolved) > 5 else ""
+                raise HTTPException(
+                    409,
+                    f"仍有 {len(unresolved)} 个 OCR 图片资源未能保存（{preview}{suffix}）；"
+                    "请先重试对应页面或保存 OCR 工程 ZIP，未进入分析与审阅。",
+                )
             meta = json.loads((project_dir / "meta.json").read_text(encoding="utf-8"))
             meta["ocr_resources"] = resource_result
             get_store()._write_json(str(project_dir), "meta.json", meta)

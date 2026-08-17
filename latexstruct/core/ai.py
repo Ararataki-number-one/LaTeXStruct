@@ -266,13 +266,30 @@ class LLMClient:
     @staticmethod
     def _message_text(raw: dict) -> str:
         try:
-            content = raw["choices"][0]["message"]["content"]
+            choice = raw["choices"][0]
         except (KeyError, IndexError, TypeError) as e:
             raise LLMError("模型响应缺少 choices[0].message.content") from e
+        finish_reason = str(choice.get("finish_reason") or "").strip().lower()
+        if finish_reason in {"length", "max_tokens"}:
+            raise LLMError("模型输出因达到 max_tokens 上限而被截断，本页将重试")
+        if finish_reason in {"content_filter", "content-filter", "safety"}:
+            raise LLMError("模型输出被内容安全策略中止")
+        try:
+            message = choice["message"]
+        except (KeyError, TypeError) as e:
+            raise LLMError("模型响应缺少 choices[0].message.content") from e
+        refusal = message.get("refusal") if isinstance(message, dict) else None
+        if refusal:
+            raise LLMError(f"模型拒绝处理该请求：{str(refusal)[:200]}")
+        content = message.get("content") if isinstance(message, dict) else None
         if isinstance(content, str):
             return content
         if isinstance(content, list):
-            parts = [str(item.get("text", "")) for item in content if isinstance(item, dict)]
+            parts = [
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and isinstance(item.get("text", ""), str)
+            ]
             return "".join(parts)
         if content is None:
             return ""

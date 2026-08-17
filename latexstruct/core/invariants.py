@@ -147,7 +147,7 @@ def check_image_resources(text: str, root: str | None) -> Dict:
                 unsafe.append(f"graphicspath:{raw_dir}")
                 continue
             search_roots.append(candidate_root)
-    extensions = ("", ".pdf", ".png", ".jpg", ".jpeg", ".eps")
+    extensions = (".pdf", ".png", ".jpg", ".jpeg", ".eps")
     for raw in paths:
         normalized = raw.replace("\\", "/").strip()
         if not normalized or "://" in normalized:
@@ -157,9 +157,13 @@ def check_image_resources(text: str, root: str | None) -> Dict:
         if relative.is_absolute() or any(part in ("", ".", "..") for part in relative.parts):
             unsafe.append(raw)
             continue
+        # graphicx only tries its default extension list when the TEX reference
+        # itself has no suffix.  Trying ``.png`` after an explicit ``foo.png``
+        # incorrectly accepts a physically different ``foo.png.png`` file.
+        candidate_suffixes = ("",) if relative.suffix else ("", *extensions)
         found = False
         for search_root in search_roots:
-            for suffix in extensions:
+            for suffix in candidate_suffixes:
                 candidate = (search_root / (normalized + suffix)).resolve()
                 try:
                     candidate.relative_to(base)

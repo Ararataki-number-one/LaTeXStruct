@@ -272,6 +272,43 @@ def test_llm_requests_have_finite_configurable_token_limit():
         raise AssertionError("非正 max_tokens 必须在发送请求前被拒绝")
 
 
+def test_llm_response_does_not_accept_truncation_filter_or_refusal_as_success():
+    failures = (
+        (
+            {"choices": [{
+                "finish_reason": "length",
+                "message": {"content": "partial but non-empty output"},
+            }]},
+            "max_tokens",
+        ),
+        (
+            {"choices": [{
+                "finish_reason": "content_filter",
+                "message": {"content": "partial filtered output"},
+            }]},
+            "安全策略",
+        ),
+        (
+            {"choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "", "refusal": "cannot inspect this image"},
+            }]},
+            "拒绝",
+        ),
+    )
+    for raw, expected in failures:
+        try:
+            LLMClient._message_text(raw)
+        except LLMError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError(f"非完整模型响应不得冒充成功：{raw}")
+
+    assert LLMClient._message_text({
+        "choices": [{"finish_reason": "stop", "message": {"content": "complete"}}],
+    }) == "complete"
+
+
 def test_provider_options_require_strict_official_authority():
     captured = []
 

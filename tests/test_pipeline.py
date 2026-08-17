@@ -3,6 +3,7 @@
 
 import os
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -61,6 +62,34 @@ def test_basic_book_fast_mode():
     # 汇报各节齐全
     for sec in ("新增环境包裹", "环境范围修正", "习题节转换", "双语标题合并", "导言区补充", "机器校验"):
         assert sec in res.report_md, sec
+
+
+def test_compile_checks_receive_preserved_ocr_resources():
+    compile_result = {
+        "available": True,
+        "ok": True,
+        "pages": 1,
+        "errors": [],
+        "log": "",
+    }
+    extra_files = {"images/page_0001_01.png": b"actual-image-bytes"}
+    with patch(
+        "latexstruct.core.compilecheck.compile_latex",
+        return_value=compile_result,
+    ) as compile_latex:
+        result = run_pipeline(
+            read_sample("basic_book.tex"),
+            mode="rule",
+            compile_check=True,
+            compile_extra_files=extra_files,
+        )
+
+    assert result.ok is True
+    assert compile_latex.call_count == 2
+    assert all(
+        call.kwargs.get("extra_files") == extra_files
+        for call in compile_latex.call_args_list
+    )
 
 
 def test_cn_fragment_fast_mode():

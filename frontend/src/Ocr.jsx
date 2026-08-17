@@ -6,6 +6,7 @@ import { apiAuthority, sameApiAuthority } from "./providerUrl";
 const OCR_SESSION_JOB_KEY = "latexstruct-current-ocr-job-v1";
 // 兼容 v1.1.2 的 10 位旧任务号；新任务使用完整 UUID4 hex（128-bit）。
 const OCR_JOB_ID_RE = /^(?:[0-9a-f]{10}|[0-9a-f]{32})$/;
+const OCR_ACTIVE_STATUSES = new Set(["starting", "running", "pausing", "paused"]);
 
 function rememberedOcrJobId() {
   try {
@@ -47,6 +48,7 @@ function ocrStatusLabel(status) {
     ready: "已读取页数",
     starting: "正在启动",
     running: "正在处理",
+    pausing: "正在安全暂停",
     done: "已完成",
     partial: "部分完成",
     error: "处理失败",
@@ -170,6 +172,8 @@ export default function Ocr({ onImport, onOpenSettings }) {
   const [restoreFailed, setRestoreFailed] = useState(false);
   const [restoreNonce, setRestoreNonce] = useState(0);
   const [retryingPage, setRetryingPage] = useState(null);
+  const [retryingFailed, setRetryingFailed] = useState(false);
+  const [controlAction, setControlAction] = useState("");
   const [rawSaving, setRawSaving] = useState(false);
   const [pollingStopped, setPollingStopped] = useState(false);
   const [pollNonce, setPollNonce] = useState(0);
@@ -177,10 +181,40 @@ export default function Ocr({ onImport, onOpenSettings }) {
   const inspectedJobId = useRef(null);
   const liveEditorRef = useRef(null);
   const activeJobId = useRef(null);
+  const pageSelectionSequence = useRef(0);
+  const retryLockRef = useRef(false);
+  const controlLockRef = useRef(false);
+  const snapshotEpochRef = useRef(0);
+  const snapshotRevisionRef = useRef({ jobId: "", revision: -1 });
+
+  const applyJobSnapshot = (next) => {
+    if (!next?.id || (activeJobId.current && activeJobId.current !== next.id)) return false;
+    const revision = Number(next.state_revision);
+    const previous = snapshotRevisionRef.current;
+    if (
+      previous.jobId === next.id
+      && Number.isFinite(revision)
+      && revision < previous.revision
+    ) {
+      return false;
+    }
+    snapshotRevisionRef.current = {
+      jobId: next.id,
+      revision: Number.isFinite(revision) ? revision : previous.jobId === next.id ? previous.revision : -1,
+    };
+    setJob(next);
+    return true;
+  };
+
+  const snapshotFromPayload = (payload) => {
+    if (payload?.job?.id && payload.job.pages) return payload.job;
+    if (payload?.id && payload.pages) return payload;
+    return null;
+  };
 
   const refreshJob = async (jid) => {
     const next = await (await api(`/api/ocr/jobs/${jid}`)).json();
-    setJob(next);
+    applyJobSnapshot(next);
     return next;
   };
 
@@ -232,9 +266,9 @@ export default function Ocr({ onImport, onOpenSettings }) {
       setMsg("正在恢复上一份 OCR 任务，请稍候再选择新文件");
       return false;
     }
-    if (retryingPage !== null || rawSaving) {
-      setMsg(retryingPage !== null
-        ? "当前页面正在重试，请等待完成后再选择新文件"
+    if (retryLockRef.current || retryingPage !== null || retryingFailed || rawSaving) {
+      setMsg(retryLockRef.current || retryingPage !== null || retryingFailed
+        ? "OCR 失败页正在重试，请等待完成后再选择新文件"
         : "原始 OCR 正在保存，请等待完成后再选择新文件");
       return false;
     }
@@ -264,16 +298,16 @@ export default function Ocr({ onImport, onOpenSettings }) {
     }
     if (
       latestJob?.importing || latestJob?.saving
-      || ["starting", "running"].includes(latestJob?.status)
+      || OCR_ACTIVE_STATUSES.has(latestJob?.status)
     ) {
-      setMsg("上一份 OCR 仍在处理、重试、保存或导入，请等待完成后再选择新文件");
+      setMsg("上一份 OCR 仍在处理或已暂停；请先继续完成任务，再选择新文件");
       return false;
     }
 
     const previous = inspectedJobId.current;
     const disposableJobs = new Set();
     if (previous) disposableJobs.add(previous);
-    if (latestJob?.id && !["starting", "running"].includes(latestJob.status)) {
+    if (latestJob?.id && !OCR_ACTIVE_STATUSES.has(latestJob.status)) {
       disposableJobs.add(latestJob.id);
     }
     try {
@@ -288,6 +322,10 @@ export default function Ocr({ onImport, onOpenSettings }) {
     const sequence = inspectSequence.current + 1;
     inspectSequence.current = sequence;
     inspectedJobId.current = null;
+    activeJobId.current = null;
+    snapshotEpochRef.current += 1;
+    snapshotRevisionRef.current = { jobId: "", revision: -1 };
+    pageSelectionSequence.current += 1;
     setFile(selected || null);
     setJob(null);
     setCurrent(null);
@@ -357,6 +395,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
       setMsg("正在启动图片转写……");
     }
     setCurrent(null);
+    pageSelectionSequence.current += 1;
     setCurrentTex("");
     setPreviewMode("live");
     setLiveTex("");
@@ -369,6 +408,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
       if (id !== pdfInfo.jobId) throw new Error("服务返回了不一致的 OCR 任务编号");
       const recoverable = rememberOcrJobId(id);
       activeJobId.current = id;
+      snapshotRevisionRef.current = { jobId: id, revision: -1 };
       inspectedJobId.current = null;
       setRestoreFailed(false);
       setJob({
@@ -394,6 +434,11 @@ export default function Ocr({ onImport, onOpenSettings }) {
           setMsg("启动尚未生效，可再次点击“开始转写”：" + e.message);
         } else {
           activeJobId.current = recovered.id;
+          snapshotRevisionRef.current = {
+            jobId: recovered.id,
+            revision: Number.isFinite(Number(recovered.state_revision))
+              ? Number(recovered.state_revision) : -1,
+          };
           inspectedJobId.current = null;
           setJob(recovered);
           setRestoreFailed(false);
@@ -418,22 +463,37 @@ export default function Ocr({ onImport, onOpenSettings }) {
   const selectPage = async (n) => {
     const page = job?.pages?.[n];
     if (page?.status === "pending") return;
+    const selectedJobId = job?.id;
+    if (!selectedJobId) return;
+    const selection = pageSelectionSequence.current + 1;
+    pageSelectionSequence.current = selection;
     setCurrent(n);
     liveEditorRef.current = null;
     setPreviewMode("page");
     try {
-      setCurrentTex(await (await api(`/api/ocr/jobs/${job.id}/pages/${n}/tex`)).text());
+      const text = await (await api(`/api/ocr/jobs/${selectedJobId}/pages/${n}/tex`)).text();
+      if (
+        selection !== pageSelectionSequence.current
+        || activeJobId.current !== selectedJobId
+      ) return;
+      setCurrentTex(text);
     } catch (error) {
+      if (
+        selection !== pageSelectionSequence.current
+        || activeJobId.current !== selectedJobId
+      ) return;
       setCurrentTex("");
       setMsg("暂时无法读取本页结果：" + error.message);
     }
   };
 
   const retry = async (n) => {
-    if (retryingPage !== null || rawSaving) return;
+    if (retryLockRef.current || retryingPage !== null || retryingFailed || rawSaving) return;
     const retryJobId = job?.id;
     const retrySequence = inspectSequence.current;
     if (!retryJobId) return;
+    retryLockRef.current = true;
+    snapshotEpochRef.current += 1;
     setRetryingPage(n);
     const label = job?.source_type === "pdf" ? `原第 ${n} 页` : "图片";
     setMsg(`${label}重试中……`);
@@ -445,7 +505,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
       try {
         const latest = await (await api(`/api/ocr/jobs/${retryJobId}`)).json();
         if (!stillCurrent()) return null;
-        setJob(latest);
+        applyJobSnapshot(latest);
         return latest;
       } catch {
         return null;
@@ -487,13 +547,108 @@ export default function Ocr({ onImport, onOpenSettings }) {
         setMsg(`${label}重试失败：${e.message}`);
       }
     } finally {
-      const latest = await refreshRetrySnapshot();
-      if (stillCurrent()) {
-        if (latest?.status === "running") {
-          setMsg(`${label}仍在后台重试，已继续自动接收进度`);
+      try {
+        const latest = await refreshRetrySnapshot();
+        if (stillCurrent()) {
+          if (latest?.status === "running") {
+            setMsg(`${label}仍在后台重试，已继续自动接收进度`);
+          }
+          setRetryingPage(null);
+          setPollNonce((value) => value + 1);
         }
-        setRetryingPage(null);
+      } finally {
+        retryLockRef.current = false;
       }
+    }
+  };
+
+  const controlOcr = async (action) => {
+    const controlJobId = job?.id;
+    if (
+      !controlJobId
+      || !["pause", "resume"].includes(action)
+      || controlLockRef.current
+      || retryLockRef.current
+      || rawSaving
+      || job?.saving
+      || job?.importing
+    ) return;
+    controlLockRef.current = true;
+    snapshotEpochRef.current += 1;
+    setControlAction(action);
+    setMsg(action === "pause"
+      ? "已请求安全暂停；当前正在渲染或识别的页面会先完成并保留。"
+      : "正在继续 OCR，不会重复识别已完成页……");
+    try {
+      const payload = await (await api(`/api/ocr/jobs/${controlJobId}/${action}`, {
+        method: "POST",
+      })).json();
+      if (activeJobId.current !== controlJobId) return;
+      const next = snapshotFromPayload(payload)
+        || await (await api(`/api/ocr/jobs/${controlJobId}`)).json();
+      if (activeJobId.current !== controlJobId) return;
+      applyJobSnapshot(next);
+      if (action === "pause") {
+        setMsg(next.status === "paused"
+          ? "OCR 已安全暂停；已完成页、图片与 Token 记录均已保留。"
+          : "正在完成当前页，随后安全暂停……");
+      } else {
+        setMsg("OCR 已继续，将从下一个未完成页开始。");
+      }
+      setPollingStopped(false);
+      setPollNonce((value) => value + 1);
+    } catch (error) {
+      if (activeJobId.current !== controlJobId) return;
+      try {
+        const latest = await (await api(`/api/ocr/jobs/${controlJobId}`)).json();
+        if (activeJobId.current === controlJobId) applyJobSnapshot(latest);
+      } catch {
+        // 控制请求的响应可能丢失；保留任务号与当前快照，由轮询继续确认。
+      }
+      setMsg(`${action === "pause" ? "暂停" : "继续"} OCR 失败：${error.message}`);
+      setPollingStopped(false);
+      setPollNonce((value) => value + 1);
+    } finally {
+      controlLockRef.current = false;
+      if (activeJobId.current === controlJobId) setControlAction("");
+    }
+  };
+
+  const retryFailedPages = async () => {
+    if (retryLockRef.current || rawSaving || job?.saving || job?.importing) return;
+    const retryJobId = job?.id;
+    if (!retryJobId) return;
+    retryLockRef.current = true;
+    snapshotEpochRef.current += 1;
+    setRetryingFailed(true);
+    setPollingStopped(false);
+    setMsg("正在重新排队所有失败页；已成功页不会重复识别……");
+    try {
+      const payload = await (await api(`/api/ocr/jobs/${retryJobId}/retry-failed`, {
+        method: "POST",
+      })).json();
+      if (activeJobId.current !== retryJobId) return;
+      const next = snapshotFromPayload(payload)
+        || await (await api(`/api/ocr/jobs/${retryJobId}`)).json();
+      if (activeJobId.current !== retryJobId) return;
+      applyJobSnapshot(next);
+      setMsg(next.status === "running"
+        ? "失败页已重新排队，正在后台顺序识别；可在页边界安全暂停。"
+        : "失败页重试请求已提交。");
+      setPollNonce((value) => value + 1);
+    } catch (error) {
+      if (activeJobId.current !== retryJobId) return;
+      try {
+        const latest = await (await api(`/api/ocr/jobs/${retryJobId}`)).json();
+        if (activeJobId.current === retryJobId) applyJobSnapshot(latest);
+      } catch {
+        // 任务编号仍保留，不根据一次断连假定后台未接收请求。
+      }
+      setMsg("重试所有失败页失败：" + error.message);
+      setPollNonce((value) => value + 1);
+    } finally {
+      retryLockRef.current = false;
+      if (activeJobId.current === retryJobId) setRetryingFailed(false);
     }
   };
 
@@ -565,15 +720,15 @@ export default function Ocr({ onImport, onOpenSettings }) {
   };
 
   const saveRawResult = async () => {
-    if (rawSaving || retryingPage !== null) return;
+    if (rawSaving || retryLockRef.current || retryBusy) return;
     setRawSaving(true);
-    setMsg("正在把原始 OCR 安全保存到下载文件夹……");
+    setMsg("正在把 OCR 工程 ZIP（TEX+图片）保存到下载文件夹……");
     try {
       const saved = await (await api(`/api/ocr/jobs/${job.id}/save`, { method: "POST" })).json();
       setRawSaved({ ...saved, jobId: job.id });
       setMsg(`已保存 ${saved.filename} 到 ${saved.folder}`);
     } catch (error) {
-      setMsg("保存原始 OCR 失败：" + error.message);
+      setMsg("保存 OCR 工程 ZIP 失败：" + error.message);
     } finally {
       setRawSaving(false);
     }
@@ -590,18 +745,18 @@ export default function Ocr({ onImport, onOpenSettings }) {
 
   const browserDownloadRaw = async () => {
     try {
-      const response = await api(`/api/ocr/jobs/${job.id}/result`);
+      const response = await api(`/api/ocr/jobs/${job.id}/package`);
       const blob = await response.blob();
       if (!blob.size) throw new Error("服务返回了空文件");
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = "ocr-raw.tex";
+      link.download = "ocr-project.zip";
       document.body.appendChild(link);
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setMsg("已请求浏览器下载；桌面版若没有保存，请使用“修复下载原始 OCR”");
+      setMsg("已请求浏览器下载 OCR 工程 ZIP；桌面版若没有保存，请使用主保存按钮。");
     } catch (error) {
       setMsg("浏览器下载失败：" + error.message);
     }
@@ -612,6 +767,10 @@ export default function Ocr({ onImport, onOpenSettings }) {
     try {
       await api(`/api/ocr/jobs/${job.id}`, { method: "DELETE" });
       forgetOcrJobId(job.id);
+      activeJobId.current = null;
+      snapshotEpochRef.current += 1;
+      snapshotRevisionRef.current = { jobId: "", revision: -1 };
+      pageSelectionSequence.current += 1;
       setJob(null);
       setFile(null);
       setCurrent(null);
@@ -670,6 +829,11 @@ export default function Ocr({ onImport, onOpenSettings }) {
           return;
         }
         activeJobId.current = remembered;
+        snapshotRevisionRef.current = {
+          jobId: remembered,
+          revision: Number.isFinite(Number(restored.state_revision))
+            ? Number(restored.state_revision) : -1,
+        };
         inspectedJobId.current = restored.status === "ready" ? remembered : null;
         setJob(restored.status === "ready" ? null : restored);
         setCurrent(null);
@@ -701,8 +865,12 @@ export default function Ocr({ onImport, onOpenSettings }) {
             jobId: restored.status === "ready" ? remembered : null,
           });
         }
-        setMsg(restored.status === "running"
-          ? "已恢复上一份 OCR，正在继续接收逐页进度……"
+        setMsg(["running", "pausing"].includes(restored.status)
+          ? (restored.status === "pausing"
+            ? "已恢复上一份 OCR，正在完成当前页后安全暂停……"
+            : "已恢复上一份 OCR，正在继续接收逐页进度……")
+          : restored.status === "paused"
+            ? "已恢复上一份 OCR 的暂停状态；可点击“继续识别”。"
           : restored.status === "ready"
             ? `已恢复上一份${restored.source_type === "pdf" ? " PDF 页数记录" : "图片上传记录"}；若文件选择已清空，请重新选择原文件`
             : "已恢复上一份 OCR 结果，可继续检查、保存或导入项目");
@@ -723,25 +891,35 @@ export default function Ocr({ onImport, onOpenSettings }) {
   }, [restoreNonce]);
 
   useEffect(() => {
-    const busy = ["starting", "running"].includes(job?.status)
-      || Boolean(job?.saving || job?.importing);
+    const localRetryBusy = retryingPage !== null || retryingFailed;
+    const busy = OCR_ACTIVE_STATUSES.has(job?.status)
+      || Boolean(job?.saving || job?.importing || localRetryBusy);
     if (!job?.id || !busy) return undefined;
     let active = true;
     let timer = null;
     let failures = 0;
     const tick = async () => {
+      const requestEpoch = snapshotEpochRef.current;
       try {
         const next = await (await api(`/api/ocr/jobs/${job.id}`)).json();
-        if (!active) return;
+        if (
+          !active
+          || requestEpoch !== snapshotEpochRef.current
+          || activeJobId.current !== job.id
+        ) return;
         if (failures > 0) setMsg("进度连接已恢复，继续接收 OCR 状态");
         failures = 0;
         setPollingStopped(false);
-        setJob(next);
-        if (["starting", "running"].includes(next.status) || next.saving || next.importing) {
-          timer = setTimeout(tick, 1200);
+        applyJobSnapshot(next);
+        if (OCR_ACTIVE_STATUSES.has(next.status) || next.saving || next.importing || localRetryBusy) {
+          timer = setTimeout(tick, next.status === "paused" ? 2500 : 1200);
         }
       } catch (error) {
-        if (!active) return;
+        if (
+          !active
+          || requestEpoch !== snapshotEpochRef.current
+          || activeJobId.current !== job.id
+        ) return;
         failures += 1;
         if (failures <= 5) {
           const delay = Math.min(10000, 800 * (2 ** (failures - 1)));
@@ -758,12 +936,12 @@ export default function Ocr({ onImport, onOpenSettings }) {
       active = false;
       if (timer) clearTimeout(timer);
     };
-  }, [job?.id, job?.status, job?.saving, job?.importing, pollNonce]);
+  }, [job?.id, job?.status, job?.saving, job?.importing, retryingPage, retryingFailed, pollNonce]);
 
   useEffect(() => {
     if (!job?.status) return;
     if (job.saving) {
-      setMsg("正在把原始 OCR 安全保存到下载文件夹……");
+      setMsg("正在把 OCR 工程 ZIP（TEX+图片）保存到下载文件夹……");
     } else if (job.importing) {
       setMsg("正在把原始 OCR 导入项目并执行安全检查……");
     } else if (job.status === "done") {
@@ -772,8 +950,10 @@ export default function Ocr({ onImport, onOpenSettings }) {
       setMsg("部分页面转写失败；请在左侧选择失败页并重试，全部成功后再进入结构化审阅");
     } else if (job.status === "error") {
       setMsg("OCR 未完成；请检查文件与视觉模型设置后重新开始转写");
+    } else if (job.status === "pausing") {
+      setMsg("正在完成当前页，随后安全暂停；已完成结果不会丢失。");
     } else if (job.status === "paused") {
-      setMsg("OCR 已暂停；可点击“开始转写”重新开始");
+      setMsg("OCR 已安全暂停；可点击“继续识别”从未完成页恢复。");
     } else if (job.status === "running") {
       setMsg("已上传，正在逐页处理……");
     }
@@ -848,6 +1028,13 @@ export default function Ocr({ onImport, onOpenSettings }) {
   const pageNums = job ? Object.keys(job.pages || {}).map(Number).sort((a, b) => a - b) : [];
   const successfulPages = job
     ? Object.values(job.pages || {}).filter((page) => page.status === "done").length : 0;
+  const failedPageNums = job ? pageNums.filter((n) => {
+    const page = job.pages?.[n];
+    return page?.status !== "done" && (
+      page?.can_retry === true || (page?.can_retry == null && page?.status === "error")
+    );
+  }) : [];
+  const retryBusy = retryingPage !== null || retryingFailed;
   const totalPages = job ? (job.total || pageNums.length || successfulPages) : 0;
   const processedPages = job ? Math.min(totalPages, Math.max(job.done || 0, successfulPages)) : 0;
   const progressCount = job && ["partial", "error"].includes(job.status)
@@ -888,8 +1075,8 @@ export default function Ocr({ onImport, onOpenSettings }) {
           <input
             type="file"
             accept=".pdf,.png,.jpg,.jpeg"
-            disabled={restoringJob || restoreFailed || starting || job?.status === "running" || job?.importing
-              || retryingPage !== null || rawSaving}
+            disabled={restoringJob || restoreFailed || starting || OCR_ACTIVE_STATUSES.has(job?.status)
+              || job?.importing || controlAction || retryBusy || rawSaving}
             onChange={async (event) => {
               const accepted = await chooseFile(event.target.files?.[0] || null);
               if (!accepted) event.target.value = "";
@@ -903,7 +1090,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
           <button
             className="primary"
             disabled={restoringJob || restoreFailed || starting || Boolean(job?.id) || job?.saving || job?.importing
-              || readiness.blocked || retryingPage !== null || rawSaving
+              || readiness.blocked || controlAction || retryBusy || rawSaving
               || (Boolean(file) && pdfInfo.status !== "ready") || (isPdf && Boolean(pageRangeError))}
             onClick={start}
           >
@@ -1018,6 +1205,11 @@ export default function Ocr({ onImport, onOpenSettings }) {
                   ? `${job.source_type === "pdf" ? `已暂停在原第 ${job.page} 页` : "图片任务已暂停"} · ${job.current_index || processedPages}/${totalPages}`
                   : "任务已暂停"}</span>
               )}
+              {job.status === "pausing" && (
+                <span>{job.page > 0
+                  ? `${job.source_type === "pdf" ? `正在完成原第 ${job.page} 页` : "正在完成图片识别"} · 完成后安全暂停`
+                  : "正在进入安全暂停点"}</span>
+              )}
               {job.status === "running" && job.page > 0 && (
                 <span>{job.source_type === "pdf"
                   ? `原第 ${job.page} 页 · ${job.current_index || 1}/${totalPages}`
@@ -1025,7 +1217,38 @@ export default function Ocr({ onImport, onOpenSettings }) {
               )}
             </div>
             {job.error && <p className="process-error-message">{job.error}</p>}
-            {pollingStopped && job.status === "running" && (
+            <div className="ocr-control-row">
+              {job.status === "running" && job.can_pause !== false && (
+                <button
+                  type="button"
+                  disabled={Boolean(controlAction) || retryBusy || rawSaving || job.saving || job.importing}
+                  onClick={() => controlOcr("pause")}
+                >
+                  {controlAction === "pause" ? "正在请求暂停……" : "Ⅱ 安全暂停"}
+                </button>
+              )}
+              {["pausing", "paused"].includes(job.status) && job.can_resume !== false && (
+                <button
+                  className="primary"
+                  type="button"
+                  disabled={Boolean(controlAction) || retryBusy || rawSaving || job.saving || job.importing}
+                  onClick={() => controlOcr("resume")}
+                >
+                  {controlAction === "resume" ? "正在继续……" : "▶ 继续识别"}
+                </button>
+              )}
+              {["partial", "error"].includes(job.status) && failedPageNums.length > 0 && (
+                <button
+                  className="primary"
+                  type="button"
+                  disabled={retryBusy || rawSaving || Boolean(controlAction) || job.saving || job.importing}
+                  onClick={retryFailedPages}
+                >
+                  {retryingFailed ? "正在重新排队……" : `重试全部失败页（${failedPageNums.length}）`}
+                </button>
+              )}
+            </div>
+            {pollingStopped && OCR_ACTIVE_STATUSES.has(job.status) && (
               <button
                 type="button"
                 onClick={() => {
@@ -1060,7 +1283,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
               {importMode === "ai"
                 ? "AI 会判断章节层级、删除 OCR 粘贴的目录页并插入真正的 \\tableofcontents，同时校正定理与证明边界。AI 不可用时会明确停止，不会悄悄换成规则结果。"
                 : "旧规则模式仅为已有项目保留，不使用额外 AI 调用，也不再作为主要整理流程。"}
-              {" "}结构校正通过后才套用固定 ElegantBook；任何安全检查失败都会保留原文并阻止导出。
+              {" "}结构校正通过后才套用固定 ElegantBook；安全检查未通过时仍可导出当前草稿，导出物会明确标记 UNVERIFIED 警告。
             </small>
           </div>
         )}
@@ -1069,7 +1292,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
             {job.status === "done" && (
               <button
                 className="primary"
-                disabled={importingProject || rawSaving || retryingPage !== null}
+                disabled={importingProject || rawSaving || retryBusy || Boolean(controlAction)}
                 onClick={importProject}
               >
                 {importingProject
@@ -1077,18 +1300,18 @@ export default function Ocr({ onImport, onOpenSettings }) {
                   : `进入${importMode === "ai" ? " AI 深度" : "规则"}整理（保留原始 OCR）`}
               </button>
             )}
-            <button className="primary" type="button" disabled={rawSaving || retryingPage !== null} onClick={saveRawResult}>
-              {rawSaving ? "正在保存……" : "修复下载原始 OCR"}{job.status === "partial" ? "（不完整）" : ""}
+            <button className="primary" type="button" disabled={rawSaving || retryBusy || Boolean(controlAction)} onClick={saveRawResult}>
+              {rawSaving ? "正在保存……" : "保存 OCR 工程 ZIP（TEX+图片）"}{job.status === "partial" ? "（不完整）" : ""}
             </button>
-            <button type="button" disabled={retryingPage !== null} onClick={copyRawResult}>一键复制原始 OCR</button>
-            <button type="button" disabled={retryingPage !== null} onClick={browserDownloadRaw}>浏览器下载（备用）</button>
+            <button type="button" disabled={retryBusy || Boolean(controlAction)} onClick={copyRawResult}>一键复制原始 OCR</button>
+            <button type="button" disabled={retryBusy || Boolean(controlAction)} onClick={browserDownloadRaw}>浏览器下载 OCR 工程 ZIP（备用）</button>
             {rawSaved && <button type="button" onClick={openDownloadFolder}>打开保存位置</button>}
             {job.status === "partial" && <span className="warning">请重试失败页后再进入结构化审阅。</span>}
           </div>
         )}
         {job && ["done", "partial", "error"].includes(job.status) && (
           <div className="row">
-            <button type="button" disabled={rawSaving || retryingPage !== null} onClick={discardJob}>放弃本次 OCR</button>
+            <button type="button" disabled={rawSaving || retryBusy || Boolean(controlAction)} onClick={discardJob}>放弃本次 OCR</button>
           </div>
         )}
       </section>
@@ -1178,7 +1401,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
                 <button type="button" onClick={() => setPreviewMode("live")}>回到实时结果</button>
                 {(job.pages[current]?.status === "error" || job.pages[current]?.low_conf) && (
                   <button
-                    disabled={retryingPage !== null || rawSaving || job.pages[current]?.retrying}
+                    disabled={retryBusy || rawSaving || Boolean(controlAction) || job.pages[current]?.retrying}
                     onClick={() => retry(current)}
                   >
                     {retryingPage === current || job.pages[current]?.retrying ? "正在重试……" : "重试此页"}

@@ -19,6 +19,7 @@ from latexstruct.ocr import (  # noqa: E402
     encode_image,
     image_mime_type,
     merge_book,
+    ocr_page_needs_review,
     ocr_page_needs_retry,
     parse_page_range,
     pdf_document_info_bytes,
@@ -136,7 +137,7 @@ def test_page_marker_is_written_once_by_program_not_vision_model():
     assert result.count("% Page") == 1
 
 
-def test_stage_a_rejects_model_generated_structure_commands():
+def test_stage_a_preserves_model_generated_structure_but_flags_review():
     forbidden = (
         r"\documentclass{article}" + "\n" + r"\begin{document}" + "\nText.\n" + r"\end{document}",
         r"\begin{document}" + "\nText.\n" + r"\end{document}",
@@ -147,12 +148,9 @@ def test_stage_a_rejects_model_generated_structure_commands():
     )
     for page_text in forbidden:
         client = FakeVisionClient(pages={1: f"```latex\n{page_text}\n```"})
-        try:
-            transcribe_page(client, b"\x89PNG\r\n\x1a\n" + b"0" * 16, 1)
-        except LLMError as exc:
-            assert "OCR 阶段已保守拒绝" in str(exc)
-        else:
-            raise AssertionError(f"Stage A 必须拒绝结构命令：{page_text}")
+        result = transcribe_page(client, b"\x89PNG\r\n\x1a\n" + b"0" * 16, 1)
+        assert page_text in result
+        assert ocr_page_needs_review(result)
 
 
 def test_stage_a_allows_literal_headings_and_math_environments():
@@ -167,6 +165,7 @@ def test_stage_a_allows_literal_headings_and_math_environments():
     assert "1.2 Introduction" in result
     assert "Theorem 3.1." in result
     assert r"\begin{equation}" in result
+    assert not ocr_page_needs_review(result)
 
 
 def test_clean_page_output_normalizes_single_line_tagged_display():
