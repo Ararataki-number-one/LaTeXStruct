@@ -468,7 +468,13 @@ def _run_update_job(job_id: str, info) -> None:
             downloaded_bytes=max(0, int(info.size or 0)),
             message="下载完成，安全校验已通过",
         )
-        schedule_installer_after_exit(dest)
+        from .. import __version__
+
+        schedule_installer_after_exit(
+            dest,
+            previous_version=__version__,
+            expected_version=info.latest,
+        )
         _set_update_job(
             job_id,
             status="restarting",

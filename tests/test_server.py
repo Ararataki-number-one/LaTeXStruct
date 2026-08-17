@@ -1694,7 +1694,11 @@ def test_update_install_schedules_exit_only_after_verified_download():
         assert state["progress"] == 1.0
         args, kwargs = download.call_args
         assert args == (info,) and callable(kwargs["progress"])
-        schedule.assert_called_once_with("C:/Temp/LaTeXStruct-setup-1.2.3.exe")
+        schedule.assert_called_once_with(
+            "C:/Temp/LaTeXStruct-setup-1.2.3.exe",
+            previous_version="1.1.8",
+            expected_version="v1.2.3",
+        )
         close_app.assert_called_once_with(delay=1.2)
         srv._cancel_update_preparation()
 

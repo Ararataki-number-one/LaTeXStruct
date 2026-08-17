@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """主动更新模块测试（逻辑层，无网络）。"""
 
+import base64
 import os
 import subprocess
 import sys
@@ -190,11 +191,16 @@ def test_windows_helper_waits_for_process_and_exclusive_unlock(tmp_path):
             patch("latexstruct.updater.subprocess.Popen") as popen,
         ):
             schedule_installer_after_exit(
-                str(setup), app_pid=4321, target_executable=str(target)
+                str(setup),
+                app_pid=4321,
+                target_executable=str(target),
+                previous_version="v1.1.7",
+                expected_version="v1.1.8",
             )
     argv = popen.call_args.args[0]
     kwargs = popen.call_args.kwargs
-    script = argv[-1]
+    assert argv[-2] == "-EncodedCommand"
+    script = base64.b64decode(argv[-1]).decode("utf-16le")
     assert "Get-Process -Id $appProcessId" in script
     assert "[IO.File]::Open" in script and "[IO.FileShare]::None" in script
     assert "Stop-Process -Id $appProcessId -Force" in script
@@ -203,17 +209,24 @@ def test_windows_helper_waits_for_process_and_exclusive_unlock(tmp_path):
     assert kwargs["env"]["LATEXSTRUCT_UPDATE_PID"] == "4321"
     assert kwargs["env"]["LATEXSTRUCT_UPDATE_TARGET"] == str(target)
     assert kwargs["env"]["LATEXSTRUCT_UPDATE_INSTALLER"] == str(setup)
-    # helper 必须与父进程解耦；否则桌面窗口退出时会一起杀掉更新。
+    assert kwargs["env"]["LATEXSTRUCT_UPDATE_PREVIOUS"] == "1.1.7"
+    assert kwargs["env"]["LATEXSTRUCT_UPDATE_EXPECTED"] == "1.1.8"
+    # CREATE_NEW_PROCESS_GROUP 足以让 helper 独立运行；DETACHED_PROCESS 会让
+    # Windows PowerShell 5.1 在执行 EncodedCommand 前直接退出，必须禁用。
     assert kwargs["stdin"] is subprocess.DEVNULL
     assert kwargs["stdout"] is subprocess.DEVNULL
     assert kwargs["stderr"] is subprocess.DEVNULL
     assert kwargs["close_fds"] is True
     flags = kwargs["creationflags"]
-    assert flags & 0x00000008  # DETACHED_PROCESS
+    assert not flags & 0x00000008  # DETACHED_PROCESS
     assert flags & 0x00000200  # CREATE_NEW_PROCESS_GROUP
     assert flags & 0x08000000  # CREATE_NO_WINDOW
     for argument in WINDOWS_INSTALLER_ARGS:
         assert f"'{argument}'" in script
+    assert "update-install.log" in script
+    assert "Wait-ForExpectedVersion 15" in script
+    assert "Start-UpdatedTarget" in script
+    assert "for ($attempt = 1; $attempt -le 2; $attempt++)" in script
     for key in secret_env:
         assert key not in kwargs["env"]
 
