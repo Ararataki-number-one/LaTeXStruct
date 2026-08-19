@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .ai import AIConfig, AI_KINDS, LLMClient, LLMError, decide_candidates
+from .ai import AIConfig, AI_KINDS, LLMError, build_text_client, decide_candidates
 from .parser import detect_newline, line_starts, normalize_newlines, offset_to_line, parse_latex
 from .ocrstruct import (
     build_ocr_structure_ops,
@@ -472,7 +472,8 @@ def run_pipeline(
         deterministic_kinds = {"bilingual-title", "exercise-section"}
         rule_decisions, ambiguous = build_rule_decisions(doc, scan_res, rule_config, kinds=deterministic_kinds, pack=pack)
         ai_candidates = [c for c in scan_res.candidates if c.kind in AI_KINDS]
-        client = ai_client or LLMClient((ai_config or AIConfig()).decide)
+        cfg = ai_config or AIConfig()
+        client = ai_client or build_text_client(cfg, "decide")
         try:
             emit(
                 "decide", 0.24, "AI 正在逐批判断候选结构",
@@ -527,7 +528,7 @@ def run_pipeline(
                 )
 
             ai_decisions, ai_amb, ai_notes, usage = decide_candidates(
-                client, doc, ctx, ai_candidates, ai_config or AIConfig(), mode,
+                client, doc, ctx, ai_candidates, cfg, mode,
                 progress_callback=decision_progress,
                 control_callback=control,
             )
@@ -549,9 +550,13 @@ def run_pipeline(
                 "AI 结构化未完成，原项目保持不变",
                 usage=ai_usage,
             )
+            guidance = (
+                "Codex 安装、ChatGPT 登录、订阅额度与网络"
+                if cfg.analysis_backend == "codex_cli"
+                else "API Key、模型与网络"
+            )
             raise LLMError(
-                "AI 结构化未完成，未使用规则模式替代；请检查 API Key、模型与网络后重试："
-                f"{e}"
+                f"AI 结构化未完成，未使用规则模式替代；请检查{guidance}后重试：{e}"
             ) from None
     else:
         emit("decide", 0.48, "正在用保守规则生成修改建议")
@@ -630,7 +635,7 @@ def run_pipeline(
         and not decisions_reused
     ):
         cfg = ai_config or AIConfig()
-        rclient = review_client or LLMClient(cfg.review)
+        rclient = review_client or build_text_client(cfg, "review")
         # 漏报抽查：AI 判定"无需处理"的候选一并交复查复核（可 missed-extra 反悔）
         review_ambiguous = list(ambiguous) + [
             {"candidate_id": n.get("candidate_id", ""), "line": n.get("line", 1),
@@ -782,9 +787,13 @@ def run_pipeline(
                 "AI 复查未完成，原项目保持不变",
                 usage=ai_usage,
             )
+            guidance = (
+                "Codex 安装、ChatGPT 登录、订阅额度与网络"
+                if cfg.analysis_backend == "codex_cli"
+                else "复查模型与网络"
+            )
             raise LLMError(
-                "AI 复查未完成，未保存未经完整复查的草稿；请检查复查模型与网络后重试："
-                f"{e}"
+                f"AI 复查未完成，未保存未经完整复查的草稿；请检查{guidance}后重试：{e}"
             ) from None
 
     result_text = "\n".join(out)

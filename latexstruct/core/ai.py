@@ -80,6 +80,11 @@ class AIConfig:
     # 复查是独立的第二道精度门：逐候选调用避免把相邻定理的 verdict/ID 串位。
     # 决策阶段仍对低风险定理做 4 项小批处理，因此总体请求数保持可控。
     review_batch: int = 1
+    # ``codex_cli`` 统一接管 OCR、文字分析与复查；API 配置仍保留供用户主动切换。
+    # Codex 失败时绝不静默回退 API，以免产生用户没有同意的按量费用。
+    analysis_backend: str = "api"
+    codex_model: str = ""
+    codex_reasoning_effort: str = "medium"
 
 
 class LLMClient:
@@ -299,6 +304,23 @@ class LLMClient:
         if content is None:
             return ""
         raise LLMError("模型响应 content 类型不受支持")
+
+
+def build_text_client(ai_config: AIConfig, role: str):
+    """按显式后端创建文字模型客户端；OCR 不经过此工厂。"""
+    backend = str(getattr(ai_config, "analysis_backend", "api") or "api").strip()
+    if backend == "api":
+        if role not in {"decide", "review"}:
+            raise LLMError(f"未知文字模型角色：{role}")
+        return LLMClient(getattr(ai_config, role))
+    if backend == "codex_cli":
+        from .codex_cli import CodexCLIClient
+
+        return CodexCLIClient(
+            model=getattr(ai_config, "codex_model", ""),
+            reasoning_effort=getattr(ai_config, "codex_reasoning_effort", "medium"),
+        )
+    raise LLMError(f"不支持的分析后端：{backend}")
 
 
 # ---------------------------------------------------------------------------

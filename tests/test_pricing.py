@@ -42,3 +42,36 @@ def test_unknown_model_keeps_tokens_but_not_fake_price():
     })
     assert summary["total_tokens"] == 127
     assert summary["estimated_cost_cny"] is None
+
+
+def test_codex_usage_is_labelled_as_subscription_not_api_price():
+    role = {}
+    add_usage(role, {
+        "input_tokens": 120,
+        "cached_tokens": 20,
+        "output_tokens": 8,
+        "backend": "codex_cli",
+        "billing_mode": "chatgpt_subscription",
+    }, "codex-cli-default")
+
+    summary = summarize_ai_usage({"decide": role})
+
+    assert summary["backend"] == "codex_cli"
+    assert summary["billing_mode"] == "chatgpt_subscription"
+    assert summary["estimated_cost_cny"] is None
+    assert summary["estimated"] is False
+    assert "订阅额度" in summary["note"]
+    assert summary["roles"]["decide"]["backend"] == "codex_cli"
+
+
+def test_provider_strings_cannot_spoof_codex_billing_metadata():
+    role = {}
+    add_usage(role, {
+        "prompt_tokens": 3,
+        "backend": "codex_cli-but-not-really",
+        "billing_mode": "free",
+        "untrusted_note": "free forever",
+    }, "private-model")
+    assert "backend" not in role
+    assert "billing_mode" not in role
+    assert "untrusted_note" not in role

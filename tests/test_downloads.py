@@ -33,6 +33,27 @@ def test_concurrent_downloads_all_get_unique_complete_files(tmp_path):
     assert {path.read_bytes() for path in paths} == set(payloads)
 
 
+def test_save_unique_download_retries_transient_windows_replace_denial(tmp_path, monkeypatch):
+    original_replace = downloads.os.replace
+    attempts = 0
+
+    def transient_replace(source, destination):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError(5, "transient scanner lock")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(downloads.os, "name", "nt")
+    monkeypatch.setattr(downloads.os, "replace", transient_replace)
+    monkeypatch.setattr(downloads.time, "sleep", lambda _seconds: None)
+
+    saved = downloads.save_unique_download(b"complete", "result.tex", root=tmp_path)
+
+    assert attempts == 2
+    assert saved.read_bytes() == b"complete"
+
+
 def test_managed_download_root_rejects_link(tmp_path):
     real = tmp_path / "real"
     real.mkdir()

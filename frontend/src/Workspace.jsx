@@ -36,6 +36,9 @@ function processIssueGuidance(job) {
   if (job?.status === "cancelled" || /取消|cancel/i.test(detail)) {
     return "任务已安全取消，未验证草稿没有保存；需要时可点击“开始分析”重新开始。";
   }
+  if (/codex|\bcli\b|login|登录|subscription|订阅|额度|rate\s*limit/i.test(detail)) {
+    return "请打开顶部“设置”，检查 Codex CLI 的安装、ChatGPT 登录和订阅额度，刷新状态后再重试；系统不会自动切回 API 计费。";
+  }
   if (/api\s*key|api\s*base|base\s*url|endpoint|鉴权|认证|unauthori[sz]ed|forbidden|http\s*(401|403)|模型|\bmodel\b/i.test(detail)) {
     return "请打开顶部“设置”，检查服务商、API Key 和模型后再重试。";
   }
@@ -53,7 +56,7 @@ function processIssueGuidance(job) {
 
 function needsAiSettings(job) {
   const detail = String(job?.error || job?.message || "");
-  return /api\s*key|api\s*base|base\s*url|endpoint|鉴权|认证|unauthori[sz]ed|forbidden|http\s*(401|403)|模型|\bmodel\b/i.test(detail);
+  return /codex|\bcli\b|login|登录|subscription|订阅|额度|rate\s*limit|api\s*key|api\s*base|base\s*url|endpoint|鉴权|认证|unauthori[sz]ed|forbidden|http\s*(401|403)|模型|\bmodel\b/i.test(detail);
 }
 
 function VerificationFailures({ failures = [], persisted = false }) {
@@ -647,9 +650,13 @@ export default function Workspace({ pid, onOpenSettings }) {
   const showDiffEditor = view === "side" && !largeDiff;
   const tokenTotal = job?.cost?.total_tokens || 0;
   const estimatedCny = job?.cost?.estimated_cost_cny;
+  const analysisBackend = job?.analysis_backend || job?.ai_backend || job?.backend || job?.cost?.backend;
+  const usesCodexSubscription = analysisBackend === "codex_cli";
   const processedCandidateCount = Number(job?.processed_candidates || 0);
   const candidateTotal = Number(job?.candidate_total || 0);
-  const priceText = estimatedCny == null
+  const priceText = usesCodexSubscription
+    ? "Codex 订阅额度（非 API 计费）"
+    : estimatedCny == null
     ? (tokenTotal ? "自定义/未知模型，暂不估价" : "尚无模型费用")
     : `约 ¥${estimatedCny < 0.01 ? estimatedCny.toFixed(4) : estimatedCny.toFixed(2)}`;
 
@@ -942,6 +949,7 @@ export default function Workspace({ pid, onOpenSettings }) {
               <span style={{ width: `${Math.round((job.progress || 0) * 100)}%` }} />
             </div>
             <div className="process-metrics">
+              {usesCodexSubscription && <span>引擎：Codex CLI（ChatGPT 订阅）</span>}
               <span>Token：{tokenTotal.toLocaleString()}</span>
               <span>费用：{priceText}</span>
               <span>实时预览：{job.preview_label || "等待草稿"}</span>

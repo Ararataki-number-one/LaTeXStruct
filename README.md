@@ -8,7 +8,8 @@ LaTeX 数学书结构化整理本地客户端（Windows 优先，安装版 + 主
 ## 安装与更新
 
 - **安装版**：GitHub Releases 下载 `LaTeXStruct-setup-*.exe` 双击安装（每用户、无需管理员）；
-- **便携版**：Releases 中的 `LaTeXStruct.exe` 单文件免安装；
+- **便携版**：Releases 中的 `LaTeXStruct-portable-*.zip`，解压后直接运行 `LaTeXStruct.exe`；
+  压缩包同时附带项目 MIT 许可证和内置 Codex runtime 的第三方许可证与归属声明；
 - **主动更新**：启动时自动检查 Releases 最新版；更新包通过大小与 SHA-256 校验后，应用会
   在没有活动任务或未保存 OCR 成果时安全退出、静默升级并自动重启；
   更新弹窗会显示中文更新说明、真实下载进度与可取消状态，重启后显示旧版到新版的更新结果；
@@ -26,10 +27,42 @@ LaTeX 数学书结构化整理本地客户端（Windows 优先，安装版 + 主
   生成自签证书签名（仅本机信任）。**消除 SmartScreen 警告需购买 EV/OV 代码签名证书**
   （如 DigiCert/Sectigo），拿到 pfx 后按上述方式配置即可；
 - 安装器界面默认**简体中文**（`packaging/installer.iss` 使用官方 ChineseSimplified 语言包）；
-- AI 设置默认只需选择平台并填写一次 API Key；Qwen 可同时用于文字判断、复查和 OCR，
-  DeepSeek 用于文字判断/复查；未配置 Key 时会明确提示并保留原文，不会用规则结果冒充 AI 整理。
+- OCR、分析与审阅可统一选择 API，或使用安装包内置的官方 Codex CLI 运行时与本机
+  ChatGPT 登录。Codex 模式不会读取项目 API Key，也不会在不可用时静默回退到按量计费 API。
 
-## Qwen 视觉模型配置
+## 本机 Codex OCR、分析与审阅（ChatGPT 订阅）
+
+在「设置 → AI 引擎」选择“Codex CLI”后，PDF/图片逐页转写、文字结构判断和 AI 复查都会由
+安装包内置、固定版本的官方 Codex CLI 运行时执行。它复用本机已有的 **ChatGPT 登录**，
+消耗对应套餐的 Codex 使用额度，而不是项目中配置的 OpenAI 兼容 API Key；界面可刷新运行时、
+登录方式和就绪状态，并可单独选择模型与推理强度。为避免意外产生 API 账单，只接受
+ChatGPT 登录：检测到 API Key 登录、未登录或运行时故障时，本次任务会明确停止并保留已有结果，
+**不会自动切回 API 后端**。
+
+首次使用前，请在同一个 Windows 账户的终端运行一次：
+
+```powershell
+codex login
+```
+
+并选择 **Sign in with ChatGPT**。若系统提示找不到 `codex`，请先按
+[官方 Codex CLI 安装说明](https://github.com/openai/codex#installing-and-running-codex-cli)安装；
+仅登录 Codex Desktop 不保证 CLI 登录状态可被读取。完成后回到设置页点击“刷新状态”。安装包内置
+的是与本应用固定匹配的运行时，实际登录凭据仍由官方 CLI 在当前用户目录中创建和管理。
+
+“本机 Codex”指 Codex 程序在本机受限进程中运行，并不代表模型离线运行：推理仍需联网访问
+OpenAI 服务，也会受 ChatGPT 套餐额度和服务可用性影响。应用不会复制或展示 Codex 登录令牌，
+也不会把项目中的 API Key 传给该子进程。
+
+Codex OCR 使用 CLI 官方 `--image` 输入逐页传递受控的 PNG/JPEG；每次调用都在临时空目录、
+只读沙箱和禁用工具的条件下运行，完成后清理页面副本。现有 OCR 的安全暂停、失败页重试、
+原始 TEX/图片工程包与后续结构审阅流程保持不变。
+
+官方说明：[Codex 认证方式](https://learn.chatgpt.com/docs/auth)、
+[Codex 非交互模式](https://learn.chatgpt.com/docs/non-interactive-mode)、
+[Codex CLI 图片输入](https://learn.chatgpt.com/docs/developer-commands?surface=cli)。
+
+## API 模式的 Qwen 视觉模型配置
 
 截至 2026-08-15，阿里云 Model Studio 已正式提供 `qwen3.7-flash`：它是支持
 图片、文本和视频输入的 Qwen3.7 原生视觉 Flash 模型。LaTeXStruct 已将它作为首选
@@ -77,7 +110,7 @@ git push origin "v$version"
 # 3) 已安装客户端下次启动自动提示更新
 ```
 
-## 当前状态（v1.1.10）
+## 当前状态（v1.1.11）
 
 - 核心流水线已具备解析、扫描、保守 AI 决策、独立复查、可逆补丁和统一安全检查；
   定理/证明边界、自定义环境、label/ref、图片路径、花括号、项目文件集合与编译前后对比
@@ -101,6 +134,9 @@ git push origin "v$version"
 - 分阶段进度卡显示当前动作、候选进度、按 AI 批次更新的实时草稿、Token 与约人民币费用；
   处理任务支持安全暂停、继续和取消，同一项目的分析、审阅与最终写入使用单一事务锁，
   避免并发请求覆盖结果；未验证草稿永不写入正式结果；
+- 分析、独立审阅与 PDF/图片 OCR 均可选择本机 Codex CLI 后端，复用 ChatGPT 登录和订阅额度；
+  该模式仍需联网，不继承应用 API Key，也不会在失败时静默回退到按量计费 API。用户仍可主动
+  切换到兼容 API 模式；
 - 新项目和 OCR 导入默认走 AI 深度整理；视觉阶段只忠实转录，章节、真实目录命令和定理/证明
   边界由后续结构阶段统一处理。AI 决策或复查失败会明确停止并保留原文，旧规则模式仅作兼容；
 - 最终安全检查未通过时会保存独立诊断草稿和逐项修复建议，重启后仍可查看；诊断草稿不能参与
@@ -140,7 +176,8 @@ latexstruct/
 │   │   ├── patch.py              # 补丁模型 + 内容不变校验
 │   │   ├── verify.py             # 环境/花括号配平 + 已知问题报告
 │   │   ├── rules.py              # 旧规则兼容模式决策
-│   │   ├── ai.py                 # AI 决策引擎（OpenAI 兼容客户端）
+│   │   ├── ai.py                 # AI 决策引擎（API / 本机 Codex 后端选择）
+│   │   ├── codex_cli.py          # 受限 Codex CLI 调用、ChatGPT 登录检查与状态
 │   │   ├── review.py             # AI 复查引擎
 │   │   ├── prompts.py            # 母提示词 v3 + Schema + 上下文组装
 │   │   ├── template.py           # 固定 ElegantBook 成品模板与层级适配
@@ -190,12 +227,13 @@ python -m latexstruct --port 8765     # 指定端口
    立即进入工作台，以后台任务实时展示结构整理过程，最终统一生成 ElegantBook；
 5. **导出**：可选单个 TEX，或包含类文件、图片/子文件、许可证与汇报的完整工程 ZIP；界面会
    明确区分已验证成品与可能无法编译的 `UNVERIFIED` 当前快照；
-6. **设置**：新用户选择 DeepSeek 或 Qwen、填写一次 Key 后即可切换各角色模型；Base URL、
-   分角色 Key 与自定义模型收在高级设置。未开启凭据管理器时，
+6. **设置**：OCR、分析与审阅可统一选择 DeepSeek/Qwen API，或复用 ChatGPT 登录的本机 Codex；API
+   后端填写一次 Key 后即可切换各角色模型，Base URL、分角色 Key 与自定义模型收在高级设置。
+   Codex 后端不使用这些 Key，未就绪时会停止而不自动回退 API。未开启凭据管理器时，
    Key 保存在本机 `%APPDATA%\LaTeXStruct\config.json`，开启后改存
    Windows 凭据管理器（配置文件仅占位符）；也可用环境变量
    `LATEXSTRUCT_DECIDE_KEY` / `LATEXSTRUCT_REVIEW_KEY`；OCR 还支持
-   `DASHSCOPE_API_KEY` / `LATEXSTRUCT_OCR_KEY`。无 Key 时 AI 模式自动降级为规则模式。
+   `DASHSCOPE_API_KEY` / `LATEXSTRUCT_OCR_KEY`。这些 API Key 仅在用户主动选择 API 模式时使用。
 
 ## 运行测试
 

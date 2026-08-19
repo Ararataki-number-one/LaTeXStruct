@@ -204,6 +204,20 @@ def test_release_metadata_matches_app_version():
     assert "#error AppVersion must be supplied" in installer
     assert '#define AppVersion "0.2.0"' not in installer
     assert "OutputBaseFilename=LaTeXStruct-setup-{#AppVersion}" in installer
+    assert 'Source: "..\\packaging\\THIRD_PARTY_NOTICES.txt"' in installer
+    assert 'Source: "..\\LICENSE"' in installer
+
+    notices_path = os.path.join(root, "packaging", "THIRD_PARTY_NOTICES.txt")
+    with open(notices_path, encoding="utf-8") as f:
+        notices = f.read()
+    for required in (
+        "OpenAI Codex CLI 0.144.4",
+        "Apache License",
+        "Version 2.0",
+        "OpenAI Codex",
+        "Ratatui",
+    ):
+        assert required in notices
 
     with open(os.path.join(root, "scripts", "build.ps1"), encoding="utf-8") as f:
         build_script = f.read()
@@ -302,8 +316,8 @@ def test_release_build_safety_guards():
     assert "v1.1.4" not in workflow
     assert "name: LaTeXStruct-v${{ env.APP_VERSION }}" in workflow
     assert "name: LaTeXStruct-${{ github.ref_name }}" not in workflow
-    assert "$previousVersion = '1.1.9'" in workflow
-    assert "previous_version='1.1.9'" in workflow
+    assert "$previousVersion = '1.1.10'" in workflow
+    assert "previous_version='1.1.10'" in workflow
     assert "[string]$health.version -eq $previousVersion" in workflow
     assert "            if (-not $oldHealthy)" in workflow
     # 升级冒烟必须走应用内真实的独立 helper，不能绕过第一阶段
@@ -322,6 +336,12 @@ def test_release_build_safety_guards():
     assert "            if (-not $updated.updated" in workflow
     assert "/api/update/result" in workflow
     assert "body_path: dist/RELEASE_NOTES.md" in workflow
+    assert "LaTeXStruct-portable-$env:APP_VERSION.zip" in workflow
+    assert "dist/LaTeXStruct-portable-*.zip" in workflow
+    assert "dist/LaTeXStruct.exe\n            dist/LaTeXStruct-setup" not in workflow
+    assert "安装后未找到第三方许可证" in workflow
+    assert "便携包缺少 $requiredFile" in workflow
+    assert "'dist/LaTeXStruct.exe','LICENSE',$notice" in workflow
 
     with open(os.path.join(root, "packaging", "LaTeXStruct.spec"), encoding="utf-8") as f:
         pyinstaller_spec = f.read()
@@ -331,7 +351,18 @@ def test_release_build_safety_guards():
     assert '(str(react_static_dir), "latexstruct/server/static-react")' in pyinstaller_spec
     assert 'elegantbook_class.is_file()' in pyinstaller_spec
     assert '(str(elegantbook_assets_dir), "latexstruct/assets/elegantbook")' in pyinstaller_spec
+    assert 'collect_all("codex_cli_bin")' in pyinstaller_spec
+    assert "codex_datas" in pyinstaller_spec
+    assert "codex_hiddenimports" in pyinstaller_spec
     assert 'os.path.exists("../latexstruct/server/static-react")' not in pyinstaller_spec
+
+    with open(os.path.join(root, "requirements.txt"), encoding="utf-8") as f:
+        requirements = f.read()
+    with open(os.path.join(root, "pyproject.toml"), encoding="utf-8") as f:
+        pyproject = f.read()
+    pinned_codex_runtime = "openai-codex-cli-bin==0.144.4"
+    assert pinned_codex_runtime in requirements
+    assert pinned_codex_runtime in pyproject
 
     restart_script = os.path.join(root, "packaging", "update_restart.ps1")
     assert os.path.isfile(restart_script)

@@ -26,6 +26,11 @@ CONFIG_PATH = os.path.join(default_data_dir(), "config.json")
 
 @dataclass
 class AppConfig:
+    # OCR、文字分析与复查统一使用原有兼容 API，或复用本机 Codex 的 ChatGPT 登录。
+    # Codex 模式不会使用或回退到下方 API 配置。
+    analysis_backend: str = "api"
+    codex_model: str = ""
+    codex_reasoning_effort: str = "medium"
     decide_base_url: str = "https://api.deepseek.com"
     decide_model: str = "deepseek-v4-flash"
     decide_api_key: str = field(default="", repr=False)
@@ -52,7 +57,14 @@ class AppConfig:
             review_key = self.decide_api_key
         decide = RoleConfig(self.decide_base_url, self.decide_model, decide_key)
         review = RoleConfig(self.review_base_url, self.review_model, review_key)
-        return AIConfig(decide=decide, review=review, review_enabled=self.review_enabled)
+        return AIConfig(
+            decide=decide,
+            review=review,
+            review_enabled=self.review_enabled,
+            analysis_backend=self.analysis_backend,
+            codex_model=self.codex_model,
+            codex_reasoning_effort=self.codex_reasoning_effort,
+        )
 
     def to_ocr_config(self) -> OcrConfig:
         base_url = self.ocr_base_url or self.decide_base_url
@@ -62,7 +74,12 @@ class AppConfig:
             key = self.decide_api_key
         if not key and _same_api_host(base_url, self.review_base_url):
             key = self.review_api_key
-        return OcrConfig(role=RoleConfig(base_url, model, key))
+        return OcrConfig(
+            role=RoleConfig(base_url, model, key),
+            backend=self.analysis_backend,
+            codex_model=self.codex_model,
+            codex_reasoning_effort=self.codex_reasoning_effort,
+        )
 
     def masked(self) -> Dict:
         d = asdict(self)
@@ -165,6 +182,30 @@ def _new_config_uses_keyring() -> bool:
     return os.name == "nt"
 
 
+def _validate_codex_settings(cfg: AppConfig, *, tolerate_invalid: bool = False) -> None:
+    """Validate the non-secret Codex selector without probing or starting Codex."""
+    from .core.codex_cli import validate_codex_effort, validate_codex_model
+
+    backend = str(cfg.analysis_backend or "api").strip().lower()
+    if backend not in {"api", "codex_cli"}:
+        if not tolerate_invalid:
+            raise ValueError("analysis_backend 必须是 api 或 codex_cli")
+        backend = "api"
+    cfg.analysis_backend = backend
+    try:
+        cfg.codex_model = validate_codex_model(cfg.codex_model)
+    except ValueError:
+        if not tolerate_invalid:
+            raise
+        cfg.codex_model = ""
+    try:
+        cfg.codex_reasoning_effort = validate_codex_effort(cfg.codex_reasoning_effort)
+    except ValueError:
+        if not tolerate_invalid:
+            raise
+        cfg.codex_reasoning_effort = "medium"
+
+
 def load_config(backend: KeystoreBackend | None = None) -> AppConfig:
     backend = backend if backend is not None else default_backend()
     config_exists = os.path.exists(CONFIG_PATH)
@@ -239,6 +280,8 @@ def load_config(backend: KeystoreBackend | None = None) -> AppConfig:
     for field_name in ("decide_model", "review_model", "ocr_model"):
         model = getattr(cfg, field_name)
         setattr(cfg, field_name, legacy_models.get(model, model))
+    # 损坏或旧版配置必须安全回退到 API；保存入口则会严格拒绝非法值。
+    _validate_codex_settings(cfg, tolerate_invalid=True)
     return cfg
 
 
@@ -248,6 +291,7 @@ def save_config(
     secret_updates: Optional[Dict[str, str]] = None,
 ):
     backend = backend if backend is not None else default_backend()
+    _validate_codex_settings(cfg)
     if not (cfg.ocr_base_url or "").strip():
         cfg.ocr_base_url = cfg.decide_base_url
     data = {

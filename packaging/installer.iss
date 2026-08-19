@@ -37,6 +37,8 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 [Files]
 Source: "..\dist\LaTeXStruct.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\packaging\update_restart.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\packaging\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\LaTeXStruct"; Filename: "{app}\LaTeXStruct.exe"

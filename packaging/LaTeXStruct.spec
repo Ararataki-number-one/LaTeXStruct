@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 # PyInstaller executes a spec with the caller's current directory unchanged, while
 # relative paths passed to Analysis/datas are resolved relative to the spec file.
@@ -29,12 +29,14 @@ if not elegantbook_class.is_file() or not elegantbook_license.is_file():
 if not app_icon.is_file():
     raise SystemExit("Windows application icon is missing")
 
+codex_datas, codex_binaries, codex_hiddenimports = collect_all("codex_cli_bin")
+
 datas = [
     (str(legacy_static_dir), "latexstruct/server/static"),
     (str(react_static_dir), "latexstruct/server/static-react"),
     (str(elegantbook_assets_dir), "latexstruct/assets/elegantbook"),
-]
-binaries = []
+] + codex_datas
+binaries = codex_binaries
 hiddenimports = [
     "uvicorn.logging",
     "uvicorn.loops",
@@ -46,7 +48,7 @@ hiddenimports = [
     "uvicorn.protocols.websockets.auto",
     "uvicorn.lifespan",
     "uvicorn.lifespan.on",
-] + collect_submodules("webview")
+] + collect_submodules("webview") + codex_hiddenimports
 
 a = Analysis(
     [str(packaging_dir / "run.py")],

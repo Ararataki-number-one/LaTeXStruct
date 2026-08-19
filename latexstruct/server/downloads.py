@@ -12,6 +12,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -102,7 +103,18 @@ def save_unique_download(data: bytes, filename: str, *, root: Path | None = None
                 candidate = None
                 continue
             try:
-                os.replace(temporary, candidate)
+                # Windows Defender/索引器可能在刚关闭占位文件后短暂持有句柄，
+                # 使同目录的原子 replace 偶发返回 WinError 5。目标仍是本次独占
+                # 创建的空占位，因此只对 Windows 的 PermissionError 做短暂重试；
+                # 其他平台或其他错误继续立即失败，绝不改为覆盖未知文件。
+                for attempt in range(6):
+                    try:
+                        os.replace(temporary, candidate)
+                        break
+                    except PermissionError:
+                        if os.name != "nt" or attempt == 5:
+                            raise
+                        time.sleep(0.01 * (attempt + 1))
             except Exception:
                 candidate.unlink(missing_ok=True)
                 raise

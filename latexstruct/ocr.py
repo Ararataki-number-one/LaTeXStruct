@@ -66,6 +66,9 @@ OCR_PREAMBLE = """\\documentclass[11pt]{__DOCUMENT_CLASS__}
 @dataclass
 class OcrConfig:
     role: RoleConfig = field(default_factory=RoleConfig)
+    backend: str = "api"
+    codex_model: str = ""
+    codex_reasoning_effort: str = "medium"
     pages: str = ""  # 如 "1-5" 或 "1,3,7"；空 = 全部
     dpi: int = 150
     concurrency: int = 1
@@ -328,9 +331,18 @@ def ocr_page_needs_retry(text: str) -> bool:
 def transcribe_page(client: LLMClient, png_bytes: bytes, page_no: int) -> str:
     user = f"请转写第 {page_no} 页。只输出 LaTeX 代码块。"
     try:
-        raw = client.chat_vision(OCR_SYSTEM_PROMPT, user, encode_image(png_bytes))
+        chat_vision_bytes = getattr(client, "chat_vision_bytes", None)
+        if callable(chat_vision_bytes):
+            # Codex CLI 直接接收受控临时图片路径，避免生成巨大的 Base64 提示。
+            raw = chat_vision_bytes(OCR_SYSTEM_PROMPT, user, png_bytes)
+        else:
+            raw = client.chat_vision(OCR_SYSTEM_PROMPT, user, encode_image(png_bytes))
     except LLMError as e:
         msg = str(e)
+        # Codex 自带明确的登录/模型/额度指引；不要把本机后端错误误报成
+        # 兼容 API 或 Qwen 模型配置问题。
+        if getattr(client, "backend", "") == "codex_cli":
+            raise
         lower = msg.lower()
         if any(token in lower for token in ("http 401", "http error 401", "http 403", "http error 403")):
             raise LLMError(

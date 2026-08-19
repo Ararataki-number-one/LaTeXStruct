@@ -143,6 +143,11 @@ def add_usage(total: Dict, usage: Dict, model: str) -> Dict:
     for key, value in (usage or {}).items():
         if isinstance(value, (int, float)):
             total[key] = total.get(key, 0) + value
+    # 仅保留由本地客户端产生的固定元数据；供应商响应中的任意字符串不透传到 UI。
+    if (usage or {}).get("backend") == "codex_cli":
+        total["backend"] = "codex_cli"
+    if (usage or {}).get("billing_mode") == "chatgpt_subscription":
+        total["billing_mode"] = "chatgpt_subscription"
     tokens = usage_tokens(usage)
     # 嵌套的缓存命中字段不会被上面的顶层数值循环处理，单独汇总。
     if "cached_tokens" not in usage and tokens["cached_tokens"]:
@@ -188,7 +193,15 @@ def summarize_ai_usage(ai_usage: Dict) -> Dict:
                 round(float(estimated_cost), 6) if estimated_cost is not None else None
             ),
         }
-    return {
+        if raw.get("backend") == "codex_cli":
+            roles[role]["backend"] = "codex_cli"
+        if raw.get("billing_mode") == "chatgpt_subscription":
+            roles[role]["billing_mode"] = "chatgpt_subscription"
+    backends = {v.get("backend") for v in roles.values() if v.get("backend")}
+    billing_modes = {
+        v.get("billing_mode") for v in roles.values() if v.get("billing_mode")
+    }
+    summary = {
         "input_tokens": input_total,
         "output_tokens": output_total,
         "total_tokens": token_total,
@@ -198,3 +211,11 @@ def summarize_ai_usage(ai_usage: Dict) -> Dict:
         "estimated": True,
         "note": "费用为公开单价估算，不含优惠、免费额度与供应商最终结算差异",
     }
+    if len(backends) == 1:
+        summary["backend"] = next(iter(backends))
+    if len(billing_modes) == 1:
+        summary["billing_mode"] = next(iter(billing_modes))
+    if summary.get("billing_mode") == "chatgpt_subscription":
+        summary["estimated"] = False
+        summary["note"] = "本次分析计入 ChatGPT/Codex 订阅额度，不使用按量 API 计费"
+    return summary

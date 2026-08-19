@@ -498,6 +498,79 @@ def test_keyring_delete_failure_aborts_and_keeps_old_secret():
         _restore(tmp)
 
 
+def test_codex_analysis_settings_roundtrip_into_ai_config():
+    tmp = _tmp()
+    try:
+        with _isolated_env():
+            cfg = config.AppConfig(
+                analysis_backend="codex_cli",
+                codex_model="openai/gpt-5.4",
+                codex_reasoning_effort="xhigh",
+                keyring=False,
+            )
+            config.save_config(cfg, backend=FakeBackend())
+            on_disk = json.loads(open(config.CONFIG_PATH, encoding="utf-8").read())
+            assert on_disk["analysis_backend"] == "codex_cli"
+            assert on_disk["codex_model"] == "openai/gpt-5.4"
+            assert on_disk["codex_reasoning_effort"] == "xhigh"
+
+            loaded = config.load_config(backend=FakeBackend())
+            ai_cfg = loaded.to_ai_config()
+            assert loaded.masked()["analysis_backend"] == "codex_cli"
+            assert ai_cfg.analysis_backend == "codex_cli"
+            assert ai_cfg.codex_model == "openai/gpt-5.4"
+            assert ai_cfg.codex_reasoning_effort == "xhigh"
+    finally:
+        _restore(tmp)
+
+
+def test_invalid_persisted_codex_settings_fall_back_safely():
+    tmp = _tmp()
+    try:
+        with open(config.CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump({
+                "analysis_backend": "automatic-api-fallback",
+                "codex_model": 'gpt-5\" --yolo',
+                "codex_reasoning_effort": "maximum",
+            }, f)
+        with _isolated_env():
+            loaded = config.load_config(backend=FakeBackend())
+        assert loaded.analysis_backend == "api"
+        assert loaded.codex_model == ""
+        assert loaded.codex_reasoning_effort == "medium"
+    finally:
+        _restore(tmp)
+
+
+def test_invalid_codex_settings_are_rejected_before_config_is_replaced():
+    tmp = _tmp()
+    try:
+        original = {
+            "analysis_backend": "api",
+            "codex_model": "",
+            "codex_reasoning_effort": "medium",
+        }
+        with open(config.CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(original, f)
+        cfg = config.AppConfig(
+            analysis_backend="codex_cli",
+            codex_model='gpt-5\" --config forced_login_method="apikey"',
+            codex_reasoning_effort="high",
+            keyring=False,
+        )
+
+        try:
+            config.save_config(cfg, backend=FakeBackend())
+        except ValueError as exc:
+            assert "模型 ID" in str(exc)
+        else:
+            raise AssertionError("非法 Codex 模型不得保存")
+
+        assert json.loads(open(config.CONFIG_PATH, encoding="utf-8").read()) == original
+    finally:
+        _restore(tmp)
+
+
 def main():
     import traceback
 

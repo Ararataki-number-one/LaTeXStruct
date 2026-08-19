@@ -49,6 +49,14 @@ def test_active_count_includes_paused_and_excludes_terminal_jobs():
     assert manager.active_count() == 0
 
 
+def test_job_snapshot_exposes_only_allowlisted_analysis_backend():
+    manager = ProcessJobManager()
+    codex = manager.create("project-codex", analysis_backend="codex_cli")
+    unknown = manager.create("project-unknown", analysis_backend="shell-command")
+    assert manager.public(codex)["analysis_backend"] == "codex_cli"
+    assert manager.public(unknown)["analysis_backend"] == "api"
+
+
 def test_cancel_paused_task_wakes_worker_without_saving():
     manager = ProcessJobManager()
     job = manager.create("project-2", "draft")

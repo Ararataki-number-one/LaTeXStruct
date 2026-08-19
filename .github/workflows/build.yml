@@ -173,6 +173,13 @@ jobs:
           $dir = Join-Path $env:LOCALAPPDATA "Programs\LaTeXStruct-Smoke"
           Start-Process -FilePath $setup.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$dir" -Wait
           if (-not (Test-Path "$dir\LaTeXStruct.exe")) { Write-Error "安装后未找到 exe"; exit 1 }
+          $notices = "$dir\THIRD_PARTY_NOTICES.txt"
+          if (-not (Test-Path $notices)) { Write-Error "安装后未找到第三方许可证"; exit 1 }
+          if (-not (Test-Path "$dir\LICENSE.txt")) { Write-Error "安装后未找到项目许可证"; exit 1 }
+          $noticeText = Get-Content $notices -Raw
+          foreach ($required in @('OpenAI Codex CLI 0.144.4','Apache License','Version 2.0','OpenAI Codex','Ratatui')) {
+            if (-not $noticeText.Contains($required)) { Write-Error "第三方许可证缺少：$required"; exit 1 }
+          }
           $proc = Start-Process -FilePath "$dir\LaTeXStruct.exe" -ArgumentList "--server","--port","8099" -PassThru
           $ok = $false
           $observedVersion = "<未响应>"
@@ -243,7 +250,7 @@ jobs:
         run: |
           # 只需在发布时更换这一处基线。测试下面的完整链路：
           # schedule_installer_after_exit -> 旧应用退出 -> 安装 -> 新应用重启。
-          $previousVersion = '1.1.9'
+          $previousVersion = '1.1.10'
           $previousTag = "v$previousVersion"
           $headers = @{
             'User-Agent' = 'latexstruct-upgrade-smoke'
@@ -301,7 +308,7 @@ jobs:
             $env:LATEXSTRUCT_SMOKE_INSTALLER = $currentSetup.FullName
             $env:LATEXSTRUCT_SMOKE_OLD_PID = [string]$oldProc.Id
             $env:LATEXSTRUCT_SMOKE_TARGET = $installedExe
-            $helperOutput = python -c "import os; from latexstruct.updater import schedule_installer_after_exit; print(schedule_installer_after_exit(os.environ['LATEXSTRUCT_SMOKE_INSTALLER'], app_pid=int(os.environ['LATEXSTRUCT_SMOKE_OLD_PID']), target_executable=os.environ['LATEXSTRUCT_SMOKE_TARGET'], previous_version='1.1.9', expected_version=os.environ['APP_VERSION']).pid)"
+            $helperOutput = python -c "import os; from latexstruct.updater import schedule_installer_after_exit; print(schedule_installer_after_exit(os.environ['LATEXSTRUCT_SMOKE_INSTALLER'], app_pid=int(os.environ['LATEXSTRUCT_SMOKE_OLD_PID']), target_executable=os.environ['LATEXSTRUCT_SMOKE_TARGET'], previous_version='1.1.10', expected_version=os.environ['APP_VERSION']).pid)"
             if ($LASTEXITCODE -ne 0) {
               Write-Error '应用内更新 helper 调度失败'; exit 1
             }
@@ -421,12 +428,26 @@ jobs:
           Get-ChildItem dist/LaTeXStruct-setup-*.exe | ForEach-Object {
             & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
           }
+      - name: 打包便携版与第三方许可证
+        shell: pwsh
+        run: |
+          $notice = 'packaging/THIRD_PARTY_NOTICES.txt'
+          if (-not (Test-Path $notice)) { Write-Error '缺少第三方许可证'; exit 1 }
+          $portable = "dist/LaTeXStruct-portable-$env:APP_VERSION.zip"
+          Compress-Archive -LiteralPath 'dist/LaTeXStruct.exe','LICENSE',$notice -DestinationPath $portable
+          $verifyDir = Join-Path $env:RUNNER_TEMP 'latexstruct-portable-license-check'
+          Expand-Archive -LiteralPath $portable -DestinationPath $verifyDir
+          foreach ($requiredFile in @('LaTeXStruct.exe','LICENSE','THIRD_PARTY_NOTICES.txt')) {
+            if (-not (Test-Path (Join-Path $verifyDir $requiredFile))) {
+              Write-Error "便携包缺少 $requiredFile"; exit 1
+            }
+          }
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: LaTeXStruct-v${{ env.APP_VERSION }}
           path: |
-            dist/LaTeXStruct.exe
+            dist/LaTeXStruct-portable-*.zip
             dist/LaTeXStruct-setup-*.exe
       - name: 生成当前版本中文发布说明
         if: startsWith(github.ref, 'refs/tags/v')
@@ -447,6 +468,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/LaTeXStruct.exe
+            dist/LaTeXStruct-portable-*.zip
             dist/LaTeXStruct-setup-*.exe
           body_path: dist/RELEASE_NOTES.md

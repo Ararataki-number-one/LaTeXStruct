@@ -16,6 +16,7 @@ server = [
     "python-multipart",
     "sqlalchemy",
     "openai",
+    "openai-codex-cli-bin==0.144.4",
     "pywebview",
     "PyMuPDF>=1.24,<2",
 ]

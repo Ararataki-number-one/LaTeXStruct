@@ -96,6 +96,42 @@ def _ocr_retry_wait(attempt: int) -> None:
     time.sleep(min(4.0, 0.5 * (2 ** max(0, attempt - 1))))
 
 
+def _build_ocr_client(
+    cfg: AppConfig,
+    base_url: str = "",
+    model: str = "",
+    api_key: str = "",
+):
+    """按全局后端创建视觉客户端；Codex 模式绝不接触或回退到 API 配置。"""
+    from ..core.ai import LLMClient, LLMError, RoleConfig
+
+    ocr_cfg = cfg.to_ocr_config()
+    if ocr_cfg.backend == "codex_cli":
+        from ..core.codex_cli import CodexCLIClient
+
+        client = CodexCLIClient(
+            model=ocr_cfg.codex_model,
+            reasoning_effort=ocr_cfg.codex_reasoning_effort,
+        )
+        return client, client.cfg.model, "codex_cli"
+    if ocr_cfg.backend != "api":
+        raise LLMError(f"不支持的 OCR 后端：{ocr_cfg.backend}")
+    configured_role = ocr_cfg.role
+    selected_base_url = base_url or configured_role.base_url
+    selected_model = model or configured_role.model
+    selected_key = api_key
+    if (
+        not selected_key
+        and selected_base_url.rstrip("/") == configured_role.base_url.rstrip("/")
+    ):
+        selected_key = configured_role.api_key
+    return (
+        LLMClient(RoleConfig(selected_base_url, selected_model, selected_key)),
+        selected_model,
+        "api",
+    )
+
+
 def _public_ocr_job(job: dict) -> dict:
     """在同一把锁中生成可供轮询/控制端点共用的完整快照。"""
     with _ocr_jobs_lock:
@@ -137,6 +173,9 @@ def _public_ocr_job(job: dict) -> dict:
         public["raw_revision"] = int(job.get("raw_revision") or 0)
         public["raw_chars"] = int(job.get("raw_chars") or len(job.get("raw_tex") or ""))
         public["state_revision"] = int(job.get("state_revision") or 0)
+        # 旧任务没有该字段时明确标为 unknown；绝不能拿当前设置替它猜测，
+        # 否则切换后端后历史任务会显示错误的计费来源。
+        public["backend"] = str(job.get("backend") or "unknown")
         public["can_pause"] = job.get("status") == "running"
         public["can_resume"] = job.get("status") in {"pausing", "paused"}
         public["can_cancel"] = False
@@ -1154,6 +1193,9 @@ class BatchRejectRequest(BaseModel):
 
 
 class ConfigRequest(BaseModel):
+    analysis_backend: Optional[str] = None
+    codex_model: Optional[str] = None
+    codex_reasoning_effort: Optional[str] = None
     decide_base_url: Optional[str] = None
     decide_model: Optional[str] = None
     decide_api_key: Optional[str] = None
@@ -2042,10 +2084,14 @@ def create_app(updated_from: str = "") -> FastAPI:
         return {"ok": True, "folder": "下载/LaTeXStruct"}
 
     def _run_project_impl(pid: str, exclude: set, reuse_decisions: bool = False,
-                          progress_callback=None, control_callback=None, commit_callback=None):
+                          progress_callback=None, control_callback=None, commit_callback=None,
+                          config_snapshot: Optional[AppConfig] = None):
         p = get_store().get(pid)
         text = get_store().read_source(pid)
-        cfg = get_config()
+        # Background tasks receive the complete settings snapshot captured when the
+        # user started them.  A later settings save must not change either their
+        # billing backend or their model halfway through the launch boundary.
+        cfg = config_snapshot if config_snapshot is not None else get_config()
         mode = p["mode"]
         from ..core.template import normalize_template_id
 
@@ -2282,7 +2328,8 @@ def create_app(updated_from: str = "") -> FastAPI:
         }
 
     def _run_project(pid: str, exclude: set, reuse_decisions: bool = False,
-                     progress_callback=None, control_callback=None, commit_callback=None):
+                     progress_callback=None, control_callback=None, commit_callback=None,
+                     config_snapshot: Optional[AppConfig] = None):
         # Includes the final store commit. RLock is required because review
         # routes hold this transaction while updating meta.json before rerunning.
         with _project_lock(pid):
@@ -2295,6 +2342,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                     progress_callback=progress_callback,
                     control_callback=control_callback,
                     commit_callback=commit_callback,
+                    config_snapshot=config_snapshot,
                 )
             finally:
                 _end_pipeline_run()
@@ -2329,7 +2377,16 @@ def create_app(updated_from: str = "") -> FastAPI:
                 meta = json.loads(
                     Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8")
                 )
-                job = _process_jobs.create(pid, get_store().read_source(pid))
+                launch_cfg = deepcopy(get_config()) if meta.get("mode") == "ai" else None
+                job = _process_jobs.create(
+                    pid,
+                    get_store().read_source(pid),
+                    analysis_backend=(
+                        launch_cfg.analysis_backend
+                        if launch_cfg is not None
+                        else "api"
+                    ),
+                )
         jid = job["id"]
 
         def worker():
@@ -2342,6 +2399,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                     ),
                     control_callback=lambda: _process_jobs.control(jid),
                     commit_callback=lambda: _process_jobs.begin_commit(jid),
+                    config_snapshot=launch_cfg,
                 )
                 _process_jobs.complete(jid, processed)
             except ProcessingCancelled:
@@ -2541,6 +2599,13 @@ def create_app(updated_from: str = "") -> FastAPI:
     def get_cfg():
         return get_config().masked()
 
+    @app.get("/api/codex/status")
+    def get_codex_status():
+        """只探测 runtime 与 ChatGPT 登录类型，不发送模型请求。"""
+        from ..core.codex_cli import codex_status
+
+        return codex_status()
+
     @app.put("/api/config")
     def put_cfg(req: ConfigRequest):
         global _config
@@ -2640,6 +2705,7 @@ def create_app(updated_from: str = "") -> FastAPI:
             "imported_processed": None,
             "error": "",
             "usage": {},
+            "backend": "unknown",
             "created": time.time(),
             "updated": time.time(),
             "state_revision": 1,
@@ -2689,6 +2755,12 @@ def create_app(updated_from: str = "") -> FastAPI:
         model: str,
         api_key: str,
     ):
+        # 启动时冻结后端选择；后续设置变化不应改变本任务的重试/计费身份。
+        launch_cfg = get_config()
+        with _ocr_jobs_lock:
+            job["backend"] = str(launch_cfg.analysis_backend or "api")
+            _bump_ocr_state(job)
+
         def _transcribe_one(job, client, page_no: int, png_path: str, max_attempts: int = 2):
             """转写单页；非空结果始终保留，仅明确暂时性失败自动重试。"""
             from ..ocr import ocr_page_needs_retry, ocr_page_needs_review, transcribe_page
@@ -2853,23 +2925,14 @@ def create_app(updated_from: str = "") -> FastAPI:
             _bump_ocr_state(job)
 
         def worker():
-            from ..core.ai import LLMClient, RoleConfig
-
             try:
-                cfg = get_config()
-                configured_role = cfg.to_ocr_config().role
-                selected_base_url = base_url or configured_role.base_url
-                selected_model = model or configured_role.model
-                selected_key = api_key
-                if (
-                    not selected_key
-                    and selected_base_url.rstrip("/") == configured_role.base_url.rstrip("/")
-                ):
-                    selected_key = configured_role.api_key
-                client = LLMClient(RoleConfig(selected_base_url, selected_model, selected_key))
+                client, selected_model, backend = _build_ocr_client(
+                    launch_cfg, base_url, model, api_key,
+                )
                 with _ocr_jobs_lock:
                     job["client"] = client
                     job["model"] = selected_model
+                    job["backend"] = backend
                     job["phase"] = "逐页渲染与忠实转写"
                     _bump_ocr_state(job)
                 for index, page_no in enumerate(page_nos, start=1):

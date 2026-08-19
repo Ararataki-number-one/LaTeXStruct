@@ -4,6 +4,7 @@ import { api } from "./api";
 import { apiAuthority, sameApiAuthority } from "./providerUrl";
 
 const OCR_SESSION_JOB_KEY = "latexstruct-current-ocr-job-v1";
+const CODEX_BACKEND = "codex_cli";
 // 兼容 v1.1.2 的 10 位旧任务号；新任务使用完整 UUID4 hex（128-bit）。
 const OCR_JOB_ID_RE = /^(?:[0-9a-f]{10}|[0-9a-f]{32})$/;
 const OCR_ACTIVE_STATUSES = new Set(["starting", "running", "pausing", "paused"]);
@@ -88,7 +89,7 @@ function matchingPreset(baseUrl, model, providers) {
 
 function ocrReadiness(setup, overrideModel, customVisionConfirmed) {
   if (setup.status === "loading") {
-    return { blocked: true, reason: "正在检查视觉模型与 API Key……" };
+    return { blocked: true, reason: "正在检查 OCR 引擎……" };
   }
   if (setup.status === "error") {
     return {
@@ -98,6 +99,22 @@ function ocrReadiness(setup, overrideModel, customVisionConfirmed) {
   }
 
   const cfg = setup.config || {};
+  if (cfg.analysis_backend === CODEX_BACKEND) {
+    if (!setup.codexStatus?.ready) {
+      return {
+        blocked: true,
+        codex: true,
+        reason: setup.codexStatusError
+          || setup.codexStatus?.message
+          || "本机 Codex 尚未就绪。请在设置中完成 ChatGPT 登录并刷新状态。",
+      };
+    }
+    return {
+      blocked: false,
+      codex: true,
+      reason: "OCR 已就绪：图片/PDF 将由 Codex 视觉能力处理，使用 ChatGPT/Codex 订阅额度。需要联网，并非离线识别。",
+    };
+  }
   const baseUrl = cfg.ocr_base_url || cfg.decide_base_url || "";
   const effectiveModel = overrideModel.trim() || cfg.ocr_model || cfg.decide_model || "";
   const authority = apiAuthority(baseUrl);
@@ -790,10 +807,24 @@ export default function Ocr({ onImport, onOpenSettings }) {
     Promise.all([
       api("/api/config").then((r) => r.json()),
       api("/api/providers").then((r) => r.json()),
-    ]).then(([config, data]) => {
-      if (active) {
-        setSetup({ status: "ready", config, providers: data.providers || [] });
+    ]).then(async ([config, data]) => {
+      let codexStatus = null;
+      let codexStatusError = "";
+      if (config.analysis_backend === CODEX_BACKEND) {
+        try {
+          codexStatus = await api("/api/codex/status").then((response) => response.json());
+        } catch (error) {
+          codexStatusError = error.message;
+        }
       }
+      if (!active) return;
+      setSetup({
+        status: "ready",
+        config,
+        providers: data.providers || [],
+        codexStatus,
+        codexStatusError,
+      });
     }).catch(() => {
       if (active) setSetup({ status: "error", config: null, providers: [] });
     });
@@ -1043,6 +1074,9 @@ export default function Ocr({ onImport, onOpenSettings }) {
       ? `完成 ${totalPages}/${totalPages} 页`
       : `已处理 ${processedPages}/${totalPages} 页`;
   const readiness = ocrReadiness(setup, model, customVisionConfirmed);
+  const usesCodex = setup.config?.analysis_backend === CODEX_BACKEND;
+  const jobBackend = job?.analysis_backend || job?.ai_backend || job?.backend || job?.cost?.backend;
+  const jobUsesCodex = jobBackend === CODEX_BACKEND || (usesCodex && !jobBackend);
   const currentTaskIndex = current == null ? 0 : (job?.pages?.[current]?.task_index || 0);
 
   return (
@@ -1054,7 +1088,9 @@ export default function Ocr({ onImport, onOpenSettings }) {
           role={readiness.blocked ? "alert" : "status"}
         >
           <div>
-            <b>{readiness.blocked ? "OCR 尚未就绪" : "视觉模型与 Key 已就绪"}</b>
+            <b>{readiness.blocked
+              ? "OCR 尚未就绪"
+              : readiness.codex ? "Codex 视觉 OCR 已就绪" : "视觉模型与 Key 已就绪"}</b>
             <p>{readiness.reason}</p>
             {readiness.needsConfirmation && (
               <label className="toggle-line">
@@ -1161,19 +1197,19 @@ export default function Ocr({ onImport, onOpenSettings }) {
             </button>
           </div>
         )}
-        <details className="advanced">
-          <summary>临时指定其他视觉模型（一般无需填写）</summary>
-          <div className="row">
-            <input
-              placeholder="视觉模型 ID；留空使用设置页选择的模型"
-              value={model}
-              onChange={(e) => {
-                setModel(e.target.value);
-                setCustomVisionConfirmed(false);
-              }}
-            />
-          </div>
-        </details>
+        {!usesCodex && <details className="advanced">
+            <summary>临时指定其他视觉模型（一般无需填写）</summary>
+            <div className="row">
+              <input
+                placeholder="视觉模型 ID；留空使用设置页选择的模型"
+                value={model}
+                onChange={(e) => {
+                  setModel(e.target.value);
+                  setCustomVisionConfirmed(false);
+                }}
+              />
+            </div>
+          </details>}
         {job && (
           <div className={`process-card process-${job.status}`}>
             <div className="process-summary">
@@ -1189,8 +1225,11 @@ export default function Ocr({ onImport, onOpenSettings }) {
                 <span>源 PDF：共 {job.source_total} 页，本次 {totalPages} 页</span>
               )}
               <span>Token：{(job.cost?.total_tokens || job.usage?.total_tokens || 0).toLocaleString()}</span>
-              <span>费用：{job.cost?.estimated_cost_cny == null ? "暂无估价" :
-                `约 ¥${job.cost.estimated_cost_cny < 0.01 ? job.cost.estimated_cost_cny.toFixed(4) : job.cost.estimated_cost_cny.toFixed(2)}`}</span>
+              {jobUsesCodex && <span>引擎：Codex CLI（云端视觉）</span>}
+              <span>费用：{jobUsesCodex
+                ? "Codex 订阅额度（非 API 计费）"
+                : job.cost?.estimated_cost_cny == null ? "暂无估价"
+                  : `约 ¥${job.cost.estimated_cost_cny < 0.01 ? job.cost.estimated_cost_cny.toFixed(4) : job.cost.estimated_cost_cny.toFixed(2)}`}</span>
               {job.status === "done" && <span>本次 {totalPages}/{totalPages} 页全部完成</span>}
               {job.status === "partial" && (
                 <span>已成功 {successfulPages}/{totalPages} 页，请重试失败页</span>

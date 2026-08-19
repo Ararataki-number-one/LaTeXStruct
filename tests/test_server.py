@@ -72,6 +72,67 @@ def _client(tmp):
     return TestClient(srv.create_app())
 
 
+def test_build_ocr_client_uses_codex_for_vision_without_api_fallback():
+    from latexstruct.config import AppConfig
+    from latexstruct.core.codex_cli import CodexCLIClient
+
+    cfg = AppConfig(
+        analysis_backend="codex_cli",
+        codex_model="gpt-5.4",
+        codex_reasoning_effort="high",
+        ocr_base_url="https://paid.example.invalid/v1",
+        ocr_model="paid-vision-model",
+        ocr_api_key="stored-paid-secret",
+    )
+
+    client, model, backend = srv._build_ocr_client(
+        cfg,
+        base_url="https://override.example.invalid/v1",
+        model="override-paid-model",
+        api_key="request-paid-secret",
+    )
+
+    assert isinstance(client, CodexCLIClient)
+    assert (model, backend) == ("gpt-5.4", "codex_cli")
+    assert client.reasoning_effort == "high"
+    assert client.cfg.base_url == ""
+    assert client.cfg.api_key == ""
+
+
+def test_build_ocr_client_preserves_compatible_api_selection():
+    from latexstruct.config import AppConfig
+    from latexstruct.core.ai import LLMClient
+
+    cfg = AppConfig(
+        analysis_backend="api",
+        ocr_base_url="https://vision.example.invalid/v1",
+        ocr_model="stored-model",
+        ocr_api_key="stored-secret",
+    )
+
+    client, model, backend = srv._build_ocr_client(cfg)
+
+    assert isinstance(client, LLMClient)
+    assert (model, backend) == ("stored-model", "api")
+    assert client.cfg.base_url == "https://vision.example.invalid/v1"
+    assert client.cfg.api_key == "stored-secret"
+
+
+def test_public_ocr_job_uses_stored_backend_and_never_current_settings():
+    from latexstruct.config import AppConfig
+
+    old_config = srv._config
+    try:
+        srv._config = AppConfig(analysis_backend="api")
+        assert srv._public_ocr_job({"status": "done", "backend": "codex_cli"})[
+            "backend"
+        ] == "codex_cli"
+        srv._config = AppConfig(analysis_backend="codex_cli")
+        assert srv._public_ocr_job({"status": "done"})["backend"] == "unknown"
+    finally:
+        srv._config = old_config
+
+
 def _wait_for_json(client, path, predicate, timeout=15.0, interval=0.02):
     """Poll a background endpoint until its JSON state satisfies ``predicate``."""
     deadline = time.monotonic() + timeout
@@ -625,6 +686,24 @@ def test_qwen_provider_presets_are_public_and_valid():
         assert qwen["base_url"].endswith("/compatible-mode/v1")
         assert qwen["api_key_env"] == "DASHSCOPE_API_KEY"
         assert all("api_key" not in p for p in providers)
+
+
+def test_codex_status_endpoint_is_read_only_and_returns_public_fields():
+    public_status = {
+        "available": True,
+        "authenticated": True,
+        "ready": True,
+        "version": "codex-cli test",
+        "message": "ready",
+        "action": "none",
+    }
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        with patch("latexstruct.core.codex_cli.codex_status", return_value=public_status) as probe:
+            response = c.get("/api/codex/status")
+        assert response.status_code == 200
+        assert response.json() == public_status
+        probe.assert_called_once_with()
 
 
 def test_ocr_multipart_and_jpeg_preview():
@@ -1646,6 +1725,76 @@ def test_background_process_can_pause_preview_resume_and_finish():
             )
         assert state["status"] == "done", state
         assert c.get(f"/api/projects/{pid}/result").status_code == 200
+
+
+def test_background_process_freezes_complete_ai_config_at_start():
+    """A later settings change cannot alter an already advertised backend/model."""
+    from latexstruct.config import AppConfig
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        srv._config = AppConfig(
+            analysis_backend="codex_cli",
+            codex_model="snapshot-model",
+            codex_reasoning_effort="high",
+        )
+        pid = c.post(
+            "/api/projects",
+            json={"text": SAMPLE, "name": "frozen-ai-config", "mode": "ai"},
+        ).json()["id"]
+        worker_entered = threading.Event()
+        release_worker = threading.Event()
+        captured = {}
+        original_pipeline = srv.run_pipeline
+
+        def blocked_begin_pipeline():
+            worker_entered.set()
+            assert release_worker.wait(3)
+
+        def capture_pipeline(*args, **kwargs):
+            ai_config = kwargs["ai_config"]
+            captured.update({
+                "backend": ai_config.analysis_backend,
+                "model": ai_config.codex_model,
+                "effort": ai_config.codex_reasoning_effort,
+            })
+            # Exercise the rest of the transaction without issuing a model request.
+            kwargs["mode"] = "rule"
+            kwargs["ai_config"] = None
+            return original_pipeline(*args, **kwargs)
+
+        unavailable = {
+            "available": False, "ok": None, "pages": 0, "errors": [], "log": "",
+        }
+        with (
+            patch.object(srv, "_begin_pipeline_run", blocked_begin_pipeline),
+            patch.object(srv, "run_pipeline", capture_pipeline),
+            patch("latexstruct.core.compilecheck.compile_latex", return_value=unavailable),
+        ):
+            started = c.post(f"/api/projects/{pid}/process/start")
+            assert started.status_code == 200
+            assert started.json()["analysis_backend"] == "codex_cli"
+            assert worker_entered.wait(1)
+
+            # Simulate an overlapping settings save mutating the cached object.  The
+            # worker must retain the deep copy captured by process/start.
+            srv._config.analysis_backend = "api"
+            srv._config.codex_model = "changed-after-start"
+            srv._config.codex_reasoning_effort = "low"
+            release_worker.set()
+            state = _wait_for_json(
+                c,
+                f"/api/projects/{pid}/process/status",
+                lambda item: item["status"] in {"done", "blocked", "error", "cancelled"},
+            )
+
+        assert state["status"] == "done", state
+        assert state["analysis_backend"] == "codex_cli"
+        assert captured == {
+            "backend": "codex_cli",
+            "model": "snapshot-model",
+            "effort": "high",
+        }
 
 
 def test_background_process_commits_ai_review_without_runtime_patch_objects():

@@ -48,6 +48,52 @@ class FakeVisionClient:
         return f"```latex\nTheorem 1. Statement on page {page}.\n```"
 
 
+def test_transcribe_page_prefers_direct_bytes_for_codex_compatible_client():
+    class BytesVisionClient:
+        last_usage = {}
+
+        def __init__(self):
+            self.received = None
+
+        def chat_vision_bytes(self, system, user, image_bytes):
+            self.received = (system, user, image_bytes)
+            return "```latex\nDirect image path.\n```"
+
+        def chat_vision(self, *_args):
+            raise AssertionError("Codex-compatible client must not receive a Base64 Data URI")
+
+    image = b"\x89PNG\r\n\x1a\n" + b"pixels"
+    client = BytesVisionClient()
+
+    result = transcribe_page(client, image, 4)
+
+    assert result == "% Page 4\nDirect image path."
+    assert client.received[2] is image
+
+
+def test_codex_vision_error_is_not_rewritten_as_qwen_api_advice():
+    class FailedCodexClient:
+        backend = "codex_cli"
+        last_usage = {}
+
+        def chat_vision_bytes(self, *_args):
+            raise LLMError("所选 Codex image model unavailable")
+
+    try:
+        transcribe_page(
+            FailedCodexClient(),
+            b"\x89PNG\r\n\x1a\n" + b"pixels",
+            1,
+        )
+    except LLMError as exc:
+        message = str(exc)
+        assert message == "所选 Codex image model unavailable"
+        assert "Qwen" not in message
+        assert "API Key" not in message
+    else:
+        raise AssertionError("Codex OCR failure must fail closed")
+
+
 def test_parse_page_range():
     assert parse_page_range("", 10) == list(range(1, 11))
     assert parse_page_range("1-3,7", 10) == [1, 2, 3, 7]

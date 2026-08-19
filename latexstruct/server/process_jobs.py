@@ -52,7 +52,12 @@ class ProcessJobManager:
                 if self._latest_by_pid.get(pid) == jid:
                     self._latest_by_pid.pop(pid, None)
 
-    def create(self, pid: str, source_preview: str = "") -> dict:
+    def create(
+        self,
+        pid: str,
+        source_preview: str = "",
+        analysis_backend: str = "api",
+    ) -> dict:
         self.cleanup()
         with self._changed:
             existing = self._active_locked(pid)
@@ -79,6 +84,9 @@ class ProcessJobManager:
                 "preview_label": "原始内容（尚未生成草稿）",
                 "usage": {},
                 "cost": summarize_ai_usage({}),
+                "analysis_backend": (
+                    "codex_cli" if analysis_backend == "codex_cli" else "api"
+                ),
                 "events": [{"at": now, "phase": "queued", "message": "任务已创建"}],
                 "result": None,
                 "error": "",
