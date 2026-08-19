@@ -196,6 +196,26 @@ def render_markdown(reports: List[Dict]) -> str:
             f"| {r['name']} | {'OK' if c['content_invariant'] else 'FAIL'} | "
             f"{'OK' if c['invariants_ok'] else 'FAIL'} | {'OK' if c['env_balance'] else 'FAIL'} | {comp_s} |"
         )
+    compile_failures = [
+        r for r in reports
+        if r["content"].get("compile") and not r["content"]["compile"].get("ok")
+    ]
+    if compile_failures:
+        L.append("")
+        L.append("## 编译诊断")
+        L.append("")
+        for r in compile_failures:
+            c = r["content"]
+            for phase, label in (("compile_before", "修改前"), ("compile", "修改后")):
+                result = c.get(phase) or {}
+                if not result.get("available"):
+                    details = "编译器不可用"
+                elif result.get("ok"):
+                    details = f"成功 {result.get('pages', 0)} 页"
+                else:
+                    errors = result.get("errors") or ["编译失败，但日志中未提取到 TeX 错误"]
+                    details = "; ".join(str(error).replace("|", "\\|") for error in errors)
+                L.append(f"- `{r['name']}` {label}：{details}")
     if any(r["label_errors"] for r in reports):
         L.append("")
         L.append("## 金标数据问题")

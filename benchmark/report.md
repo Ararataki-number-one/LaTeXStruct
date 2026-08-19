@@ -1,6 +1,6 @@
 # LaTeXStruct Benchmark
 
-- 金标集数：14 · 标签总数：200 · TP 200 / FP 0 / FN 0
+- 金标集数：14 · 标签总数：198 · TP 198 / FP 0 / FN 0
 - 总 Precision 100.00% · Recall 100.00% · F1 100.00%
 - 正文零改动率：100% · 引用保持率：100% · 编译成功率：100%（1 组参与编译）
 
@@ -28,11 +28,11 @@
 | extremal_1 | theorem-like:proposition | 14 | 0 | 0 | 100.00% | 100.00% | 100.00% |
 | extremal_1 | theorem-like:theorem | 1 | 0 | 0 | 100.00% | 100.00% | 100.00% |
 | extremal_2 | proof | 6 | 0 | 0 | 100.00% | 100.00% | 100.00% |
-| extremal_2 | theorem-like | 11 | 0 | 0 | 100.00% | 100.00% | 100.00% |
+| extremal_2 | theorem-like | 9 | 0 | 0 | 100.00% | 100.00% | 100.00% |
 | extremal_2 | theorem-like:example | 1 | 0 | 0 | 100.00% | 100.00% | 100.00% |
-| extremal_2 | theorem-like:lemma | 4 | 0 | 0 | 100.00% | 100.00% | 100.00% |
+| extremal_2 | theorem-like:lemma | 3 | 0 | 0 | 100.00% | 100.00% | 100.00% |
 | extremal_2 | theorem-like:proposition | 3 | 0 | 0 | 100.00% | 100.00% | 100.00% |
-| extremal_2 | theorem-like:theorem | 3 | 0 | 0 | 100.00% | 100.00% | 100.00% |
+| extremal_2 | theorem-like:theorem | 2 | 0 | 0 | 100.00% | 100.00% | 100.00% |
 | extremal_3 | proof | 5 | 0 | 0 | 100.00% | 100.00% | 100.00% |
 | extremal_3 | theorem-like | 6 | 0 | 0 | 100.00% | 100.00% | 100.00% |
 | extremal_3 | theorem-like:theorem | 6 | 0 | 0 | 100.00% | 100.00% | 100.00% |

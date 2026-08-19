@@ -75,6 +75,10 @@ def test_compile_regression_fails_benchmark_gate():
         result = evaluate_golden(GOLDEN_DIR / "basic_book.json", compile_check=True)
     assert result["content"]["compile_gate"] is False
     assert result["ok"] is False
+    report = render_markdown([result])
+    assert "## 编译诊断" in report
+    assert "`basic-book` 修改前：成功 1 页" in report
+    assert "`basic-book` 修改后：broken" in report
 
 
 def main():
