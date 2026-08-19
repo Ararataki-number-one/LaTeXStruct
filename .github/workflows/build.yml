@@ -74,14 +74,15 @@ jobs:
           & $tlmgr.FullName update --self
           if ($LASTEXITCODE -ne 0) { Write-Error "TinyTeX 包管理器更新失败"; exit 1 }
           # amssymb.sty 属于 amsfonts，amsthm.sty 属于 amscls；这里必须使用
-          # TeX Live 的发行包名，而不是 .sty 文件名。
-          & $tlmgr.FullName install xetex elegantbook amsmath amsfonts amscls geometry tcolorbox graphics titlesec
+          # TeX Live 的发行包名，而不是 .sty 文件名。TinyTeX-0 不会随
+          # tcolorbox 自动安装其运行时使用的 etoolbox，需显式列出。
+          & $tlmgr.FullName install xetex elegantbook amsmath amsfonts amscls geometry tcolorbox etoolbox graphics titlesec
           if ($LASTEXITCODE -ne 0) { Write-Error "TinyTeX 依赖安装失败"; exit 1 }
           $kpsewhich = Join-Path $bin 'kpsewhich.exe'
           $xelatex = Join-Path $bin 'xelatex.exe'
           if (-not (Test-Path $kpsewhich)) { Write-Error "TinyTeX 缺少 kpsewhich"; exit 1 }
           if (-not (Test-Path $xelatex)) { Write-Error "TinyTeX 缺少 xelatex"; exit 1 }
-          foreach ($file in @('elegantbook.cls', 'amsmath.sty', 'amssymb.sty', 'amsthm.sty', 'tcolorbox.sty', 'titlesec.sty')) {
+          foreach ($file in @('elegantbook.cls', 'amsmath.sty', 'amssymb.sty', 'amsthm.sty', 'tcolorbox.sty', 'etoolbox.sty', 'titlesec.sty')) {
             $resolved = & $kpsewhich $file
             if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($resolved)) {
               Write-Error "TinyTeX 依赖缺失: $file"; exit 1
