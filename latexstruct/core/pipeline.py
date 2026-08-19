@@ -38,7 +38,7 @@ from .patch import (
 from .report import build_report
 from .review import run_review
 from .rules import RuleConfig, build_rule_decisions
-from .scanner import scan
+from .scanner import _declared_theorem_envs, scan
 from .verify import check_display_tag_safety, compare_braces, compare_env_balance, known_issues
 
 DOC_CLASS_RE = re.compile(r"\\documentclass(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
@@ -64,13 +64,16 @@ class PipelineResult:
     error: str = ""
 
 
-def _build_context(doc) -> PatchContext:
+def _build_context(doc, structured_envs=None) -> PatchContext:
     m = DOC_CLASS_RE.search(doc.text)
     cls = m.group(1) if m else ""
     is_elegant = "elegantbook" in cls.lower()
     used_env_names = {r[0] for r in doc.env_ranges}
     theorem_declarations = list(NEW_THEOREM_RE.finditer(doc.masked))
-    newtheorem_names = {m.group(2) for m in theorem_declarations}
+    newtheorem_names = _declared_theorem_envs(doc.masked)
+    newtheorem_names.update(
+        str(name).strip() for name in (structured_envs or ()) if name
+    )
     numbered_envs = {m.group(2) for m in theorem_declarations if not m.group(1)}
     unnumbered_envs = {
         m.group(2) for m in theorem_declarations if m.group(1)
@@ -195,7 +198,12 @@ def _apply_decisions(doc, decisions: List[Decision], ctx: PatchContext, ambiguou
     if candidates_by_id:
         from .legalize import legalize_decisions
 
-        legalize_decisions(doc, decisions, candidates_by_id)  # AI span 段落边界合法化
+        legalize_decisions(
+            doc,
+            decisions,
+            candidates_by_id,
+            ctx.existing_envs,
+        )  # AI span 段落边界合法化
     lines = doc.text.split("\n")
     planned: List[Tuple[Decision, List]] = []
     rejected: List[AppliedPatch] = []
@@ -359,6 +367,8 @@ def run_pipeline(
     resource_root: str = None,
     require_resources: bool = False,
     compile_extra_files: dict = None,
+    compile_project_main_rel: str = None,
+    known_structured_envs=None,
 ) -> PipelineResult:
     def control():
         if control_callback:
@@ -397,6 +407,7 @@ def run_pipeline(
                     "status": "rejected",
                     "reason": f"章节树补丁校验失败，已保留原文：{ocr_rejected[0].error}",
                 })
+    pre_template_text = text
     template_notes: List[dict] = []
     template_applied = False
     template_patches: List[AppliedPatch] = []
@@ -420,16 +431,23 @@ def run_pipeline(
                 template_applied = True
             else:
                 template_notes.append(
-                    {"line": 1, "reason": f"模板转换编辑校验失败，已跳过：{t_rejected[0].error}"}
+                    {
+                        "line": 1,
+                        "status": "rejected",
+                        "reason": f"模板转换编辑校验失败，已跳过：{t_rejected[0].error}",
+                    }
                 )
 
+    template_safe = not any(
+        note.get("status") == "rejected" for note in template_notes
+    )
     transformed_source_text = text
 
     emit("parse", 0.10, "正在解析 LaTeX 结构")
     doc = parse_latex(text)
     emit("scan", 0.17, "正在扫描定理、证明与章节候选")
-    scan_res = scan(doc, pack)
-    ctx = _build_context(doc)
+    ctx = _build_context(doc, known_structured_envs)
+    scan_res = scan(doc, pack, structured_envs=ctx.existing_envs)
     candidates_by_id = {c.id: c for c in scan_res.candidates}
     emit(
         "scan",
@@ -549,7 +567,23 @@ def run_pipeline(
         )
 
     if not decisions_reused:
-        pre = build_preamble_decision(doc, ctx, decisions)
+        # Validate AI source ranges before deriving theorem declarations.  A
+        # fail-closed short wrap must not leave an orphan ``\newtheorem`` in an
+        # otherwise untouched document while it waits for pending review.
+        if candidates_by_id:
+            from .legalize import legalize_decisions
+
+            legalize_decisions(
+                doc, decisions, candidates_by_id, ctx.existing_envs
+            )
+        pre = build_preamble_decision(
+            doc,
+            ctx,
+            [
+                decision for decision in decisions
+                if not getattr(decision, "_legalize_error", "")
+            ],
+        )
         if pre is not None:
             decisions.append(pre)
     for d in decisions:
@@ -586,11 +620,12 @@ def run_pipeline(
         completed_candidates=[d.candidate_id for d in decisions],
     )
 
-    # AI 复查（默认开启；降级或无补丁时跳过）
+    # AI 复查（默认开启）。即使没有补丁，只要初次 AI 留下 none/歧义项，
+    # 也必须给复查器真实源片段；否则漏答会被静默当作整批通过。
     if (
         mode == "ai"
         and (ai_config is None or ai_config.review_enabled)
-        and applied
+        and (applied or ai_notes or ambiguous)
         and not ai_degraded
         and not decisions_reused
     ):
@@ -629,11 +664,54 @@ def run_pipeline(
                 mode,
                 progress_callback=review_progress,
                 control_callback=control,
+                candidates_by_id=candidates_by_id,
+                preserve_pending_ids={
+                    str(note.get("candidate_id", "") or "")
+                    for note in ai_notes
+                    if str(note.get("candidate_id", "") or "")
+                },
             )
             out = review_info["out"]
             applied = review_info["applied"]
             rejected = review_info["rejected"]
             decisions = review_info["decisions"]
+            # wrong-env / missed-extra 可能改变最终需要的定理环境。初次决策前
+            # 生成的 preamble-add 已经陈旧，必须按最后一轮决策重建；否则会得到
+            # ``\begin{lemma}`` 却没有 ``\newtheorem*{lemma}`` 的不可编译结果。
+            decisions = [d for d in decisions if d.action != "preamble-add"]
+            final_pre = build_preamble_decision(
+                doc,
+                ctx,
+                [
+                    decision for decision in decisions
+                    if not getattr(decision, "_legalize_error", "")
+                ],
+            )
+            if final_pre is not None:
+                decisions.append(final_pre)
+            out, applied, rejected, final_dropped = _apply_decisions(
+                doc,
+                decisions,
+                ctx,
+                ambiguous,
+                candidates_by_id=candidates_by_id,
+            )
+            for d, reason in final_dropped:
+                item = {
+                    "candidate_id": d.candidate_id,
+                    "line": _interval(d)[0] or 1,
+                    "reason": reason,
+                }
+                if not any(
+                    old.get("candidate_id") == item["candidate_id"]
+                    and old.get("reason") == item["reason"]
+                    for old in ambiguous
+                ):
+                    ambiguous.append(item)
+            review_info["out"] = out
+            review_info["applied"] = applied
+            review_info["rejected"] = rejected
+            review_info["decisions"] = decisions
             ai_usage["review"] = review_info["usage"]
             for escalation in review_info.get("escalations", []):
                 if not any(
@@ -642,6 +720,53 @@ def run_pipeline(
                     for old in ambiguous
                 ):
                     ambiguous.append(escalation)
+            # 安全恢复的 missed-extra 已经成为最终 applied Decision；初次 none/
+            # 漏答留下的说明和人工项不应继续出现在最终报告，否则同一 candidate
+            # 会同时显示“已应用”和“仍待确认”。只清理由复查实际应用成功的 ID；
+            # 被最终安全门拒绝的 review 决策仍保留人工项。
+            reviewed_applied_ids = {
+                ap.decision.candidate_id
+                for ap in applied
+                if ap.decision.source == "review"
+            }
+            if reviewed_applied_ids:
+                ai_notes = [
+                    note for note in ai_notes
+                    if note.get("candidate_id") not in reviewed_applied_ids
+                ]
+                ambiguous = [
+                    item for item in ambiguous
+                    if item.get("candidate_id") not in reviewed_applied_ids
+                ]
+            # A valid should-remove or pending-ok finding is an explicit review
+            # answer to preserve the source.  Clear the stale initial ambiguity
+            # for every such candidate, then retain an existing action=none note
+            # or create a review-sourced note.  Cached reruns therefore have both
+            # full candidate coverage and no failed Decision to reapply.
+            preserved_findings = review_info.get("preserved_findings") or {}
+            preserved_ids = {
+                str(candidate_id)
+                for candidate_id in review_info.get("preserved_candidate_ids", [])
+            }
+            if preserved_ids:
+                ambiguous = [
+                    item for item in ambiguous
+                    if str(item.get("candidate_id", "") or "") not in preserved_ids
+                ]
+            for candidate_id in sorted(preserved_ids):
+                if any(
+                    note.get("candidate_id") == candidate_id for note in ai_notes
+                ):
+                    continue
+                candidate = candidates_by_id.get(candidate_id)
+                finding = preserved_findings.get(candidate_id) or {}
+                ai_notes.append({
+                    "candidate_id": candidate_id,
+                    "line": candidate.span.start_line if candidate is not None else 1,
+                    "reason": str(finding.get("reason", "复查确认应保留原文"))[:120],
+                    "confidence": 1.0,
+                    "source": "review",
+                })
         except LLMError as e:
             if rclient.last_usage:
                 from ..pricing import add_usage
@@ -686,57 +811,154 @@ def run_pipeline(
         "known_issues": known_issues(result_text),
         "display_tags": check_display_tag_safety(result_text),
         "ocr_structure": check_ocr_structure(result_text),
+        "template": {
+            "ok": template_safe,
+            "applied": template_applied,
+            "issues": [
+                note for note in template_notes if note.get("status") == "rejected"
+            ],
+        },
         "resources": check_image_resources(result_text, resource_root),
         "ai_degraded": ai_degraded,
         "ai_usage": ai_usage,
         "decisions_reused": decisions_reused,
         "compile_required": bool(require_compile),
-        "compile_required_when_available": bool(require_compile_when_available),
+        "compile_required_when_available": bool(
+            require_compile_when_available or template_applied
+        ),
         "resources_required": bool(require_resources),
     }
-    compile_check = bool(compile_check or require_compile or require_compile_when_available)
+    compile_check = bool(
+        compile_check
+        or require_compile
+        or require_compile_when_available
+        or template_applied
+    )
     if compile_check:
         emit("compile", 0.91, "正在比较编译结果")
         from .compilecheck import compile_latex
 
-        if require_compile or require_compile_when_available:
-            # When the final result itself is required to compile, a separate compile of the
-            # intermediate template text doubles latency without changing the safety decision.
-            verification["compile_before"] = {
-                "available": False, "ok": None, "pages": 0, "errors": [],
-                "log": "", "skipped": True,
-            }
-        else:
-            verification["compile_before"] = compile_latex(
-                transformed_source_text,
-                extra_files=compile_extra_files,
-            )
-        verification["compile_after"] = compile_latex(
-            result_text,
-            extra_files=compile_extra_files,
-        )
+        def compile_snapshot(snapshot: str) -> Dict:
+            """Compile either a single TEX file or a reconstructed folder snapshot.
+
+            The analysis representation for folder projects deliberately contains
+            inline ``LATEXSTRUCT-FILE`` blocks *and* retains the original
+            ``\\input`` commands.  Compiling that flattened representation would
+            duplicate every child file; compiling it without the children makes
+            perfectly valid projects fail with ``File ... not found``.  Re-split
+            each before/after snapshot and overlay its processed TEX files on the
+            byte-for-byte original resources instead.
+            """
+            if not compile_project_main_rel:
+                return compile_latex(snapshot, extra_files=compile_extra_files)
+
+            from .project import safe_project_relpath, split_project
+
+            main_rel = safe_project_relpath(compile_project_main_rel)
+            per_file = split_project(snapshot)
+            files = dict(compile_extra_files or {})
+            files.pop(main_rel, None)
+            for rel, content in per_file.items():
+                if not rel:
+                    continue
+                files[safe_project_relpath(rel)] = content.encode("utf-8")
+            return compile_latex(per_file.get("", ""), extra_files=files)
+
+        # The baseline must precede template conversion.  Using the converted
+        # draft for both snapshots hides class/template regressions as a no-op.
+        verification["compile_before"] = compile_snapshot(pre_template_text)
+        verification["compile_after"] = compile_snapshot(result_text)
     compile_safe = not require_compile
+    compile_unverified = False
     if compile_check:
         cb = verification["compile_before"]
         ca = verification["compile_after"]
         if require_compile:
             compile_safe = bool(ca.get("available") and ca.get("ok"))
+        elif template_applied and (cb.get("available") or ca.get("available")):
+            # An explicitly selected template is a material document-class
+            # migration.  If a compiler exists, the converted result itself must
+            # succeed; two matching failures cannot certify that migration.
+            compile_safe = bool(ca.get("available") and ca.get("ok"))
         elif require_compile_when_available and ca.get("available"):
             compile_safe = bool(ca.get("ok"))
         elif cb.get("available") and ca.get("available"):
-            compile_safe = bool(
-                ca.get("ok")
-                or (not cb.get("ok") and cb.get("errors", []) == ca.get("errors", []))
-            )
+            has_compile_delta = result_text != pre_template_text
+            if ca.get("ok"):
+                compile_safe = True
+            elif not cb.get("ok") and not has_compile_delta:
+                # No final structural edit means both snapshots are identical.  The
+                # pre-existing source failure is not evidence against an unchanged
+                # draft, so preserve the historical no-op behaviour.
+                compile_safe = True
+            else:
+                # xelatex uses ``-halt-on-error`` and compile_latex intentionally
+                # returns only a bounded error list.  Equal first errors therefore
+                # cannot prove that a modified draft introduced no later failure.
+                # A changed result with two failed compiles is unverified and must
+                # fail closed, even when the visible error arrays happen to match.
+                compile_safe = False
+                compile_unverified = bool(not cb.get("ok") and has_compile_delta)
         else:
             compile_safe = True
     resources_safe = bool(
         verification["resources"]["ok"]
         and (verification["resources"]["checked"] or not require_resources)
     )
+    candidate_ids = {candidate.id for candidate in scan_res.candidates}
+    answered_candidate_ids = {
+        decision.candidate_id for decision in decisions + user_rejected
+        if decision.candidate_id in candidate_ids
+    } | {
+        str(note.get("candidate_id", "") or "") for note in ai_notes
+        if str(note.get("candidate_id", "") or "") in candidate_ids
+    } | {
+        str(candidate_id) for candidate_id in review_info.get(
+            "preserved_candidate_ids", []
+        )
+        if str(candidate_id) in candidate_ids
+    }
+    missing_decision_ids = sorted(candidate_ids - answered_candidate_ids)
+    unresolved_items = [
+        item for item in ambiguous
+        if str(item.get("candidate_id", "") or "") in candidate_ids
+    ]
+    structure_safe = not missing_decision_ids and not unresolved_items
+    verification["structure_decisions"] = {
+        "ok": structure_safe,
+        "candidate_total": len(candidate_ids),
+        "answered": len(answered_candidate_ids),
+        "coverage": (
+            round(len(answered_candidate_ids) / len(candidate_ids), 6)
+            if candidate_ids else 1.0
+        ),
+        "missing_ids": missing_decision_ids,
+        "manual_required": len(unresolved_items),
+    }
+    review_checked = bool(
+        mode == "ai"
+        and (ai_config is None or ai_config.review_enabled)
+        and (applied or ai_notes or ambiguous)
+        and not decisions_reused
+    )
+    review_safe = bool(
+        not review_checked
+        or (
+            review_info
+            and not review_info.get("invalid")
+            and not review_info.get("escalations")
+        )
+    )
+    verification["ai_review"] = {
+        "ok": review_safe,
+        "checked": review_checked,
+        "invalid": len(review_info.get("invalid", [])) if review_info else 0,
+        "escalations": len(review_info.get("escalations", [])) if review_info else 0,
+    }
     verification["compile"] = {
         "ok": compile_safe,
         "checked": bool(compile_check and verification.get("compile_after", {}).get("available")),
+        "unverified": compile_unverified,
     }
     ok = (
         verification["content_invariant"]
@@ -745,8 +967,11 @@ def run_pipeline(
         and verification["invariants"]["ok"]
         and verification["display_tags"]["ok"]
         and verification["ocr_structure"]["ok"]
+        and template_safe
         and resources_safe
         and compile_safe
+        and structure_safe
+        and review_safe
     )
     verification["checks"] = [
         {"id": "content", "label": "正文可逆", "ok": verification["content_invariant"]},
@@ -764,13 +989,31 @@ def run_pipeline(
             "skipped": not verification["ocr_structure"]["checked"],
         },
         {
+            "id": "template",
+            "label": "排版模板安全转换",
+            "ok": template_safe,
+            "skipped": not template,
+        },
+        {
             "id": "resources",
             "label": "图片资源真实存在且位于项目内",
             "ok": resources_safe,
             "skipped": not verification["resources"]["checked"],
         },
+        {
+            "id": "structure-decisions",
+            "label": "所有结构候选均有唯一且无需人工兜底的结论",
+            "ok": structure_safe,
+        },
+        {
+            "id": "ai-review",
+            "label": "AI 复查完整且无未解决项",
+            "ok": review_safe,
+            "skipped": not review_checked,
+        },
         {"id": "compile", "label": (
-            "编译器可用时结果必须成功" if require_compile_when_available
+            "编译器可用时结果必须成功"
+            if require_compile_when_available or template_applied
             else "编译结果未恶化"
         ), "ok": compile_safe,
          "skipped": not verification["compile"]["checked"]},
@@ -836,6 +1079,57 @@ def run_pipeline(
                 "section": "", "confidence": 0.0, "source": "rule",
                 "reason": a.get("reason", ""), "status": "ambiguous",
             })
+    # action=none 是一个真实的 AI 结论，而不是“没有决策”。过去这些候选只在
+    # Markdown 报告里出现，审阅树完全看不到，用户无法抽查漏包。现在把所有
+    # 保留结论也加入清单；若同一候选后来升级为人工项，状态以 ambiguous 为准。
+    ambiguous_by_id = {
+        str(item.get("candidate_id", "") or ""): item for item in ambiguous
+    }
+    for note in ai_notes:
+        cid = str(note.get("candidate_id", "") or "")
+        if not cid or any(item["candidate_id"] == cid for item in decision_items):
+            continue
+        candidate = cand_by_id.get(cid)
+        pending = ambiguous_by_id.get(cid)
+        reason = str((pending or note).get("reason", "") or "")
+        decision_items.append({
+            "candidate_id": cid,
+            "kind": candidate.kind if candidate is not None else "preserve",
+            "env": candidate.env_hint if candidate is not None else "",
+            "line": candidate.span.start_line if candidate is not None else note.get("line", 1),
+            "title": (
+                candidate.title_text[:80] if candidate is not None else reason[:80]
+            ),
+            "section": (
+                " / ".join(candidate.payload.get("section_path", ()))
+                if candidate is not None else ""
+            ),
+            "confidence": round(float(note.get("confidence", 0.0) or 0.0), 3),
+            "source": str(note.get("source", "ai") or "ai"),
+            "reason": reason,
+            "status": "ambiguous" if pending is not None else "preserved",
+        })
+    for cid in review_info.get("preserved_candidate_ids", []):
+        cid = str(cid)
+        if not cid or any(item["candidate_id"] == cid for item in decision_items):
+            continue
+        candidate = cand_by_id.get(cid)
+        finding = (review_info.get("preserved_findings") or {}).get(cid) or {}
+        decision_items.append({
+            "candidate_id": cid,
+            "kind": candidate.kind if candidate is not None else "preserve",
+            "env": candidate.env_hint if candidate is not None else "",
+            "line": candidate.span.start_line if candidate is not None else 1,
+            "title": candidate.title_text[:80] if candidate is not None else "",
+            "section": (
+                " / ".join(candidate.payload.get("section_path", ()))
+                if candidate is not None else ""
+            ),
+            "confidence": 1.0,
+            "source": "review",
+            "reason": str(finding.get("reason", "复查确认应保留原文")),
+            "status": "preserved",
+        })
 
     result = PipelineResult(
         ok=ok,

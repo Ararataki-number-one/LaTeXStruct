@@ -27,12 +27,6 @@
    "line": 134
   },
   {
-   "needle": "Lemma 2.2 is a very special (but still illustrative) case of",
-   "kind": "theorem-like",
-   "env": "lemma",
-   "line": 164
-  },
-  {
    "needle": "Lemma 2.3 (Erdős 1964b). Let \\(X\\) be a set of \\(n\\) element",
    "kind": "theorem-like",
    "env": "lemma",
@@ -54,12 +48,6 @@
    "kind": "theorem-like",
    "env": "example",
    "line": 307
-  },
-  {
-   "needle": "Theorem 2.4 says that a graph cannot have many edges, unless",
-   "kind": "theorem-like",
-   "env": "theorem",
-   "line": 347
   },
   {
    "needle": "Theorem 2.6. If an \\(n\\) -vertex graph \\(G = \\left( {V,E}\\ri",

@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -51,15 +52,82 @@ class FakeClient:
         return r, {"total_tokens": 100}
 
 
+class ExactReviewClient(FakeClient):
+    """Return exactly one finding for every target in the current review batch."""
+
+    def __init__(self, overrides=None, first_call_extras=None, model="fake-model"):
+        super().__init__({"findings": []}, model=model)
+        self.overrides = overrides or {}
+        self.first_call_extras = first_call_extras or []
+
+    def chat_json(self, system, user):
+        self.calls.append((system, user))
+        marker = "本请求待复查 candidate 共 "
+        required = []
+        if marker in user:
+            header = user.split(marker, 1)[1].split("。", 1)[0]
+            listed = header.split("：", 1)[1] if "：" in header else ""
+            required = [item.strip() for item in listed.split(",") if item.strip()]
+        findings = []
+        for cid in required:
+            configured = self.overrides.get(cid)
+            if configured is None:
+                configured = {
+                    "candidate_id": cid,
+                    "verdict": "ok",
+                    "reason": "checked",
+                }
+            findings.append(json.loads(json.dumps(configured)))
+        if self.idx == 0:
+            findings.extend(json.loads(json.dumps(self.first_call_extras)))
+        self.idx += 1
+        return {"findings": findings}, {"total_tokens": 100}
+
+
+class ExactDecisionClient(FakeClient):
+    """Return only decisions whose IDs occur in the current prompt batch."""
+
+    def __init__(self, response, model="fake-model"):
+        super().__init__(response, model=model)
+        self.by_id = {
+            str(item.get("candidate_id", "")): item
+            for item in response.get("decisions", [])
+        }
+
+    def chat_json(self, system, user):
+        self.calls.append((system, user))
+        required = re.findall(r"^### 候选 (\S+)$", user, flags=re.MULTILINE)
+        decisions = [
+            json.loads(json.dumps(self.by_id[cid]))
+            for cid in required
+            if cid in self.by_id
+        ]
+        self.idx += 1
+        return {"decisions": decisions}, {"total_tokens": 100}
+
+
 def build_fake_decide_response(doc, res):
+    from latexstruct.core.legalize import (  # noqa: PLC0415
+        _next_stop_line,
+        _pre_stop_atomic_end,
+    )
+
     decisions = []
     for c in res.candidates:
         if c.kind not in ("theorem-like", "proof", "scope-fix"):
             continue
         if c.kind == "theorem-like":
+            stop = _next_stop_line(doc, c.span.start_line)
+            complete_end = _pre_stop_atomic_end(doc, c.span.start_line, stop)
             decisions.append({
                 "candidate_id": c.id, "action": "wrap", "env": c.env_hint,
-                "body_span": {"start_line": c.span.start_line, "end_line": c.span.end_line},
+                "body_span": {
+                    "start_line": c.span.start_line,
+                    # The fake model mirrors the production prompt: when a
+                    # reliable successor exists it explicitly selects the last
+                    # pre-stop atom instead of relying on unsafe auto-extension.
+                    "end_line": complete_end or c.span.end_line,
+                },
                 "optional_arg": "", "keep_title_text": True, "reason": "包裹",
                 "confidence": 0.9,
             })
@@ -136,7 +204,9 @@ def test_parse_decisions_validation():
     ds5, amb5, _ = parse_decisions(injected, cands, windows, doc)
     assert amb5 == [] and ds5[0].optional_arg == "1"
     assert ds5[0].keep_title_text is False
-    assert ds5[0].payload["title_prefix"] == "Theorem 1."
+    # Prefixes are kept byte-for-byte from the source so applying the edit does
+    # not leave behind the original separator whitespace.
+    assert ds5[0].payload["title_prefix"] == "Theorem 1. "
 
     # 只有 body_span 真从候选标题行开始时才剥离前缀，避免改到前一段正文。
     earlier = {"decisions": [{
@@ -422,14 +492,14 @@ def test_ai_mode_pipeline_with_fake_decide():
     text = read_sample("basic_book.tex")
     doc = parse_latex(text)
     res = scan(doc)
-    fake = FakeClient(build_fake_decide_response(doc, res))
+    fake = ExactDecisionClient(build_fake_decide_response(doc, res))
     cfg = AIConfig(decide=RoleConfig(api_key="test"), review_enabled=False)
     out = run_pipeline(text, mode="ai", ai_config=cfg, ai_client=fake)
     assert out.ok, out.report_md
     assert "\\begin{theorem}" in out.result
     assert "\\begin{proof}" in out.result
     assert "\\begin{definition}" in out.result
-    assert "\\begin{definition}[1.1.1]\n A graph" in out.result
+    assert "\\begin{definition}[1.1.1]\nA graph" in out.result
     assert "\\begin{theorem}[2.3.4]\n(Erd" in out.result
     assert "Theorem 2.3.4 (Erd" not in out.result
     assert "\\begin{proof}\nFix a sequence" in out.result
@@ -440,8 +510,8 @@ def test_ai_mode_pipeline_with_fake_decide():
     assert out.verification["env_balance"]["ok"] is True
     assert out.verification["ai_degraded"] is False
     assert out.verification["ai_usage"]["decide"]["model"] == "fake-model"
-    # 伪决策全部被采用
-    assert len(fake.calls) == 1
+    # 伪决策全部被采用；多原子 theorem-like 额外占一个隔离批次。
+    assert len(fake.calls) == 5
 
 
 def test_ai_batches_emit_progressive_tex_previews():
@@ -453,7 +523,11 @@ def test_ai_batches_emit_progressive_tex_previews():
     )
     doc = parse_latex(text)
     scanned = scan(doc)
-    fake = FakeClient(build_fake_decide_response(doc, scanned))
+    full_response = build_fake_decide_response(doc, scanned)
+    fake = FakeClient([
+        {"decisions": [decision]}
+        for decision in full_response["decisions"]
+    ])
     cfg = AIConfig(
         decide=RoleConfig(api_key="test"),
         review_enabled=False,
@@ -510,7 +584,8 @@ def test_ai_cannot_wrap_explicit_number_in_existing_numbered_environment():
         ai_config=AIConfig(decide=RoleConfig(api_key="test"), review_enabled=False),
         ai_client=FakeClient(response),
     )
-    assert result.ok, result.report_md
+    assert result.ok is False
+    assert result.verification["safe_to_export"] is False
     assert result.result == text
     assert any("避免双编号" in item["reason"] for item in result.ambiguous)
 
@@ -519,7 +594,7 @@ def test_cached_review_decisions_do_not_call_ai_again():
     text = read_sample("basic_book.tex")
     doc = parse_latex(text)
     scanned = scan(doc)
-    first_client = FakeClient(build_fake_decide_response(doc, scanned))
+    first_client = ExactDecisionClient(build_fake_decide_response(doc, scanned))
     cfg = AIConfig(decide=RoleConfig(api_key="test"), review_enabled=False)
     first = run_pipeline(text, mode="ai", ai_config=cfg, ai_client=first_client)
     assert first.ok
@@ -557,21 +632,44 @@ def test_ai_mode_without_key_fails_closed_instead_of_impersonating_ai():
         raise AssertionError("AI 模式缺少 Key 时必须明确失败，不能静默降级")
 
 
-def test_review_wrong_env_auto_fix():
-    text = read_sample("basic_book.tex")
+def test_review_wrong_env_cannot_override_explicit_title():
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "Theorem 7. A statement.\n"
+        "\\end{document}\n"
+    )
     doc = parse_latex(text)
     res = scan(doc)
     target = [c for c in res.candidates if c.kind == "theorem-like" and c.env_hint == "theorem"][0]
-    fake_decide = FakeClient(build_fake_decide_response(doc, res))
-    fake_review = FakeClient({"findings": [
-        {"candidate_id": target.id, "verdict": "wrong-env", "fix": {"env": "lemma"}, "reason": "应为引理"},
-    ]})
+    fake_decide = FakeClient({"decisions": [{
+        "candidate_id": target.id,
+        "action": "wrap",
+        "env": "theorem",
+        "body_span": {
+            "start_line": target.span.start_line,
+            "end_line": target.span.end_line,
+        },
+        "reason": "explicit theorem title",
+        "confidence": 0.99,
+    }]})
+    fake_review = ExactReviewClient(overrides={target.id: {
+            "candidate_id": target.id,
+            "verdict": "wrong-env",
+            "fix": {
+                "env": "lemma",
+                "confidence": 0.99,
+                "evidence": "review model claims lemma semantics",
+            },
+            "reason": "review model claims lemma semantics",
+        }})
     cfg = AIConfig(decide=RoleConfig(api_key="t"), review=RoleConfig(api_key="t"), review_enabled=True)
     out = run_pipeline(text, mode="ai", ai_config=cfg, ai_client=fake_decide, review_client=fake_review)
-    assert out.ok, out.report_md
-    assert "\\begin{lemma}" in out.result
+    assert out.ok is False
+    assert out.verification["safe_to_export"] is False
+    assert out.result == text
+    assert "\\begin{lemma}" not in out.result
     assert out.verification["content_invariant"] is True
-    assert any(f["verdict"] == "wrong-env" for f in out.review["findings"])
+    assert any(item["candidate_id"] == target.id for item in out.review["invalid"])
 
 
 def test_review_cannot_turn_proof_candidate_into_theorem_environment():
@@ -589,12 +687,12 @@ def test_review_cannot_turn_proof_candidate_into_theorem_environment():
         "body_span": {"start_line": proof.span.start_line, "end_line": proof.span.end_line},
         "confidence": 0.99,
     }]})
-    review = FakeClient({"findings": [{
+    review = ExactReviewClient(overrides={proof.id: {
         "candidate_id": proof.id,
         "verdict": "wrong-env",
         "fix": {"env": "theorem"},
         "reason": "malicious incompatible rewrite",
-    }]})
+    }})
     result = run_pipeline(
         text,
         mode="ai",
@@ -607,7 +705,9 @@ def test_review_cannot_turn_proof_candidate_into_theorem_environment():
         ai_client=decide,
         review_client=review,
     )
-    assert result.ok
+    assert result.ok is False
+    assert result.verification["safe_to_export"] is False
+    assert result.result == text
     assert r"\begin{theorem}" not in result.result
     assert any("证明候选只能使用 proof" in item["reason"] for item in result.ambiguous)
 
@@ -632,7 +732,7 @@ def test_review_wrong_range_cannot_expand_before_numbered_theorem_title():
         "confidence": 0.99,
         "reason": "wrap",
     }]})
-    fake_review = FakeClient({"findings": [{
+    fake_review = ExactReviewClient(overrides={target.id: {
         "candidate_id": target.id,
         "verdict": "wrong-range",
         "fix": {
@@ -642,7 +742,7 @@ def test_review_wrong_range_cannot_expand_before_numbered_theorem_title():
             },
         },
         "reason": "unsafe expansion",
-    }]})
+    }})
     cfg = AIConfig(
         decide=RoleConfig(api_key="test"),
         review=RoleConfig(api_key="test"),
@@ -653,7 +753,9 @@ def test_review_wrong_range_cannot_expand_before_numbered_theorem_title():
         text, mode="ai", ai_config=cfg,
         ai_client=fake_decide, review_client=fake_review,
     )
-    assert result.ok, result.report_md
+    assert result.ok is False
+    assert result.verification["safe_to_export"] is False
+    assert result.result == text
     assert "Intro paragraph." in result.result
     assert "Theorem 7. A numbered statement." in result.result
     assert r"\begin{theorem}" not in result.result
@@ -665,16 +767,37 @@ def test_review_should_remove():
     doc = parse_latex(text)
     res = scan(doc)
     target = [c for c in res.candidates if c.kind == "theorem-like" and c.env_hint == "theorem"][0]
-    fake_decide = FakeClient(build_fake_decide_response(doc, res))
-    fake_review = FakeClient({"findings": [
-        {"candidate_id": target.id, "verdict": "should-remove", "fix": {}, "reason": "引用性文字，误包"},
-    ]})
+    fake_decide = ExactDecisionClient(build_fake_decide_response(doc, res))
+    fake_review = ExactReviewClient(overrides={target.id: {
+        "candidate_id": target.id,
+        "verdict": "should-remove",
+        "fix": {},
+        "reason": "引用性文字，误包",
+    }})
     cfg = AIConfig(decide=RoleConfig(api_key="t"), review=RoleConfig(api_key="t"), review_enabled=True)
     out = run_pipeline(text, mode="ai", ai_config=cfg, ai_client=fake_decide, review_client=fake_review)
     assert out.ok, out.report_md
     # 样例中唯一的定理环境（范围修正后的那个）+ 被移除的包裹 → 仅剩 1 个 \begin{theorem}
     assert out.result.count("\\begin{theorem}") == 1
     assert out.verification["content_invariant"] is True
+
+    class ExplodingClient:
+        def chat_json(self, *_args, **_kwargs):
+            raise AssertionError("复用 should-remove 保留结论时不应再次调用 AI")
+
+    reused = run_pipeline(
+        text,
+        mode="ai",
+        ai_config=cfg,
+        ai_client=ExplodingClient(),
+        review_client=ExplodingClient(),
+        decisions_override=out.decisions,
+        ambiguous_override=out.ambiguous,
+        ai_notes_override=out.ai_notes,
+    )
+    assert reused.ok, reused.report_md
+    assert reused.verification["structure_decisions"]["coverage"] == 1.0
+    assert reused.result == out.result
 
 
 def test_review_missed_extra_is_report_only_without_source_anchor():
@@ -683,24 +806,27 @@ def test_review_missed_extra_is_report_only_without_source_anchor():
     res = scan(doc)
     body_para = [b for b in doc.blocks_of_kind("para") if "Here is the body" in b.text][0]
     fake_decide = FakeClient(build_fake_decide_response(doc, res))
-    fake_review = FakeClient({"findings": [
+    fake_review = ExactReviewClient(first_call_extras=[
         {"candidate_id": "c-x", "verdict": "missed-extra",
          "fix": {"action": "wrap", "env": "definition",
-                 "body_span": {"start_line": body_para.span.start_line,
-                               "end_line": body_para.span.end_line}},
+                  "body_span": {"start_line": body_para.span.start_line,
+                                "end_line": body_para.span.end_line}},
          "reason": "漏包正文"},
-    ]})
+    ])
     cfg = AIConfig(decide=RoleConfig(api_key="t"), review=RoleConfig(api_key="t"), review_enabled=True)
     out = run_pipeline(text, mode="ai", ai_config=cfg, ai_client=fake_decide, review_client=fake_review)
-    assert out.ok, out.report_md
-    # 复查看到的是结果文本行号，不能用它凭空创建源文本补丁。
-    assert out.result.count("\\begin{definition}") == 1
-    assert any("疑似漏项" in item["reason"] for item in out.ambiguous)
+    assert out.ok is False
+    assert out.verification["safe_to_export"] is False
+    assert out.result == text
+    # 未知 candidate 没有可靠源锚点，必须阻止导出而不是凭空创建补丁。
+    assert out.result.count("\\begin{definition}") == 0
+    assert any("未知" in item["reason"] for item in out.ambiguous)
     assert out.verification["content_invariant"] is True
 
 
-def test_review_missed_extra_from_ai_none():
-    # 决策判 none 的候选进入复查清单；复查只报告 missed-extra，不跨坐标系补包。
+def test_review_missed_extra_without_confidence_is_unsafe():
+    # 决策判 none 的候选进入复查清单；缺少置信度/证据的 missed-extra
+    # 不能跨坐标系补包，也不能被当作安全完成。
     text = read_sample("basic_book.tex")
     doc = parse_latex(text)
     res = scan(doc)
@@ -711,16 +837,18 @@ def test_review_missed_extra_from_ai_none():
     ]}
     target = [c for c in res.candidates if c.kind == "theorem-like"][0]
     fake_decide = FakeClient(decide_resp)
-    fake_review = FakeClient({"findings": [
-        {"candidate_id": target.id, "verdict": "missed-extra",
+    fake_review = ExactReviewClient(overrides={target.id: {
+        "candidate_id": target.id, "verdict": "missed-extra",
          "fix": {"action": "wrap", "env": target.env_hint,
-                 "body_span": {"start_line": target.span.start_line,
-                               "end_line": target.span.end_line}},
+                  "body_span": {"start_line": target.span.start_line,
+                                "end_line": target.span.end_line}},
          "reason": "漏包"},
-    ]})
+    })
     cfg = AIConfig(decide=RoleConfig(api_key="t"), review=RoleConfig(api_key="t"), review_enabled=True)
     out = run_pipeline(text, mode="ai", ai_config=cfg, ai_client=fake_decide, review_client=fake_review)
-    assert out.ok, out.report_md
+    assert out.ok is False
+    assert out.verification["safe_to_export"] is False
+    assert out.result == text
     assert f"\\begin{{{target.env_hint}}}" not in out.result
     assert any("疑似漏项" in item["reason"] for item in out.ambiguous)
     assert out.verification["content_invariant"] is True
@@ -751,12 +879,12 @@ The next paragraph is not part of the theorem.
     }]})
     # 这些数字属于结果预览坐标；旧实现会直接写回源 Decision，导致 closer
     # 落到 equation 内。现在只能报告，不能自动改 span。
-    review = FakeClient({"findings": [{
+    review = ExactReviewClient(overrides={target.id: {
         "candidate_id": target.id,
         "verdict": "wrong-range",
         "fix": {"body_span": {"start_line": 5, "end_line": 6}},
         "reason": "模拟错误的结果坐标",
-    }]})
+    }})
     result = run_pipeline(
         text,
         mode="ai",
@@ -769,17 +897,22 @@ The next paragraph is not part of the theorem.
         ai_client=decide,
         review_client=review,
     )
-    assert result.ok, result.report_md
+    assert result.ok is False
+    assert result.verification["safe_to_export"] is False
+    assert result.result == text
     output = result.result
     # 复查已明确判范围错，不能让静态校验刚好通过的错包裹继续导出。
     # 由于结果坐标不能安全写回，最保守的修复是撤销整个初次补丁。
     assert r"\begin{theorem}" not in output
     assert r"\end{theorem}" not in output
     assert r"f(x)=x^2. \tag{1}" in output
-    assert any("范围问题" in item["reason"] for item in result.ambiguous)
+    assert any(
+        "范围问题" in item["reason"] or "保守跳过" in item["reason"]
+        for item in result.ambiguous
+    )
 
 
-def test_ai_span_ending_inside_equation_snaps_closer_after_full_math():
+def test_ai_span_inside_equation_without_reliable_stop_is_fail_closed():
     text = r"""\documentclass{book}
 \usepackage{amsmath}
 \begin{document}
@@ -807,11 +940,10 @@ This paragraph is outside.
         ai_config=AIConfig(decide=RoleConfig(api_key="test"), review_enabled=False),
         ai_client=decide,
     )
-    assert result.ok, result.report_md
-    output = result.result
-    assert output.index(r"\end{equation}") < output.index(r"\end{theorem}")
-    assert output.index(r"\end{theorem}") < output.index("This paragraph is outside")
-    assert r"f(x)=x^2. \tag{2}" in output
+    assert result.ok is False
+    assert result.result == text
+    assert r"\begin{theorem}" not in result.result
+    assert any("漏段" in item["reason"] for item in result.ambiguous)
 
 
 def test_ai_span_ending_inside_matrix_snaps_proof_closer_after_bracket_display():
@@ -845,7 +977,9 @@ The next discussion is outside.
         ai_config=AIConfig(decide=RoleConfig(api_key="test"), review_enabled=False),
         ai_client=decide,
     )
-    assert result.ok, result.report_md
+    assert result.ok is False
+    assert result.verification["safe_to_export"] is False
+    assert result.result == text
     output = result.result
     # 文档尾是唯一结构停点，而模型没有覆盖后面的普通叙述。程序无法证明该叙述
     # 属于 proof 内还是 proof 外，因此宁可完全不包裹，也不截断/误吞正文。
@@ -867,17 +1001,20 @@ def test_long_multiparagraph_proof_window_reaches_next_structure():
     proof = next(c for c in candidates if c.kind == "proof")
     theorem = next(c for c in candidates if c.kind == "theorem-like")
     proof_end = theorem.span.start_line - 1
-    decide = FakeClient({"decisions": [{
-        "candidate_id": proof.id,
-        "action": "wrap",
-        "env": "proof",
-        "body_span": {
-            "start_line": proof.span.start_line,
-            "end_line": proof_end,
+    decide = ExactDecisionClient({"decisions": [
+        {
+            "candidate_id": proof.id,
+            "action": "wrap",
+            "env": "proof",
+            "body_span": {
+                "start_line": proof.span.start_line,
+                "end_line": proof_end,
+            },
+            "confidence": 0.99,
+            "reason": "完整长证明到下一定理之前",
         },
-        "confidence": 0.99,
-        "reason": "完整长证明到下一定理之前",
-    }]})
+        {"candidate_id": theorem.id, "action": "none", "reason": "next structure"},
+    ]})
     result = run_pipeline(
         text,
         mode="ai",
@@ -905,28 +1042,41 @@ def test_complete_window_cannot_accept_model_truncated_proof():
     doc = parse_latex(text)
     candidates = scan(doc).candidates
     proof = next(c for c in candidates if c.kind == "proof")
-    decide = FakeClient({"decisions": [{
-        "candidate_id": proof.id,
-        "action": "wrap",
-        "env": "proof",
-        # 窗口完整，但模型只选第一段：过去会生成一个看似合法的半截 proof。
-        "body_span": {
-            "start_line": proof.span.start_line,
-            "end_line": proof.span.end_line,
+    theorem = next(c for c in candidates if c.kind == "theorem-like")
+    decide = FakeClient({"decisions": [
+        {
+            "candidate_id": proof.id,
+            "action": "wrap",
+            "env": "proof",
+            # 窗口完整，但模型只选第一段：过去会生成一个看似合法的半截 proof。
+            "body_span": {
+                "start_line": proof.span.start_line,
+                "end_line": proof.span.end_line,
+            },
+            "confidence": 0.99,
+            "reason": "incorrectly short",
         },
-        "confidence": 0.99,
-        "reason": "incorrectly short",
-    }]})
+        {"candidate_id": theorem.id, "action": "none", "reason": "next structure"},
+    ]})
     result = run_pipeline(
         text,
         mode="ai",
         ai_config=AIConfig(decide=RoleConfig(api_key="test"), review_enabled=False),
         ai_client=decide,
     )
-    assert result.ok and result.verification["safe_to_export"] is True
+    assert result.ok is False
+    assert result.verification["safe_to_export"] is False
+    assert result.result == text
     output = result.result
-    assert output.index("Final step remains") < output.index(r"\end{proof}")
-    assert output.index(r"\end{proof}") < output.index("Theorem 2.")
+    # A complete context window is not evidence that the omitted paragraphs
+    # belong to the proof.  Without QED, the model must itself select through
+    # the last atomic block before the next reliable structure.
+    assert r"\begin{proof}" not in output and r"\end{proof}" not in output
+    assert "First step." in output and "Final step remains" in output
+    assert any(
+        item["candidate_id"] == proof.id and "proof" in item["reason"]
+        for item in result.ambiguous
+    )
 
 
 def test_overlong_candidate_window_rejects_partial_proof():
@@ -940,17 +1090,21 @@ def test_overlong_candidate_window_rejects_partial_proof():
     doc = parse_latex(text)
     candidates = scan(doc).candidates
     proof = next(c for c in candidates if c.kind == "proof")
-    decide = FakeClient({"decisions": [{
-        "candidate_id": proof.id,
-        "action": "wrap",
-        "env": "proof",
-        "body_span": {
-            "start_line": proof.span.start_line,
-            "end_line": proof.span.start_line + 4,
+    theorem = next(c for c in candidates if c.kind == "theorem-like")
+    decide = FakeClient({"decisions": [
+        {
+            "candidate_id": proof.id,
+            "action": "wrap",
+            "env": "proof",
+            "body_span": {
+                "start_line": proof.span.start_line,
+                "end_line": proof.span.start_line + 4,
+            },
+            "confidence": 0.99,
+            "reason": "故意截断",
         },
-        "confidence": 0.99,
-        "reason": "故意截断",
-    }]})
+        {"candidate_id": theorem.id, "action": "none", "reason": "next structure"},
+    ]})
     result = run_pipeline(
         text,
         mode="ai",
@@ -962,7 +1116,9 @@ def test_overlong_candidate_window_rejects_partial_proof():
         ),
         ai_client=decide,
     )
-    assert result.ok, result.report_md
+    assert result.ok is False
+    assert result.verification["safe_to_export"] is False
+    assert result.result == text
     assert r"\begin{proof}" not in result.result
     assert any("超过 AI 安全窗口" in item["reason"] for item in result.ambiguous)
     assert "必须 action=none" in decide.calls[0][1]
@@ -994,7 +1150,7 @@ def test_review_missed_extra_cannot_bypass_numbered_environment_guard():
             "reason": "wrap proof",
         },
     ]})
-    review = FakeClient({"findings": [{
+    review = ExactReviewClient(overrides={target.id: {
         "candidate_id": target.id,
         "verdict": "missed-extra",
         "fix": {
@@ -1004,9 +1160,13 @@ def test_review_missed_extra_cannot_bypass_numbered_environment_guard():
                 "start_line": target.span.start_line,
                 "end_line": target.span.end_line,
             },
+            "confidence": 0.99,
+            "evidence": "explicit Theorem 7 source title",
         },
+        "confidence": 0.99,
+        "evidence": "explicit Theorem 7 source title",
         "reason": "try to add theorem",
-    }]})
+    }})
     cfg = AIConfig(
         decide=RoleConfig(api_key="test"),
         review=RoleConfig(api_key="test"),
@@ -1020,20 +1180,39 @@ def test_review_missed_extra_cannot_bypass_numbered_environment_guard():
         ai_client=decide,
         review_client=review,
     )
-    assert result.ok, result.report_md
+    assert result.ok is False
+    assert result.verification["safe_to_export"] is False
+    assert result.result == text
     assert "\\begin{theorem}" not in result.result
     assert "Theorem 7. A statement with its own number." in result.result
-    assert "\\begin{proof}\nA separate proof paragraph." in result.result
-    assert any("疑似漏项" in item["reason"] for item in result.ambiguous)
+    assert "\\begin{proof}\nA separate proof paragraph." not in result.result
+    assert any("避免双编号" in item["reason"] for item in result.ambiguous)
 
 
 def test_review_batching():
-    # review_batch=2 时，5 个 AI 补丁（4 wrap + 1 move-boundary）应分 3 次复查调用
-    text = read_sample("basic_book.tex")
+    # review_batch=2 时，5 个实际补丁（1 个规则 preamble + 4 个 AI wrap）
+    # 应分 3 次复查；规则补丁也不能绕过复查。
+    text = (
+        "\\documentclass{book}\n\\begin{document}\n"
+        "Theorem 1. First.\n\n"
+        "Theorem 2. Second.\n\n"
+        "Theorem 3. Third.\n\n"
+        "Theorem 4. Fourth.\n"
+        "\\end{document}\n"
+    )
     doc = parse_latex(text)
     res = scan(doc)
-    fake_decide = FakeClient(build_fake_decide_response(doc, res))
-    fake_review = FakeClient([{"findings": []}, {"findings": []}, {"findings": []}])
+    theorem_ids = [c.id for c in res.candidates if c.kind == "theorem-like"]
+    assert len(theorem_ids) == 4
+    fake_decide = ExactDecisionClient(build_fake_decide_response(doc, res))
+    review_ids = ["preamble", *theorem_ids]
+    fake_review = FakeClient([
+        {"findings": [
+            {"candidate_id": cid, "verdict": "ok", "reason": "checked"}
+            for cid in review_ids[index:index + 2]
+        ]}
+        for index in range(0, len(review_ids), 2)
+    ])
     cfg = AIConfig(decide=RoleConfig(api_key="t"), review=RoleConfig(api_key="t"),
                    review_enabled=True, review_batch=2)
     out = run_pipeline(text, mode="ai", ai_config=cfg, ai_client=fake_decide, review_client=fake_review)
@@ -1056,14 +1235,18 @@ def test_review_batch_cannot_modify_candidate_from_another_batch():
     fake_decide = FakeClient(build_fake_decide_response(doc, scanned))
     fake_review = FakeClient([
         {
-            "findings": [{
-                # 第一个 batch 恶意引用第二个 batch 的真实 ID。
-                "candidate_id": theorem_ids[1],
-                "verdict": "should-remove",
-                "reason": "cross-batch attempt",
-            }],
+            "findings": [
+                {"candidate_id": "preamble", "verdict": "ok", "reason": "checked"},
+                {
+                    # 第一个 batch 恶意引用第三个 batch 的真实 ID。
+                    "candidate_id": theorem_ids[1],
+                    "verdict": "should-remove",
+                    "reason": "cross-batch attempt",
+                },
+            ],
         },
-        {"findings": []},
+        {"findings": [{"candidate_id": theorem_ids[0], "verdict": "ok", "reason": "checked"}]},
+        {"findings": [{"candidate_id": theorem_ids[1], "verdict": "ok", "reason": "checked"}]},
     ])
     cfg = AIConfig(
         decide=RoleConfig(api_key="t"),
@@ -1079,8 +1262,10 @@ def test_review_batch_cannot_modify_candidate_from_another_batch():
         ai_client=fake_decide,
         review_client=fake_review,
     )
-    assert out.ok, out.report_md
-    assert out.result.count("\\begin{theorem}") == 2
+    assert out.ok is False
+    assert out.verification["safe_to_export"] is False
+    assert out.result == text
+    assert out.result.count("\\begin{theorem}") == 0
     assert any("未知修改项" in item["reason"] for item in out.review["invalid"])
 
 
@@ -1092,13 +1277,69 @@ def test_prompt_builders():
     user = build_decide_user(doc, cands, context_lines=4)
     assert "候选" in user and cands[0].id in user
     assert f"[{cands[0].span.start_line:4d}]" in user
+    assert "解析器可靠结构停点" in user
     ruser = build_review_user(doc.text.split("\n"),
                               [{"candidate_id": "c-1", "action": "wrap", "env": "theorem",
                                 "reason": "包裹", "body_span": (20, 21),
-                                "result_span": (22, 24)}],
+                                "result_span": (22, 24),
+                                "candidate": {"kind": "theorem-like"}}],
                               [], context_lines=4)
     assert "修改 1" in ruser and "source_body_span=20..21" in ruser
     assert "result_span=22..24" in ruser
+    assert "普通叙述和空行不算停点" in ruser or "第 " in ruser
+
+
+def test_boundary_prompts_expose_title_body_and_each_omitted_atom():
+    text = (
+        "Definition.\n"
+        "A fibration has fibres which are discrete categories.\n\n"
+        "The collection of discrete fibrations forms a full subcategory.\n\n"
+        "\\begin{lemma}\nA separate result.\n\\end{lemma}\n"
+    )
+    doc = parse_latex(text)
+    candidate = next(
+        item for item in scan(doc).candidates
+        if item.kind == "theorem-like" and item.env_hint == "definition"
+    )
+    assert candidate.payload["title_remainder"] == ""
+    stop_line = text.split("\n").index("\\begin{lemma}") + 1
+    decide_user = build_decide_user(
+        doc,
+        [candidate],
+        windows={candidate.id: (1, stop_line)},
+    )
+    assert "标题所在原子块含正文: 是" in decide_user
+    assert "候选原子块末行: 第 2 行" in decide_user
+    assert "解析器可靠结构停点: 第 6 行" in decide_user
+    assert "可靠停点前最后非空原子块末行: 第 4 行" in decide_user
+    assert "原子块 1: 第 4..4 行" in decide_user
+    assert "逐块审计要求" in decide_user
+
+    source_lines = text.split("\n")
+    review_user = build_review_user(
+        source_lines,
+        [],
+        [],
+        source_lines=source_lines,
+        pending_summaries=[{
+            "candidate_id": candidate.id,
+            "body_span": (candidate.span.start_line, candidate.span.end_line),
+            "source_window": (1, stop_line),
+            "reason": "初次范围未通过完整性门",
+            "candidate": {
+                "kind": "theorem-like",
+                "candidate_span": {
+                    "start_line": candidate.span.start_line,
+                    "end_line": candidate.span.end_line,
+                },
+                "candidate_atom_has_body": True,
+            },
+        }],
+    )
+    assert "当前选择吸附后的原子块末行: 第 2 行" in review_user
+    assert "当前选择后、可靠停点前遗漏的非空原子块" in review_user
+    assert "原子块 1: 第 4..4 行" in review_user
+    assert "标题所在原子块含正文: 是" in review_user
 
 
 def main():

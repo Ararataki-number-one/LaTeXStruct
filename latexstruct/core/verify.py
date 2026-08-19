@@ -225,9 +225,11 @@ _FAILURE_ACTIONS = {
     "images": "图片引用发生变化，已禁止保存；请检查 includegraphics 路径",
     "display-math": "按提示行号修正展示公式边界或改用 equation/align 环境",
     "outline": "重新运行 AI 结构化；目录必须由 \\tableofcontents 生成，章节使用标准 LaTeX 命令",
+    "template": "保持原排版，或仅对 article/report/book/ctex 文档明确选择 ElegantBook 后重试",
     "resources": "重新从原 PDF 导入以提取图片；仍缺失时请把列出的图片加入项目 images 目录",
     "compile": "根据首条编译错误及行号修正后重试；原项目和上一次安全结果均未覆盖",
     "project": "补齐缺失的 input/include 文件并解除循环引用后重试",
+    "source-encoding": "保留原项目；移除原编码无法表示的新字符，或明确将整个源项目转换编码后重试",
 }
 
 
@@ -281,6 +283,10 @@ def verification_failures(verification: Dict) -> List[Dict]:
             details = list((verification.get("display_tags") or {}).get("issues") or [])
         elif check_id == "outline":
             details = list((verification.get("ocr_structure") or {}).get("issues") or [])
+        elif check_id == "template":
+            details = list((verification.get("template") or {}).get("issues") or [])
+            if details:
+                summary = str(details[0].get("reason") or summary)
         elif check_id == "resources":
             resources = verification.get("resources") or {}
             missing = [str(item) for item in resources.get("missing", [])]
@@ -305,6 +311,11 @@ def verification_failures(verification: Dict) -> List[Dict]:
                        + [{"reason": f"循环引用：{item}"} for item in project.get("cycles", [])])[:50]
             if project.get("error"):
                 details.insert(0, {"reason": str(project["error"])[:300]})
+        elif check_id == "source-encoding":
+            error = str((verification.get("source_encoding") or {}).get("error") or "")
+            if error:
+                summary = error
+                details = [{"reason": error}]
         if details and summary == f"{label}未通过":
             summary = str(details[0].get("reason") or summary)
         result.append({

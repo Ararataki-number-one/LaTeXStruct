@@ -37,6 +37,8 @@ class ProjectStore:
         pack: str = "",
         kind: str = "",
         template_title: str = "",
+        original_source: bytes = None,
+        source_format: Dict = None,
     ) -> str:
         pid = uuid.uuid4().hex[:12]
         d = self._dir(pid)
@@ -54,8 +56,14 @@ class ProjectStore:
             meta["kind"] = kind
         if template_title:
             meta["template_title"] = str(template_title).strip()[:160]
+        if original_source is not None:
+            meta["has_original_source"] = True
+            if source_format:
+                meta["source_format"] = dict(source_format)
         self._write_json(d, "meta.json", meta)
         self._write_text(d, "source.tex", text)
+        if original_source is not None:
+            self._atomic_write_bytes(d, "original-source.tex", bytes(original_source))
         return pid
 
     def delete(self, pid: str):

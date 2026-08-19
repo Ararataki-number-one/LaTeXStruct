@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from bisect import bisect_right
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Collection, Dict, List, Optional, Tuple
 
 from .parser import PROTECTED_ENVS, Block, Document, Span
 from .patch import NEW_THEOREM_RE
@@ -32,13 +32,22 @@ ITEM_ENVS = {"enumerate", "itemize", "description", "problemset", "exercise", "p
 MATH_ENVS = {
     "math", "displaymath", "equation", "equation*", "align", "align*", "alignat",
     "alignat*", "flalign", "flalign*", "gather", "gather*", "multline", "multline*",
-    "eqnarray", "eqnarray*", "split", "cases", "matrix", "pmatrix", "bmatrix",
-    "Bmatrix", "vmatrix", "Vmatrix", "smallmatrix",
+    "eqnarray", "eqnarray*", "split", "aligned", "alignedat", "gathered", "cases",
+    "array", "matrix", "pmatrix", "bmatrix", "Bmatrix", "vmatrix", "Vmatrix",
+    "smallmatrix",
+}
+# TeX 在这些环境的单元格中处于受限水平模式，或由环境自己管理 ``&``/换行。
+# 把 theorem/proof 环境插进单元格，可能直到编译器越过源文档的首个既有错误后
+# 才暴露 ``Not allowed in LR mode``。扫描阶段必须硬排除，而不能把风险留给 AI。
+ALIGNMENT_ENVS = {
+    "tabular", "tabular*", "tabularx", "tabulary", "longtable", "longtabu",
+    "supertabular", "xtabular", "mpxtabular", "tblr", "talltblr", "longtblr",
 }
 SKIP_ENVS = (
     THEOREM_LIKE_ENVS
     | ITEM_ENVS
     | MATH_ENVS
+    | ALIGNMENT_ENVS
     | {"proof", "solution", "thebibliography", "figure", "table",
        "algorithm", "algorithmic", "minipage"}
 )
@@ -58,7 +67,13 @@ EN_MAP = {
 EN_TITLE_RE = re.compile(
     r"^(Definition|Theorem|Lemma|Proposition|Corollary|Remark|Example|"
     r"Conjecture|Problem|Question|Claim|Fact|Observation|Note|Exercise)\b"
-    r"(?:\s+(\d+(?:\.\d+)*))?\s*[.:]?\s*(?=\s|$|（|\()"
+    r"(?:"
+    r"\s+(\d+(?:\.\d+)*)(?:\s*[.:](?!\d)\s*|\s+(?=[A-Z\\$(（(])|\s*$)"
+    r"|\s+(?:\((?:[^()\n]|\([^()\n]{1,80}\)){1,1024}\)|\[[^\[\]\n]{1,1024}\])"
+    r"(?:\s*[.:]\s*|\s*$)"
+    r"|\s*[.:]\s*"
+    r"|\s*$"
+    r")(?=\S|$|（|\()"
 )
 # 中文长关键词：关键词后必须跟 编号/标点/空白+内容/括号（防"定义域"类误匹配）
 CN_TITLE_RE = re.compile(
@@ -75,8 +90,68 @@ CN_TITLE_SHORT_RE = re.compile(
 )
 CN_SHORT_NUM_RE = re.compile(r"^(注|例)\s*(\d+(?:\.\d+)*)\s*[:：.。]?\s*")
 
+_MULTILINE_NAMED_TITLE_HEAD_RE = re.compile(
+    r"^\s*(?:Definition|Theorem|Lemma|Proposition|Corollary|Remark|Example|"
+    r"Conjecture|Problem|Question|Claim|Fact|Observation|Note|Exercise)\b"
+    r"[ \t]*(?P<open>[\[(])"
+)
+_TITLE_TRAILING_PUNCTUATION = frozenset({"", ".", ":", "：", "。"})
+_MAX_MULTILINE_TITLE_CHARS = 4096
+_MAX_MULTILINE_TITLE_LINES = 24
+
+_PROOF_OF_TITLE_END_PATTERN = r"(?=\s*(?:[.:：。]|$))"
+_PROOF_OF_REF_TOKEN_PATTERN = (
+    # ``\\href``/``\\hyperref`` (and aliases ending in those names) create
+    # links; they are not semantic result references.  The scoped case-folded
+    # negative lookahead remains effective in both the hard-coded scanner and
+    # the case-insensitive RulePack compiler.
+    r"\\(?![A-Za-z@]*(?i:h(?:yper)?ref)\b)[A-Za-z@]*ref\*?"
+    r"\s*\{[^{}\n]{1,160}\}"
+)
+_PROOF_OF_TYPED_QUALIFIER_PATTERN = (
+    r"(?:\s+(?:up\s+to|for|on|in|under|with|of)\s+"
+    r"[^.\n:：。]{1,160})?"
+)
+PROOF_OF_TARGET_PATTERN = (
+    # A typed target must finish as a title.  Previously the bare ``Theorem``
+    # alternative accepted prose such as ``Proof of Theorem 1 appears ...``.
+    r"(?:Theorem|Lemma|Proposition|Corollary|Conjecture|Claim|Fact|Observation|"
+    r"Definition|Result|Question|Problem|Exercise)\b"
+    rf"(?:\s*~?\s*(?:\d+(?:\.\d+)*|{_PROOF_OF_REF_TOKEN_PATTERN}))?"
+    rf"{_PROOF_OF_TYPED_QUALIFIER_PATTERN}{_PROOF_OF_TITLE_END_PATTERN}"
+    r"|\d+(?:\.\d+)*"
+    rf"{_PROOF_OF_TITLE_END_PATTERN}"
+    # Real books commonly define semantic aliases such as ``\\thmref`` and
+    # ``\\propref``.  Require one non-nested label argument and a terminal
+    # title boundary, while explicitly excluding hyperlink commands.
+    rf"|{_PROOF_OF_REF_TOKEN_PATTERN}{_PROOF_OF_TITLE_END_PATTERN}"
+)
+PROOF_OF_NAMED_TARGET_PATTERN = (
+    r"the\s+(?:"
+    r"(?:upper|lower)\s+bound(?:\s+(?:in|of|for)\s+"
+    r"(?:Theorem|Lemma|Proposition|Corollary|Claim|Result)\s+\d+(?:\.\d+)*)?"
+    r"|(?:main\s+)?(?:theorem|lemma|proposition|corollary|claim|result|assertion)\b"
+    rf"){_PROOF_OF_TITLE_END_PATTERN}"
+)
+PROOF_OF_NATURAL_TARGET_PATTERN = (
+    # Named results such as ``Green's theorem`` or ``the spectral theorem``.
+    # A proper-name head (case-sensitive even inside an ``re.I`` pack), or a
+    # definite descriptive name, is mandatory.  This rejects generic prose
+    # such as ``Proof of a theorem.`` and ``Proof of this theorem.``.
+    r"(?:"
+    r"(?-i:[A-Z][A-Za-z0-9'’.-]*)"
+    r"(?:\s+[A-Za-z][A-Za-z0-9'’.-]*){0,4}"
+    r"|the\s+[A-Za-z][A-Za-z0-9'’.-]*"
+    r"(?:\s+[A-Za-z][A-Za-z0-9'’.-]*){0,4}"
+    r")\s+"
+    r"(?:theorem|lemma|proposition|corollary|claim|result|assertion)\b"
+    r"(?:\s+(?:for|on|in|under|with|of)\s+[^.\n:：。]{1,160})?"
+    rf"{_PROOF_OF_TITLE_END_PATTERN}"
+)
 PROOF_RE = re.compile(
-    r"^(?:Proof\s*[:.]?(?:\s|$)|Proof\s*\[[^\]]*\](?:\s*\.)?(?:\s|$)|Proof of\b|"
+    r"^(?:Proof(?!\s+of\b)\s*[:.]?(?:\s|$)|Proof\s*\[[^\]]*\](?:\s*\.)?(?:\s|$)|"
+    rf"Proof of\s+(?:{PROOF_OF_TARGET_PATTERN}|{PROOF_OF_NAMED_TARGET_PATTERN}|"
+    rf"{PROOF_OF_NATURAL_TARGET_PATTERN})|"
     r"Sketch of the proof\.?(?:\s|$)|"
     r"证明\s*[:：]\s*|证明\s*$|证明如下\s*[:：]?\s*)"
 )
@@ -88,7 +163,9 @@ PROOF_SIMPLE_RE = re.compile(
     r"证明[。：]\s*|证明如下[：:]\s*)"
 )
 PROOF_OF_RE = re.compile(
-    r"^(Proof of\s+.+?)(?:[。:：]|\.(?=$|\s+(?=[A-Z\\$\(一-鿿])))\s*",
+    rf"^(Proof of\s+(?:{PROOF_OF_TARGET_PATTERN}|{PROOF_OF_NAMED_TARGET_PATTERN}|"
+    rf"{PROOF_OF_NATURAL_TARGET_PATTERN}).*?)"
+    r"(?:[。:：.]|$)\s*",
     re.I,
 )
 STYLED_SEMANTIC_RE = re.compile(
@@ -112,6 +189,33 @@ PROOF_END_MARKERS = ("□", "证毕")
 
 EXERCISE_KEYWORDS = re.compile(r"exercises?|problems?|练习|习题|问题集", re.I)
 BARE_NUM_RE = re.compile(r"^\s*\d+\.")
+
+# amsthm 之外的三种常见定理声明。这里只提取环境名，用于把已经结构化的
+# 内容加入硬排除集合；声明的样式、编号和标题均不在扫描器职责范围内。
+# 可选参数中允许普通的 ``{...}``（如 ``name={Main theorem}``），但不尝试
+# 解析任意嵌套 TeX：匹配失败时宁可少识别声明，也不能误取正文命令。
+_DECL_OPTIONS = r"(?:\[(?:[^\[\]{}]|\{[^{}]*\})*\]\s*)*"
+NEW_TCB_THEOREM_RE = re.compile(
+    rf"\\newtcbtheorem\s*\*?\s*{_DECL_OPTIONS}\{{([^{{}}]+)\}}",
+    re.S,
+)
+DECLARE_THEOREM_RE = re.compile(
+    rf"\\declaretheorem\s*\*?\s*{_DECL_OPTIONS}\{{([^{{}}]+)\}}",
+    re.S,
+)
+NEW_MD_THEOREM_RE = re.compile(
+    rf"\\newmdtheoremenv\s*\*?\s*{_DECL_OPTIONS}\{{([^{{}}]+)\}}",
+    re.S,
+)
+
+# ``env-body-outside`` 会被规则模式直接执行 move-boundary，因此普通相邻段落
+# 绝不能成为该候选。只保留源文本明确说明“正文漏在环境外”的迁移/测试标记；
+# 其他不确定情形由 ``env-only-title`` 作为只读歧义提示，保持 fail closed。
+EXPLICIT_OUTSIDE_BODY_RE = re.compile(
+    r"(?:\b(?:left|placed|kept|fell)\s+outside\b.{0,80}\b(?:the\s+)?environment\b|"
+    r"(?:正文|内容).{0,40}(?:漏在|遗漏在|位于|留在).{0,20}环境(?:之)?外)",
+    re.I | re.S,
+)
 
 
 @dataclass
@@ -139,7 +243,11 @@ class ScanResult:
 # ---------------------------------------------------------------------------
 
 
-def scan(doc: Document, pack=None) -> ScanResult:
+def scan(
+    doc: Document,
+    pack=None,
+    structured_envs: Optional[Collection[str]] = None,
+) -> ScanResult:
     from .ruleset import load_pack
 
     rp = load_pack(pack)
@@ -151,10 +259,33 @@ def scan(doc: Document, pack=None) -> ScanResult:
     skipped: List[dict] = []
     cid = 1
 
-    # 用户通过 \newtheorem 定义的环境与内置 theorem 一样属于已结构化区域，
-    # 里面即使出现 "Theorem ..." 字样也绝不能再次包裹。
-    custom_theorem_envs = {m.group(2) for m in NEW_THEOREM_RE.finditer(doc.masked)}
-    skip_envs = SKIP_ENVS | custom_theorem_envs
+    # 用户定义的环境与内置 theorem 一样属于已结构化区域，里面即使出现
+    # ``Theorem ...`` 字样也绝不能再次包裹。带星号的内置环境并不是新的
+    # 语义类型（只是无编号版本），必须同步硬排除。
+    supplied_structured_envs = {
+        str(name).strip() for name in (structured_envs or ()) if name
+    }
+    custom_theorem_envs = (
+        _declared_theorem_envs(doc.masked) | supplied_structured_envs
+    )
+    starred_theorem_envs = {
+        f"{name}*" for name in THEOREM_LIKE_ENVS | {"proof", "solution"}
+    }
+    custom_starred_envs = {
+        f"{name}*" for name in custom_theorem_envs if not name.endswith("*")
+    }
+    skip_envs = (
+        SKIP_ENVS
+        | starred_theorem_envs
+        | custom_theorem_envs
+        | custom_starred_envs
+    )
+    structured_theorem_envs = (
+        THEOREM_LIKE_ENVS
+        | {f"{name}*" for name in THEOREM_LIKE_ENVS}
+        | custom_theorem_envs
+        | custom_starred_envs
+    )
 
     def add(**kw) -> Candidate:
         nonlocal cid
@@ -163,20 +294,35 @@ def scan(doc: Document, pack=None) -> ScanResult:
         candidates.append(c)
         return c
 
-    def match_title(first):
+    def match_title(source):
+        first, multiline = _title_probe(source)
         semantic, wrapper = _semantic_view(first)
         for env, pat in title_res:
             m = pat.match(semantic)
             if m:
                 num = m.group(1) if m.groups() else None
-                raw_prefix = _raw_semantic_prefix(first, semantic, m.end(), wrapper)
-                replacement = _styled_semantic_replacement(first, m.end(), wrapper)
+                # A line-based patch cannot move an arbitrary multi-line title
+                # into an optional environment argument.  It can, however,
+                # safely remove the literal keyword on the first line and leave
+                # every parenthesis/macro/comment byte in place.  This avoids a
+                # duplicate ``Theorem`` label without risking a lossy rewrite.
+                if multiline:
+                    raw_prefix = ""
+                    title_line_old, replacement = _multiline_title_line_rewrite(source)
+                else:
+                    raw_prefix = _raw_semantic_prefix(
+                        first, semantic, m.end(), wrapper
+                    )
+                    replacement = _styled_semantic_replacement(
+                        first, m.end(), wrapper
+                    )
+                    title_line_old = first if replacement else ""
                 return (
                     env,
                     num,
                     raw_prefix,
                     semantic[m.end():].strip(),
-                    first if replacement else "",
+                    title_line_old,
                     replacement,
                 )
         return None
@@ -202,21 +348,22 @@ def scan(doc: Document, pack=None) -> ScanResult:
             continue
         if envs & BOX_ENVS:
             # 盒子内的标题行：多为英文条目的中文翻译辅助文本，按设计硬排除但记录跳过
-            if match_title(first):
+            if match_title(b.text):
                 skipped.append(
                     {"line": b.span.start_line, "kind": "box-title",
                      "reason": "位于 tcolorbox/mdframed 内（疑似英文条目的中文翻译，保守不动）"}
                 )
             continue
-        m = match_title(first)
+        m = match_title(b.text)
         if m:
             kind_env, num, prefix, remainder, title_line_old, title_line_new = m
+            title_text, _multiline = _title_probe(b.text)
             add(
                 kind="theorem-like",
                 rule_id="bare-title",
                 block_id=b.id,
                 span=b.span,
-                title_text=first,
+                title_text=title_text,
                 env_hint=kind_env,
                 confidence=0.85 if num else 0.7,
                 payload={
@@ -319,12 +466,20 @@ def scan(doc: Document, pack=None) -> ScanResult:
             },
         )
 
-    # 已有环境范围错误
+    # 已有环境范围错误。范围移动是破坏性操作，候选一旦进入规则模式就会
+    # 自动执行，因此必须使用比裸标题扫描更严格的证据门。
     for b in doc.blocks:
-        if b.kind != "env" or b.name not in THEOREM_LIKE_ENVS:
+        if b.kind != "env" or b.name not in structured_theorem_envs:
             continue
+        only_title = _env_is_only_title(doc, b, match_title)
+        explicit_outside = False
         nxt = _next_block_after(doc, b)
-        if nxt is not None and nxt.span.start_line == b.span.end_line + 1:
+        masked_lines = doc.masked.split("\n")
+        separator_lines = (
+            masked_lines[b.span.end_line:nxt.span.start_line - 1]
+            if nxt is not None else []
+        )
+        if nxt is not None and all(not line.strip() for line in separator_lines):
             if nxt.kind == "para":
                 first = _first_nonempty_line(nxt.text)
                 # 章节、下一个定理标题或证明起始语是新的结构边界。把它们
@@ -334,7 +489,13 @@ def scan(doc: Document, pack=None) -> ScanResult:
                     or match_title(first)
                     or match_proof(first)
                 )
-                if not starts_new_structure:
+                # “环境后有一个普通段落”是标准写法，不能据此推断它属于环境。
+                # 只有原文带有明确的迁移标记时才生成可自动移动的候选。
+                explicit_outside = bool(
+                    not starts_new_structure
+                    and EXPLICIT_OUTSIDE_BODY_RE.search(nxt.text)
+                )
+                if explicit_outside:
                     add(
                         kind="scope-fix",
                         rule_id="env-body-outside",
@@ -346,7 +507,9 @@ def scan(doc: Document, pack=None) -> ScanResult:
                         payload={"env_name": b.name, "next_kind": nxt.kind,
                                  "next_line": nxt.span.start_line, "next_end_line": nxt.span.end_line},
                     )
-            elif nxt.kind == "displaymath":
+            elif nxt.kind == "displaymath" and only_title:
+                # 只有空环境/纯标题环境后紧跟公式时，公式才构成足够强的
+                # “正文遗漏”证据；完整单行定理后的公式可能只是后续讨论。
                 add(
                     kind="scope-fix",
                     rule_id="env-missing-display",
@@ -358,7 +521,10 @@ def scan(doc: Document, pack=None) -> ScanResult:
                     payload={"env_name": b.name, "next_kind": nxt.kind,
                              "next_line": nxt.span.start_line, "next_end_line": nxt.span.end_line},
                 )
-        if _env_nonblank_lines(doc, b) <= 1:
+        # 同一环境已有更具体的 env-body-outside 候选时不要再生成第二个
+        # env-only-title ID；重复候选会让模型/规则只能回答其中一个，并造成
+        # 虚假的“漏答”或两次移动同一边界。
+        if only_title and not explicit_outside:
             add(
                 kind="scope-fix",
                 rule_id="env-only-title",
@@ -381,11 +547,193 @@ def scan(doc: Document, pack=None) -> ScanResult:
 # ---------------------------------------------------------------------------
 
 
+def _declared_theorem_envs(text: str) -> set:
+    """提取常见定理声明命令定义的环境名。"""
+    names = {m.group(2).strip() for m in NEW_THEOREM_RE.finditer(text)}
+    for pattern in (NEW_TCB_THEOREM_RE, DECLARE_THEOREM_RE, NEW_MD_THEOREM_RE):
+        names.update(m.group(1).strip() for m in pattern.finditer(text))
+    return {name for name in names if name and "\\" not in name}
+
+
+def _env_interior(doc: Document, b: Block) -> Optional[str]:
+    """返回与环境块对应的已屏蔽内部文本；无法唯一定位时取最外层匹配。"""
+    matches = []
+    for rng in doc.env_ranges:
+        name, bs, be, es, ee = rng
+        if name != b.name:
+            continue
+        if (
+            offset_to_line(doc, bs) == b.span.start_line
+            and offset_to_line(doc, es) == b.span.end_line
+        ):
+            matches.append(rng)
+    if not matches:
+        return None
+    _name, _bs, begin_end, end_start, _ee = max(
+        matches, key=lambda item: item[3] - item[1]
+    )
+    return doc.masked[begin_end:end_start]
+
+
+_NONCONTENT_ENV_COMMAND_RE = re.compile(
+    # ``\\hypertarget{name}{text}`` has visible content in its second argument;
+    # only its genuinely empty form is non-content.  Likewise, never consume an
+    # accidental second group following ``\\label`` or ``\\index``.
+    r"(?:\\(?:label|index)\s*\{[^{}]*\}"
+    r"|\\hypertarget\s*\{[^{}]*\}\s*\{\s*\})",
+    re.S,
+)
+
+
+def _env_is_only_title(doc: Document, b: Block, match_title) -> bool:
+    """判断环境是否确实为空或只含标题，而不是粗暴按“一行”判断。"""
+    interior = _env_interior(doc, b)
+    if interior is None:
+        return False
+    visible = _NONCONTENT_ENV_COMMAND_RE.sub("", interior).strip()
+    if not visible:
+        return True
+
+    nonblank = [line for line in visible.split("\n") if line.strip()]
+    first = nonblank[0]
+    hit = match_title(first)
+    if hit is None:
+        # 一行完整陈述（无论是否以 “Theorem” 开头）是合法正文。
+        return False
+    # A title-looking word is evidence of an empty theorem entry only when its
+    # semantic type agrees with the enclosing built-in environment.  For
+    # example, ``Exercise.`` is complete content inside a ``proof`` environment,
+    # not a missing proof body.  Unknown aliases remain fail-closed because the
+    # scanner does not have a trustworthy alias-to-canonical mapping here.
+    enclosing = str(b.name or "").removesuffix("*").casefold()
+    matched_env = str(hit[0] or "").casefold()
+    if enclosing not in THEOREM_LIKE_ENVS or matched_env != enclosing:
+        return False
+    remainder = str(hit[3] or "").strip()
+    tail = "\n".join(nonblank[1:]).strip()
+    return not remainder and not tail
+
+
 def _first_nonempty_line(text: str) -> str:
     for line in text.split("\n"):
         if line.strip():
             return line
     return ""
+
+
+def _unescaped_comment_start(line: str) -> int:
+    """Return the first TeX-comment percent index, ignoring ``\\%``."""
+    for index, char in enumerate(line):
+        if char != "%":
+            continue
+        backslashes = 0
+        cursor = index - 1
+        while cursor >= 0 and line[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        if backslashes % 2 == 0:
+            return index
+    return -1
+
+
+def _normalize_multiline_title(source: str) -> str:
+    visible = []
+    for line in source.split("\n"):
+        comment = _unescaped_comment_start(line)
+        if comment >= 0:
+            line = line[:comment]
+        if line.strip():
+            visible.append(line.strip())
+    return re.sub(r"\s+", " ", " ".join(visible)).strip()
+
+
+def _title_probe(source: str) -> tuple[str, bool]:
+    """Return a matchable title prefix and whether it spans source lines.
+
+    OCR-style headings reconstructed from optional theorem arguments can contain
+    ``\\footnote``/``\\href`` markup and balanced parentheses across several
+    lines.  This bounded scanner accepts only a balanced named title whose closer
+    is followed solely by title punctuation on that source line.  It therefore
+    cannot turn an ordinary sentence after ``Theorem (name)`` into a heading.
+    """
+    first = _first_nonempty_line(source)
+    if not first or "\n" not in source:
+        return first, False
+    first_offset = source.find(first)
+    head = _MULTILINE_NAMED_TITLE_HEAD_RE.match(source[first_offset:])
+    if head is None:
+        return first, False
+    opening = first_offset + head.start("open")
+    opener = source[opening]
+    closer = "]" if opener == "[" else ")"
+    depth = 0
+    cursor = opening
+    limit = min(len(source), opening + _MAX_MULTILINE_TITLE_CHARS)
+    line_count = 1
+    closing = -1
+    while cursor < limit:
+        char = source[cursor]
+        if char == "\n":
+            line_count += 1
+            if line_count > _MAX_MULTILINE_TITLE_LINES:
+                return first, False
+            cursor += 1
+            continue
+        if char == "%":
+            line_start = source.rfind("\n", 0, cursor) + 1
+            if _unescaped_comment_start(source[line_start:cursor + 1]) == cursor - line_start:
+                newline = source.find("\n", cursor + 1, limit)
+                if newline < 0:
+                    return first, False
+                cursor = newline
+                continue
+        if char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                closing = cursor
+                break
+        cursor += 1
+    if closing < 0 or line_count <= 1:
+        return first, False
+
+    line_end = source.find("\n", closing + 1)
+    if line_end < 0:
+        line_end = len(source)
+    trailing = source[closing + 1:line_end]
+    comment = _unescaped_comment_start(trailing)
+    if comment >= 0:
+        trailing = trailing[:comment]
+    if trailing.strip() not in _TITLE_TRAILING_PUNCTUATION:
+        return first, False
+    normalized = _normalize_multiline_title(source[first_offset:line_end])
+    return (normalized, True) if normalized else (first, False)
+
+
+def _multiline_title_keyword_prefix(source: str) -> str:
+    """Return only the first-line keyword prefix of a proven multi-line title."""
+    first = _first_nonempty_line(source)
+    if not first:
+        return ""
+    first_offset = source.find(first)
+    head = _MULTILINE_NAMED_TITLE_HEAD_RE.match(source[first_offset:])
+    if head is None:
+        return ""
+    return source[first_offset:first_offset + head.start("open")]
+
+
+def _multiline_title_line_rewrite(source: str) -> tuple[str, str]:
+    """Remove only a multi-line title's keyword while preserving indentation."""
+    first = _first_nonempty_line(source)
+    if not first:
+        return "", ""
+    head = _MULTILINE_NAMED_TITLE_HEAD_RE.match(first)
+    if head is None:
+        return "", ""
+    leading = first[:len(first) - len(first.lstrip())]
+    rewritten = leading + first[head.start("open"):]
+    return (first, rewritten) if rewritten != first else ("", "")
 
 
 def _semantic_view(first: str) -> Tuple[str, Optional[dict]]:
@@ -463,13 +811,19 @@ def _styled_semantic_replacement(
 
 def _match_title(first: str):
     """返回 (关键词, 编号, 可剥离前缀)；无匹配返回 None。"""
+    source = first
+    first, multiline = _title_probe(first)
     semantic, wrapper = _semantic_view(first)
     m = EN_TITLE_RE.match(semantic)
     if m:
         return (
             m.group(1),
             m.group(2),
-            _raw_semantic_prefix(first, semantic, m.end(), wrapper),
+            (
+                _multiline_title_keyword_prefix(source)
+                if multiline
+                else _raw_semantic_prefix(first, semantic, m.end(), wrapper)
+            ),
         )
     m = CN_NUM_PREFIX_RE.match(semantic)
     if m and m.group(2):

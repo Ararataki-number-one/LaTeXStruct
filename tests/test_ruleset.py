@@ -11,7 +11,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from latexstruct.core.parser import parse_latex  # noqa: E402
 from latexstruct.core.pipeline import run_pipeline  # noqa: E402
-from latexstruct.core.ruleset import list_builtin_packs, load_pack  # noqa: E402
+from latexstruct.core.ruleset import (  # noqa: E402
+    DEFAULT_PROOF_OF_START,
+    list_builtin_packs,
+    load_pack,
+)
 from latexstruct.core.scanner import scan  # noqa: E402
 
 SAMPLES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
@@ -36,6 +40,13 @@ def test_default_pack_preserves_behavior():
     assert r_default.stats == r_explicit.stats
     assert {c.env_hint for c in r_default.candidates if c.kind == "theorem-like"} == {
         "definition", "theorem", "remark"}
+
+
+def test_english_and_default_share_the_same_proof_of_grammar():
+    default = load_pack()
+    english = load_pack("english")
+    assert DEFAULT_PROOF_OF_START in default.proof_starts
+    assert DEFAULT_PROOF_OF_START in english.proof_starts
 
 
 def test_english_pack_ignores_chinese():

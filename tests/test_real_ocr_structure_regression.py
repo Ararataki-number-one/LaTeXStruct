@@ -255,18 +255,20 @@ def test_real_ai_spans_snap_after_display_equation_tag_and_matrix() -> None:
 
     legalize_decisions(doc, decisions, by_id)
 
-    first_display_close = _line_number(lines, r"\]")
     equation_close = _line_number(lines, r"\end{equation}")
     matrix_display_close = max(
         index for index, line in enumerate(lines, start=1) if line == r"\]"
     )
-    assert decisions[0].body_span[1] >= first_display_close
+    # The first model range omits the qualifier between the display and the
+    # next theorem.  Snapping only to ``\]`` would create a balanced but
+    # semantically truncated theorem, so the new boundary gate rejects it.
+    assert "漏段" in getattr(decisions[0], "_legalize_error", "")
     assert decisions[1].body_span[1] >= equation_close, [d.body_span for d in decisions]
     assert decisions[2].body_span[1] >= matrix_display_close
 
     context = PatchContext(preamble_anchor=3)
     planned = []
-    for decision in decisions:
+    for decision in decisions[1:]:
         ops, error = build_ops(decision, lines, context)
         assert error == ""
         planned.append((decision, ops))

@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Collection, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from ..providers import api_provider
@@ -24,15 +24,18 @@ from .parser import Document
 from .patch import Decision
 from .prompts import build_decide_system, build_decide_user, build_meta
 from .scanner import Candidate
-from .legalize import _next_stop_line
+from .legalize import _next_stop_line, theorem_requires_boundary_singleton
 
 ALLOWED_WRAP_ENVS = {
     "theorem", "lemma", "proposition", "corollary", "definition",
     "remark", "example", "conjecture", "problem", "claim", "proof",
+    "question", "fact", "observation", "note", "exercise",
 }
 ALLOWED_ACTIONS = {"wrap", "move-boundary", "none"}
 AI_KINDS = {"theorem-like", "proof", "scope-fix"}
-MIN_AI_CONFIDENCE = 0.75
+AUTO_APPLY_CONFIDENCE = 0.75
+# Backwards-compatible name for integrations that imported the old constant.
+MIN_AI_CONFIDENCE = AUTO_APPLY_CONFIDENCE
 
 
 class LLMError(Exception):
@@ -68,13 +71,15 @@ class AIConfig:
     review_enabled: bool = True
     # 数学讲义中的一个定理/证明常跨多个展示公式。较小批次配合更完整的
     # 源文本窗口，比一次塞入几十个只有六行上下文的候选更可靠。
-    batch_size: int = 10
+    batch_size: int = 4
     context_lines: int = 20
     # 长证明必须看到下一个可靠结构停点，不能因固定 20 行窗口
     # 被截成半个 proof。超过此上限则 fail-closed，交人工确认。
     max_candidate_lines: int = 240
     review_max_rounds: int = 2
-    review_batch: int = 12  # 复查分块大小（整本书时避免单次调用超上下文）
+    # 复查是独立的第二道精度门：逐候选调用避免把相邻定理的 verdict/ID 串位。
+    # 决策阶段仍对低风险定理做 4 项小批处理，因此总体请求数保持可控。
+    review_batch: int = 1
 
 
 class LLMClient:
@@ -334,19 +339,54 @@ def parse_decisions(
     by_id = {c.id: c for c in candidates}
     raw = obj.get("decisions")
     if not isinstance(raw, list):
-        return [], [{"candidate_id": "-", "line": 1, "reason": "AI 响应缺少 decisions 数组"}], []
-    seen = set()
+        missing = [{
+            "candidate_id": c.id,
+            "line": c.span.start_line,
+            "reason": "AI 响应缺少 decisions 数组，因此该候选没有唯一决策",
+        } for c in candidates]
+        return [], [
+            {"candidate_id": "-", "line": 1, "reason": "AI 响应缺少 decisions 数组"},
+            *missing,
+        ], []
     incomplete_windows = incomplete_windows or set()
+    # 先按候选计数，再解析。过去使用 ``seen`` 会接受第一次回答，并把重复回答
+    # 当作一个无关警告；完全漏答的候选则会直接消失。二者都会让 UI 误以为整批
+    # 已判断完毕。现在每个输入候选必须恰好对应一个对象，否则该候选只进入人工项。
+    raw_by_id: Dict[str, List[dict]] = {}
     for item in raw:
         if not isinstance(item, dict):
+            ambiguous.append({
+                "candidate_id": "-", "line": 1,
+                "reason": "AI decisions 中包含非对象条目，已保守忽略",
+            })
             continue
-        cid = item.get("candidate_id", "")
-        c = by_id.get(cid)
-        if c is None or cid in seen:
-            ambiguous.append({"candidate_id": cid, "line": c.span.start_line if c else 1,
-                              "reason": "AI 引用了未知或重复的候选，保守忽略"})
+        cid = str(item.get("candidate_id", "") or "")
+        if cid not in by_id:
+            ambiguous.append({
+                "candidate_id": cid, "line": 1,
+                "reason": "AI 引用了未知候选，已保守忽略",
+            })
             continue
-        seen.add(cid)
+        raw_by_id.setdefault(cid, []).append(item)
+
+    for c in candidates:
+        items = raw_by_id.get(c.id, [])
+        if not items:
+            ambiguous.append({
+                "candidate_id": c.id,
+                "line": c.span.start_line,
+                "reason": "AI 未返回该候选的决策，未静默视为无需处理",
+            })
+            continue
+        if len(items) != 1:
+            ambiguous.append({
+                "candidate_id": c.id,
+                "line": c.span.start_line,
+                "reason": f"AI 对该候选返回了 {len(items)} 个决策，无法确定唯一结论",
+            })
+            continue
+        item = items[0]
+        cid = c.id
         action = item.get("action")
         if action not in ALLOWED_ACTIONS:
             ambiguous.append({"candidate_id": cid, "line": c.span.start_line,
@@ -354,8 +394,12 @@ def parse_decisions(
             continue
         lo, hi = windows[cid]
         if action == "none":
-            notes.append({"candidate_id": cid, "line": c.span.start_line,
-                          "reason": str(item.get("reason", ""))[:120]})
+            notes.append({
+                "candidate_id": cid,
+                "line": c.span.start_line,
+                "reason": str(item.get("reason", ""))[:120],
+                "confidence": _confidence(item),
+            })
             continue
         env = str(item.get("env", "") or "")
         if action == "wrap":
@@ -370,6 +414,16 @@ def parse_decisions(
                     "candidate_id": cid,
                     "line": c.span.start_line,
                     "reason": "模型给出的环境类型与扫描器确认的证明/定理候选冲突，保守保留",
+                })
+                continue
+            if c.kind == "theorem-like" and c.env_hint and env != c.env_hint:
+                ambiguous.append({
+                    "candidate_id": cid,
+                    "line": c.span.start_line,
+                    "reason": (
+                        f"模型环境 {env!r} 与标题关键词确定的 {c.env_hint!r} 冲突，"
+                        "已保守保留"
+                    ),
                 })
                 continue
             if cid in incomplete_windows:
@@ -389,7 +443,7 @@ def parse_decisions(
                                   "reason": "body_span 未包含候选标题，保守保留"})
                 continue
             conf = _confidence(item)
-            if conf < MIN_AI_CONFIDENCE:
+            if conf < AUTO_APPLY_CONFIDENCE:
                 ambiguous.append({"candidate_id": cid, "line": c.span.start_line,
                                   "reason": f"AI 置信度 {conf:.0%} 低于自动修改阈值，需人工确认"})
                 continue
@@ -448,7 +502,7 @@ def parse_decisions(
                                   "reason": "扫描器目标边界越出上下文范围，保守保留"})
                 continue
             conf = _confidence(item)
-            if conf < MIN_AI_CONFIDENCE:
+            if conf < AUTO_APPLY_CONFIDENCE:
                 ambiguous.append({"candidate_id": cid, "line": c.span.start_line,
                                   "reason": f"AI 置信度 {conf:.0%} 低于自动修改阈值，需人工确认"})
                 continue
@@ -464,6 +518,43 @@ def parse_decisions(
                 )
             )
     return decisions, ambiguous, notes
+
+
+def candidate_windows(
+    doc: Document,
+    candidates: List[Candidate],
+    ai_config: AIConfig,
+    structured_envs: Optional[Collection[str]] = None,
+) -> Tuple[Dict[str, Tuple[int, int]], set]:
+    """构建可复用的源坐标窗口。
+
+    初次决策与 missed-extra 复核必须使用完全相同的边界规则；否则复查可能
+    借由更宽的窗口绕过长候选 fail-closed 门。
+    """
+    windows: Dict[str, Tuple[int, int]] = {}
+    incomplete_windows = set()
+    total_lines = doc.text.count("\n") + 1
+    for candidate in candidates:
+        lo = max(1, candidate.span.start_line - ai_config.context_lines)
+        normal_hi = min(
+            total_lines,
+            candidate.span.end_line + ai_config.context_lines,
+        )
+        hi = normal_hi
+        if candidate.kind in {"theorem-like", "proof"}:
+            stop = _next_stop_line(
+                doc, candidate.span.start_line, structured_envs
+            )
+            semantic_hi = stop if stop is not None else total_lines
+            safe_hi = min(
+                total_lines,
+                candidate.span.start_line + max(1, ai_config.max_candidate_lines),
+            )
+            hi = max(normal_hi, min(semantic_hi, safe_hi))
+            if semantic_hi > safe_hi:
+                incomplete_windows.add(candidate.id)
+        windows[candidate.id] = (lo, hi)
+    return windows, incomplete_windows
 
 
 def decide_candidates(
@@ -483,37 +574,51 @@ def decide_candidates(
     ambiguous: List[dict] = []
     notes: List[dict] = []
     usage_total: Dict = {}
-    for i in range(0, len(candidates), max(1, ai_config.batch_size)):
+    # Proof, scope edits, and theorem entries with post-title atoms have
+    # materially higher boundary risk than a one-atom theorem heading.  Keeping
+    # them in a mixed batch made it possible for a model to copy a neighbour's
+    # stop/env or overlook one continuation while still echoing a valid ID.
+    # Isolate only those candidates; single-atom theorem batches retain normal
+    # API latency and cost.
+    batches: List[List[Candidate]] = []
+    buffered: List[Candidate] = []
+    low_risk_batch_size = max(1, ai_config.batch_size)
+
+    def flush_buffer() -> None:
+        nonlocal buffered
+        if buffered:
+            batches.append(buffered)
+            buffered = []
+
+    for candidate in candidates:
+        if (
+            candidate.kind in {"proof", "scope-fix"}
+            or theorem_requires_boundary_singleton(
+                doc, candidate, ctx.existing_envs
+            )
+        ):
+            flush_buffer()
+            batches.append([candidate])
+            continue
+        buffered.append(candidate)
+        if len(buffered) >= low_risk_batch_size:
+            flush_buffer()
+    flush_buffer()
+
+    processed = 0
+    for batch in batches:
         if control_callback:
             control_callback()
-        batch = candidates[i : i + ai_config.batch_size]
-        windows = {}
-        incomplete_windows = set()
-        total_lines = doc.text.count("\n") + 1
-        for candidate in batch:
-            lo = max(1, candidate.span.start_line - ai_config.context_lines)
-            normal_hi = min(
-                total_lines,
-                candidate.span.end_line + ai_config.context_lines,
-            )
-            hi = normal_hi
-            if candidate.kind in {"theorem-like", "proof"}:
-                stop = _next_stop_line(doc, candidate.span.start_line)
-                semantic_hi = stop if stop is not None else total_lines
-                safe_hi = min(
-                    total_lines,
-                    candidate.span.start_line + max(1, ai_config.max_candidate_lines),
-                )
-                hi = max(normal_hi, min(semantic_hi, safe_hi))
-                if semantic_hi > safe_hi:
-                    incomplete_windows.add(candidate.id)
-            windows[candidate.id] = (lo, hi)
+        windows, incomplete_windows = candidate_windows(
+            doc, batch, ai_config, ctx.existing_envs
+        )
         user = build_decide_user(
             doc,
             batch,
             ai_config.context_lines,
             windows=windows,
             incomplete_windows=incomplete_windows,
+            structured_envs=ctx.existing_envs,
         )
         obj, usage = client.chat_json(system, user)
         model = getattr(client, "cfg", None) and client.cfg.model or ""
@@ -530,9 +635,10 @@ def decide_candidates(
         decisions.extend(ds)
         ambiguous.extend(am)
         notes.extend(nt)
+        processed += len(batch)
         if progress_callback:
             progress_callback({
-                "done": min(i + len(batch), len(candidates)),
+                "done": processed,
                 "total": len(candidates),
                 "usage": dict(usage_total),
                 "decisions": [d.candidate_id for d in decisions],

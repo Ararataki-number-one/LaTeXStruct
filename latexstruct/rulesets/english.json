@@ -10,9 +10,9 @@
     "example": ["Example"]
   },
   "proof_starts": [
-    "Proof\\.?(?:\\s|$)",
+    "Proof(?!\\s+of\\b)\\s*[:.]?(?:\\s|$)",
     "Proof\\s*\\[[^\\]]*\\](?:\\s*\\.)?(?:\\s|$)",
-    "Proof of\\b",
+    "Proof of\\s+(?:(?:Theorem|Lemma|Proposition|Corollary|Conjecture|Claim|Fact|Observation|Definition|Result|Question|Problem|Exercise)\\b(?:\\s*~?\\s*(?:\\d+(?:\\.\\d+)*|\\\\(?![A-Za-z@]*(?i:h(?:yper)?ref)\\b)[A-Za-z@]*ref\\*?\\s*\\{[^{}\\n]{1,160}\\}))?(?:\\s+(?:up\\s+to|for|on|in|under|with|of)\\s+[^.\\n:：。]{1,160})?(?=\\s*(?:[.:：。]|$))|\\d+(?:\\.\\d+)*(?=\\s*(?:[.:：。]|$))|\\\\(?![A-Za-z@]*(?i:h(?:yper)?ref)\\b)[A-Za-z@]*ref\\*?\\s*\\{[^{}\\n]{1,160}\\}(?=\\s*(?:[.:：。]|$))|the\\s+(?:(?:upper|lower)\\s+bound(?:\\s+(?:in|of|for)\\s+(?:Theorem|Lemma|Proposition|Corollary|Claim|Result)\\s+\\d+(?:\\.\\d+)*)?|(?:main\\s+)?(?:theorem|lemma|proposition|corollary|claim|result|assertion)\\b)(?=\\s*(?:[.:：。]|$))|(?:(?-i:[A-Z][A-Za-z0-9'’.-]*)(?:\\s+[A-Za-z][A-Za-z0-9'’.-]*){0,4}|the\\s+[A-Za-z][A-Za-z0-9'’.-]*(?:\\s+[A-Za-z][A-Za-z0-9'’.-]*){0,4})\\s+(?:theorem|lemma|proposition|corollary|claim|result|assertion)\\b(?:\\s+(?:for|on|in|under|with|of)\\s+[^.\\n:：。]{1,160})?(?=\\s*(?:[.:：。]|$)))",
     "Sketch of the proof\\.?(?:\\s|$)"
   ]
 }

@@ -21,6 +21,7 @@ import zipfile
 from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Optional
+from weakref import WeakValueDictionary
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
@@ -28,6 +29,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..config import AppConfig, load_config, save_config
+from ..core.invariants import IMG_RE
+from ..core.parser import parse_latex
 from ..core.pipeline import run_pipeline
 from ..providers import list_provider_presets
 from ..store import ProjectStore
@@ -45,6 +48,27 @@ _update_state_lock = threading.RLock()
 _update_preparing = False
 _update_jobs_lock = threading.RLock()
 _update_jobs: Dict[str, dict] = {}
+_project_locks_guard = threading.Lock()
+_project_locks: WeakValueDictionary[str, threading.RLock] = WeakValueDictionary()
+
+
+def _project_lock(pid: str):
+    """Return the stable per-project processing/review transaction lock.
+
+    The registry lock protects lock creation only. Work for different projects
+    therefore remains concurrent, while one project's meta/result files cannot
+    be published by overlapping process or review requests. The weak registry
+    does not retain a project forever: holders and waiters keep the returned
+    lock strongly referenced until their transaction ends, after which an idle
+    entry may be collected safely.
+    """
+    key = str(pid)
+    with _project_locks_guard:
+        lock = _project_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _project_locks[key] = lock
+        return lock
 
 OCR_ACTIVE_STATUSES = {"starting", "running", "pausing", "paused"}
 
@@ -143,10 +167,8 @@ def _ocr_control(job: dict) -> None:
             _bump_ocr_state(job)
             _ocr_jobs_changed.notify_all()
 
-OCR_IMAGE_REF_RE = re.compile(
-    r"\\includegraphics\*?(?:\s*\[(?P<opts>[^\]]*)\])?\s*\{"
-    r"(?P<path>images/page_(?P<page>\d+)_(?P<index>\d+)(?P<ext>\.(?:png|jpe?g))?)"
-    r"\}",
+OCR_CANONICAL_IMAGE_PATH_RE = re.compile(
+    r"images/page_(?P<page>\d+)_(?P<index>\d+)(?P<ext>\.(?:png|jpe?g))?",
     re.I,
 )
 MAX_PRESERVED_OCR_IMAGE_BYTES = 25 * 1024 * 1024
@@ -257,22 +279,46 @@ def _preserve_source_page_previews(
     return previews, used
 
 
-def _ocr_image_references(text: str) -> list[dict]:
+def _ocr_image_references(text: str) -> tuple[list[dict], list[str]]:
+    """Return canonical OCR image references and every unsupported active path.
+
+    The shared invariant parser masks comments, inline ``\\verb`` and protected
+    environments before ``IMG_RE`` runs.  This keeps examples in source text from
+    blocking import while ensuring that *every* active ``\\includegraphics`` is
+    either bound to a canonical OCR asset or reported unresolved.
+    """
     references = []
+    unsupported = []
     seen = set()
+    unsupported_seen = set()
+    document = parse_latex(text)
     # ``transcribe_page`` prepends the physical PDF page to every OCR chunk.  The
     # visual model may then copy the printed page number from the footer and may
     # also use that printed number in the suggested image filename.  Therefore
     # only the first Page marker in each PAGE BREAK chunk is authoritative.
-    for chunk in OCR_PAGE_BREAK_RE.split(text):
+    break_matches = list(OCR_PAGE_BREAK_RE.finditer(document.text))
+    chunk_starts = [0, *(match.end() for match in break_matches)]
+    chunk_ends = [*(match.start() for match in break_matches), len(document.text)]
+    for chunk_start, chunk_end in zip(chunk_starts, chunk_ends):
+        chunk = document.text[chunk_start:chunk_end]
+        active_chunk = document.masked[chunk_start:chunk_end]
         page_marker = OCR_PAGE_MARKER_RE.search(chunk)
-        for match in OCR_IMAGE_REF_RE.finditer(chunk):
-            path = match.group("path").replace("\\", "/")
+        for match in IMG_RE.finditer(active_chunk):
+            raw_path = match.group(1)
+            path = raw_path.replace("\\", "/").strip()
+            canonical = OCR_CANONICAL_IMAGE_PATH_RE.fullmatch(path)
+            if canonical is None:
+                unresolved_path = path or raw_path
+                if unresolved_path not in unsupported_seen:
+                    unsupported_seen.add(unresolved_path)
+                    unsupported.append(unresolved_path)
+                continue
             if path in seen:
                 continue
             seen.add(path)
-            printed_page = int(match.group("page"))
-            options = match.group("opts") or ""
+            printed_page = int(canonical.group("page"))
+            options_match = re.search(r"\[(?P<opts>[^\]]*)\]", match.group(0))
+            options = options_match.group("opts") if options_match else ""
             width_match = re.search(
                 r"\bwidth\s*=\s*(?P<width>\d+(?:\.\d+)?)\s*\\(?:line|text)width\b",
                 options,
@@ -284,11 +330,11 @@ def _ocr_image_references(text: str) -> list[dict]:
                 "source_page": (
                     int(page_marker.group("page")) if page_marker else printed_page
                 ),
-                "index": int(match.group("index")),
-                "ext": (match.group("ext") or "").lower(),
+                "index": int(canonical.group("index")),
+                "ext": (canonical.group("ext") or "").lower(),
                 "width_hint": float(width_match.group("width")) if width_match else None,
             })
-    return references
+    return references, unsupported
 
 
 def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
@@ -297,8 +343,13 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
     优先提取真实图块。提取数量不足时，使用 OCR 实际看过的源页栅格作为
     明确标注的 ``page_fallback``，从而不会把悬空图片路径带入分析/审阅。
     """
-    references = _ocr_image_references(raw_tex)
-    result = {"assets": [], "source_pages": [], "unresolved": [], "errors": []}
+    references, unsupported = _ocr_image_references(raw_tex)
+    result = {
+        "assets": [],
+        "source_pages": [],
+        "unresolved": list(unsupported),
+        "errors": [],
+    }
     project_dir = project_dir.resolve()
     if not references:
         preview_pages = job.get("selected_pages") or sorted((job.get("pages") or {}).keys())
@@ -1053,6 +1104,8 @@ def _persisted_review_summary(review: dict) -> dict:
         ("invalid", list),
         ("usage", dict),
         ("error", str),
+        ("preserved_candidate_ids", list),
+        ("preserved_findings", dict),
     ):
         value = review.get(key)
         if isinstance(value, expected_type):
@@ -1080,6 +1133,7 @@ def get_config() -> AppConfig:
 
 class CreateRequest(BaseModel):
     text: str = ""
+    source_file: Optional[dict] = None
     name: str = ""
     mode: str = "ai"
     template: str = ""
@@ -1162,14 +1216,14 @@ def create_app(updated_from: str = "") -> FastAPI:
 
     @app.get("/api/templates")
     def templates():
-        from ..core.template import ELEGANTBOOK, list_template_presets
+        from ..core.template import ELEGANTBOOK, PRESERVE_SOURCE, list_template_presets
 
         return {
             "templates": list_template_presets(),
-            "default": ELEGANTBOOK,
+            "default": PRESERVE_SOURCE,
             "ocr_default": ELEGANTBOOK,
-            "export_default": ELEGANTBOOK,
-            "fixed": True,
+            "export_default": PRESERVE_SOURCE,
+            "fixed": False,
         }
 
     @app.get("/api/providers")
@@ -1305,22 +1359,45 @@ def create_app(updated_from: str = "") -> FastAPI:
 
     @app.post("/api/projects")
     def create_project(req: CreateRequest):
-        from ..core.template import ELEGANTBOOK, normalize_template_id
+        from ..core.project import decode_tex_bytes
+        from ..core.template import normalize_template_id
 
-        if not req.text.strip():
+        original_source = None
+        source_format = None
+        source_text = req.text
+        if req.source_file is not None:
+            original_source = _decode_folder_files(
+                {"source.tex": req.source_file}
+            )["source.tex"]
+            decoded = decode_tex_bytes(original_source)
+            source_text = decoded.text
+            source_format = decoded.metadata()
+        if not source_text.strip():
             raise HTTPException(400, "内容为空")
-        normalize_template_id(req.template)
-        pid = get_store().create(req.text, req.name, req.mode, ELEGANTBOOK, req.pack)
+        template = normalize_template_id(req.template)
+        pid = get_store().create(
+            source_text,
+            req.name,
+            req.mode,
+            template,
+            req.pack,
+            original_source=original_source,
+            source_format=source_format,
+        )
         return {"id": pid}
 
     def _import_project_files(files: Dict[str, bytes], name: str, mode: str,
                               template: str, pack: str, defer_process: bool):
         """统一的文件夹/ZIP 导入；原始资源逐字节保存在项目副本中。"""
-        from ..core.project import discover_main, flatten_project, process_project
-        from ..core.template import ELEGANTBOOK, normalize_template_id
+        from ..core.project import (
+            decode_tex_bytes,
+            discover_main,
+            flatten_project,
+            process_project,
+        )
+        from ..core.template import normalize_template_id
 
-        normalize_template_id(template)
-        template = ELEGANTBOOK
+        template = normalize_template_id(template)
         mode = mode or "ai"
 
         tmpdir = tempfile.mkdtemp(prefix="ls-folder-")
@@ -1343,6 +1420,8 @@ def create_app(updated_from: str = "") -> FastAPI:
                     Path(tmpdir), mode=mode, template=template or None,
                     template_context={"title": name},
                     ai_config=cfg.to_ai_config() if mode == "ai" else None,
+                    compile_check=True,
+                    compile_files=files,
                     pack=pack or None,
                 )
                 flattened, graph_obj = res.flattened, res.graph
@@ -1361,6 +1440,10 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "files": graph_obj.files,
                 "missing": graph_obj.missing,
                 "cycles": graph_obj.cycles,
+            }
+            meta["text_formats"] = {
+                rel: decode_tex_bytes(files[rel]).metadata()
+                for rel in {graph_obj.main_rel, *graph_obj.files}
             }
             get_store()._write_json(str(project_dir), "meta.json", meta)
             with zipfile.ZipFile(project_dir / "original-files.zip", "w", zipfile.ZIP_DEFLATED) as zf:
@@ -1452,7 +1535,7 @@ def create_app(updated_from: str = "") -> FastAPI:
 
     def _committed_export(pid: str):
         """只放行明确通过安全检查的、与提交标记一致的 TeX 结果。"""
-        info, result_bytes, _directory = _committed_record(pid)
+        info, result_bytes, directory = _committed_record(pid)
         verification = info.get("verification") if isinstance(info, dict) else None
         if not isinstance(verification, dict) or verification.get("safe_to_export") is not True:
             raise HTTPException(409, "安全检查未明确通过，已阻止导出；请查看汇报或重新处理")
@@ -1460,13 +1543,17 @@ def create_app(updated_from: str = "") -> FastAPI:
             result_text = result_bytes.decode("utf-8")
         except UnicodeDecodeError:
             raise HTTPException(409, "结果不是有效 UTF-8 TEX，已阻止导出；请重新处理项目") from None
-        from ..core.template import uses_elegantbook_class
+        meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+        original_path = directory / "original-source.tex"
+        if meta.get("kind") != "folder" and original_path.is_file():
+            from ..core.project import encode_tex_like_original
 
-        if not uses_elegantbook_class(result_text):
-            raise HTTPException(
-                409,
-                "该结果不是当前固定的 ElegantBook 成品；请重新运行结构化整理后再导出",
-            )
+            try:
+                result_bytes = encode_tex_like_original(
+                    result_text, original_path.read_bytes()
+                )
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from None
         return info, result_bytes
 
     def _committed_report(pid: str):
@@ -1527,14 +1614,17 @@ def create_app(updated_from: str = "") -> FastAPI:
             info, result_bytes, _directory = _committed_record(pid)
             report_bytes = _committed_report(pid)
             verification = info.get("verification") if isinstance(info, dict) else None
+            verified = bool(
+                isinstance(verification, dict)
+                and verification.get("safe_to_export") is True
+            )
+            if verified:
+                _verified_info, result_bytes = _committed_export(pid)
             return {
                 "info": info,
                 "result": result_bytes,
                 "report": report_bytes,
-                "verified": bool(
-                    isinstance(verification, dict)
-                    and verification.get("safe_to_export") is True
-                ),
+                "verified": verified,
                 "attempt": "committed",
                 "directory": directory,
             }
@@ -1542,7 +1632,12 @@ def create_app(updated_from: str = "") -> FastAPI:
         # A task can fail before producing a structured draft (for example an AI
         # transport error).  The imported source is still a useful current TEX
         # artifact and remains exportable with an explicit unverified marker.
-        source_bytes = get_store().read_source(pid).encode("utf-8")
+        original_source = directory / "original-source.tex"
+        source_bytes = (
+            original_source.read_bytes()
+            if original_source.is_file()
+            else get_store().read_source(pid).encode("utf-8")
+        )
         report_bytes = (
             "# LaTeXStruct 当前导出\n\n"
             "本次分析尚未产生可校验的结构化草稿；此包保留原始导入 TEX。\n"
@@ -1579,6 +1674,7 @@ def create_app(updated_from: str = "") -> FastAPI:
     def _current_package_bytes(pid: str) -> tuple[bytes, bool]:
         """Build a portable package for the newest attempt without claiming it is valid."""
         from ..core.project import safe_project_relpath
+        from ..core.template import uses_elegantbook_class
         from ..elegantbook import elegantbook_bundle_assets
 
         current = _current_record(pid)
@@ -1592,8 +1688,15 @@ def create_app(updated_from: str = "") -> FastAPI:
             "This is the newest LaTeXStruct draft, exported at the user's request.\n"
             "It did not pass every verification/compile check. Read LATEXSTRUCT-REPORT.md.\n"
         ).encode("utf-8")
+        try:
+            current_text = current["result"].decode("utf-8")
+        except UnicodeDecodeError:
+            current_text = ""
+        template_assets = (
+            elegantbook_bundle_assets() if uses_elegantbook_class(current_text) else {}
+        )
         reserved = {
-            **elegantbook_bundle_assets(),
+            **template_assets,
             "LATEXSTRUCT-REPORT.md": current["report"],
             "LATEXSTRUCT-UNVERIFIED.txt": warning,
         }
@@ -1602,16 +1705,45 @@ def create_app(updated_from: str = "") -> FastAPI:
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
             written = set()
-            if meta.get("kind") == "folder" and isinstance(per_file, dict) and per_file:
+            if meta.get("kind") == "folder" and not (
+                isinstance(per_file, dict) and per_file
+            ):
+                original_zip = Path(get_store()._dir(pid)) / "original-files.zip"
+                if not original_zip.is_file():
+                    raise HTTPException(409, "原始文件夹工程快照缺失，已阻止保真导出")
+                with zipfile.ZipFile(original_zip, "r") as source_zip:
+                    for member in source_zip.infolist():
+                        if member.is_dir():
+                            continue
+                        rel = safe_project_relpath(member.filename)
+                        if rel in reserved:
+                            raise HTTPException(
+                                409, f"原项目中的 {rel} 与导出说明文件冲突"
+                            )
+                        zf.writestr(rel, source_zip.read(member))
+                        written.add(rel)
+            elif meta.get("kind") == "folder":
+                from ..core.project import encode_project_files
+
                 graph = meta.get("graph") or {}
                 main_rel = safe_project_relpath(str(graph.get("main_rel") or "main.tex"))
-                zf.writestr(main_rel, str(per_file.get("", "")).encode("utf-8"))
+                original_zip = Path(get_store()._dir(pid)) / "original-files.zip"
+                if not original_zip.is_file():
+                    raise HTTPException(409, "原始文件夹工程快照缺失，已阻止保真导出")
+                original_files = _decode_zip_files(original_zip.read_bytes())
+                try:
+                    encoded_files = encode_project_files(
+                        original_files, main_rel, per_file
+                    )
+                except ValueError as exc:
+                    raise HTTPException(409, str(exc)) from None
+                zf.writestr(main_rel, encoded_files[main_rel])
                 written.add(main_rel)
-                for rel, content in per_file.items():
+                for rel, _content in per_file.items():
                     if not rel:
                         continue
                     safe_rel = safe_project_relpath(rel)
-                    zf.writestr(safe_rel, str(content).encode("utf-8"))
+                    zf.writestr(safe_rel, encoded_files[safe_rel])
                     written.add(safe_rel)
             else:
                 zf.writestr("main.tex", current["result"])
@@ -1635,14 +1767,17 @@ def create_app(updated_from: str = "") -> FastAPI:
         return output.getvalue(), False
 
     def _export_package_bytes(pid: str) -> bytes:
-        """Build a portable ElegantBook package from the same committed result marker."""
+        """Build a portable project package from the same committed result marker."""
         from ..core.project import safe_project_relpath
         from ..core.template import uses_elegantbook_class
         from ..elegantbook import elegantbook_bundle_assets
 
         info, result_bytes = _committed_export(pid)
         report_bytes = _committed_report(pid)
-        assets = elegantbook_bundle_assets()
+        from ..core.project import decode_tex_bytes
+
+        result_text = decode_tex_bytes(result_bytes).text
+        assets = elegantbook_bundle_assets() if uses_elegantbook_class(result_text) else {}
         reserved = {**assets, "LATEXSTRUCT-REPORT.md": report_bytes}
         meta = json.loads(
             (Path(get_store()._dir(pid)) / "meta.json").read_text(encoding="utf-8")
@@ -1651,19 +1786,24 @@ def create_app(updated_from: str = "") -> FastAPI:
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             if per_file:
+                from ..core.project import encode_project_files
+
                 graph = meta.get("graph") or {}
                 main_rel = safe_project_relpath(graph.get("main_rel", ""))
-                main_text = str(per_file.get("", ""))
-                if not uses_elegantbook_class(main_text):
-                    raise HTTPException(
-                        409,
-                        "项目主文件不是 ElegantBook 成品，已阻止打包；请重新处理项目",
-                    )
                 processed = {main_rel} | {
                     safe_project_relpath(rel) for rel in per_file if rel
                 }
                 written = set()
                 original_zip = Path(get_store()._dir(pid)) / "original-files.zip"
+                if not original_zip.is_file():
+                    raise HTTPException(409, "原始文件夹工程快照缺失，已阻止保真导出")
+                original_files = _decode_zip_files(original_zip.read_bytes())
+                try:
+                    encoded_files = encode_project_files(
+                        original_files, main_rel, per_file
+                    )
+                except ValueError as exc:
+                    raise HTTPException(409, str(exc)) from None
                 if original_zip.exists():
                     with zipfile.ZipFile(original_zip, "r") as source_zip:
                         for member in source_zip.infolist():
@@ -1680,13 +1820,13 @@ def create_app(updated_from: str = "") -> FastAPI:
                             else:
                                 zf.writestr(rel, data)
                             written.add(rel)
-                zf.writestr(main_rel, main_text.encode("utf-8"))
+                zf.writestr(main_rel, encoded_files[main_rel])
                 written.add(main_rel)
-                for rel, content in per_file.items():
+                for rel, _content in per_file.items():
                     if not rel:
                         continue
                     safe_rel = safe_project_relpath(rel)
-                    zf.writestr(safe_rel, str(content).encode("utf-8"))
+                    zf.writestr(safe_rel, encoded_files[safe_rel])
                     written.add(safe_rel)
                 expected = meta.get("original_file_count")
                 if expected is not None and len(written) != expected:
@@ -1718,7 +1858,7 @@ def create_app(updated_from: str = "") -> FastAPI:
         return Response(
             content=data,
             media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{pid}-ElegantBook.zip"'},
+            headers={"Content-Disposition": f'attachment; filename="{pid}-structured-project.zip"'},
         )
 
     @app.get("/api/projects/{pid}/export-folder")
@@ -1742,7 +1882,10 @@ def create_app(updated_from: str = "") -> FastAPI:
     def delete_project(pid: str):
         if _process_jobs.active(pid):
             raise HTTPException(409, "项目正在处理；请先取消任务，待安全停止后再删除")
-        get_store().delete(pid)
+        with _project_lock(pid):
+            if _process_jobs.active(pid):
+                raise HTTPException(409, "项目正在处理；请先取消任务，待安全停止后再删除")
+            get_store().delete(pid)
         return {"ok": True}
 
     @app.get("/api/projects/{pid}/source")
@@ -1854,11 +1997,11 @@ def create_app(updated_from: str = "") -> FastAPI:
         project_name = str(project.get("name") or "LaTeXStruct")
         if artifact == "result":
             _info, data = _committed_export(pid)
-            return data, f"{project_name}-ElegantBook.tex", True
+            return data, f"{project_name}-structured.tex", True
         if artifact == "report":
             return _committed_report(pid), f"{project_name}-report.md", True
         if artifact in {"package", "folder"}:
-            return _export_package_bytes(pid), f"{project_name}-ElegantBook-project.zip", True
+            return _export_package_bytes(pid), f"{project_name}-structured-project.zip", True
         if artifact == "current":
             current = _current_record(pid)
             verified = bool(current["verified"])
@@ -1904,16 +2047,9 @@ def create_app(updated_from: str = "") -> FastAPI:
         text = get_store().read_source(pid)
         cfg = get_config()
         mode = p["mode"]
-        from ..core.template import ELEGANTBOOK
+        from ..core.template import normalize_template_id
 
-        previous_template = str(p.get("template") or "")
-        template = ELEGANTBOOK
-        if previous_template != ELEGANTBOOK:
-            # Existing projects migrate only when the user explicitly reruns processing.
-            # Cached spans were produced against a different preamble, so they cannot be reused.
-            get_store().set_template(pid, ELEGANTBOOK)
-            p["template"] = ELEGANTBOOK
-            reuse_decisions = False
+        template = normalize_template_id(p.get("template") or "")
         pack = (p.get("pack") or "") or None
         prior = {}
         info_path = Path(get_store()._dir(pid)) / "verification.json"
@@ -1922,15 +2058,25 @@ def create_app(updated_from: str = "") -> FastAPI:
         cached = prior.get("decision_cache") if reuse_decisions else None
         overrides = [_decision_from_dict(item) for item in cached] if cached else None
         is_ocr_project = p.get("kind") == "ocr"
-        # OCR is noisy enough to require an actual final compile when TeX is installed.
-        # Ordinary imported TEX keeps the fast path; its report states that compile was not run.
+        # OCR 必须在编译器可用时成功；普通 TEX 至少比较处理前后，避免结构补丁
+        # 引入新的编译错误却仍被标为安全。
         template_compile_guard = is_ocr_project
         compile_extra_files = None
+        compile_project_main_rel = None
         if is_ocr_project:
             compile_extra_files = _verified_ocr_resource_bytes(
                 Path(get_store()._dir(pid)),
                 p.get("ocr_resources") or {},
             )
+        elif p.get("kind") == "folder":
+            original_zip = Path(get_store()._dir(pid)) / "original-files.zip"
+            if not original_zip.is_file():
+                raise ValueError("原始文件夹工程快照缺失，无法执行可靠的编译比较")
+            compile_extra_files = _decode_zip_files(original_zip.read_bytes())
+            graph = p.get("graph") or {}
+            compile_project_main_rel = str(graph.get("main_rel") or "")
+            if not compile_project_main_rel:
+                raise ValueError("文件夹工程主文件记录缺失，无法执行可靠的编译比较")
         latest_draft = {"text": ""}
 
         def capture_progress(phase, progress, message, data):
@@ -1948,15 +2094,28 @@ def create_app(updated_from: str = "") -> FastAPI:
             ai_notes_override=prior.get("ai_notes") if overrides else None,
             progress_callback=capture_progress,
             control_callback=control_callback,
-            compile_check=is_ocr_project or template_compile_guard,
+            # 普通 TEX 也要比较处理前后编译结果；否则语义错误的环境变更可能在
+            # “正文可逆”检查下被误标为安全。未安装 TeX 时仍由静态检查接管。
+            compile_check=True,
             require_compile_when_available=is_ocr_project or template_compile_guard,
             resource_root=get_store()._dir(pid) if is_ocr_project else None,
             require_resources=is_ocr_project,
             compile_extra_files=compile_extra_files,
+            compile_project_main_rel=compile_project_main_rel,
         )
         extra_verification = {}
+        encoding_error = ""
+        if p.get("kind") != "folder":
+            original_source = Path(get_store()._dir(pid)) / "original-source.tex"
+            if original_source.is_file():
+                from ..core.project import encode_tex_like_original
+
+                try:
+                    encode_tex_like_original(res.result, original_source.read_bytes())
+                except ValueError as exc:
+                    encoding_error = str(exc)
         if p.get("kind") == "folder":
-            from ..core.project import split_project
+            from ..core.project import encode_project_files, split_project
 
             graph = p.get("graph") or {}
             try:
@@ -1965,12 +2124,22 @@ def create_app(updated_from: str = "") -> FastAPI:
             except ValueError as exc:
                 per_file = {}
                 split_error = str(exc)
+            if not split_error:
+                try:
+                    encode_project_files(
+                        compile_extra_files or {},
+                        str(graph.get("main_rel") or ""),
+                        per_file,
+                    )
+                except ValueError as exc:
+                    encoding_error = str(exc)
             expected = {"", *(graph.get("files") or [])}
             project_ok = bool(
                 not split_error
                 and set(per_file) == expected
                 and not graph.get("missing")
                 and not graph.get("cycles")
+                and not encoding_error
             )
             project_check = {
                 "ok": project_ok,
@@ -1980,6 +2149,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "missing_includes": graph.get("missing") or [],
                 "cycles": graph.get("cycles") or [],
                 "error": split_error,
+                "encoding_error": encoding_error,
             }
             res.verification["project"] = project_check
             res.verification.setdefault("checks", []).append(
@@ -1997,6 +2167,31 @@ def create_app(updated_from: str = "") -> FastAPI:
                     "- ❌ 依赖图或文件集合不完整，已阻止导出。\n"
                     f"- 文件数量：{len(expected)} → {len(per_file)}\n"
                 )
+        encoding_checked = bool(
+            p.get("kind") == "folder"
+            or (Path(get_store()._dir(pid)) / "original-source.tex").is_file()
+        )
+        encoding_ok = not encoding_error
+        res.verification["source_encoding"] = {
+            "checked": encoding_checked,
+            "ok": encoding_ok,
+            "error": encoding_error,
+        }
+        res.verification.setdefault("checks", []).append({
+            "id": "source-encoding",
+            "label": "源文件编码、BOM 与换行可保真写回",
+            "ok": encoding_ok,
+            "skipped": not encoding_checked,
+        })
+        if encoding_error:
+            res.verification["safe_to_export"] = False
+            res.verification["export_blocked"] = True
+            res.ok = False
+            res.report_md += (
+                "\n\n## 源文件编码安全检查\n\n"
+                f"- ❌ {encoding_error}\n"
+                "- 原始文件字节保持不变；本次修改仅作为未验证草稿保留。\n"
+            )
         decisions = [_decision_dict(d) for d in res.decisions]
         decision_cache = cached or decisions
         applied = [
@@ -2088,40 +2283,53 @@ def create_app(updated_from: str = "") -> FastAPI:
 
     def _run_project(pid: str, exclude: set, reuse_decisions: bool = False,
                      progress_callback=None, control_callback=None, commit_callback=None):
-        _begin_pipeline_run()
-        try:
-            return _run_project_impl(
-                pid,
-                exclude,
-                reuse_decisions=reuse_decisions,
-                progress_callback=progress_callback,
-                control_callback=control_callback,
-                commit_callback=commit_callback,
-            )
-        finally:
-            _end_pipeline_run()
+        # Includes the final store commit. RLock is required because review
+        # routes hold this transaction while updating meta.json before rerunning.
+        with _project_lock(pid):
+            _begin_pipeline_run()
+            try:
+                return _run_project_impl(
+                    pid,
+                    exclude,
+                    reuse_decisions=reuse_decisions,
+                    progress_callback=progress_callback,
+                    control_callback=control_callback,
+                    commit_callback=commit_callback,
+                )
+            finally:
+                _end_pipeline_run()
 
     @app.post("/api/projects/{pid}/process")
     def process(pid: str):
         _ensure(pid)
         if _process_jobs.active(pid):
             raise HTTPException(409, "项目已有后台任务；请在进度卡片中暂停、继续或取消")
-        meta = json.loads(Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8"))
-        return _run_project(pid, set(meta.get("excludes", [])))
+        with _project_lock(pid):
+            if _process_jobs.active(pid):
+                raise HTTPException(409, "项目已有后台任务；请在进度卡片中暂停、继续或取消")
+            meta = json.loads(
+                Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8")
+            )
+            return _run_project(pid, set(meta.get("excludes", [])))
 
     @app.post("/api/projects/{pid}/process/start")
     def process_start(pid: str):
         """启动可暂停的后台处理；同一项目最多一个活动任务。"""
         _ensure(pid)
-        with _update_state_lock:
-            _raise_if_update_preparing()
-            existing = _process_jobs.active(pid)
-            if existing:
-                return _process_jobs.public(existing) | {"already_running": True}
-            meta = json.loads(
-                Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8")
-            )
-            job = _process_jobs.create(pid, get_store().read_source(pid))
+        existing = _process_jobs.active(pid)
+        if existing:
+            return _process_jobs.public(existing) | {"already_running": True}
+        # Keep lock order project -> update state, matching _run_project.
+        with _project_lock(pid):
+            with _update_state_lock:
+                _raise_if_update_preparing()
+                existing = _process_jobs.active(pid)
+                if existing:
+                    return _process_jobs.public(existing) | {"already_running": True}
+                meta = json.loads(
+                    Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8")
+                )
+                job = _process_jobs.create(pid, get_store().read_source(pid))
         jid = job["id"]
 
         def worker():
@@ -2211,14 +2419,19 @@ def create_app(updated_from: str = "") -> FastAPI:
         _ensure(pid)
         if _process_jobs.active(pid):
             raise HTTPException(409, "请等待处理完成或先取消任务，再修改审阅结论")
-        meta = json.loads(Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8"))
-        excludes = set(meta.get("excludes", []))
-        excludes.add(cid)
-        meta["excludes"] = sorted(excludes)
-        Path(get_store()._dir(pid), "meta.json").write_text(
-            json.dumps(meta, ensure_ascii=False), encoding="utf-8"
-        )
-        return _run_project(pid, excludes, reuse_decisions=True)
+        with _project_lock(pid):
+            if _process_jobs.active(pid):
+                raise HTTPException(409, "请等待处理完成或先取消任务，再修改审阅结论")
+            meta = json.loads(
+                Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8")
+            )
+            excludes = set(meta.get("excludes", []))
+            excludes.add(cid)
+            meta["excludes"] = sorted(excludes)
+            Path(get_store()._dir(pid), "meta.json").write_text(
+                json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+            )
+            return _run_project(pid, excludes, reuse_decisions=True)
 
     @app.post("/api/projects/{pid}/decisions/{cid}/unreject")
     def unreject_decision(pid: str, cid: str):
@@ -2226,14 +2439,19 @@ def create_app(updated_from: str = "") -> FastAPI:
         _ensure(pid)
         if _process_jobs.active(pid):
             raise HTTPException(409, "请等待处理完成或先取消任务，再修改审阅结论")
-        meta = json.loads(Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8"))
-        excludes = set(meta.get("excludes", []))
-        excludes.discard(cid)
-        meta["excludes"] = sorted(excludes)
-        Path(get_store()._dir(pid), "meta.json").write_text(
-            json.dumps(meta, ensure_ascii=False), encoding="utf-8"
-        )
-        return _run_project(pid, excludes, reuse_decisions=True)
+        with _project_lock(pid):
+            if _process_jobs.active(pid):
+                raise HTTPException(409, "请等待处理完成或先取消任务，再修改审阅结论")
+            meta = json.loads(
+                Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8")
+            )
+            excludes = set(meta.get("excludes", []))
+            excludes.discard(cid)
+            meta["excludes"] = sorted(excludes)
+            Path(get_store()._dir(pid), "meta.json").write_text(
+                json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+            )
+            return _run_project(pid, excludes, reuse_decisions=True)
 
     @app.post("/api/projects/{pid}/decisions/reject-batch")
     def reject_batch(pid: str, req: BatchRejectRequest):
@@ -2241,13 +2459,18 @@ def create_app(updated_from: str = "") -> FastAPI:
         _ensure(pid)
         if _process_jobs.active(pid):
             raise HTTPException(409, "请等待处理完成或先取消任务，再修改审阅结论")
-        meta = json.loads(Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8"))
-        excludes = set(meta.get("excludes", [])) | set(req.cids)
-        meta["excludes"] = sorted(excludes)
-        Path(get_store()._dir(pid), "meta.json").write_text(
-            json.dumps(meta, ensure_ascii=False), encoding="utf-8"
-        )
-        return _run_project(pid, excludes, reuse_decisions=True)
+        with _project_lock(pid):
+            if _process_jobs.active(pid):
+                raise HTTPException(409, "请等待处理完成或先取消任务，再修改审阅结论")
+            meta = json.loads(
+                Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8")
+            )
+            excludes = set(meta.get("excludes", [])) | set(req.cids)
+            meta["excludes"] = sorted(excludes)
+            Path(get_store()._dir(pid), "meta.json").write_text(
+                json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+            )
+            return _run_project(pid, excludes, reuse_decisions=True)
 
     @app.post("/api/projects/{pid}/decisions/reset")
     def reset_decisions(pid: str):
@@ -2255,12 +2478,17 @@ def create_app(updated_from: str = "") -> FastAPI:
         _ensure(pid)
         if _process_jobs.active(pid):
             raise HTTPException(409, "请等待处理完成或先取消任务，再修改审阅结论")
-        meta = json.loads(Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8"))
-        meta["excludes"] = []
-        Path(get_store()._dir(pid), "meta.json").write_text(
-            json.dumps(meta, ensure_ascii=False), encoding="utf-8"
-        )
-        return _run_project(pid, set(), reuse_decisions=True)
+        with _project_lock(pid):
+            if _process_jobs.active(pid):
+                raise HTTPException(409, "请等待处理完成或先取消任务，再修改审阅结论")
+            meta = json.loads(
+                Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8")
+            )
+            meta["excludes"] = []
+            Path(get_store()._dir(pid), "meta.json").write_text(
+                json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+            )
+            return _run_project(pid, set(), reuse_decisions=True)
 
     @app.get("/api/projects/{pid}/diff")
     def diff(pid: str):

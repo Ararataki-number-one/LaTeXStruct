@@ -118,15 +118,19 @@ def test_ci_installs_texlive_distribution_packages():
     assert "elegantbook.cls" in workflow
 
 
-def test_elegantbook_is_the_fixed_frontend_export_template():
+def test_frontend_preserves_standard_tex_but_ocr_still_uses_elegantbook():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, "frontend", "src", "Projects.jsx"), encoding="utf-8") as f:
         projects = f.read()
     with open(os.path.join(root, "frontend", "src", "Ocr.jsx"), encoding="utf-8") as f:
         ocr = f.read()
 
-    assert 'const template = "elegantbook"' in projects
-    assert 'ElegantBook 专业讲义（固定）' in projects
+    assert 'const [template, setTemplate] = useState("")' in projects
+    assert '保持原排版（推荐）' in projects
+    assert 'ElegantBook 专业讲义' in projects
+    assert 'api("/api/templates")' in projects
+    assert 'aria-label="排版方案"' in projects
+    assert '标准 TeX 默认不做模板迁移' in projects
     assert 'const [mode, setMode] = useState("ai")' in projects
     assert 'AI 深度整理（默认，章节 + 定理 + 复查）' in projects
     assert 'const importTemplate = "elegantbook"' in ocr
@@ -196,12 +200,14 @@ def test_release_metadata_matches_app_version():
         installer = f.read()
     assert "#error AppVersion must be supplied" in installer
     assert '#define AppVersion "0.2.0"' not in installer
+    assert "OutputBaseFilename=LaTeXStruct-setup-{#AppVersion}" in installer
 
     with open(os.path.join(root, "scripts", "build.ps1"), encoding="utf-8") as f:
         build_script = f.read()
     assert '[string]$Version = ""' in build_script
     assert "packaging/sync_version.py" in build_script
     assert "npm" in build_script and "run build" in build_script
+    assert '"LaTeXStruct-setup-$Version.exe"' in build_script
 
 
 def test_product_icon_assets_are_multisize_and_wired_into_every_surface():
@@ -293,7 +299,8 @@ def test_release_build_safety_guards():
     assert "v1.1.4" not in workflow
     assert "name: LaTeXStruct-v${{ env.APP_VERSION }}" in workflow
     assert "name: LaTeXStruct-${{ github.ref_name }}" not in workflow
-    assert "$previousVersion = '1.1.7'" in workflow
+    assert "$previousVersion = '1.1.9'" in workflow
+    assert "previous_version='1.1.9'" in workflow
     assert "[string]$health.version -eq $previousVersion" in workflow
     assert "            if (-not $oldHealthy)" in workflow
     # 升级冒烟必须走应用内真实的独立 helper，不能绕过第一阶段

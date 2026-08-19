@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """FastAPI 服务接口测试（需要 fastapi + httpx；未安装时自动跳过）。"""
 
-import io
+import base64
+import gc
 import hashlib
+import io
 import json
 import os
 import re
@@ -18,7 +20,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 SAMPLE = (
-    "\\documentclass{book}\n\\begin{document}\n\n"
+    "\\documentclass{book}\n\\usepackage{tcolorbox}\n\\begin{document}\n\n"
     "\\section*{1.1 The Method}\n\\begin{tcolorbox}\n\\section*{方法}\n\\end{tcolorbox}\n\n"
     "Theorem 1. A statement.\n\n\\end{document}\n"
 )
@@ -59,6 +61,8 @@ except ImportError:  # 依赖未安装 → 跳过
 
 def _client(tmp):
     srv._process_jobs.clear()
+    with srv._project_locks_guard:
+        srv._project_locks.clear()
     srv._cancel_update_preparation()
     with srv._update_jobs_lock:
         srv._update_jobs.clear()
@@ -66,6 +70,20 @@ def _client(tmp):
     srv._store = srv.ProjectStore(root=os.path.join(tmp, "projects"))
     srv._config = None
     return TestClient(srv.create_app())
+
+
+def _wait_for_json(client, path, predicate, timeout=15.0, interval=0.02):
+    """Poll a background endpoint until its JSON state satisfies ``predicate``."""
+    deadline = time.monotonic() + timeout
+    state = None
+    while time.monotonic() < deadline:
+        response = client.get(path)
+        assert response.status_code == 200, response.text
+        state = response.json()
+        if predicate(state):
+            return state
+        time.sleep(interval)
+    return state
 
 
 def _inspect_and_start_image(c, filename, image, media_type, data=None):
@@ -98,7 +116,7 @@ def test_health_and_project_flow():
         assert s["ok"] is True and s["applied"] >= 1
         # 结果与汇报
         result = c.get(f"/api/projects/{pid}/result").text
-        assert "\\begin{theorem*}[1]" in result and "（方法）" in result
+        assert "\\begin{theorem}[1]" in result and "（方法）" in result
         report = c.get(f"/api/projects/{pid}/report").text
         assert "机器校验" in report and "内容不变校验：通过" in report
         # diff
@@ -112,13 +130,160 @@ def test_health_and_project_flow():
         assert package.status_code == 200 and "zip" in package.headers["content-type"]
         with zipfile.ZipFile(io.BytesIO(package.content)) as zf:
             assert zf.read("main.tex") == e.content
-            assert b"v4.7 ElegantBook document class" in zf.read("elegantbook.cls")
-            assert "ELEGANTBOOK-LICENSE.txt" in zf.namelist()
-            assert "ELEGANTBOOK-BUNDLE-README.md" in zf.namelist()
+            assert "elegantbook.cls" not in zf.namelist()
+            assert "ELEGANTBOOK-LICENSE.txt" not in zf.namelist()
+            assert "ELEGANTBOOK-BUNDLE-README.md" not in zf.namelist()
             assert zf.read("LATEXSTRUCT-REPORT.md") == c.get(f"/api/projects/{pid}/report").content
         # 删除
         c.delete(f"/api/projects/{pid}")
         assert c.get(f"/api/projects/{pid}").status_code == 404
+
+
+def test_single_file_binary_import_preserves_latin1_bytes_and_encodes_modifications():
+    unavailable = {
+        "available": False, "ok": None, "pages": 0, "errors": [], "log": "",
+    }
+    unchanged_raw = (
+        "\\documentclass{article}\r\n\\begin{document}\r\n"
+        "Caf\xe9.\r\n\\end{document}\r\n"
+    ).encode("latin-1")
+    modified_raw = (
+        "\\documentclass{article}\r\n\\usepackage{amsthm}\r\n"
+        "\\newtheorem*{theorem}{Theorem}\r\n\\begin{document}\r\n"
+        "Theorem. R\xe9sum\xe9.\r\n\\end{document}\r\n"
+    ).encode("latin-1")
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        with patch("latexstruct.core.compilecheck.compile_latex", return_value=unavailable):
+            unchanged = c.post("/api/projects", json={
+                "text": "browser preview is not authoritative",
+                "name": "latin1-unchanged",
+                "mode": "rule",
+                "source_file": {
+                    "encoding": "base64",
+                    "data": base64.b64encode(unchanged_raw).decode("ascii"),
+                },
+            })
+            assert unchanged.status_code == 200, unchanged.text
+            unchanged_pid = unchanged.json()["id"]
+            processed = c.post(f"/api/projects/{unchanged_pid}/process")
+            assert processed.status_code == 200 and processed.json()["ok"] is True
+            assert c.get(f"/api/projects/{unchanged_pid}/export").content == unchanged_raw
+
+            modified = c.post("/api/projects", json={
+                "text": "",
+                "name": "latin1-modified",
+                "mode": "rule",
+                "source_file": {
+                    "encoding": "base64",
+                    "data": base64.b64encode(modified_raw).decode("ascii"),
+                },
+            })
+            modified_pid = modified.json()["id"]
+            processed = c.post(f"/api/projects/{modified_pid}/process")
+            assert processed.status_code == 200 and processed.json()["ok"] is True
+            exported = c.get(f"/api/projects/{modified_pid}/export").content
+
+        decoded = exported.decode("latin-1")
+        assert "\\begin{theorem}" in decoded
+        assert "R\xe9sum\xe9." in decoded
+        assert "\n" not in decoded.replace("\r\n", "")
+        assert b"R\xc3\xa9sum\xc3\xa9" not in exported
+
+
+def test_single_file_unrepresentable_change_is_blocked_as_unverified():
+    raw = (
+        "\\documentclass{article}\r\n\\begin{document}\r\n"
+        "Caf\xe9.\r\n\\end{document}\r\n"
+    ).encode("latin-1")
+    unavailable = {
+        "available": False, "ok": None, "pages": 0, "errors": [], "log": "",
+    }
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        created = c.post("/api/projects", json={
+            "text": "",
+            "name": "latin1-unrepresentable",
+            "mode": "rule",
+            "source_file": {
+                "encoding": "base64",
+                "data": base64.b64encode(raw).decode("ascii"),
+            },
+        })
+        pid = created.json()["id"]
+        real_pipeline = srv.run_pipeline
+
+        def pipeline_with_unrepresentable_change(*args, **kwargs):
+            result = real_pipeline(*args, **kwargs)
+            changed = result.result.replace("\\end{document}", "\u4e2d\u6587\n\\end{document}")
+            result.result = changed
+            result.export_text = changed.replace("\n", result.newline)
+            return result
+
+        with patch("latexstruct.core.compilecheck.compile_latex", return_value=unavailable), patch.object(
+            srv, "run_pipeline", pipeline_with_unrepresentable_change
+        ):
+            processed = c.post(f"/api/projects/{pid}/process")
+
+        assert processed.status_code == 200
+        body = processed.json()
+        assert body["ok"] is False
+        assert "source-encoding" in body["failed_checks"]
+        assert c.get(f"/api/projects/{pid}/export").status_code == 409
+        verification = c.get(f"/api/projects/{pid}/decisions").json()["verification"]
+        assert verification["source_encoding"]["ok"] is False
+        assert "无法表示" in verification["source_encoding"]["error"]
+
+
+def test_folder_export_preserves_unchanged_gbk_and_encodes_modified_tex_as_gbk():
+    unavailable = {
+        "available": False, "ok": None, "pages": 0, "errors": [], "log": "",
+    }
+    main_raw = (
+        "\\documentclass{article}\r\n\\usepackage{amsthm}\r\n"
+        "\\newtheorem*{theorem}{Theorem}\r\n% GBK \u4e3b\u6587\u4ef6\r\n"
+        "\\begin{document}\r\n\\input{chapter}\r\n\\end{document}\r\n"
+    ).encode("gbk")
+    chapter_raw = "Theorem. \u4e2d\u6587\u5b9a\u7406\u3002\r\n".encode("gbk")
+    payload = {
+        rel: {
+            "encoding": "base64",
+            "data": base64.b64encode(data).decode("ascii"),
+        }
+        for rel, data in {"main.tex": main_raw, "chapter.tex": chapter_raw}.items()
+    }
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        created = c.post("/api/projects/folder", json={
+            "files": payload,
+            "name": "gbk-folder",
+            "mode": "rule",
+            "defer_process": True,
+        })
+        assert created.status_code == 200, created.text
+        pid = created.json()["id"]
+        current = c.get(f"/api/projects/{pid}/export-current-package")
+        assert current.status_code == 200
+        assert current.headers["x-latexstruct-verified"] == "false"
+        with zipfile.ZipFile(io.BytesIO(current.content)) as archive:
+            assert archive.read("main.tex") == main_raw
+            assert archive.read("chapter.tex") == chapter_raw
+        with patch("latexstruct.core.compilecheck.compile_latex", return_value=unavailable):
+            processed = c.post(f"/api/projects/{pid}/process")
+        assert processed.status_code == 200 and processed.json()["ok"] is True
+        package = c.get(f"/api/projects/{pid}/export-package")
+        assert package.status_code == 200, package.text
+        with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
+            exported_main = archive.read("main.tex")
+            exported_chapter = archive.read("chapter.tex")
+
+        assert exported_main == main_raw
+        chapter_text = exported_chapter.decode("gbk")
+        assert "\\begin{theorem}" in chapter_text
+        assert "\u4e2d\u6587\u5b9a\u7406" in chapter_text
+        assert "\n" not in chapter_text.replace("\r\n", "")
 
 
 def test_frozen_release_refuses_to_serve_incompatible_legacy_frontend():
@@ -174,6 +339,47 @@ def test_unclosed_bracket_display_blocks_server_export():
         assert blocked.status_code == 409 and "安全检查" in blocked.json()["detail"]
 
 
+def test_incompatible_elegantbook_conversion_is_not_committed_as_verified():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        text = (
+            "\\documentclass{beamer}\n\\begin{document}\n"
+            "\\begin{frame}Text\\end{frame}\n\\end{document}\n"
+        )
+        pid = c.post(
+            "/api/projects",
+            json={
+                "text": text,
+                "name": "incompatible-template",
+                "mode": "rule",
+                "template": "elegantbook",
+            },
+        ).json()["id"]
+        compiled = {
+            "available": True,
+            "ok": True,
+            "pages": 1,
+            "errors": [],
+            "log": "",
+        }
+        with patch(
+            "latexstruct.core.compilecheck.compile_latex",
+            return_value=compiled,
+        ):
+            processed = c.post(f"/api/projects/{pid}/process")
+
+        assert processed.status_code == 200 and processed.json()["ok"] is False
+        verification = c.get(f"/api/projects/{pid}/decisions").json()["verification"]
+        assert verification["template"]["ok"] is False
+        assert verification["safe_to_export"] is False
+        assert srv.get_store().read_result(pid) is None
+        assert c.get(f"/api/projects/{pid}/export").status_code == 409
+        current = c.get(f"/api/projects/{pid}/export-current")
+        assert current.status_code == 200
+        assert current.headers["x-latexstruct-verified"] == "false"
+        assert current.text == text
+
+
 def test_export_requires_current_committed_verification_hash():
     with WorkspaceTmp() as tmp:
         c = _client(tmp)
@@ -188,14 +394,15 @@ def test_export_requires_current_committed_verification_hash():
         missing = c.get(f"/api/projects/{pid}/export")
         assert missing.status_code == 409
 
-        # 安全 marker 不能把旧版非 ElegantBook 结果伪装成当前正式成品。
+        # 保持源排版是正式导出模式；只要安全 marker 与内容 hash 匹配即可导出。
         legacy_text = "\\documentclass{book}\n\\begin{document}\nOld\n\\end{document}\n"
         store.set_result(
             pid, legacy_text, "# report", [],
             {"verification": {"safe_to_export": True}},
         )
         legacy = c.get(f"/api/projects/{pid}/export")
-        assert legacy.status_code == 409 and "ElegantBook" in legacy.json()["detail"]
+        assert legacy.status_code == 200
+        assert legacy.text == legacy_text
 
         committed_text = COMMITTED_ELEGANT.replace("\n", "\r\n")
         store.set_result(
@@ -1030,15 +1237,16 @@ def test_decisions_and_reject():
         d = c.get(f"/api/projects/{pid}/decisions").json()
         items = d["items"]
         assert items, "决策清单为空"
-        theorem = next(i for i in items if i["env"] == "theorem*" and i["status"] == "applied")
+        theorem = next(i for i in items if i["env"] == "theorem" and i["status"] == "applied")
         assert "line" in theorem and "section" in theorem
         # 拒绝定理包裹 → 重新整理后该环境消失、内容不变校验仍通过
         r = c.post(f"/api/projects/{pid}/decisions/{theorem['candidate_id']}/reject")
         assert r.status_code == 200
+        assert r.json()["ok"] is True
         rejected_items = c.get(f"/api/projects/{pid}/decisions").json()["items"]
         assert next(i for i in rejected_items if i["candidate_id"] == theorem["candidate_id"])["status"] == "rejected"
         result = c.get(f"/api/projects/{pid}/result").text
-        assert "\\begin{theorem*}" not in result
+        assert "\\begin{theorem}" not in result
         info = json.loads(Path(tmp, "projects", pid, "verification.json").read_text(encoding="utf-8"))
         assert info["verification"]["content_invariant"] is True
         # 双语合并等其他修改保留
@@ -1047,10 +1255,190 @@ def test_decisions_and_reject():
         r = c.post(f"/api/projects/{pid}/decisions/{theorem['candidate_id']}/unreject")
         assert r.status_code == 200
         result2 = c.get(f"/api/projects/{pid}/result").text
-        assert "\\begin{theorem*}" in result2
+        assert "\\begin{theorem}" in result2
         info2 = json.loads(Path(tmp, "projects", pid, "verification.json").read_text(encoding="utf-8"))
         assert info2["verification"]["content_invariant"] is True
         assert info2["verification"]["decisions_reused"] is True
+
+
+def test_concurrent_rejects_are_serialized_and_keep_both_exclusions():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        pid = c.post(
+            "/api/projects",
+            json={"text": SAMPLE, "name": "concurrent-review", "mode": "rule"},
+        ).json()["id"]
+        unavailable = {
+            "available": False, "ok": None, "pages": 0, "errors": [], "log": "",
+        }
+        with patch("latexstruct.core.compilecheck.compile_latex", return_value=unavailable):
+            assert c.post(f"/api/projects/{pid}/process").json()["ok"] is True
+        items = c.get(f"/api/projects/{pid}/decisions").json()["items"]
+        candidate_ids = [item["candidate_id"] for item in items if item["status"] == "applied"][:2]
+        assert len(candidate_ids) == 2
+
+        original_pipeline = srv.run_pipeline
+        first_entered = threading.Event()
+        second_entered = threading.Event()
+        release_first = threading.Event()
+        call_guard = threading.Lock()
+        calls = 0
+
+        def serialized_pipeline(*args, **kwargs):
+            nonlocal calls
+            with call_guard:
+                calls += 1
+                call_number = calls
+            if call_number == 1:
+                first_entered.set()
+                assert release_first.wait(3)
+            elif call_number == 2:
+                second_entered.set()
+            return original_pipeline(*args, **kwargs)
+
+        responses = {}
+
+        def reject(label, candidate_id):
+            responses[label] = c.post(
+                f"/api/projects/{pid}/decisions/{candidate_id}/reject"
+            )
+
+        with (
+            patch.object(srv, "run_pipeline", serialized_pipeline),
+            patch("latexstruct.core.compilecheck.compile_latex", return_value=unavailable),
+        ):
+            first = threading.Thread(target=reject, args=("first", candidate_ids[0]))
+            second = threading.Thread(target=reject, args=("second", candidate_ids[1]))
+            first.start()
+            assert first_entered.wait(1)
+            second.start()
+            # The second request must not enter the pipeline while the first
+            # request still owns the project's meta/result transaction.
+            assert not second_entered.wait(0.15)
+            release_first.set()
+            first.join(timeout=5)
+            second.join(timeout=5)
+
+        assert not first.is_alive() and not second.is_alive()
+        assert responses["first"].status_code == 200
+        assert responses["second"].status_code == 200
+        assert second_entered.is_set()
+        decision_state = c.get(f"/api/projects/{pid}/decisions").json()
+        assert decision_state["excludes"] == sorted(candidate_ids)
+        statuses = {
+            item["candidate_id"]: item["status"] for item in decision_state["items"]
+        }
+        assert all(statuses[candidate_id] == "rejected" for candidate_id in candidate_ids)
+
+
+def test_delete_missing_projects_does_not_retain_project_locks():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        with srv._project_locks_guard:
+            baseline = len(srv._project_locks)
+
+        for index in range(100):
+            response = c.delete(f"/api/projects/{index:012x}")
+            # Missing-project delete historically returns 200. A future 404 is
+            # also valid; the regression concerns the lock registry lifetime.
+            assert response.status_code in {200, 404}
+
+        gc.collect()
+        with srv._project_locks_guard:
+            assert len(srv._project_locks) == baseline
+
+
+def test_concurrent_same_project_waiter_reuses_one_weak_registry_lock():
+    with WorkspaceTmp() as tmp:
+        _client(tmp)
+        pid = "0123456789ab"
+        first_entered = threading.Event()
+        second_has_reference = threading.Event()
+        second_entered = threading.Event()
+        release_first = threading.Event()
+        locks = {}
+
+        def first_worker():
+            lock = srv._project_lock(pid)
+            locks["first"] = lock
+            with lock:
+                first_entered.set()
+                assert second_has_reference.wait(2)
+                assert not second_entered.wait(0.1)
+                assert release_first.wait(2)
+
+        def second_worker():
+            assert first_entered.wait(2)
+            lock = srv._project_lock(pid)
+            locks["second"] = lock
+            second_has_reference.set()
+            with lock:
+                second_entered.set()
+
+        first = threading.Thread(target=first_worker)
+        second = threading.Thread(target=second_worker)
+        first.start()
+        second.start()
+        assert first_entered.wait(1)
+        assert second_has_reference.wait(1)
+        assert locks["first"] is locks["second"]
+        assert not second_entered.is_set()
+        release_first.set()
+        first.join(timeout=3)
+        second.join(timeout=3)
+
+        assert not first.is_alive() and not second.is_alive()
+        assert second_entered.is_set()
+
+
+def test_background_process_rejects_review_write_without_waiting_for_project_lock():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        pid = c.post(
+            "/api/projects",
+            json={"text": SAMPLE, "name": "background-review-conflict", "mode": "rule"},
+        ).json()["id"]
+        unavailable = {
+            "available": False, "ok": None, "pages": 0, "errors": [], "log": "",
+        }
+        with patch("latexstruct.core.compilecheck.compile_latex", return_value=unavailable):
+            assert c.post(f"/api/projects/{pid}/process").json()["ok"] is True
+        candidate_id = next(
+            item["candidate_id"]
+            for item in c.get(f"/api/projects/{pid}/decisions").json()["items"]
+            if item["status"] == "applied"
+        )
+
+        original_pipeline = srv.run_pipeline
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_pipeline(*args, **kwargs):
+            entered.set()
+            assert release.wait(3)
+            return original_pipeline(*args, **kwargs)
+
+        with (
+            patch.object(srv, "run_pipeline", slow_pipeline),
+            patch("latexstruct.core.compilecheck.compile_latex", return_value=unavailable),
+        ):
+            assert c.post(f"/api/projects/{pid}/process/start").status_code == 200
+            assert entered.wait(1)
+            started = time.monotonic()
+            conflict = c.post(
+                f"/api/projects/{pid}/decisions/{candidate_id}/reject"
+            )
+            elapsed = time.monotonic() - started
+            assert conflict.status_code == 409
+            assert elapsed < 1.0
+            release.set()
+            state = _wait_for_json(
+                c,
+                f"/api/projects/{pid}/process/status",
+                lambda item: item["status"] in {"done", "blocked", "error", "cancelled"},
+            )
+        assert state["status"] == "done", state
+        assert c.get(f"/api/projects/{pid}/decisions").json()["excludes"] == []
 
 
 def test_rulesets_and_folder_import():
@@ -1060,10 +1448,10 @@ def test_rulesets_and_folder_import():
         assert "bilingual" in r["packs"] and "academic-paper" in r["packs"]
         templates = c.get("/api/templates").json()
         assert templates["ocr_default"] == "elegantbook"
-        assert templates["default"] == "elegantbook"
-        assert templates["export_default"] == "elegantbook"
-        assert templates["fixed"] is True
-        assert {item["id"] for item in templates["templates"]} == {"elegantbook"}
+        assert templates["default"] == ""
+        assert templates["export_default"] == ""
+        assert templates["fixed"] is False
+        assert {item["id"] for item in templates["templates"]} == {"", "elegantbook"}
         invalid = c.post("/api/projects", json={
             "text": "\\documentclass{article}\n\\begin{document}\nX\n\\end{document}\n",
             "template": "model-generated-preamble",
@@ -1075,7 +1463,13 @@ def test_rulesets_and_folder_import():
             "chapters/ch01.tex": "\\section{One}\n\nTheorem 1. A statement.\n\nProof. By definition.\n",
             "images/pixel.bin": {"encoding": "base64", "data": "AAEC/w=="},
         }
-        r = c.post("/api/projects/folder", json={"files": files, "name": "book", "mode": "rule"})
+        # 显式选择 ElegantBook 时，转换结果和离线资产仍须完整打包。
+        r = c.post("/api/projects/folder", json={
+            "files": files,
+            "name": "book",
+            "mode": "rule",
+            "template": "elegantbook",
+        })
         assert r.status_code == 200
         d = r.json()
         assert d["graph"]["main_rel"] == "main.tex"
@@ -1094,18 +1488,13 @@ def test_rulesets_and_folder_import():
             assert "ELEGANTBOOK-LICENSE.txt" in zf.namelist()
             assert "ELEGANTBOOK-BUNDLE-README.md" in zf.namelist()
             assert zf.read("LATEXSTRUCT-REPORT.md") == c.get(f"/api/projects/{pid}/report").content
-        # v1.1.2 的旧 marker 尚无 report_sha256；读取旧项目时继续兼容。
         store = srv.get_store()
         project_dir = Path(store._dir(pid))
-        marker_path = project_dir / "verification.json"
-        legacy_marker = json.loads(marker_path.read_text(encoding="utf-8"))
-        legacy_marker.pop("report_sha256")
-        marker_path.write_text(json.dumps(legacy_marker, ensure_ascii=False), encoding="utf-8")
-        assert c.get(f"/api/projects/{pid}/export-folder").status_code == 200
         # 审阅拒绝会重跑，但逐文件结果和原始二进制资源仍可安全导出。
         items = c.get(f"/api/projects/{pid}/decisions").json()["items"]
         theorem = next(i for i in items if i["kind"] == "theorem-like")
-        assert c.post(f"/api/projects/{pid}/decisions/{theorem['candidate_id']}/reject").status_code == 200
+        rejected = c.post(f"/api/projects/{pid}/decisions/{theorem['candidate_id']}/reject")
+        assert rejected.status_code == 200 and rejected.json()["ok"] is True
         assert c.get(f"/api/projects/{pid}/export-folder").status_code == 200
         # 文件夹导出同样必须核对 result.tex 与最终 verification marker。
         report_text = store.read_report(pid)
@@ -1113,6 +1502,12 @@ def test_rulesets_and_folder_import():
         stale_report = c.get(f"/api/projects/{pid}/export-folder")
         assert stale_report.status_code == 409 and "汇报" in stale_report.json()["detail"]
         store._write_text(str(project_dir), "report.md", report_text)
+        # v1.1.2 的旧 marker 尚无 report_sha256；读取旧项目时继续兼容。
+        marker_path = project_dir / "verification.json"
+        legacy_marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        legacy_marker.pop("report_sha256")
+        marker_path.write_text(json.dumps(legacy_marker, ensure_ascii=False), encoding="utf-8")
+        assert c.get(f"/api/projects/{pid}/export-folder").status_code == 200
         store._write_text(
             str(project_dir), "result.tex", store.read_result(pid) + "% stale hash\n"
         )
@@ -1166,11 +1561,11 @@ def test_zip_import_strips_wrapper_and_defers_processing():
 
         started = c.post(f"/api/projects/{pid}/process/start")
         assert started.status_code == 200
-        for _ in range(200):
-            state = c.get(f"/api/projects/{pid}/process/status").json()
-            if state["status"] in {"done", "error", "cancelled"}:
-                break
-            time.sleep(0.01)
+        state = _wait_for_json(
+            c,
+            f"/api/projects/{pid}/process/status",
+            lambda item: item["status"] in {"done", "blocked", "error", "cancelled"},
+        )
         assert state["status"] == "done", state
         assert state["result"]["ok"] is True
         exported = c.get(f"/api/projects/{pid}/export-folder")
@@ -1244,11 +1639,11 @@ def test_background_process_can_pause_preview_resume_and_finish():
             assert preview.headers["X-LaTeXStruct-Preview-Revision"] == str(state["preview_revision"])
             assert preview.headers["Cache-Control"] == "no-store"
             assert c.post(f"/api/projects/{pid}/process/resume").status_code == 200
-            for _ in range(300):
-                state = c.get(f"/api/projects/{pid}/process/status").json()
-                if state["status"] in {"done", "error", "cancelled"}:
-                    break
-                time.sleep(0.01)
+            state = _wait_for_json(
+                c,
+                f"/api/projects/{pid}/process/status",
+                lambda item: item["status"] in {"done", "blocked", "error", "cancelled"},
+            )
         assert state["status"] == "done", state
         assert c.get(f"/api/projects/{pid}/result").status_code == 200
 
@@ -1286,11 +1681,11 @@ def test_background_process_commits_ai_review_without_runtime_patch_objects():
 
         with patch.object(srv, "run_pipeline", pipeline_with_full_runtime_review):
             assert c.post(f"/api/projects/{pid}/process/start").status_code == 200
-            for _ in range(300):
-                state = c.get(f"/api/projects/{pid}/process/status").json()
-                if state["status"] in {"done", "error", "cancelled"}:
-                    break
-                time.sleep(0.01)
+            state = _wait_for_json(
+                c,
+                f"/api/projects/{pid}/process/status",
+                lambda item: item["status"] in {"done", "blocked", "error", "cancelled"},
+            )
 
         assert state["status"] == "done", state
         assert state["progress"] == 1.0
@@ -1331,11 +1726,11 @@ def test_background_commit_failure_never_reports_one_hundred_percent():
         store = srv.get_store()
         with patch.object(store, "set_result", side_effect=OSError("simulated disk failure")):
             assert c.post(f"/api/projects/{pid}/process/start").status_code == 200
-            for _ in range(300):
-                state = c.get(f"/api/projects/{pid}/process/status").json()
-                if state["status"] in {"done", "error", "cancelled"}:
-                    break
-                time.sleep(0.01)
+            state = _wait_for_json(
+                c,
+                f"/api/projects/{pid}/process/status",
+                lambda item: item["status"] in {"done", "blocked", "error", "cancelled"},
+            )
 
         assert state["status"] == "error", state
         assert state["phase"] == "error"
@@ -1667,7 +2062,10 @@ def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_sepa
                 from latexstruct.core.ai import LLMError
 
                 raise LLMError("暂时性网络错误")
-            return "```latex\nTheorem 1. A recovered statement.\n\nProof. Recovered proof text.\n```"
+            return (
+                "```latex\nTheorem 1. A recovered statement.\n\n"
+                "Proof. Recovered proof text. This completes the proof.\n```"
+            )
 
         png = b"\x89PNG\r\n\x1a\n" + b"0" * 16
         with patch("latexstruct.core.ai.LLMClient.chat_vision", flaky_vision):
@@ -1684,7 +2082,22 @@ def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_sepa
 
         def fake_structure_ai(_self, system, user):
             if '"findings"' in system:
-                return {"findings": []}, {"total_tokens": 4}
+                review_batch = re.search(
+                    r"本请求待复查 candidate 共 \d+ 个：(.*?)。",
+                    user,
+                )
+                review_ids = [
+                    candidate_id.strip()
+                    for candidate_id in (review_batch.group(1).split(",") if review_batch else [])
+                    if candidate_id.strip()
+                ]
+                return {
+                    "findings": [{
+                        "candidate_id": candidate_id,
+                        "verdict": "ok",
+                        "reason": "离线假模型逐项确认结构",
+                    } for candidate_id in review_ids]
+                }, {"total_tokens": 4}
             decisions = []
             for block in re.split(r"(?=### 候选 c-\d+)", user):
                 header = re.search(r"### 候选 (c-\d+).*?kind: ([^ |]+).*?建议环境: ([^ |]+)", block, re.S)
@@ -1719,11 +2132,12 @@ def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_sepa
             assert imported.status_code == 200
             pid = imported.json()["id"]
             assert imported.json()["process"]["status"] in {"running", "committing", "done"}
-            for _ in range(600):
-                process = c.get(f"/api/projects/{pid}/process/status").json()
-                if process["status"] not in {"running", "pausing", "paused", "committing"}:
-                    break
-                time.sleep(0.02)
+            process = _wait_for_json(
+                c,
+                f"/api/projects/{pid}/process/status",
+                lambda item: item["status"]
+                not in {"running", "pausing", "paused", "committing"},
+            )
         assert process["status"] == "done", process
         raw = c.get(f"/api/projects/{pid}/source").text
         structured = c.get(f"/api/projects/{pid}/result").text
@@ -1797,6 +2211,48 @@ def test_ocr_import_never_opens_review_with_unresolved_images():
             with srv._ocr_jobs_lock:
                 srv._ocr_jobs.pop(jid, None)
             shutil.rmtree(job_dir, ignore_errors=True)
+
+
+def test_ocr_import_blocks_every_active_noncanonical_image_reference():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        for index, image_path in enumerate(
+            ("figure.png", "images/diagram", "images/page_1_1.pdf"),
+            start=1,
+        ):
+            jid = f"unsupported-ocr-image-{index}"
+            job_dir = tempfile.mkdtemp(prefix="ocr-unsupported-", dir=tmp)
+            page_path = Path(job_dir, "page-1.png")
+            page_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 24)
+            with srv._ocr_jobs_lock:
+                srv._ocr_jobs[jid] = {
+                    "id": jid,
+                    "status": "done",
+                    "raw_ready": True,
+                    "raw_tex": f"% Page 1\n\\includegraphics{{{image_path}}}",
+                    "raw_revision": 1,
+                    "usage_revision": 0,
+                    "page_revision": 1,
+                    "downloaded_revision": 0,
+                    "imported_revision": 0,
+                    "importing": False,
+                    "saving": False,
+                    "usage": {},
+                    "selected_pages": [1],
+                    "pages": {1: {"png": str(page_path), "status": "done"}},
+                    "dir": job_dir,
+                }
+            try:
+                response = c.post(f"/api/ocr/jobs/{jid}/import")
+
+                assert response.status_code == 409
+                assert image_path in response.json()["detail"]
+                assert "未进入分析与审阅" in response.json()["detail"]
+                assert srv.get_store().list() == []
+            finally:
+                with srv._ocr_jobs_lock:
+                    srv._ocr_jobs.pop(jid, None)
+                shutil.rmtree(job_dir, ignore_errors=True)
 
 
 def test_ocr_page_with_broken_display_is_done_but_marked_low_confidence():
@@ -2009,6 +2465,7 @@ def test_update_install_failures_are_non_200_and_release_reservation():
 
 
 def test_update_install_schedules_exit_only_after_verified_download():
+    from latexstruct import __version__
     from latexstruct.updater import UpdateInfo
 
     info = UpdateInfo(
@@ -2048,7 +2505,7 @@ def test_update_install_schedules_exit_only_after_verified_download():
         assert args == (info,) and callable(kwargs["progress"])
         schedule.assert_called_once_with(
             "C:/Temp/LaTeXStruct-setup-1.2.3.exe",
-            previous_version="1.1.9",
+            previous_version=__version__,
             expected_version="v1.2.3",
         )
         close_app.assert_called_once_with(delay=1.2)
@@ -2155,8 +2612,8 @@ def test_native_save_repairs_webview_download_and_never_overwrites():
         assert second_path.read_bytes() == first_path.read_bytes()
         with zipfile.ZipFile(package_path) as zf:
             assert zf.read("main.tex") == first_path.read_bytes()
-            assert b"v4.7 ElegantBook document class" in zf.read("elegantbook.cls")
-            assert "ELEGANTBOOK-LICENSE.txt" in zf.namelist()
+            assert "elegantbook.cls" not in zf.namelist()
+            assert "ELEGANTBOOK-LICENSE.txt" not in zf.namelist()
         assert report_path.read_bytes() == c.get(f"/api/projects/{pid}/report").content
 
 

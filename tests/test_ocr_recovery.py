@@ -336,6 +336,26 @@ def test_explicit_png_reference_is_preserved_exactly_once_with_source_preview():
         ).hexdigest()
 
 
+def test_ocr_resource_scan_ignores_commented_and_verbatim_image_examples():
+    raw = r"""% Page 1
+% \includegraphics{figure.png}
+\begin{verbatim}
+\includegraphics{images/diagram}
+\includegraphics{images/page_1_1.pdf}
+\end{verbatim}
+\verb|\includegraphics{also-not-active.png}|
+Plain OCR text.
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp, "project")
+        project.mkdir()
+
+        result = _preserve_ocr_resources({}, raw, project)
+
+    assert result["unresolved"] == []
+    assert result["assets"] == []
+
+
 def test_missing_figure_uses_hash_marked_source_page_fallback_and_bundle():
     raw = "\n".join(
         [

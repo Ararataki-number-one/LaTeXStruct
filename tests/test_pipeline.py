@@ -93,9 +93,15 @@ def test_compile_checks_receive_preserved_ocr_resources():
 
 
 def test_cn_fragment_fast_mode():
-    res = run_pipeline(read_sample("cn_fragment.tex"), mode="rule")
-    assert res.ok, res.report_md
-    out = res.result
+    source = read_sample("cn_fragment.tex")
+    res = run_pipeline(source, mode="rule")
+    assert res.ok is False
+    assert res.verification["safe_to_export"] is False
+    assert res.result == source
+    # Safe transformations may be constructed in the draft, but the presence
+    # of unresolved numbered remark/example candidates rolls the whole export
+    # back to the source.
+    planned = {ap.decision.env for ap in res.applied if ap.decision.action == "wrap"}
     # ElegantBook 内置的星号色块不会自动计数，可安全保留原书编号；没有可证明
     # 星号版本的旧 remark/example 仍宁可保留原文，不冒险产生双编号。
     for env, number in (
@@ -105,18 +111,11 @@ def test_cn_fragment_fast_mode():
         ("corollary", "2.3"),
         ("lemma", "1"),
     ):
-        assert f"\\begin{{{env}*}}[{number}]" in out, env
-    assert "定理 2.1（某某）. 结论陈述" not in out
-    assert "定义 1.1. 设 $A$ 是集合" not in out
-    assert "注 3. 一个注记" in out
-    assert "例 5. 一个例子" in out
+        assert f"{env}*" in planned, (env, number)
+    assert "注 3. 一个注记" in res.result
+    assert "例 5. 一个例子" in res.result
     assert any("避免双编号" in item["reason"] for item in res.ambiguous)
-    # 证明起始语剥离
-    assert out.count("\\begin{proof}") == 2
-    assert "证明：略" not in out and "略。" in out
-    assert "证明如下" not in out and "先证存在性。" in out
-    # elegantbook：不补 amsthm
-    assert "\\usepackage{amsthm}" not in out
+    assert sum(ap.decision.env == "proof" for ap in res.applied) == 2
     assert res.verification["content_invariant"] is True
     assert res.verification["env_balance"]["ok"] is True
 
@@ -144,7 +143,7 @@ def test_unnumbered_title_prefix_is_removed_but_title_only_is_preserved():
     )
     result = run_pipeline(text, mode="rule")
     assert result.ok, result.report_md
-    assert "\\begin{theorem}\n A statement without a source number." in result.result
+    assert "\\begin{theorem}\nA statement without a source number." in result.result
     assert "Theorem. A statement without a source number." not in result.result
     assert "\\begin{remark}\nRemark\n\\end{remark}" in result.result
 
@@ -176,7 +175,8 @@ def test_existing_numbered_theorem_declaration_defers_explicit_source_number():
         "\\end{document}\n"
     )
     first = run_pipeline(text, mode="rule")
-    assert first.ok, first.report_md
+    assert first.ok is False
+    assert first.verification["safe_to_export"] is False
     assert first.result == text
     assert not first.applied
     assert any("避免双编号" in item["reason"] for item in first.ambiguous)
@@ -188,7 +188,8 @@ def test_existing_numbered_theorem_declaration_defers_explicit_source_number():
         decisions_override=first.decisions,
         ambiguous_override=[],
     )
-    assert reused.ok, reused.report_md
+    assert reused.ok is False
+    assert reused.verification["safe_to_export"] is False
     assert reused.result == text
     assert reused.verification["decisions_reused"] is True
     assert any("避免双编号" in item["reason"] for item in reused.ambiguous)
@@ -203,7 +204,7 @@ def test_existing_starred_theorem_declaration_accepts_explicit_source_number():
     )
     result = run_pipeline(text, mode="rule")
     assert result.ok, result.report_md
-    assert "\\begin{theorem}[7]\n A statement with its own number." in result.result
+    assert "\\begin{theorem}[7]\nA statement with its own number." in result.result
     assert result.result.count("\\newtheorem*{theorem}{Theorem}") == 1
 
 
@@ -385,7 +386,7 @@ def test_overlapping_decisions_are_both_deferred():
     assert {d.candidate_id for d, _ in dropped} == {"a", "b"}
 
 
-def test_scope_fixes_are_grouped_by_environment_instance():
+def test_scope_fixes_do_not_guess_from_adjacent_paragraphs():
     text = (
         "\\documentclass{book}\n\\begin{document}\n"
         "\\begin{theorem}\nTheorem A.\n\\end{theorem}\n"
@@ -396,8 +397,10 @@ def test_scope_fixes_are_grouped_by_environment_instance():
     doc = parse_latex(text)
     decisions, ambiguous = build_rule_decisions(doc, scan(doc))
     moves = [d for d in decisions if d.action == "move-boundary"]
-    assert len(moves) == 1
-    assert any("只包住标题" in item["reason"] for item in ambiguous)
+    # An ordinary paragraph after a closed theorem may be commentary.  Its
+    # adjacency alone is not enough evidence to move a structural boundary.
+    assert moves == []
+    assert ambiguous == []
 
 
 def test_used_but_undefined_theorem_is_declared_for_wrapped_output():
@@ -729,6 +732,81 @@ Plain OCR text.
     assert not result.ok
     assert result.verification["compile"]["checked"] is True
     assert result.verification["safe_to_export"] is False
+
+
+def test_failed_before_and_after_with_patch_is_unverified_even_if_first_errors_match():
+    text = (
+        "\\documentclass{article}\n"
+        "\\usepackage{amsthm}\n"
+        "\\newtheorem{theorem}{Theorem}\n"
+        "\\begin{document}\n"
+        "\\undefinedA\n"
+        "\\begin{tabular}{l}\n"
+        "Theorem 1. A cached decision must not be trusted here. \\\\\n"
+        "\\end{tabular}\n"
+        "\\end{document}\n"
+    )
+    failed = {
+        "available": True,
+        "ok": False,
+        "pages": 0,
+        # -halt-on-error exposes only the pre-existing first error in both runs;
+        # the modified run could contain a later "Not allowed in LR mode".
+        "errors": ["Undefined control sequence @l.5: \\undefinedA"],
+        "log": "",
+    }
+    cached_wrap = Decision(
+        candidate_id="cached-tabular-title",
+        action="wrap",
+        env="theorem",
+        body_span=(7, 7),
+        source="ai",
+    )
+    with patch(
+        "latexstruct.core.compilecheck.compile_latex",
+        side_effect=[dict(failed), dict(failed)],
+    ):
+        result = run_pipeline(
+            text,
+            mode="rule",
+            compile_check=True,
+            decisions_override=[cached_wrap],
+        )
+
+    assert result.applied
+    assert result.ok is False
+    assert result.result == text
+    assert result.verification["compile"] == {
+        "ok": False,
+        "checked": True,
+        "unverified": True,
+    }
+    assert result.verification["safe_to_export"] is False
+    assert "首个错误相同不足以证明补丁未引入后续错误" in result.report_md
+
+
+def test_failed_identical_compile_without_patch_preserves_noop_path():
+    text = "\\documentclass{article}\n\\begin{document}\n\\undefinedA\n\\end{document}\n"
+    failed = {
+        "available": True,
+        "ok": False,
+        "pages": 0,
+        "errors": ["Undefined control sequence @l.3: \\undefinedA"],
+        "log": "",
+    }
+    with patch(
+        "latexstruct.core.compilecheck.compile_latex",
+        side_effect=[dict(failed), dict(failed)],
+    ):
+        result = run_pipeline(text, mode="rule", compile_check=True)
+
+    assert result.applied == []
+    assert result.ok is True
+    assert result.verification["compile"] == {
+        "ok": True,
+        "checked": True,
+        "unverified": False,
+    }
 
 
 def test_required_ocr_image_resource_missing_blocks_export():

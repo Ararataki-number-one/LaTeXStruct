@@ -784,15 +784,15 @@ export default function Workspace({ pid, onOpenSettings }) {
           disabled={!canExport}
           className={verifiedExportReady ? "primary" : "warning-button"}
           title={verifiedExportReady
-            ? "保存已通过机器检查的 ElegantBook 主 TEX"
+            ? "保存已通过机器检查的结构化主 TEX"
             : "导出当前快照；文件会明确标记为未验证，可能无法编译"}
           onClick={() => {
             if (confirmCurrentExport()) {
-              saveToDownloads(exportArtifact, verifiedExportReady ? "ElegantBook TEX" : "当前 TEX（未验证）");
+              saveToDownloads(exportArtifact, verifiedExportReady ? "结构化 TEX" : "当前 TEX（未验证）");
             }
           }}
         >
-          {verifiedExportReady ? "导出 ElegantBook TEX" : "导出当前 TEX（未验证）"}
+          {verifiedExportReady ? "导出结构化 TEX" : "导出当前 TEX（未验证）"}
         </button>
         <button
           className={verifiedExportReady ? "primary" : "warning-button"}
@@ -813,7 +813,7 @@ export default function Workspace({ pid, onOpenSettings }) {
           title={verifiedExportReady ? "复制已通过机器检查的结果" : "复制当前未验证快照"}
           onClick={() => {
             if (confirmCurrentExport()) {
-              copyFromApi(exportTexPath, verifiedExportReady ? "ElegantBook TEX" : "当前 TEX（未验证）");
+              copyFromApi(exportTexPath, verifiedExportReady ? "结构化 TEX" : "当前 TEX（未验证）");
             }
           }}
         >
@@ -826,7 +826,7 @@ export default function Workspace({ pid, onOpenSettings }) {
               disabled={!canExport}
               onClick={() => {
                 if (confirmCurrentExport()) {
-                  downloadFromApi(exportTexPath, verifiedExportReady ? "ElegantBook.tex" : "LaTeXStruct-UNVERIFIED.tex");
+                  downloadFromApi(exportTexPath, verifiedExportReady ? "LaTeXStruct-structured.tex" : "LaTeXStruct-UNVERIFIED.tex");
                 }
               }}
             >
@@ -837,7 +837,7 @@ export default function Workspace({ pid, onOpenSettings }) {
               onClick={() => {
                 if (confirmCurrentExport()) {
                   downloadFromApi(exportPackagePath, verifiedExportReady
-                    ? "ElegantBook-project.zip"
+                    ? "LaTeXStruct-structured-project.zip"
                     : "LaTeXStruct-UNVERIFIED-project.zip");
                 }
               }}
@@ -846,10 +846,10 @@ export default function Workspace({ pid, onOpenSettings }) {
             </button>
             {showingFailedDraft && info?.has_result && (
               <>
-                <button onClick={() => downloadFromApi(`/api/projects/${pid}/export`, "ElegantBook-last-verified.tex") }>
+                <button onClick={() => downloadFromApi(`/api/projects/${pid}/export`, "LaTeXStruct-last-verified.tex") }>
                   上一次机器检查通过的 TEX
                 </button>
-                <button onClick={() => downloadFromApi(`/api/projects/${pid}/export-package`, "ElegantBook-last-verified.zip") }>
+                <button onClick={() => downloadFromApi(`/api/projects/${pid}/export-package`, "LaTeXStruct-last-verified.zip") }>
                   上一次机器检查通过的 ZIP
                 </button>
               </>

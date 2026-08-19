@@ -224,6 +224,11 @@ def build_report(
         L.append(
             f"  - 整理后：{'成功 ' + str(ca.get('pages')) + ' 页' if ca.get('ok') else '失败 ' + '; '.join(ca.get('errors', [])[:2])}"
         )
+        if verification.get("compile", {}).get("unverified"):
+            L.append(
+                "  - 结论：整理前后均编译失败，首个错误相同不足以证明补丁未引入后续错误；"
+                "已按未验证结果阻止安全导出"
+            )
     elif verification.get("compile_required"):
         L.append("- 编译校验（xelatex）：不可用；OCR 成品已按保守原则阻止导出")
     elif verification.get("compile_required_when_available"):

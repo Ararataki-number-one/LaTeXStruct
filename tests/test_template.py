@@ -3,12 +3,14 @@
 
 import os
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from latexstruct.core.pipeline import run_pipeline  # noqa: E402
 from latexstruct.core.template import (  # noqa: E402
     ELEGANTBOOK,
+    PRESERVE_SOURCE,
     PROFESSIONAL_HANDOUT,
     build_template_ops,
     list_template_presets,
@@ -252,9 +254,56 @@ Text
     assert r"\usepackage{titlesec}" not in inserted
 
 
+def test_elegantbook_rejects_incompatible_document_classes_fail_closed():
+    for document_class in ("beamer", "letter"):
+        text = (
+            f"\\documentclass{{{document_class}}}\n"
+            "\\begin{document}\nText\n\\end{document}\n"
+        )
+        ops, notes = build_template_ops(text, template=ELEGANTBOOK)
+
+        assert ops == []
+        assert notes[0]["status"] == "rejected"
+        assert "安全转换名单" in notes[0]["reason"]
+        result = run_pipeline(text, mode="rule", template=ELEGANTBOOK)
+        assert result.ok is False
+        assert result.verification["template"]["ok"] is False
+        assert result.verification["safe_to_export"] is False
+        assert result.result == text
+
+
+def test_template_compile_uses_pre_template_source_and_requires_final_success():
+    text = "\\documentclass{article}\n\\begin{document}\nText\n\\end{document}\n"
+    failed = {
+        "available": True,
+        "ok": False,
+        "pages": 0,
+        "errors": ["Undefined control sequence"],
+        "log": "",
+    }
+    with patch(
+        "latexstruct.core.compilecheck.compile_latex",
+        return_value=failed,
+    ) as compile_latex:
+        result = run_pipeline(
+            text,
+            mode="rule",
+            template=ELEGANTBOOK,
+        )
+
+    assert compile_latex.call_count == 2
+    before_call, after_call = compile_latex.call_args_list
+    assert before_call.args[0] == text
+    assert "\\documentclass[lang=en,11pt]{elegantbook}" in after_call.args[0]
+    assert result.ok is False
+    assert result.verification["compile"]["ok"] is False
+    assert result.verification["safe_to_export"] is False
+
+
 def test_template_registry_and_professional_idempotence():
     presets = list_template_presets()
-    assert {item["id"] for item in presets} == {ELEGANTBOOK}
+    assert {item["id"] for item in presets} == {PRESERVE_SOURCE, ELEGANTBOOK}
+    assert normalize_template_id(None) == PRESERVE_SOURCE
     assert normalize_template_id(PROFESSIONAL_HANDOUT) == PROFESSIONAL_HANDOUT
     try:
         normalize_template_id("free-form-ai-preamble")

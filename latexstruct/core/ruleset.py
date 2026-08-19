@@ -23,10 +23,47 @@ RULESETS_DIR = Path(__file__).resolve().parent.parent / "rulesets"
 
 CJK_RE = re.compile(r"^[\u4e00-\u9fff]+$")
 
+_PROOF_TITLE_END = r"(?=\s*(?:[.:：。]|$))"
+_PROOF_REF_TOKEN = (
+    r"\\(?![A-Za-z@]*(?i:h(?:yper)?ref)\b)[A-Za-z@]*ref\*?"
+    r"\s*\{[^{}\n]{1,160}\}"
+)
+_PROOF_TYPED_QUALIFIER = (
+    r"(?:\s+(?:up\s+to|for|on|in|under|with|of)\s+"
+    r"[^.\n:：。]{1,160})?"
+)
+_PROOF_TYPED_TARGET = (
+    r"(?:Theorem|Lemma|Proposition|Corollary|Conjecture|Claim|Fact|Observation|"
+    r"Definition|Result|Question|Problem|Exercise)\b"
+    rf"(?:\s*~?\s*(?:\d+(?:\.\d+)*|{_PROOF_REF_TOKEN}))?"
+    rf"{_PROOF_TYPED_QUALIFIER}{_PROOF_TITLE_END}"
+)
+_PROOF_NAMED_TARGET = (
+    r"the\s+(?:"
+    r"(?:upper|lower)\s+bound(?:\s+(?:in|of|for)\s+"
+    r"(?:Theorem|Lemma|Proposition|Corollary|Claim|Result)\s+\d+(?:\.\d+)*)?"
+    r"|(?:main\s+)?(?:theorem|lemma|proposition|corollary|claim|result|assertion)\b"
+    rf"){_PROOF_TITLE_END}"
+)
+_PROOF_NATURAL_TARGET = (
+    r"(?:(?-i:[A-Z][A-Za-z0-9'’.-]*)"
+    r"(?:\s+[A-Za-z][A-Za-z0-9'’.-]*){0,4}"
+    r"|the\s+[A-Za-z][A-Za-z0-9'’.-]*"
+    r"(?:\s+[A-Za-z][A-Za-z0-9'’.-]*){0,4})\s+"
+    r"(?:theorem|lemma|proposition|corollary|claim|result|assertion)\b"
+    r"(?:\s+(?:for|on|in|under|with|of)\s+[^.\n:：。]{1,160})?"
+    rf"{_PROOF_TITLE_END}"
+)
+DEFAULT_PROOF_OF_START = (
+    rf"Proof of\s+(?:{_PROOF_TYPED_TARGET}|\d+(?:\.\d+)*{_PROOF_TITLE_END}|"
+    rf"{_PROOF_REF_TOKEN}{_PROOF_TITLE_END}|{_PROOF_NAMED_TARGET}|"
+    rf"{_PROOF_NATURAL_TARGET})"
+)
+
 DEFAULT_PROOF_STARTS = [
-    r"Proof\s*[:.]?(?:\s|$)",
+    r"Proof(?!\s+of\b)\s*[:.]?(?:\s|$)",
     r"Proof\s*\[[^\]]*\](?:\s*\.)?(?:\s|$)",
-    r"Proof of\b",
+    DEFAULT_PROOF_OF_START,
     r"Sketch of the proof\.?(?:\s|$)",
     r"证明\s*[:：]\s*",
     r"证明\s*$",
@@ -115,8 +152,17 @@ def _title_regex(kw: str) -> re.Pattern:
             rf"^{re.escape(kw)}\s*(\d+(?:\.\d+)*)\s*[:：.。]?\s*(?=\S|$)"
             rf"|^{re.escape(kw)}(?:\s*[:：.。]\s*|\s+(?=\S)|(?=（|\())"
         )
+    # 英文裸标题必须有可见的“标题证据”：标点、编号后大写/公式/括号开头的
+    # 陈述，或标题在行尾。仅凭 ``Theorem 2 shows ...`` 这类引用句不能生成候选。
     return re.compile(
-        rf"^{re.escape(kw)}\b(?:\s+(\d+(?:\.\d+)*))?\s*[.:]?\s*(?=\s|$|（|\()"
+        rf"^{re.escape(kw)}\b(?:"
+        rf"\s+(\d+(?:\.\d+)*)(?:\s*[.:](?!\d)\s*|\s+(?=[A-Z\\$(（(])|\s*$)"
+        rf"|\s+(?:\((?:[^()\n]|\([^()\n]{{1,80}}\)){{1,1024}}\)|"
+        rf"\[[^\[\]\n]{{1,1024}}\])"
+        rf"(?:\s*[.:]\s*|\s*$)"
+        rf"|\s*[.:]\s*"
+        rf"|\s*$"
+        rf")(?=\S|$|（|\()"
     )
 
 

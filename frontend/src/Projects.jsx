@@ -1,9 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 
-const TEXT_EXTENSIONS = new Set([
-  ".tex", ".sty", ".cls", ".bib", ".bst", ".cfg", ".def", ".bbx", ".cbx", ".lbx", ".txt",
-]);
 const ACTIVE_TASKS = new Set(["running", "pausing", "paused", "cancelling", "committing"]);
 const TASK_LABELS = {
   running: "处理中",
@@ -17,7 +14,8 @@ const TASK_LABELS = {
   cancelled: "已取消",
 };
 const FALLBACK_TEMPLATES = [
-  { id: "elegantbook", label: "ElegantBook 专业讲义（固定）", description: "章节、目录和定理结构通过安全检查后，统一生成 ElegantBook 成品。" },
+  { id: "", label: "保持原排版（推荐）", description: "保留原文档类、宏包、章节层级和自定义环境，只整理明确的正文结构。" },
+  { id: "elegantbook", label: "ElegantBook 专业讲义", description: "明确需要统一书籍版式时使用，会转换文档类、章节层级、目录和定理色块。" },
 ];
 
 function extension(name) {
@@ -32,6 +30,28 @@ function bytesToBase64(buffer) {
     binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   }
   return btoa(binary);
+}
+
+function decodeTexPreview(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return new TextDecoder("utf-16le").decode(bytes.subarray(2));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return new TextDecoder("utf-16be").decode(bytes.subarray(2));
+  }
+  const utf8Bytes = bytes.length >= 3
+    && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf
+    ? bytes.subarray(3) : bytes;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(utf8Bytes);
+  } catch (_) {
+    try {
+      const gb = new TextDecoder("gb18030", { fatal: true }).decode(bytes);
+      if (/[\u3400-\u9fff]/.test(gb)) return gb;
+    } catch (_) { /* fall through to the byte-preserving preview */ }
+    return Array.from(bytes, (value) => String.fromCharCode(value)).join("");
+  }
 }
 
 function readDirectory(reader) {
@@ -99,11 +119,13 @@ function ocrProjectHint(project, duplicateCount) {
 export default function Projects({ onOpen }) {
   const [projects, setProjects] = useState([]);
   const [packs, setPacks] = useState([]);
+  const [templates, setTemplates] = useState(FALLBACK_TEMPLATES);
   const [name, setName] = useState("");
   const [mode, setMode] = useState("ai");
   const [pack, setPack] = useState("bilingual");
-  const template = "elegantbook";
+  const [template, setTemplate] = useState("");
   const [text, setText] = useState("");
+  const [singleSource, setSingleSource] = useState(null);
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [importState, setImportState] = useState(null);
@@ -127,6 +149,15 @@ export default function Projects({ onOpen }) {
       .then((data) => {
         setPacks(data.packs);
         setPack(data.default);
+      })
+      .catch(() => {});
+    api("/api/templates")
+      .then((response) => response.json())
+      .then((data) => {
+        if (Array.isArray(data.templates) && data.templates.length) {
+          setTemplates(data.templates);
+        }
+        setTemplate(typeof data.default === "string" ? data.default : "");
       })
       .catch(() => {});
   }, []);
@@ -156,7 +187,7 @@ export default function Projects({ onOpen }) {
     try {
       const response = await api("/api/projects", {
         method: "POST",
-        body: JSON.stringify({ text, ...projectOptions }),
+        body: JSON.stringify({ text, source_file: singleSource, ...projectOptions }),
       });
       const { id } = await response.json();
       setImportState({ progress: 1, message: "导入完成，准备进入分析与审阅" });
@@ -183,9 +214,10 @@ export default function Projects({ onOpen }) {
       for (let index = 0; index < selected.length; index += 1) {
         const { file, path } = selected[index];
         if (!path || files[path]) throw new Error("项目中存在重复或无效路径：" + path);
-        files[path] = TEXT_EXTENSIONS.has(extension(file.name))
-          ? await file.text()
-          : { encoding: "base64", data: bytesToBase64(await file.arrayBuffer()) };
+        files[path] = {
+          encoding: "base64",
+          data: bytesToBase64(await file.arrayBuffer()),
+        };
         setImportState({
           progress: 0.1 + 0.55 * (index + 1) / Math.max(1, selected.length),
           message: `正在读取项目文件 ${index + 1}/${selected.length}：${path}`,
@@ -246,7 +278,13 @@ export default function Projects({ onOpen }) {
     if (![".tex", ".txt"].includes(extension(file.name))) {
       return alert("单文件请选择 .tex/.txt；多文件项目请拖入整个文件夹或 ZIP");
     }
-    setText(await file.text());
+    const buffer = await file.arrayBuffer();
+    setText(decodeTexPreview(buffer));
+    setSingleSource({
+      encoding: "base64",
+      data: bytesToBase64(buffer),
+      name: file.name,
+    });
     if (!name) setName(file.name.replace(/\.[^.]+$/, ""));
     setImportState({ progress: 1, message: `已读取 ${file.name}，点击“导入并打开”继续` });
   };
@@ -348,19 +386,27 @@ export default function Projects({ onOpen }) {
             <select value={pack} onChange={(event) => setPack(event.target.value)}>
               {packs.map((item) => <option key={item} value={item}>{item}</option>)}
             </select>
-            <div className="template-choice fixed-template" aria-label="固定排版方案">
-              <span>成品模板</span>
-              <b>{FALLBACK_TEMPLATES[0].label}</b>
-            </div>
+            <select
+              value={template}
+              onChange={(event) => setTemplate(event.target.value)}
+              aria-label="排版方案"
+            >
+              {templates.map((item) => (
+                <option key={item.id || "preserve"} value={item.id}>{item.label}</option>
+              ))}
+            </select>
           </div>
           <p className="template-description">
-            {FALLBACK_TEMPLATES[0].description} AI 只提交可审阅的结构补丁，不自由改写正文；
-            目录统一使用 LaTeX 的 \tableofcontents，安全检查失败时不会导出。
+            {(templates.find((item) => item.id === template) || FALLBACK_TEMPLATES[0]).description}
+            {" "}AI 只提交可审阅的结构补丁，不自由改写正文；标准 TeX 默认不做模板迁移。
           </p>
           <textarea
             placeholder="也可以在这里粘贴 .tex 全文……"
             value={text}
-            onChange={(event) => setText(event.target.value)}
+            onChange={(event) => {
+              setText(event.target.value);
+              setSingleSource(null);
+            }}
           />
         </details>
         <div className="import-footer">

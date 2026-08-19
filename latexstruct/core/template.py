@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""可审阅、可撤销的固定排版模板。
+"""可审阅、可撤销的排版模板。
 
-正式成品统一使用 ElegantBook。模型只判断正文结构；文档类、文章到书籍的
-标题层级适配、目录分页与定理视觉环境全部由确定性补丁完成。旧的
-``professional-handout`` 仅保留给既有项目读取，重新处理时会迁移到 ElegantBook。
+已经结构化的普通 TeX 默认保持原排版；OCR 重建或用户明确选择时才转换为
+ElegantBook。模型只判断正文结构，模板转换始终是独立、可审阅的确定性补丁。
+``professional-handout`` 仅保留给既有项目读取。
 """
 
 from __future__ import annotations
@@ -41,12 +41,14 @@ ELEGANT_NEW_THEOREM_RE = re.compile(r"\\elegantnewtheorem\s*\{([^{}]+)\}")
 
 PROFESSIONAL_HANDOUT = "professional-handout"
 ELEGANTBOOK = "elegantbook"
+PRESERVE_SOURCE = ""
 PROFESSIONAL_MARKER = "% LaTeXStruct template: professional-handout begin"
 ELEGANTBOOK_MARKER = "% LaTeXStruct template: elegantbook v4.7"
 ELEGANTBOOK_TITLE_MARKER = "% LaTeXStruct: clean ElegantBook title page"
 SUPPORTED_HANDOUT_CLASSES = {
     "article", "report", "book", "ctexart", "ctexrep", "ctexbook",
 }
+ELEGANTBOOK_SOURCE_CLASSES = frozenset({*SUPPORTED_HANDOUT_CLASSES, ELEGANTBOOK})
 ARTICLE_CLASSES = {"article", "ctexart"}
 ELEGANTBOOK_BUILTIN_ENVS = frozenset({
     "theorem", "definition", "postulate", "axiom", "corollary", "lemma",
@@ -67,14 +69,20 @@ ELEGANTBOOK_EXTRA_ENVS = {
 
 TEMPLATE_PRESETS = (
     {
+        "id": PRESERVE_SOURCE,
+        "label": "保持原排版（推荐）",
+        "description": "保留原 documentclass、宏包、章节层级和自定义环境，只整理明确的正文结构。",
+        "recommended_for": "tex",
+    },
+    {
         "id": ELEGANTBOOK,
-        "label": "ElegantBook 专业讲义（固定）",
-        "description": "统一书籍版式、章节层级、真实目录与定理色块；所有正式导出均使用。",
-        "recommended_for": "all",
+        "label": "ElegantBook 专业讲义",
+        "description": "明确需要统一书籍版式时使用；会适配文档类、章节层级、目录与定理色块。",
+        "recommended_for": "ocr",
     },
 )
 _TEMPLATE_LABELS = {
-    "": "保持原排版（旧项目）",
+    PRESERVE_SOURCE: "保持原排版",
     PROFESSIONAL_HANDOUT: "专业讲义（旧项目）",
     **{item["id"]: item["label"] for item in TEMPLATE_PRESETS},
 }
@@ -88,7 +96,7 @@ def list_template_presets() -> List[dict]:
 def normalize_template_id(template: str | None) -> str:
     value = str(template or "").strip()
     if value not in _TEMPLATE_LABELS:
-        raise ValueError("未知排版模板；正式成品统一使用 ElegantBook")
+        raise ValueError("未知排版模板；请选择保持原排版或 ElegantBook")
     return value
 
 
@@ -404,10 +412,23 @@ def _build_elegantbook_ops(
         None,
     )
     if class_item is None:
-        return [], [{"line": 1, "reason": "未找到独立的 \\documentclass 行，已阻止模板转换"}]
+        return [], [{
+            "line": 1,
+            "status": "rejected",
+            "reason": "未找到独立的 \\documentclass 行，已阻止模板转换",
+        }]
 
     dc_idx, class_match = class_item
     original_class = class_match.group(1).strip().lower()
+    if original_class not in ELEGANTBOOK_SOURCE_CLASSES:
+        return [], [{
+            "line": dc_idx + 1,
+            "status": "rejected",
+            "reason": (
+                f"文档类 {original_class} 不在 ElegantBook 安全转换名单中，"
+                "已阻止模板转换"
+            ),
+        }]
     active = mask_comments(text)
     chinese = bool(re.search(r"[\u3400-\u9fff]", active))
     has_title = bool(re.search(r"\\title\s*\{", active))
@@ -443,7 +464,11 @@ def _build_elegantbook_ops(
         None,
     )
     if begin_index is None:
-        return [], [{"line": 1, "reason": "未找到独立的 \\begin{document} 行，已阻止模板转换"}]
+        return [], [{
+            "line": 1,
+            "status": "rejected",
+            "reason": "未找到独立的 \\begin{document} 行，已阻止模板转换",
+        }]
 
     # article -> book 是文档类语义适配，不是标题猜测。所有已解析层级整体上移，
     # 因而不会出现 book 类中只有 section 时的 0.1 编号。
