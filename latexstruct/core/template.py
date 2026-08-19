@@ -11,6 +11,11 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Tuple
 
+from .faithfulbook import (
+    FAITHFULBOOK_STYLE_MARKER,
+    render_faithfulbook_style,
+    resolve_faithfulbook_layout,
+)
 from .parser import mask_comments, parse_latex
 from .patch import PendingOp
 from .scanner import BOX_ENVS
@@ -33,6 +38,16 @@ CIRCLED_LINE_RE = re.compile(r"^\s*\\newcommand\*?\\circled\b.*$")
 CHAPTER_RE = re.compile(r"^\d+\s+\S")
 TOC_ENTRY_SUFFIX_RE = re.compile(r"\s+\d+\s*$")
 CONTENTS_TITLE_RE = re.compile(r"^contents$", re.I)
+LOCAL_CONTENTS_MARKER_RE = re.compile(
+    r"^\s*%\s*LaTeXStruct-Local-Contents\s*$", re.I,
+)
+PRINTED_PAGE_MARKER_PREFIX_RE = re.compile(
+    r"^\s*%\s*LaTeXStruct-Printed-Page\s*:", re.I,
+)
+PRINTED_PAGE_MARKER_RE = re.compile(
+    r"^\s*%\s*LaTeXStruct-Printed-Page\s*:\s*(?P<page>\d+)\s*$", re.I,
+)
+MAX_PRINTED_PAGE = 999_999
 SECTION_COMMAND_LINE_RE = re.compile(
     r"^(?P<indent>\s*)\\(?P<cmd>section|subsection|subsubsection)"
     r"(?P<rest>\*?\s*\{)"
@@ -41,6 +56,7 @@ ELEGANT_NEW_THEOREM_RE = re.compile(r"\\elegantnewtheorem\s*\{([^{}]+)\}")
 
 PROFESSIONAL_HANDOUT = "professional-handout"
 ELEGANTBOOK = "elegantbook"
+FAITHFULBOOK = "faithfulbook"
 PRESERVE_SOURCE = ""
 PROFESSIONAL_MARKER = "% LaTeXStruct template: professional-handout begin"
 ELEGANTBOOK_MARKER = "% LaTeXStruct template: elegantbook v4.7"
@@ -75,6 +91,12 @@ TEMPLATE_PRESETS = (
         "recommended_for": "tex",
     },
     {
+        "id": FAITHFULBOOK,
+        "label": "原书近似 · 出版书籍",
+        "description": "OCR 书稿专用双面书籍版式；保持源页分页，生成结构化页眉和章内目录。",
+        "recommended_for": "ocr",
+    },
+    {
         "id": ELEGANTBOOK,
         "label": "ElegantBook 专业讲义",
         "description": "明确需要统一书籍版式时使用；会适配文档类、章节层级、目录与定理色块。",
@@ -96,7 +118,7 @@ def list_template_presets() -> List[dict]:
 def normalize_template_id(template: str | None) -> str:
     value = str(template or "").strip()
     if value not in _TEMPLATE_LABELS:
-        raise ValueError("未知排版模板；请选择保持原排版或 ElegantBook")
+        raise ValueError("未知排版模板；请选择保持原排版、faithfulbook 或 ElegantBook")
     return value
 
 
@@ -147,6 +169,11 @@ def uses_elegantbook_class(text: str) -> bool:
         and match.group(1).strip().lower() == ELEGANTBOOK
         for line in active.split("\n")
     )
+
+
+def uses_faithfulbook_style(text: str) -> bool:
+    """Return true only for the deterministic inline faithfulbook style layer."""
+    return FAITHFULBOOK_STYLE_MARKER in text
 
 
 def _handout_title_block() -> List[str]:
@@ -571,6 +598,286 @@ def _build_elegantbook_ops(
     return ops, notes
 
 
+def _build_faithfulbook_ops(
+    text: str,
+    context: Dict[str, str] | None = None,
+) -> Tuple[List[PendingOp], List[dict]]:
+    """Apply a compact, two-sided OCR book style without rewriting source text.
+
+    The source-page ``\\clearpage`` commands and ``% Page`` markers are not
+    edited.  Running heads are generated from chapter/section marks, never by
+    copying OCR body lines into the preamble.
+    """
+    if uses_faithfulbook_style(text):
+        return [], [{"line": 1, "reason": "faithfulbook 模板已存在，未重复插入"}]
+
+    try:
+        layout = resolve_faithfulbook_layout(context)
+        style_lines = render_faithfulbook_style(layout).split("\n")
+    except (RuntimeError, ValueError) as exc:
+        return [], [{
+            "line": 1,
+            "status": "rejected",
+            "reason": f"faithfulbook 布局无效，已保留原排版：{exc}",
+        }]
+
+    doc = parse_latex(text)
+    lines = text.split("\n")
+    class_item = next(
+        ((index, match) for index, line in enumerate(lines)
+         if (match := DOC_CLASS_CAPTURE_RE.match(line)) is not None),
+        None,
+    )
+    if class_item is None:
+        return [], [{
+            "line": 1,
+            "status": "rejected",
+            "reason": "未找到独立的 \\documentclass 行，已阻止 faithfulbook 转换",
+        }]
+    dc_idx, class_match = class_item
+    original_class = class_match.group(1).strip().lower()
+    if original_class not in SUPPORTED_HANDOUT_CLASSES:
+        return [], [{
+            "line": dc_idx + 1,
+            "status": "rejected",
+            "reason": (
+                f"文档类 {original_class} 不在 faithfulbook 安全转换名单中，"
+                "已保留原排版"
+            ),
+        }]
+    begin_index = next(
+        (index for index, line in enumerate(lines) if BEGIN_DOCUMENT_RE.match(line)),
+        None,
+    )
+    if begin_index is None:
+        return [], [{
+            "line": 1,
+            "status": "rejected",
+            "reason": "未找到独立的 \\begin{document} 行，已阻止 faithfulbook 转换",
+        }]
+
+    target_class = "ctexbook" if original_class.startswith("ctex") else "book"
+    class_options = f"{layout.body_font_pt}pt,twoside,openany"
+    if target_class == "ctexbook":
+        class_options = "UTF8," + class_options
+    class_line = rf"\documentclass[{class_options}]{{{target_class}}}"
+    ops: List[PendingOp] = []
+    notes: List[dict] = []
+    if lines[dc_idx] != class_line:
+        ops.append(PendingOp("replace_line", dc_idx + 1, old=lines[dc_idx], new=class_line))
+
+    # Insert the reviewed asset inline so a single-TEX export remains complete.
+    ops.extend(PendingOp("insert_line", begin_index, new=line) for line in style_lines)
+    local_contents_markers = [
+        line_no for line_no, line in enumerate(lines, start=1)
+        if LOCAL_CONTENTS_MARKER_RE.match(line)
+    ]
+    for line_no in local_contents_markers:
+        ops.append(PendingOp(
+            "replace_line", line_no, old=lines[line_no - 1],
+            new=r"\LSChapterContents",
+        ))
+
+    # The OCR structure pass may provide a chapter-start printed-page marker
+    # only when outline and global-contents evidence agree.  Consume the
+    # numeric-only marker deterministically; malformed or implausible values
+    # remain inert comments and can never become executable TeX.
+    printed_page_markers: List[Tuple[int, int]] = []
+    invalid_printed_page_markers: List[int] = []
+    for line_no, line in enumerate(lines, start=1):
+        if not PRINTED_PAGE_MARKER_PREFIX_RE.match(line):
+            continue
+        match = PRINTED_PAGE_MARKER_RE.match(line)
+        if match is None:
+            invalid_printed_page_markers.append(line_no)
+            continue
+        printed_page = int(match.group("page"))
+        if not 1 <= printed_page <= MAX_PRINTED_PAGE:
+            invalid_printed_page_markers.append(line_no)
+            continue
+        printed_page_markers.append((line_no, printed_page))
+        ops.append(PendingOp(
+            "replace_line", line_no, old=line,
+            new=rf"\setcounter{{page}}{{{printed_page}}}",
+        ))
+
+    sections = _non_box_sections(doc)
+    article_source = original_class in ARTICLE_CLASSES
+    shifted = 0
+    chapter_nodes = []
+    if article_source and not any(section.cmd == "chapter" for section in sections):
+        command_map = {
+            "section": "chapter",
+            "subsection": "section",
+            "subsubsection": "subsection",
+        }
+        for section in sections:
+            target = command_map.get(section.cmd)
+            if not target:
+                continue
+            line_no = section.span.start_line
+            old = lines[line_no - 1]
+            match = SECTION_COMMAND_LINE_RE.match(old)
+            if match is None or match.group("cmd") != section.cmd:
+                continue
+            new = (
+                match.group("indent") + "\\" + target + match.group("rest")
+                + old[match.end():]
+            )
+            ops.append(PendingOp("replace_line", line_no, old=old, new=new))
+            shifted += 1
+            if target == "chapter" and not section.starred:
+                chapter_nodes.append(section)
+    else:
+        chapter_nodes.extend(
+            section for section in sections
+            if section.cmd == "chapter" and not section.starred
+        )
+
+    # Book semantics, not OCR page text, own the displayed pagination: front
+    # matter uses roman numerals and the first numbered chapter restarts at 1.
+    # ``openany`` makes these transitions clear the current page without
+    # inventing an empty recto page, so source-page boundaries stay intact.
+    pagination_added = False
+    first_front_page_emptied = False
+    if chapter_nodes:
+        active_lines = mask_comments(text).split("\n")
+        first_chapter_line = min(node.span.start_line for node in chapter_nodes)
+        if not any(FRONTMATTER_RE.match(line) for line in active_lines):
+            ops.append(PendingOp("insert_line", begin_index + 1, new=r"\frontmatter"))
+            pagination_added = True
+        # Do not strip the first numbered chapter's page style when the book
+        # starts directly with chapter 1.  If genuine source material (or an
+        # explicit physical-page break) precedes that chapter, arm the
+        # template's one-shot first-shipout empty style instead.  Comments and
+        # pagination-state commands alone are not treated as a title page.
+        front_page_ignored_re = re.compile(
+            r"^\s*\\(?:frontmatter|mainmatter|LSMainMatter|"
+            r"pagestyle\s*\{[^{}]*\}|thispagestyle\s*\{[^{}]*\})\s*$"
+        )
+        source_before_first_chapter = active_lines[
+            begin_index + 1:first_chapter_line - 1
+        ]
+        if any(
+            line.strip() and not front_page_ignored_re.match(line)
+            for line in source_before_first_chapter
+        ):
+            ops.append(PendingOp(
+                "insert_line", begin_index + 1, new=r"\LSFirstPageEmpty",
+            ))
+            first_front_page_emptied = True
+        if not any(MAINMATTER_RE.match(line) for line in active_lines):
+            mainmatter_anchor = first_chapter_line - 1
+            markers_before_first_chapter = [
+                line_no for line_no, _ in printed_page_markers
+                if begin_index + 1 < line_no < first_chapter_line
+            ]
+            if markers_before_first_chapter:
+                # Switch to arabic book semantics before applying the source's
+                # first authoritative printed-page counter.
+                mainmatter_anchor = max(markers_before_first_chapter) - 1
+            ops.append(PendingOp(
+                "insert_line", mainmatter_anchor, new=r"\LSMainMatter",
+            ))
+            pagination_added = True
+
+    # A chapter-local TOC is useful only when the parsed chapter has section
+    # descendants.  This avoids empty decorative blocks on chapter-only OCR.
+    chapter_tocs = len(local_contents_markers)
+    ordered_chapters = sorted(chapter_nodes, key=lambda item: item.span.start_line)
+    for chapter_index, chapter in enumerate(ordered_chapters):
+        next_chapter_line = (
+            ordered_chapters[chapter_index + 1].span.start_line
+            if chapter_index + 1 < len(ordered_chapters)
+            else len(lines) + 1
+        )
+        has_local_marker = any(
+            chapter.span.start_line < line_no < next_chapter_line
+            for line_no in local_contents_markers
+        )
+        try:
+            start = sections.index(chapter)
+        except ValueError:
+            continue
+        has_descendant = False
+        for following in sections[start + 1:]:
+            if following.level <= chapter.level:
+                break
+            if following.cmd in {"section", "subsection", "subsubsection"}:
+                has_descendant = True
+                break
+        if has_descendant and not has_local_marker:
+            ops.append(PendingOp(
+                "insert_line",
+                chapter.span.end_line,
+                new=r"\LSChapterContents",
+            ))
+            chapter_tocs += 1
+
+    source_clearpages = sum(
+        1 for line in mask_comments(text).split("\n")
+        if line.strip() == r"\clearpage"
+    )
+    notes.extend([
+        {
+            "line": dc_idx + 1,
+            "reason": (
+                "已应用 faithfulbook 双面书籍版式："
+                f"{layout.paper_width_mm:g}×{layout.paper_height_mm:g}mm、"
+                f"{layout.body_font_pt}pt 正文、约 15mm 书页边距"
+            ),
+        },
+        {
+            "line": begin_index + 1,
+            "reason": (
+                "奇偶页眉仅取自结构化章/节标题和新页码；"
+                "不会把 OCR 页眉或印刷页码复制到页眉"
+            ),
+        },
+        {
+            "line": begin_index + 1,
+            "reason": f"完整保留 {source_clearpages} 个源页 \\clearpage 分界",
+        },
+    ])
+    if shifted:
+        notes.append({
+            "line": 1,
+            "reason": f"文章型标题层级已整体上移 {shifted} 处以适配 book 章结构",
+        })
+    if pagination_added:
+        notes.append({
+            "line": 1,
+            "reason": "前置页使用罗马页码；首个编号章从正文第 1 页开始且不增加空白页",
+        })
+    if first_front_page_emptied:
+        notes.append({
+            "line": begin_index + 2,
+            "reason": "首个前置物理页使用 empty 页式；后续前置页和首章页不受影响",
+        })
+    if chapter_tocs:
+        notes.append({
+            "line": 1,
+            "reason": f"已为 {chapter_tocs} 个章加入二次编译章内目录",
+        })
+    if printed_page_markers:
+        notes.append({
+            "line": printed_page_markers[0][0],
+            "reason": (
+                f"已应用 {len(printed_page_markers)} 个可信印刷页码锚点；"
+                "只校正页码计数，不增加物理空白页"
+            ),
+        })
+    if invalid_printed_page_markers:
+        notes.append({
+            "line": invalid_printed_page_markers[0],
+            "reason": (
+                f"已忽略 {len(invalid_printed_page_markers)} 个非法印刷页码 marker；"
+                f"仅接受 1–{MAX_PRINTED_PAGE} 的十进制整数"
+            ),
+        })
+    return ops, notes
+
+
 def build_template_ops(
     text: str,
     template: str | None = ELEGANTBOOK,
@@ -582,4 +889,6 @@ def build_template_ops(
         return [], []
     if template_id == PROFESSIONAL_HANDOUT:
         return _build_professional_handout_ops(text, context=context)
+    if template_id == FAITHFULBOOK:
+        return _build_faithfulbook_ops(text, context=context)
     return _build_elegantbook_ops(text, context=context)

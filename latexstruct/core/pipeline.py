@@ -28,6 +28,7 @@ from .patch import (
     AMSTHM_BLOCK,
     AppliedPatch,
     Decision,
+    SUPPRESS_AUTO_QED_PAYLOAD_KEY,
     NEW_THEOREM_RE,
     PatchContext,
     apply_patches,
@@ -216,6 +217,7 @@ def _apply_decisions(doc, decisions: List[Decision], ctx: PatchContext, ambiguou
             unsafe_reason = _normalize_theorem_wrap_start(d, candidate)
         if not unsafe_reason:
             _restore_theorem_title_metadata(d, candidate)
+            _restore_proof_qed_metadata(d, candidate, doc)
             _adapt_elegantbook_theorem_env(d, candidate, ctx)
             unsafe_reason = _unsafe_numbered_theorem_reason(d, candidate, ctx)
         if unsafe_reason:
@@ -307,6 +309,27 @@ def _restore_theorem_title_metadata(decision: Decision, candidate) -> None:
     decision.payload["title_line_new"] = (
         title_line_new if can_rewrite and has_body else ""
     )
+
+
+def _restore_proof_qed_metadata(decision: Decision, candidate, doc) -> None:
+    """Derive per-proof auto-QED suppression from the final trusted source span."""
+    decision.payload = dict(decision.payload)
+    # Never trust this structural flag from an AI response, review, or cache.
+    decision.payload.pop(SUPPRESS_AUTO_QED_PAYLOAD_KEY, None)
+    if (
+        decision.action != "wrap"
+        or decision.env != "proof"
+        or candidate is None
+        or candidate.kind != "proof"
+        or not decision.body_span
+        or decision.body_span[0] != candidate.span.start_line
+    ):
+        return
+    from .legalize import proof_body_has_terminal_explicit_qed
+
+    start, end = decision.body_span
+    if proof_body_has_terminal_explicit_qed(doc, start, end):
+        decision.payload[SUPPRESS_AUTO_QED_PAYLOAD_KEY] = True
 
 
 def _adapt_elegantbook_theorem_env(decision: Decision, candidate, ctx: PatchContext) -> None:

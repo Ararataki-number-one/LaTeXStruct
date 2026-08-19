@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -157,6 +158,10 @@ def _public_ocr_job(job: dict) -> dict:
                 "retrying": page.get("retrying", False),
                 "can_retry": retry_available and not page.get("retrying", False),
                 "preview_ready": os.path.isfile(str(page.get("png") or "")),
+                "figure_count": len(page.get("figures") or []),
+                "figure_bbox_ready": bool(page.get("figures")),
+                "text_reference_chars": int(page.get("text_hint_chars") or 0),
+                "quality_flag_count": len(page.get("quality_flags") or []),
             }
             for n, page in job.get("pages", {}).items()
         }
@@ -376,11 +381,362 @@ def _ocr_image_references(text: str) -> tuple[list[dict], list[str]]:
     return references, unsupported
 
 
+def _ocr_figure_bbox(job: dict, reference: dict) -> dict | None:
+    """Return a secondarily validated bbox record for one exact TEX reference."""
+    pages = job.get("pages") or {}
+    page = pages.get(reference["source_page"]) or pages.get(
+        str(reference["source_page"])
+    ) or {}
+    for figure in page.get("figures") or []:
+        if not isinstance(figure, dict):
+            continue
+        path = str(figure.get("path") or "").replace("\\", "/").strip()
+        if path != reference["path"] or figure.get("index") != reference["index"]:
+            continue
+        norm = figure.get("bbox_normalized")
+        pixels = figure.get("bbox_pixels")
+        size = figure.get("image_size_pixels") or page.get("image_size_pixels")
+        if not all(isinstance(value, list) and len(value) == expected for value, expected in (
+            (norm, 4), (pixels, 4), (size, 2),
+        )):
+            continue
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in [*norm, *pixels, *size]
+        ):
+            continue
+        nx0, ny0, nx1, ny1 = [float(value) for value in norm]
+        px0, py0, px1, py1 = [float(value) for value in pixels]
+        image_width, image_height = [float(value) for value in size]
+        if not (
+            image_width > 0
+            and image_height > 0
+            and 0 <= nx0 < nx1 <= 1
+            and 0 <= ny0 < ny1 <= 1
+            and 0 <= px0 < px1 <= image_width
+            and 0 <= py0 < py1 <= image_height
+        ):
+            continue
+        box_width = nx1 - nx0
+        box_height = ny1 - ny0
+        if (
+            box_width < 0.01
+            or box_height < 0.01
+            or box_width * box_height > 0.88
+            or (box_width > 0.96 and box_height > 0.90)
+        ):
+            continue
+        result = {
+            "bbox_normalized": [nx0, ny0, nx1, ny1],
+            "bbox_pixels": [int(round(value)) for value in (px0, py0, px1, py1)],
+            "image_size_pixels": [int(image_width), int(image_height)],
+            "bbox_source": str(figure.get("source") or "structured_vision"),
+        }
+        display_width = figure.get("display_width_ratio")
+        if (
+            not isinstance(display_width, bool)
+            and isinstance(display_width, (int, float))
+            and 0.25 <= float(display_width) <= 1.0
+        ):
+            result["display_width_ratio"] = round(float(display_width), 2)
+        return result
+    return None
+
+
+_PDF_CAPTION_LINE_RE = re.compile(
+    r"^\s*(?:fig(?:ure)?|table|plate|图|圖|表)\s*(?:[.：:]|\d|[ivxlcdm])",
+    re.I,
+)
+_PDF_PURE_SUBFIGURE_LABEL_RE = re.compile(
+    r"^\s*[（(]?\s*(?:[a-z]|\d{1,2}|[ivxlcdm]{1,5})\s*[)）.]?\s*$",
+    re.I,
+)
+
+
+def _pdf_rect_distance(first, second) -> float:
+    """Euclidean edge distance between two PyMuPDF rectangles."""
+    horizontal = max(
+        float(first.x0) - float(second.x1),
+        float(second.x0) - float(first.x1),
+        0.0,
+    )
+    vertical = max(
+        float(first.y0) - float(second.y1),
+        float(second.y0) - float(first.y1),
+        0.0,
+    )
+    return (horizontal * horizontal + vertical * vertical) ** 0.5
+
+
+def _pdf_sparse_figure_label(text: str, line_rect, page_rect, anchor_union) -> bool:
+    """Accept node/math/subfigure labels while rejecting prose and captions."""
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or _PDF_CAPTION_LINE_RE.match(value):
+        return False
+    if _PDF_PURE_SUBFIGURE_LABEL_RE.fullmatch(value):
+        return True
+    # ``(a) description`` is a subcaption, not the pure panel marker.  Keeping
+    # it in TEX separately avoids duplicated prose below the rasterized figure.
+    if re.match(r"^\s*[（(][^）)]{1,8}[)）]\s*\S", value):
+        return False
+    if len(value) > 48:
+        return False
+    if float(line_rect.width) > max(
+        float(page_rect.width) * 0.30,
+        float(anchor_union.width) * 0.42,
+    ):
+        return False
+    cjk_count = len(re.findall(r"[\u3400-\u9fff]", value))
+    if cjk_count > 8:
+        return False
+    prose_words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]{2,}", value)
+    if len(prose_words) >= 4:
+        return False
+    # A short centered sentence immediately below the vector extent is a
+    # caption even when it does not start with “Fig.”.  Formula/node labels use
+    # mostly one-letter symbols and therefore do not hit this branch.
+    below_anchor = float(line_rect.y0) >= float(anchor_union.y1) - 0.5
+    if below_anchor and len(prose_words) >= 2 and sum(map(len, prose_words)) >= 9:
+        return False
+    return True
+
+
+def _refine_pdf_figure_clip(page, bbox: dict):
+    """Tighten a coarse visual bbox to PDF drawings plus sparse figure labels.
+
+    Structured vision supplies the semantic seed.  Original-PDF vector paths
+    (and genuine embedded image blocks) define the artwork extent; nearby short
+    PDF text lines extend it only for node/math/panel labels.  Dense body lines
+    and captions never expand the crop.  If the PDF exposes no reliable local
+    artwork geometry, callers retain the validated visual bbox fallback.
+    """
+    import fitz
+
+    page_rect = page.rect
+    nx0, ny0, nx1, ny1 = bbox["bbox_normalized"]
+    model = fitz.Rect(
+        page_rect.x0 + nx0 * page_rect.width,
+        page_rect.y0 + ny0 * page_rect.height,
+        page_rect.x0 + nx1 * page_rect.width,
+        page_rect.y0 + ny1 * page_rect.height,
+    )
+    page_area = max(1.0, float(page_rect.width * page_rect.height))
+    drawing_pool = []
+    try:
+        drawings = page.get_drawings()
+    except Exception:  # noqa: BLE001 - geometry refinement is optional
+        drawings = []
+    for drawing in drawings or []:
+        raw_bbox = drawing.get("rect")
+        if not raw_bbox:
+            continue
+        raw_rect = fitz.Rect(raw_bbox)
+        if raw_rect.is_empty or raw_rect.is_infinite:
+            continue
+        raw_area = max(0.0, float(raw_rect.width * raw_rect.height))
+        # Ignore page frames and long running rules.  A large genuine figure is
+        # retained unless one path itself behaves like a page-wide decoration.
+        if raw_area / page_area > 0.72:
+            continue
+        if (
+            raw_rect.width > page_rect.width * 0.82
+            and raw_rect.height > page_rect.height * 0.62
+            and raw_rect.x0 < page_rect.x0 + page_rect.width * 0.10
+            and raw_rect.x1 > page_rect.x1 - page_rect.width * 0.10
+        ):
+            continue
+        stroke = drawing.get("width")
+        stroke = float(stroke) if isinstance(stroke, (int, float)) else 0.0
+        rect = fitz.Rect(raw_rect)
+        rect.x0 -= max(0.5, stroke * 0.5)
+        rect.y0 -= max(0.5, stroke * 0.5)
+        rect.x1 += max(0.5, stroke * 0.5)
+        rect.y1 += max(0.5, stroke * 0.5)
+        if (
+            max(rect.width, rect.height) > page_rect.width * 0.65
+            and min(rect.width, rect.height) < 2.0
+        ):
+            continue
+        drawing_pool.append(rect)
+
+    anchors = [rect for rect in drawing_pool if rect.intersects(model)]
+    # A structured bbox can stop in the middle of a logo assembled from
+    # several independent vector paths.  Only when an accepted drawing already
+    # touches the model's lower edge do we admit directly connected paths in a
+    # small bounded strip below it.  Text captions are never part of this pool.
+    boundary_slack = min(12.0, max(4.0, float(page_rect.height) * 0.018))
+    if anchors and any(rect.y1 >= model.y1 - boundary_slack for rect in anchors):
+        changed = True
+        while changed:
+            changed = False
+            anchor_union = fitz.Rect(anchors[0])
+            for rect in anchors[1:]:
+                anchor_union.include_rect(rect)
+            for rect in drawing_pool:
+                if rect in anchors:
+                    continue
+                if (
+                    rect.y0 < model.y1 - boundary_slack
+                    or rect.y0 > model.y1 + boundary_slack * 2.0
+                    or rect.y1 > model.y1 + boundary_slack * 2.5
+                ):
+                    continue
+                horizontal_gap = max(
+                    float(rect.x0) - float(anchor_union.x1),
+                    float(anchor_union.x0) - float(rect.x1),
+                    0.0,
+                )
+                if (
+                    horizontal_gap <= boundary_slack
+                    and _pdf_rect_distance(rect, anchor_union) <= boundary_slack
+                ):
+                    anchors.append(rect)
+                    changed = True
+
+    try:
+        text_blocks = (page.get_text("dict") or {}).get("blocks", [])
+    except Exception:  # noqa: BLE001
+        text_blocks = []
+    for block in text_blocks:
+        if int(block.get("type", 0)) != 1 or not block.get("bbox"):
+            continue
+        rect = fitz.Rect(block["bbox"])
+        area = max(0.0, float(rect.width * rect.height))
+        if area / page_area > 0.72 or not rect.intersects(model):
+            continue
+        anchors.append(rect)
+
+    line_records = []
+    for block in text_blocks:
+        if int(block.get("type", 0)) != 0:
+            continue
+        lines = [line for line in (block.get("lines") or []) if line.get("bbox")]
+        for line in lines:
+            line_rect = fitz.Rect(line["bbox"])
+            if line_rect.is_empty or line_rect.is_infinite:
+                continue
+            text = "".join(
+                str(span.get("text") or "") for span in (line.get("spans") or [])
+            )
+            line_records.append((line_rect, text, len(lines)))
+
+    text_seed = False
+    if not anchors:
+        # Some publisher marks are encoded entirely as one custom-font glyph
+        # run (for example a horse + wordmark whose extracted text is merely
+        # “ABC”).  When the validated visual seed intersects such an isolated,
+        # sparse line, its *complete* PDF glyph bbox is stronger evidence than
+        # the model's clipped lower edge.  Multi-line body blocks and captions
+        # are deliberately ineligible.
+        for line_rect, text, block_line_count in line_records:
+            if block_line_count != 1:
+                continue
+            if (
+                line_rect.y1 <= page_rect.y0 + page_rect.height * 0.075
+                or line_rect.y0 >= page_rect.y1 - page_rect.height * 0.055
+            ):
+                continue
+            if _pdf_rect_distance(line_rect, model) > boundary_slack:
+                continue
+            horizontal_gap = max(
+                float(line_rect.x0) - float(model.x1),
+                float(model.x0) - float(line_rect.x1),
+                0.0,
+            )
+            if horizontal_gap > boundary_slack:
+                continue
+            if not _pdf_sparse_figure_label(text, line_rect, page_rect, model):
+                continue
+            anchors.append(line_rect)
+            text_seed = True
+
+    if not anchors:
+        return None
+    anchor_union = fitz.Rect(anchors[0])
+    for rect in anchors[1:]:
+        anchor_union.include_rect(rect)
+    # A single rule fragment is not enough evidence to override the model box.
+    if (
+        not text_seed
+        and len(anchors) == 1
+        and (anchor_union.width < 18.0 or anchor_union.height < 12.0)
+    ):
+        return None
+
+    label_gap = min(18.0, max(10.0, float(page_rect.width) * 0.035))
+    labels = []
+    for line_rect, text, _block_line_count in line_records:
+        # Printed running heads / folios are not figure labels, even when
+        # a tall figure starts near the top of the body and happens to lie
+        # within the generic label-distance threshold.
+        if (
+            line_rect.y1 <= page_rect.y0 + page_rect.height * 0.075
+            or line_rect.y0 >= page_rect.y1 - page_rect.height * 0.055
+        ):
+            continue
+        if not _pdf_sparse_figure_label(
+            text, line_rect, page_rect, anchor_union,
+        ):
+            continue
+        if min(_pdf_rect_distance(line_rect, rect) for rect in anchors) <= label_gap:
+            labels.append(line_rect)
+
+    clip = fitz.Rect(anchor_union)
+    for label in labels:
+        clip.include_rect(label)
+    pad = min(3.0, max(1.5, float(page_rect.width) * 0.004))
+    clip.x0 -= pad
+    clip.y0 -= pad
+    clip.x1 += pad
+    clip.y1 += pad
+    safe_top = page_rect.y0 + page_rect.height * 0.025
+    safe_bottom = page_rect.y1 - page_rect.height * 0.025
+    clip = fitz.Rect(
+        max(page_rect.x0, clip.x0),
+        max(safe_top, clip.y0),
+        min(page_rect.x1, clip.x1),
+        min(safe_bottom, clip.y1),
+    )
+    return clip if not clip.is_empty and not clip.is_infinite else None
+
+
+def _pdf_clip_from_normalized_bbox(page, bbox: dict, *, dpi: int = 300):
+    """Render only a validated figure region from the original PDF page."""
+    import fitz
+
+    page_rect = page.rect
+    nx0, ny0, nx1, ny1 = bbox["bbox_normalized"]
+    # Small page-relative padding protects vector labels while remaining far
+    # from page headers/footers and body text outside the reported figure.
+    pad_x = max(4.0, float(page_rect.width) * 0.008)
+    pad_y = max(4.0, float(page_rect.height) * 0.008)
+    # Printed running heads/folios normally live in the outer 2.5% bands.  A
+    # figure crop never crosses those bands, even if the model bbox is loose.
+    safe_top = page_rect.y0 + page_rect.height * 0.025
+    safe_bottom = page_rect.y1 - page_rect.height * 0.025
+    clip = _refine_pdf_figure_clip(page, bbox)
+    if clip is None:
+        clip = fitz.Rect(
+            max(page_rect.x0, page_rect.x0 + nx0 * page_rect.width - pad_x),
+            max(safe_top, page_rect.y0 + ny0 * page_rect.height - pad_y),
+            min(page_rect.x1, page_rect.x0 + nx1 * page_rect.width + pad_x),
+            min(safe_bottom, page_rect.y0 + ny1 * page_rect.height + pad_y),
+        )
+    clip_area = max(0.0, float(clip.width * clip.height))
+    page_area = max(1.0, float(page_rect.width * page_rect.height))
+    if clip.width <= 0 or clip.height <= 0 or clip_area / page_area > 0.92:
+        return None, None
+    pixmap = page.get_pixmap(clip=clip, dpi=max(240, int(dpi)), alpha=False)
+    data = pixmap.tobytes("png")
+    return (data, clip) if data else (None, None)
+
+
 def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
     """把 OCR ``includegraphics`` 占位绑定到原上传中的真实图片。
 
-    优先提取真实图块。提取数量不足时，使用 OCR 实际看过的源页栅格作为
-    明确标注的 ``page_fallback``，从而不会把悬空图片路径带入分析/审阅。
+    Codex 结构化 bbox 是首选：它被映射回原 PDF 坐标并以高 DPI 重新栅格化，
+    因此纯矢量图也能保留。无 bbox 的旧 API 输出只在版面候选或嵌入图数量
+    能与引用唯一对应时才导入。源页只另存为审阅预览，绝不冒充局部插图。
     """
     references, unsupported = _ocr_image_references(raw_tex)
     result = {
@@ -388,6 +744,7 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
         "source_pages": [],
         "unresolved": list(unsupported),
         "errors": [],
+        "page_records": _ocr_manifest_page_records(job),
     }
     project_dir = project_dir.resolve()
     if not references:
@@ -399,16 +756,39 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
         return result
     target = Path(str(job.get("target") or ""))
     if not target.is_file():
-        result["errors"].append("原始上传文件已不可用，改用已保存的 OCR 源页预览")
+        result["errors"].append(
+            "原始上传文件已不可用；源页预览仅供审阅，不会冒充插图"
+        )
 
     extracted: dict[str, tuple[bytes, str, int]] = {}
+    extracted_info: dict[str, dict] = {}
     if target.is_file() and job.get("source_type") == "image":
-        # 单张图片只有在正文只有一个图引用时才存在一一对应关系。
+        # A page screenshot is still a page, not automatically the figure in it.
+        # Crop it only when structured vision supplied a validated local bbox.
         if len(references) == 1 and references[0]["source_page"] == 1:
-            data = target.read_bytes()
-            suffix = target.suffix.lower()
-            if suffix in {".png", ".jpg", ".jpeg"}:
-                extracted[references[0]["path"]] = (data, suffix, 1)
+            reference = references[0]
+            bbox = _ocr_figure_bbox(job, reference)
+            image_document = None
+            if bbox is not None:
+                try:
+                    import fitz
+
+                    image_document = fitz.open(str(target))
+                    data, clip = _pdf_clip_from_normalized_bbox(
+                        image_document[0], bbox, dpi=300,
+                    )
+                    if data and clip is not None:
+                        extracted[reference["path"]] = (data, ".png", 1)
+                        extracted_info[reference["path"]] = {
+                            "kind": "bbox_crop",
+                            **bbox,
+                            "render_dpi": 300,
+                        }
+                except Exception:  # noqa: BLE001 - unresolved is the safe result
+                    pass
+                finally:
+                    if image_document is not None:
+                        image_document.close()
     elif target.is_file() and job.get("source_type") == "pdf":
         document = None
         try:
@@ -422,9 +802,41 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
                 if page_no < 1 or page_no > int(document.page_count):
                     continue
                 page = document[page_no - 1]
-                # 优先按页面版面提取真实图块。这样既保留嵌入位图，也能把 PDF 中
-                # 由矢量线条组成、没有独立 xref 的数学插图裁成 PNG。
-                clipped = []
+                # 1. 结构化 bbox 直接回到原 PDF 页面裁切；不依赖 xref，
+                #    因而矢量线条、节点和文字标签都会被高 DPI 栅格化。
+                for reference in page_references:
+                    bbox = _ocr_figure_bbox(job, reference)
+                    if bbox is None:
+                        continue
+                    try:
+                        data, clip = _pdf_clip_from_normalized_bbox(page, bbox, dpi=300)
+                    except Exception:  # noqa: BLE001
+                        data, clip = None, None
+                    if not data or clip is None:
+                        continue
+                    extracted[reference["path"]] = (
+                        data, ".png", reference["index"],
+                    )
+                    extracted_info[reference["path"]] = {
+                        "kind": "bbox_crop",
+                        **bbox,
+                        "pdf_clip_points": [
+                            round(float(clip.x0), 3), round(float(clip.y0), 3),
+                            round(float(clip.x1), 3), round(float(clip.y1), 3),
+                        ],
+                        "render_dpi": 300,
+                    }
+
+                remaining_references = [
+                    reference for reference in page_references
+                    if reference["path"] not in extracted
+                ]
+                if not remaining_references:
+                    continue
+
+                # 2. 旧视觉 API 没有 bbox 时，只接受与剩余引用数量完全一致的
+                #    局部版面候选。任何整页背景、横跨正文的大框都被排除。
+                clipped: list[tuple[bytes, object]] = []
                 try:
                     page_rect = page.rect
                     page_area = max(1.0, float(page_rect.width * page_rect.height))
@@ -497,11 +909,11 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
                     selected_boxes = []
                     reference_offset = 0
                     for group, _y0 in box_groups:
-                        if reference_offset >= len(page_references):
+                        if reference_offset >= len(remaining_references):
                             break
                         group.sort(key=lambda box: box.x0)
                         small_refs = 0
-                        for reference in page_references[reference_offset:]:
+                        for reference in remaining_references[reference_offset:]:
                             hint = reference.get("width_hint")
                             if hint is None or hint > 0.55:
                                 break
@@ -517,26 +929,41 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
                             reference_offset += 1
 
                     for box in selected_boxes:
-                        # 矢量图的文字标签通常是独立文本对象，不在 drawing bbox 内。
-                        # 留足约 24pt 边距，避免 x/y/L、节点编号和图下注释被裁断。
-                        padding = 24
+                        # 仅留小边距保护矢量标签，避免把附近正文带入插图。
+                        padding = max(6.0, min(12.0, min(page_rect.width, page_rect.height) * 0.012))
                         box = fitz.Rect(
                             max(page_rect.x0, box.x0 - padding),
                             max(page_rect.y0, box.y0 - padding),
                             min(page_rect.x1, box.x1 + padding),
                             min(page_rect.y1, box.y1 + padding),
                         )
-                        pixmap = page.get_pixmap(clip=box, dpi=200, alpha=False)
+                        if box.width * box.height / page_area > 0.72:
+                            continue
+                        pixmap = page.get_pixmap(clip=box, dpi=300, alpha=False)
                         data = pixmap.tobytes("png")
                         if data:
-                            clipped.append(data)
+                            clipped.append((data, box))
                 except Exception:  # noqa: BLE001 - 老版 PyMuPDF 回退到 xref 提取
                     clipped = []
-                if len(clipped) >= len(page_references):
-                    for reference, data in zip(page_references, clipped):
+                if len(clipped) == len(remaining_references):
+                    for reference, (data, box) in zip(remaining_references, clipped):
                         if not reference["ext"] or reference["ext"] == ".png":
                             extracted[reference["path"]] = (data, ".png", reference["index"])
+                            extracted_info[reference["path"]] = {
+                                "kind": "layout_crop",
+                                "bbox_normalized": [
+                                    round((box.x0 - page_rect.x0) / page_rect.width, 6),
+                                    round((box.y0 - page_rect.y0) / page_rect.height, 6),
+                                    round((box.x1 - page_rect.x0) / page_rect.width, 6),
+                                    round((box.y1 - page_rect.y0) / page_rect.height, 6),
+                                ],
+                                "bbox_source": "pdf_layout_unique_match",
+                                "render_dpi": 300,
+                            }
                     continue
+
+                # 3. 最后只在整页没有任何 bbox 裁图且 xref 与引用数严格相等
+                #    时使用嵌入图；部分 zip 会把图错配给某个引用，因此禁止。
                 xrefs = []
                 for image in page.get_images(full=True):
                     try:
@@ -545,9 +972,12 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
                         continue
                     if xref > 0 and xref not in xrefs:
                         xrefs.append(xref)
-                # 引用按正文出现顺序、嵌入图按 PDF 页面顺序一一绑定；不信任模型
-                # 偶尔生成的 0/1 基序号，也不在图片数不足时复用或伪造图片。
-                for reference, xref in zip(page_references, xrefs):
+                if (
+                    len(remaining_references) != len(page_references)
+                    or len(xrefs) != len(remaining_references)
+                ):
+                    continue
+                for reference, xref in zip(remaining_references, xrefs):
                     image = document.extract_image(xref) or {}
                     data = image.get("image")
                     extension = "." + str(image.get("ext") or "").lower().lstrip(".")
@@ -567,6 +997,9 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
                         # 不能只改扩展名伪装格式；当前提示生成的引用默认没有扩展名。
                         continue
                     extracted[reference["path"]] = (data, extension, xref)
+                    extracted_info[reference["path"]] = {
+                        "kind": "embedded_image_unique_match",
+                    }
         except Exception as exc:  # noqa: BLE001
             result["errors"].append(
                 "无法从原 PDF 提取插图：" + type(exc).__name__
@@ -578,16 +1011,9 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
     total = 0
     for reference in references:
         hit = extracted.get(reference["path"])
-        asset_kind = "extracted"
         if hit is None:
-            raster = _job_page_raster(job, reference["source_page"])
-            if raster is not None:
-                data, extension = raster
-                hit = (data, extension, reference["index"])
-                asset_kind = "page_fallback"
-            else:
-                result["unresolved"].append(reference["path"])
-                continue
+            result["unresolved"].append(reference["path"])
+            continue
         data, extension, source_index = hit
         data, extension, format_matches = _raster_for_reference(
             data, extension, reference["ext"]
@@ -610,16 +1036,24 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
             continue
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(data)
-        result["assets"].append({
+        asset = {
             "path": relative.replace("\\", "/"),
             "bytes": len(data),
             "sha256": hashlib.sha256(data).hexdigest(),
             "source_page": reference["source_page"],
             "printed_page": reference["page"],
             "source_index": source_index,
-            "kind": asset_kind,
+            "kind": str((extracted_info.get(reference["path"]) or {}).get(
+                "kind", "extracted",
+            )),
             "format_matches_extension": format_matches,
+        }
+        asset.update({
+            key: value
+            for key, value in (extracted_info.get(reference["path"]) or {}).items()
+            if key != "kind"
         })
+        result["assets"].append(asset)
     preview_pages = [item["source_page"] for item in references]
     preview_pages.extend(job.get("selected_pages") or [])
     previews, preview_bytes = _preserve_source_page_previews(
@@ -631,10 +1065,13 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
     result["source_pages"] = previews
     total += preview_bytes
     result["total_bytes"] = total
-    fallback_count = sum(item.get("kind") == "page_fallback" for item in result["assets"])
-    if fallback_count:
+    result["unresolved"] = list(dict.fromkeys(
+        str(path) for path in result["unresolved"] if str(path)
+    ))
+    if result["unresolved"]:
         result["errors"].append(
-            f"{fallback_count} 个插图未能可靠裁切，已绑定对应 OCR 源页预览并在清单中标注"
+            f"{len(result['unresolved'])} 个插图缺少可验证的局部裁图，已标记 unresolved；"
+            "OCR 源页预览仅供对照，不会冒充插图"
         )
     return result
 
@@ -653,6 +1090,7 @@ def _ocr_bundle_bytes(job: dict, raw_tex: str) -> tuple[bytes, dict]:
             "raw_revision": int(job.get("raw_revision") or 0),
             "usage_revision": int(job.get("usage_revision") or 0),
             "page_revision": int(job.get("page_revision") or 0),
+            "pages": _ocr_manifest_page_records(job),
             "resources": resources,
         }
         output = io.BytesIO()
@@ -677,6 +1115,270 @@ def _ocr_bundle_bytes(job: dict, raw_tex: str) -> tuple[bytes, dict]:
         return output.getvalue(), manifest
 
 
+def _bounded_ocr_bbox(value, *, allow_line: bool = False) -> list[float]:
+    """Return a finite normalized bbox or an empty list for manifest export."""
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return []
+    result = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return []
+        number = float(item)
+        if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+            return []
+        result.append(round(number, 6))
+    x0, y0, x1, y1 = result
+    if allow_line:
+        if x0 > x1 or y0 > y1 or (x0 == x1 and y0 == y1):
+            return []
+    elif x0 >= x1 or y0 >= y1:
+        return []
+    return result
+
+
+def _ocr_manifest_page_records(job: dict) -> list[dict]:
+    """Serialize only bounded OCR evidence metadata, never the text hint itself."""
+    records = []
+    for raw_page, page in sorted(
+        (job.get("pages") or {}).items(),
+        key=lambda item: int(item[0]),
+    ):
+        try:
+            page_no = int(raw_page)
+        except (TypeError, ValueError):
+            continue
+        figures = []
+        for figure in page.get("figures") or []:
+            if not isinstance(figure, dict):
+                continue
+            record = {
+                "path": str(figure.get("path") or ""),
+                "index": int(figure.get("index") or 0),
+                "bbox_normalized": list(figure.get("bbox_normalized") or []),
+                "bbox_pixels": list(figure.get("bbox_pixels") or []),
+                "image_size_pixels": list(
+                    figure.get("image_size_pixels")
+                    or page.get("image_size_pixels")
+                    or []
+                ),
+                "source": str(figure.get("source") or ""),
+            }
+            display_width = figure.get("display_width_ratio")
+            if (
+                not isinstance(display_width, bool)
+                and isinstance(display_width, (int, float))
+                and 0.25 <= float(display_width) <= 1.0
+            ):
+                record["display_width_ratio"] = round(float(display_width), 2)
+            figures.append(record)
+        quality_flags = []
+        for flag in page.get("quality_flags") or []:
+            if not isinstance(flag, dict):
+                continue
+            quality_record = {
+                "type": str(flag.get("type") or "")[:80],
+                "status": str(flag.get("status") or "")[:80],
+                "needs_review": bool(flag.get("needs_review")),
+                "left": str(flag.get("left") or "")[:80],
+                "right": str(flag.get("right") or "")[:80],
+                "reference_operator": str(flag.get("reference_operator") or "")[:8],
+                "visual_operator": str(flag.get("visual_operator") or "")[:8],
+                "initial_page_visual_operator": str(
+                    flag.get("initial_page_visual_operator") or ""
+                )[:8],
+                "local_visual_operator": str(
+                    flag.get("local_visual_operator") or ""
+                )[:8],
+                "evidence_id": str(flag.get("evidence_id") or "")[:100],
+                "crop_bbox_normalized": list(
+                    flag.get("crop_bbox_normalized") or []
+                )[:4],
+                "crop_size_pixels": list(flag.get("crop_size_pixels") or [])[:2],
+                "crop_sha256": str(flag.get("crop_sha256") or "")[:64],
+                "verifier": str(flag.get("verifier") or "")[:80],
+            }
+            for key in (
+                "occurrence",
+                "source_center_glyph_count",
+                "source_left_rule_glyph_count",
+                "source_right_rule_glyph_count",
+                "active_wr_count",
+                "active_rule_count",
+            ):
+                if key in flag:
+                    quality_record[key] = max(0, int(flag.get(key) or 0))
+            if "local_visual_status" in flag:
+                quality_record["local_visual_status"] = str(
+                    flag.get("local_visual_status") or ""
+                )[:80]
+            if "line_bbox_normalized" in flag:
+                quality_record["line_bbox_normalized"] = list(
+                    flag.get("line_bbox_normalized") or []
+                )[:4]
+            if "source" in flag:
+                quality_record["source"] = str(flag.get("source") or "")[:80]
+            if flag.get("type") == "framed_inset_vector_evidence":
+                quality_record.update({
+                    "title": str(flag.get("title") or "")[:160],
+                    "position": str(flag.get("position") or "")[:20],
+                    "environment": str(flag.get("environment") or "")[:40],
+                    "title_font_evidence": str(
+                        flag.get("title_font_evidence") or ""
+                    )[:80],
+                    "title_visible": bool(flag.get("title_visible", True)),
+                })
+                for key in (
+                    "frame_bbox_normalized",
+                    "model_bbox_normalized",
+                    "model_bbox_pixels",
+                    "title_bbox_normalized",
+                ):
+                    if key in flag:
+                        quality_record[key] = list(flag.get(key) or [])[:4]
+                edges = flag.get("edge_presence")
+                if isinstance(edges, dict):
+                    quality_record["edge_presence"] = {
+                        edge: bool(edges.get(edge))
+                        for edge in ("top", "left", "right", "bottom")
+                    }
+                stroke_width = flag.get("stroke_width_pt")
+                if (
+                    not isinstance(stroke_width, bool)
+                    and isinstance(stroke_width, (int, float))
+                    and 0.0 <= float(stroke_width) <= 20.0
+                ):
+                    quality_record["stroke_width_pt"] = round(
+                        float(stroke_width), 4,
+                    )
+            if flag.get("type") == "footnote_structure_evidence":
+                quality_record.update({
+                    "marker": str(flag.get("marker") or "")[:16],
+                    "rule_present": bool(flag.get("rule_present")),
+                    "source_body_italic": bool(flag.get("source_body_italic")),
+                    "active_body_italic": bool(flag.get("active_body_italic")),
+                    "marker_font": str(flag.get("marker_font") or "")[:80],
+                    "body_font": str(flag.get("body_font") or "")[:80],
+                })
+                for key in (
+                    "source_reference_count",
+                    "active_reference_count",
+                    "active_body_count",
+                    "body_chars",
+                ):
+                    if key in flag:
+                        try:
+                            quality_record[key] = min(
+                                1_000_000, max(0, int(flag.get(key) or 0)),
+                            )
+                        except (TypeError, ValueError):
+                            pass
+                for key in ("marker_size_pt", "body_size_pt"):
+                    value = flag.get(key)
+                    if (
+                        not isinstance(value, bool)
+                        and isinstance(value, (int, float))
+                        and math.isfinite(float(value))
+                        and 0.0 <= float(value) <= 100.0
+                    ):
+                        quality_record[key] = round(float(value), 4)
+                reference_bboxes = [
+                    normalized
+                    for normalized in (
+                        _bounded_ocr_bbox(bbox)
+                        for bbox in (flag.get("reference_bboxes_normalized") or [])[:8]
+                    )
+                    if normalized
+                ]
+                quality_record["reference_bboxes_normalized"] = reference_bboxes
+                for source_key, target_key, allow_line in (
+                    ("body_bbox_normalized", "body_bbox_normalized", False),
+                    ("rule_bbox_normalized", "rule_bbox_normalized", True),
+                    ("crop_bbox_normalized", "crop_bbox_normalized", False),
+                ):
+                    normalized = _bounded_ocr_bbox(
+                        flag.get(source_key), allow_line=allow_line,
+                    )
+                    if normalized:
+                        quality_record[target_key] = normalized
+                    else:
+                        quality_record.pop(target_key, None)
+                body_hash = str(flag.get("body_sha256") or "").lower()
+                if re.fullmatch(r"[0-9a-f]{64}", body_hash):
+                    quality_record["body_sha256"] = body_hash
+            quality_flags.append(quality_record)
+        footnote_source_evidence = []
+        for region in (page.get("footnote_regions") or [])[:8]:
+            if not isinstance(region, dict):
+                continue
+            body_bbox = _bounded_ocr_bbox(region.get("definition_bbox_normalized"))
+            references = [
+                normalized
+                for normalized in (
+                    _bounded_ocr_bbox(bbox)
+                    for bbox in (region.get("reference_bboxes_normalized") or [])[:8]
+                )
+                if normalized
+            ]
+            if not body_bbox or not references:
+                continue
+            font_evidence = (
+                region.get("font_evidence")
+                if isinstance(region.get("font_evidence"), dict) else {}
+            )
+            source_record = {
+                "evidence_id": str(region.get("evidence_id") or "")[:100],
+                "marker": str(region.get("marker_hint") or "")[:16],
+                "source_reference_count": min(
+                    12, max(0, int(region.get("reference_count") or 0)),
+                ),
+                "reference_bboxes_normalized": references,
+                "body_bbox_normalized": body_bbox,
+                "rule_present": bool(region.get("rule_present")),
+                "body_italic": bool(font_evidence.get("body_italic")),
+                "marker_font": ",".join(
+                    str(item) for item in (font_evidence.get("reference_fonts") or [])[:8]
+                )[:80],
+                "body_font": ",".join(
+                    str(item) for item in (font_evidence.get("note_fonts") or [])[:8]
+                )[:80],
+                "source": str(region.get("source") or "")[:80],
+            }
+            rule_bbox = _bounded_ocr_bbox(
+                region.get("rule_bbox_normalized"), allow_line=True,
+            )
+            if rule_bbox:
+                source_record["rule_bbox_normalized"] = rule_bbox
+            for source_key, target_key in (
+                ("reference_pt", "marker_size_pt"),
+                ("note_body_pt", "body_size_pt"),
+            ):
+                value = font_evidence.get(source_key)
+                if (
+                    not isinstance(value, bool)
+                    and isinstance(value, (int, float))
+                    and math.isfinite(float(value))
+                    and 0.0 <= float(value) <= 100.0
+                ):
+                    source_record[target_key] = round(float(value), 4)
+            footnote_source_evidence.append(source_record)
+        records.append({
+            "source_page": page_no,
+            "image_size_pixels": list(page.get("image_size_pixels") or []),
+            "reference_text": {
+                "chars": int(page.get("text_hint_chars") or 0),
+                "sha256": str(page.get("text_hint_sha256") or ""),
+            },
+            "figures": figures,
+            "footnote_source_evidence": footnote_source_evidence,
+            "quality_flags": quality_flags,
+            "needs_review": bool(
+                page.get("needs_review")
+                or any(flag.get("needs_review") for flag in quality_flags)
+            ),
+        })
+    return records
+
+
 def _snapshot_ocr_bundle_job(job: dict) -> dict:
     """Copy only immutable/bundle-relevant OCR fields while holding the job lock."""
     return {
@@ -690,7 +1392,16 @@ def _snapshot_ocr_bundle_job(job: dict) -> dict:
         "usage_revision": int(job.get("usage_revision") or 0),
         "page_revision": int(job.get("page_revision") or 0),
         "pages": {
-            page_no: {"png": str(page.get("png") or "")}
+            page_no: {
+                "png": str(page.get("png") or ""),
+                "figures": deepcopy(page.get("figures") or []),
+                "image_size_pixels": list(page.get("image_size_pixels") or []),
+                "text_hint_chars": int(page.get("text_hint_chars") or 0),
+                "text_hint_sha256": str(page.get("text_hint_sha256") or ""),
+                "footnote_regions": deepcopy(page.get("footnote_regions") or []),
+                "quality_flags": deepcopy(page.get("quality_flags") or []),
+                "needs_review": bool(page.get("needs_review")),
+            }
             for page_no, page in (job.get("pages") or {}).items()
         },
     }
@@ -1258,12 +1969,12 @@ def create_app(updated_from: str = "") -> FastAPI:
 
     @app.get("/api/templates")
     def templates():
-        from ..core.template import ELEGANTBOOK, PRESERVE_SOURCE, list_template_presets
+        from ..core.template import FAITHFULBOOK, PRESERVE_SOURCE, list_template_presets
 
         return {
             "templates": list_template_presets(),
             "default": PRESERVE_SOURCE,
-            "ocr_default": ELEGANTBOOK,
+            "ocr_default": FAITHFULBOOK,
             "export_default": PRESERVE_SOURCE,
             "fixed": False,
         }
@@ -2743,6 +3454,17 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "attempts": 0,
                 "task_index": index,
                 "retrying": False,
+                "figures": [],
+                "image_size_pixels": [],
+                "text_hint": "",
+                "text_hint_chars": 0,
+                "text_hint_sha256": "",
+                "italic_terms": [],
+                "relation_regions": [],
+                "divider_regions": [],
+                "framed_inset_regions": [],
+                "footnote_regions": [],
+                "quality_flags": [],
             }
             for index, page_no in enumerate(page_nos, start=1)
         }
@@ -2760,19 +3482,25 @@ def create_app(updated_from: str = "") -> FastAPI:
         with _ocr_jobs_lock:
             job["backend"] = str(launch_cfg.analysis_backend or "api")
             _bump_ocr_state(job)
-
         def _transcribe_one(job, client, page_no: int, png_path: str, max_attempts: int = 2):
             """转写单页；非空结果始终保留，仅明确暂时性失败自动重试。"""
-            from ..ocr import ocr_page_needs_retry, ocr_page_needs_review, transcribe_page
+            from ..ocr import (
+                ocr_page_needs_retry,
+                ocr_page_needs_review,
+                transcribe_page_result,
+            )
 
             page = job["pages"][page_no]
             with _ocr_jobs_lock:
                 page["status"] = "running"
                 page["error"] = ""
                 page["needs_review"] = False
+                page["quality_flags"] = []
                 _bump_ocr_state(job)
             with open(png_path, "rb") as image_file:
                 png = image_file.read()
+            correction_feedback = ""
+            quality_retry_state = {}
             for attempt in range(1, max_attempts + 1):
                 if attempt > 1:
                     # 上一次模型调用期间收到暂停请求时，不继续消耗下一次调用。
@@ -2782,8 +3510,34 @@ def create_app(updated_from: str = "") -> FastAPI:
                     _bump_ocr_state(job)
                 client.last_usage = {}
                 try:
-                    tex = transcribe_page(client, png, page_no)
-                    needs_review = ocr_page_needs_review(tex)
+                    transcription = transcribe_page_result(
+                        client,
+                        png,
+                        page_no,
+                        reference_text=str(page.get("text_hint") or ""),
+                        reference_italic_terms=list(page.get("italic_terms") or []),
+                        correction_feedback=correction_feedback,
+                        quality_retry_state=quality_retry_state,
+                        reference_relation_regions=deepcopy(
+                            page.get("relation_regions") or []
+                        ),
+                        reference_divider_regions=deepcopy(
+                            page.get("divider_regions") or []
+                        ),
+                        reference_framed_insets=deepcopy(
+                            page.get("framed_inset_regions") or []
+                        ),
+                        reference_footnote_regions=deepcopy(
+                            page.get("footnote_regions") or []
+                        ),
+                    )
+                    tex = transcription.tex
+                    quality_flags = deepcopy(transcription.quality_flags or [])
+                    needs_review = ocr_page_needs_review(tex) or any(
+                        bool(flag.get("needs_review"))
+                        for flag in quality_flags
+                        if isinstance(flag, dict)
+                    )
                     low_conf = (
                         "[?]" in tex
                         or "% unsure" in tex
@@ -2797,15 +3551,30 @@ def create_app(updated_from: str = "") -> FastAPI:
                         page["error"] = ""
                         page["low_conf"] = low_conf
                         page["needs_review"] = needs_review
+                        page["figures"] = deepcopy(transcription.figures)
+                        page["image_size_pixels"] = list(
+                            transcription.image_size_pixels or []
+                        )
+                        page["quality_flags"] = quality_flags
                         job["page_revision"] = int(job.get("page_revision") or 0) + 1
                         _bump_ocr_state(job)
                     return True
                 except Exception as exc:  # noqa: BLE001
                     message = _safe_task_error(exc)
+                    retry_instruction = str(
+                        getattr(exc, "retry_instruction", "") or ""
+                    )[:1600]
+                    if retry_instruction:
+                        correction_feedback = retry_instruction
+                        state = getattr(exc, "retry_state", {})
+                        quality_retry_state = dict(state) if isinstance(state, dict) else {}
                     with _ocr_jobs_lock:
                         page["error"] = message
                         _bump_ocr_state(job)
-                    if attempt >= max_attempts or not _ocr_error_is_retryable(message):
+                    if (
+                        attempt >= max_attempts
+                        or not (retry_instruction or _ocr_error_is_retryable(message))
+                    ):
                         break
                     _ocr_retry_wait(attempt)
                 finally:
@@ -2832,7 +3601,16 @@ def create_app(updated_from: str = "") -> FastAPI:
 
         def _render_one(job, page_no: int) -> str:
             """渲染单页到原有页面路径，供首轮与失败页重试共用。"""
-            from ..ocr import iter_pdf_pages
+            from ..ocr import (
+                image_pixel_size,
+                iter_pdf_pages,
+                pdf_page_italic_terms,
+                pdf_page_divider_regions,
+                pdf_page_framed_insets,
+                pdf_page_footnote_regions,
+                pdf_page_relation_regions,
+                pdf_page_text_hint,
+            )
 
             page = job["pages"][page_no]
             if job["source_type"] == "pdf":
@@ -2845,13 +3623,62 @@ def create_app(updated_from: str = "") -> FastAPI:
                     raise RuntimeError(f"原 PDF 第 {page_no} 页未生成图像") from None
                 if int(rendered_page) != page_no:
                     raise RuntimeError(f"原 PDF 第 {page_no} 页渲染结果页码不一致")
+                # Text extraction is an optional, bounded spelling reference.
+                # It must never prevent the visual OCR path from running.
+                try:
+                    text_hint = pdf_page_text_hint(job["target"], page_no)
+                except Exception:  # noqa: BLE001
+                    text_hint = ""
+                try:
+                    italic_terms = pdf_page_italic_terms(job["target"], page_no)
+                except Exception:  # noqa: BLE001
+                    italic_terms = []
+                try:
+                    relation_regions = pdf_page_relation_regions(
+                        job["target"], page_no,
+                    )
+                except Exception:  # noqa: BLE001
+                    relation_regions = []
+                try:
+                    divider_regions = pdf_page_divider_regions(
+                        job["target"], page_no,
+                    )
+                except Exception:  # noqa: BLE001
+                    divider_regions = []
+                try:
+                    framed_inset_regions = pdf_page_framed_insets(
+                        job["target"], page_no,
+                    )
+                except Exception:  # noqa: BLE001
+                    framed_inset_regions = []
+                try:
+                    footnote_regions = pdf_page_footnote_regions(
+                        job["target"], page_no,
+                    )
+                except Exception as exc:  # noqa: BLE001 - footnotes fail closed
+                    raise RuntimeError(
+                        f"第 {page_no} 页脚注源证据提取失败：{str(exc)[:180]}"
+                    ) from None
             else:
                 if page_no != 1:
                     raise RuntimeError("单张图片任务仅有第 1 页")
                 with open(job["target"], "rb") as image_file:
                     image_bytes = image_file.read()
+                text_hint = ""
+                italic_terms = []
+                relation_regions = []
+                divider_regions = []
+                framed_inset_regions = []
+                footnote_regions = []
             if not image_bytes:
                 raise RuntimeError(f"第 {page_no} 页渲染结果为空")
+            try:
+                pixel_size = image_pixel_size(image_bytes)
+            except Exception:  # noqa: BLE001 - legacy API validates only MIME magic
+                # Historical compatible-API clients do not need dimensions.
+                # Codex re-validates a real PNG/JPEG before its structured call,
+                # so a malformed raster still fails closed on that backend.
+                pixel_size = ()
             tmp_path = f"{page['png']}.{uuid.uuid4().hex}.tmp"
             try:
                 with open(tmp_path, "wb") as stream:
@@ -2862,6 +3689,20 @@ def create_app(updated_from: str = "") -> FastAPI:
             finally:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
+            with _ocr_jobs_lock:
+                page["text_hint"] = text_hint
+                page["text_hint_chars"] = len(text_hint)
+                page["text_hint_sha256"] = (
+                    hashlib.sha256(text_hint.encode("utf-8")).hexdigest()
+                    if text_hint else ""
+                )
+                page["italic_terms"] = list(italic_terms)
+                page["relation_regions"] = deepcopy(relation_regions)
+                page["divider_regions"] = deepcopy(divider_regions)
+                page["framed_inset_regions"] = deepcopy(framed_inset_regions)
+                page["footnote_regions"] = deepcopy(footnote_regions)
+                page["image_size_pixels"] = list(pixel_size)
+                _bump_ocr_state(job)
             return page["png"]
 
         def _mark_page_error(job, page_no: int, exc: Exception | str):
@@ -3461,16 +4302,18 @@ def create_app(updated_from: str = "") -> FastAPI:
         jid: str,
         name: str = "OCR 转写项目",
         mode: str = "ai",
-        template: str = "elegantbook",
+        template: str = "faithfulbook",
         title: str = "",
     ):
-        from ..core.template import ELEGANTBOOK, normalize_template_id
+        from ..core.template import FAITHFULBOOK, normalize_template_id
 
         mode = str(mode or "").strip().lower()
         if mode not in {"rule", "ai"}:
             raise HTTPException(400, "结构化整理方式只能是 AI 或规则")
         normalize_template_id(template)
-        template = ELEGANTBOOK
+        # OCR 成品固定使用近似原书的双面出版模板。显式参数仍先经过
+        # allowlist 校验，但不会让旧客户端把 OCR 又切回讲义风格。
+        template = FAITHFULBOOK
         import_options = {
             "mode": mode,
             "template": template,

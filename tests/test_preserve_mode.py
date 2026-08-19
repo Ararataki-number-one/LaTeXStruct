@@ -2,7 +2,7 @@
 """Regression coverage for the source-preserving TeX workflow.
 
 Ordinary TeX projects default to preserving their document class and layout.
-ElegantBook remains an explicit template choice and the fixed OCR target.
+ElegantBook remains an explicit template choice; OCR defaults to faithfulbook.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover - server extras are optional
     srv = None
 
 from latexstruct.core.pipeline import run_pipeline
-from latexstruct.core.template import ELEGANTBOOK, PRESERVE_SOURCE
+from latexstruct.core.template import ELEGANTBOOK, FAITHFULBOOK, PRESERVE_SOURCE
 
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -126,18 +126,19 @@ def _create_and_process(client, text: str, *, template: str = PRESERVE_SOURCE) -
     return pid
 
 
-def test_templates_api_defaults_to_preserve_while_ocr_stays_elegantbook():
+def test_templates_api_defaults_to_preserve_while_ocr_uses_faithfulbook():
     with _workspace_client() as (client, _root):
         response = client.get("/api/templates")
         assert response.status_code == 200
         payload = response.json()
         assert payload["default"] == PRESERVE_SOURCE == ""
         assert payload["export_default"] == PRESERVE_SOURCE
-        assert payload["ocr_default"] == ELEGANTBOOK
+        assert payload["ocr_default"] == FAITHFULBOOK
         assert payload["fixed"] is False
         assert {item["id"] for item in payload["templates"]} == {
             PRESERVE_SOURCE,
             ELEGANTBOOK,
+            FAITHFULBOOK,
         }
 
 
@@ -253,7 +254,7 @@ def test_ordinary_single_file_processing_compares_compile_before_and_after():
         assert verification["compile_after"]["available"] is False
 
 
-def test_ocr_import_uses_elegantbook_when_template_is_omitted():
+def test_ocr_import_uses_faithfulbook_when_template_is_omitted():
     with _workspace_client() as (client, root), patch(
         "latexstruct.core.compilecheck.compile_latex",
         side_effect=_compile_unavailable,
@@ -282,7 +283,7 @@ def test_ocr_import_uses_elegantbook_when_template_is_omitted():
         pid = imported.json()["id"]
         project = client.get(f"/api/projects/{pid}").json()
         assert project["kind"] == "ocr"
-        assert project["template"] == ELEGANTBOOK
+        assert project["template"] == FAITHFULBOOK
 
         deadline = time.time() + 5
         status = {}
@@ -298,4 +299,5 @@ def test_ocr_import_uses_elegantbook_when_template_is_omitted():
             time.sleep(0.02)
         assert status.get("status") == "done", status
         result = client.get(f"/api/projects/{pid}/result").text
-        assert "\\documentclass[lang=en,11pt]{elegantbook}" in result
+        assert "\\documentclass[10pt,twoside,openany]{book}" in result
+        assert "% LaTeXStruct template: faithfulbook v1" in result

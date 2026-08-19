@@ -121,7 +121,7 @@ def test_ci_installs_texlive_distribution_packages():
     assert "elegantbook.cls" in workflow
 
 
-def test_frontend_preserves_standard_tex_but_ocr_still_uses_elegantbook():
+def test_frontend_preserves_standard_tex_but_ocr_uses_faithfulbook():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, "frontend", "src", "Projects.jsx"), encoding="utf-8") as f:
         projects = f.read()
@@ -136,8 +136,8 @@ def test_frontend_preserves_standard_tex_but_ocr_still_uses_elegantbook():
     assert '标准 TeX 默认不做模板迁移' in projects
     assert 'const [mode, setMode] = useState("ai")' in projects
     assert 'AI 深度整理（默认，章节 + 定理 + 复查）' in projects
-    assert 'const importTemplate = "elegantbook"' in ocr
-    assert 'ElegantBook 专业讲义（固定）' in ocr
+    assert 'const importTemplate = "faithfulbook"' in ocr
+    assert '原书近似 · 出版书籍（固定）' in ocr
     assert 'const [importMode, setImportMode] = useState("ai")' in ocr
     assert '<option value="ai">AI 深度整理（默认，重点维护）</option>' in ocr
     assert '<option value="rule">旧规则兼容模式（不再主动优化）</option>' in ocr
@@ -198,6 +198,13 @@ def test_release_metadata_matches_app_version():
     major, minor, patch = version.split(".")
     assert resource.count(f"({major}, {minor}, {patch}, 0)") == 2
     assert resource.count(f"u'{version}'") == 2
+
+    with open(os.path.join(root, "README.md"), encoding="utf-8") as f:
+        readme = f.read()
+    with open(os.path.join(root, "CHANGELOG.md"), encoding="utf-8") as f:
+        changelog = f.read()
+    assert f"当前状态（v{version}）" in readme
+    assert f"## v{version}（" in changelog
 
     with open(os.path.join(root, "packaging", "installer.iss"), encoding="utf-8") as f:
         installer = f.read()
@@ -316,8 +323,8 @@ def test_release_build_safety_guards():
     assert "v1.1.4" not in workflow
     assert "name: LaTeXStruct-v${{ env.APP_VERSION }}" in workflow
     assert "name: LaTeXStruct-${{ github.ref_name }}" not in workflow
-    assert "$previousVersion = '1.1.10'" in workflow
-    assert "previous_version='1.1.10'" in workflow
+    assert "$previousVersion = '1.1.11'" in workflow
+    assert "previous_version='1.1.11'" in workflow
     assert "[string]$health.version -eq $previousVersion" in workflow
     assert "            if (-not $oldHealthy)" in workflow
     # 升级冒烟必须走应用内真实的独立 helper，不能绕过第一阶段
@@ -351,6 +358,11 @@ def test_release_build_safety_guards():
     assert '(str(react_static_dir), "latexstruct/server/static-react")' in pyinstaller_spec
     assert 'elegantbook_class.is_file()' in pyinstaller_spec
     assert '(str(elegantbook_assets_dir), "latexstruct/assets/elegantbook")' in pyinstaller_spec
+    assert 'faithfulbook_preamble.is_file()' in pyinstaller_spec
+    assert (
+        '(str(faithfulbook_assets_dir), "latexstruct/assets/faithfulbook")'
+        in pyinstaller_spec
+    )
     assert 'collect_all("codex_cli_bin")' in pyinstaller_spec
     assert "codex_datas" in pyinstaller_spec
     assert "codex_hiddenimports" in pyinstaller_spec

@@ -18,7 +18,7 @@ LaTeX 数学书结构化整理本地客户端（Windows 优先，安装版 + 主
 - **OCR 转写**：OCR 页签上传 PDF/图片 → 读取 PDF 总页数、书签树并选择起止页 → 视觉模型逐页忠实
   转写（支持 DPI、原页码/任务序号进度、安全暂停/继续、失败页批量重试）→ 完成后把原始 OCR
   TEX 与图片保存为工程 ZIP，或导入独立项目，
-  默认直接进入“AI 深度整理”；成品统一使用固定 ElegantBook 专业讲义模板，随后立即进入可暂停的后台工作台，
+  默认直接进入“AI 深度整理”；OCR 成品统一使用 155×235mm 的 faithfulbook 原书近似模板，随后立即进入可暂停的后台工作台，
   按批次显示不断增长的结构化 TeX 草稿；Token 与费用只统计实际调用；
   原始转写与结构化结果分开保存；书签仅用于所选页的章节/目录映射，没有可靠书签时不会
   凭空臆造缺失层级；
@@ -110,20 +110,20 @@ git push origin "v$version"
 # 3) 已安装客户端下次启动自动提示更新
 ```
 
-## 当前状态（v1.1.11）
+## 当前状态（v1.2.0）
 
 - 核心流水线已具备解析、扫描、保守 AI 决策、独立复查、可逆补丁和统一安全检查；
   定理/证明边界、自定义环境、label/ref、图片路径、花括号、项目文件集合与编译前后对比
   共同决定能否标为已验证成品；
-- 三本数学书和三篇论文的 720 个封闭盲测样本全部通过，六份文档的逐项精确率均为
-  100%；数据集、评分口径、安全门和 Wilson 区间见
-  [外部准确率报告](benchmark/EXTERNAL_ACCURACY_REPORT.md)；
+- 结构决策的封闭样本、评分口径、安全门和 Wilson 区间记录在
+  [外部准确率报告](benchmark/EXTERNAL_ACCURACY_REPORT.md)。该报告只衡量其固定样本与任务，不是对 OCR、
+  任意书籍或出版质量的通用承诺；
 - OCR 项目还会校验所选 PDF 书签节点、目录命令与真实图片文件；本机存在 XeLaTeX 时会实际
   编译并标记结果是否通过。未通过检查的当前草稿仍可由用户以 `UNVERIFIED` TEX/ZIP 导出，
   但不会冒充已验证成品；
 - 普通 TeX 默认保持原排版，不替换文档类、宏包、章节层级或自定义环境；只有用户明确选择时
-  才转换为 ElegantBook v4.7。OCR 成品仍使用固定 ElegantBook 流程，目录只依据原命令或 PDF 大纲
-  生成，定理用无编号色块承载原书编号；模板转换仍是可逆的确定性补丁；
+  才转换模板。OCR 成品固定使用 faithfulbook 双面书籍近似版式，按 PDF 页面尺寸、书签和章首页目录
+  重建章节树、奇偶页眉与局部目录；模板转换仍是可逆的确定性补丁；
 - 审阅工作台支持逐项接受/拒绝、上一项/下一项、筛选、低置信度提示、撤销和源码定位；
   审阅状态变化复用已有决策，不重复发起 AI 调用；
 - 单文件与多文件项目均保留原始字节；UTF-8/UTF-16 BOM、GBK/Latin-1 等可识别编码和原换行风格
@@ -144,9 +144,9 @@ git push origin "v$version"
 - OCR 保持“选择 1-based 起止页 → 原始逐页转写 → 人工检查/失败重试 → 结构化流水线”
   分层；整本累积草稿和单页原图/LaTeX 可随时切换，部分失败不会伪装成功；页签切换后会
   恢复当前任务，运行中可在当前页结束后安全暂停；未保存的付费结果不会被自动清理或被更新过程
-  静默丢弃。原始 OCR 工程 ZIP 包含 TEX、哈希 manifest、已提取插图及必要的源页回退图；
-- 成品可选择导出单个 ElegantBook TEX，或完整工程 ZIP；ZIP 同时包含主 TEX、原始图片/子文件、
-  `elegantbook.cls`、LPPL 许可证、工程说明和同次提交的安全汇报。两种导出都保存到固定的
+  静默丢弃。原始 OCR 工程 ZIP 包含 TEX、哈希 manifest、300 DPI 插图裁片及独立源页审阅预览；
+- 成品可选择导出单个 TEX，或完整工程 ZIP；faithfulbook 样式直接内联于主 TEX，ZIP 同时包含
+  裁切图片/子文件、工程说明和同次提交的安全汇报。两种导出都保存到固定的
   “下载/LaTeXStruct”目录且同名不覆盖；通过检查的结果标为已验证成品，未通过检查或未完成
   审阅的当前快照则以 `UNVERIFIED` 文件名和包内警告导出，hash 不一致仍会阻止读取；
 - Windows 凭据管理器开启后，配置文件只存占位符；凭据写入失败会中止保存，不会静默
@@ -216,6 +216,43 @@ python -m latexstruct --server        # 仅本地服务 → 浏览器打开 http
 python -m latexstruct --port 8765     # 指定端口
 ```
 
+### 可恢复的整书 Codex 跑批
+
+开发者需要长时间处理整本 PDF 时，可在本地服务启动后使用编排工具。它只连接
+`127.0.0.1`，先校验 Codex 的 ChatGPT 登录态，再统一启用 `codex_cli` 与 medium 推理；
+OCR 工程、阶段草稿、失败诊断、当前工程包和报告都原子保存在 `output/book-runs/`。
+
+```powershell
+python tools/run_local_book.py run path\to\book.pdf --start-page 3 --end-page 473 --dpi 220
+
+# Ctrl+C 会先请求安全暂停；也可从另一终端控制并在进程重启后续跑
+python tools/run_local_book.py pause output\book-runs\book\run-state.json
+python tools/run_local_book.py resume output\book-runs\book\run-state.json
+python tools/run_local_book.py status output\book-runs\book\run-state.json
+```
+
+分析未通过编译/安全检查时，工具仍会保存带 `UNVERIFIED` 标记的 current 工程包与报告，
+并以退出码 `2` 明确提示需要人工修复；它不会静默切换到 API Key 后端。
+
+### 快速混合保真工作流（开发验证）
+
+对于已有可搜索文字和嵌入字体、但 OCR 重排版尚未完成人工校对的 PDF，仓库包含一个
+Bondy 17 章参考书的专用验证工具。它把源 PDF 页作为矢量页对象放入 155×235mm 纸张，
+保留原可搜索文字和字体，只根据源大纲增加 17 章书签与可复核的哈希 manifest。这不是
+AI/OCR 重排版，不会把每行内容转换为可编辑 LaTeX，也不是面向任意 PDF 的通用转换器。
+
+```powershell
+# 先用小范围验证本机 XeLaTeX/PyMuPDF 链路
+python tools/build_bondy_fast_hybrid.py --source path\to\book.pdf --output-dir path\to\output --sample
+
+# 确认后再构建脚本限定的完整页范围
+python tools/build_bondy_fast_hybrid.py --source path\to\book.pdf --output-dir path\to\output
+```
+
+**书籍不随软件发布。** 仓库、安装包、便携包和 GitHub Release 都不包含源书、书页图像或
+上述工具生成的整书 PDF。运行者必须自行提供有权使用的源 PDF，并自行确认派生输出的
+版权与分发条件。快速混合输出保真源页，但不代表 OCR 或出版级重排版已经完成。
+
 ## 使用流程
 
 1. **导入项目**：拖入/选择单个 `.tex`、完整项目文件夹或 ZIP；系统自动识别主文件；
@@ -224,7 +261,7 @@ python -m latexstruct --port 8765     # 指定端口
 3. **应用与验证**：全部应用项完成审阅且统一安全检查通过后生成已验证成品；未通过时仍可导出
    带警告的当前快照继续修复；
 4. **OCR 导入**：先逐页取得并保留原始 OCR，处理失败页，再选择 AI 或规则整理；项目创建后
-   立即进入工作台，以后台任务实时展示结构整理过程，最终统一生成 ElegantBook；
+   立即进入工作台，以后台任务实时展示结构整理过程，最终统一生成 faithfulbook 原书近似版；
 5. **导出**：可选单个 TEX，或包含类文件、图片/子文件、许可证与汇报的完整工程 ZIP；界面会
    明确区分已验证成品与可能无法编译的 `UNVERIFIED` 当前快照；
 6. **设置**：OCR、分析与审阅可统一选择 DeepSeek/Qwen API，或复用 ChatGPT 登录的本机 Codex；API
@@ -251,10 +288,14 @@ npm run build
 python tools/qwen_vision_smoke.py path\to\page.png
 ```
 
-## 核心保证
+## 核心保证与边界
 
-- **只改结构不改内容**：所有修改都是可逆编辑日志，机器校验"撤销全部编辑后与原文逐字符一致"，
+- **TeX 结构整理只改结构不改内容**：对已导入 TeX 的修改都有可逆编辑日志，机器校验
+  "撤销全部编辑后与原文逐字符一致"，
   校验失败自动回退原文，绝不导出被改坏的内容；
 - **最小改动**：按候选打补丁，绝不重写全文；
 - **保守回退**：歧义项一律保留原文并列入汇报；
-- **AI 只做决策**：AI 输出结构化 JSON（动作 + 行号区间），从不生成正文文本。
+- **AI 角色分离**：文本分析与审阅只输出结构化决策，不重写正文；视觉 OCR 会从页图生成
+  转写文本，因而必须通过页级重试、资源/结构门禁与人工审阅；
+- **无通用准确率保证**：模型、扫描质量、PDF 文字层、字体和数学排版都会影响结果。
+  样本测试不等于对用户文档的承诺，未经人工审阅的输出不应直接用于出版。

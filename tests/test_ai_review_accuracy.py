@@ -378,6 +378,128 @@ def test_pending_review_can_replace_rejected_short_range_with_complete_range():
     assert "The collection of discrete fibrations" in review.calls[0][1]
 
 
+def test_styled_multi_atom_theorem_recovers_against_styled_proof_stop():
+    text = (
+        "\\documentclass{article}\n\\begin{document}\n"
+        r"\textbf{Theorem 7.7}\quad \textsc{The Max-Flow Min-Cut Theorem}"
+        "\n\n"
+        r"\textit{In any network, a maximum equals a minimum.}"
+        "\n\n"
+        r"\textbf{Proof}\quad Let $f$ be maximum. \hfill $\square$"
+        "\n\n"
+        "This paragraph discusses the theorem but is not part of its proof.\n"
+        "\\end{document}\n"
+    )
+    _doc, candidates = _ai_candidates(text)
+    theorem = next(
+        candidate for candidate in candidates
+        if candidate.kind == "theorem-like"
+    )
+    proof = next(candidate for candidate in candidates if candidate.kind == "proof")
+    statement_line = text.split("\n").index(
+        r"\textit{In any network, a maximum equals a minimum.}"
+    ) + 1
+
+    # Reproduce the real failure shape: the first model chooses only the styled
+    # title.  The legalizer must reject it, then the independent review sees the
+    # parser-proven Proof stop and may recover only the exact complete range.
+    decide = FakeClient([
+        {"decisions": [{
+            "candidate_id": theorem.id,
+            "action": "wrap",
+            "env": "theorem",
+            "body_span": {
+                "start_line": theorem.span.start_line,
+                "end_line": theorem.span.end_line,
+            },
+            "confidence": 0.99,
+            "reason": "初次误选标题原子",
+        }]},
+        {"decisions": [{
+            "candidate_id": proof.id,
+            "action": "wrap",
+            "env": "proof",
+            "body_span": {
+                "start_line": proof.span.start_line,
+                "end_line": proof.span.end_line,
+            },
+            "confidence": 0.99,
+            "reason": "Proof 标题及同行 QED",
+        }]},
+    ])
+
+    class RecoveringReview(FakeClient):
+        def __init__(self):
+            super().__init__([])
+
+        def chat_json(self, system, user):
+            self.calls.append((system, user))
+            ids_text = user.splitlines()[0].split("：", 1)[1].split("。", 1)[0]
+            ids = [item.strip() for item in ids_text.split(",") if item.strip()]
+            findings = []
+            for candidate_id in ids:
+                if (
+                    candidate_id == theorem.id
+                    and "### 尚未应用候选" in user
+                ):
+                    findings.append({
+                        "candidate_id": candidate_id,
+                        "verdict": "missed-extra",
+                        "fix": {
+                            "action": "wrap",
+                            "env": "theorem",
+                            "body_span": {
+                                "start_line": theorem.span.start_line,
+                                "end_line": statement_line,
+                            },
+                            "confidence": 0.99,
+                            "evidence": "Proof 可靠停点前只有独立定理陈述原子块",
+                        },
+                        "reason": "标题后的陈述必须一并包裹",
+                    })
+                else:
+                    findings.append({
+                        "candidate_id": candidate_id,
+                        "verdict": "ok",
+                        "fix": {},
+                        "reason": "源范围与结构停点一致",
+                    })
+            return {"findings": findings}, {"total_tokens": 1}
+
+    review = RecoveringReview()
+    result = run_pipeline(
+        text,
+        mode="ai",
+        ai_config=_config(
+            review_enabled=True,
+            review_max_rounds=2,
+            batch_size=50,
+            review_batch=1,
+        ),
+        ai_client=decide,
+        review_client=review,
+    )
+    assert result.ok, result.report_md
+    assert len(decide.calls) == 2
+    theorem_prompt = decide.calls[0][1]
+    assert f"解析器可靠结构停点: 第 {proof.span.start_line} 行" in theorem_prompt
+    assert f"可靠停点前最后非空原子块末行: 第 {statement_line} 行" in theorem_prompt
+    assert f"原子块 1: 第 {statement_line}..{statement_line} 行" in theorem_prompt
+    begin = result.result.index("\\begin{theorem}")
+    statement = result.result.index("In any network, a maximum equals a minimum")
+    end = result.result.index("\\end{theorem}")
+    proof_begin = result.result.index("\\begin{proof}")
+    assert begin < statement < end < proof_begin
+    recovered = next(
+        decision for decision in result.decisions
+        if decision.candidate_id == theorem.id
+    )
+    assert recovered.source == "review"
+    assert not any(
+        item.get("candidate_id") == theorem.id for item in result.ambiguous
+    )
+
+
 def test_pending_review_short_range_is_still_fail_closed():
     text, target, result, _review = _short_definition_case("short")
     assert not result.ok

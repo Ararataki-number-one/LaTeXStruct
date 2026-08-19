@@ -181,7 +181,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
   const [liveRevision, setLiveRevision] = useState(0);
   const [rawSaved, setRawSaved] = useState(null);
   const [importMode, setImportMode] = useState("ai");
-  const importTemplate = "elegantbook";
+  const importTemplate = "faithfulbook";
   const [importingProject, setImportingProject] = useState(false);
   const [msg, setMsg] = useState("");
   const [starting, setStarting] = useState(false);
@@ -1316,13 +1316,13 @@ export default function Ocr({ onImport, onOpenSettings }) {
             </label>
             <div className="template-choice fixed-template" aria-label="固定排版方案">
               <span>结构化后的成品</span>
-              <b>ElegantBook 专业讲义（固定）</b>
+              <b>原书近似 · 出版书籍（固定）</b>
             </div>
             <small>
               {importMode === "ai"
                 ? "AI 会判断章节层级、删除 OCR 粘贴的目录页并插入真正的 \\tableofcontents，同时校正定理与证明边界。AI 不可用时会明确停止，不会悄悄换成规则结果。"
                 : "旧规则模式仅为已有项目保留，不使用额外 AI 调用，也不再作为主要整理流程。"}
-              {" "}结构校正通过后才套用固定 ElegantBook；安全检查未通过时仍可导出当前草稿，导出物会明确标记 UNVERIFIED 警告。
+              {" "}结构校正通过后才套用 faithfulbook：保持源页比例和分页，重建奇偶页眉、章内目录并使用 300 DPI 插图裁片；安全检查未通过时仍可导出当前草稿，导出物会明确标记 UNVERIFIED 警告。
             </small>
           </div>
         )}

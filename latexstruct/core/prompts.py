@@ -236,6 +236,7 @@ def _boundary_facts(
         _next_stop_line,
         _pre_stop_atomic_end,
         _proof_end_line,
+        _theorem_end_line,
     )
 
     lines = doc.text.split("\n")
@@ -327,6 +328,14 @@ def _boundary_facts(
             facts.append("解析器明确证明结束标记: 无")
         else:
             facts.append(f"解析器明确证明结束标记所在原子块末行: 第 {hard_end} 行")
+    elif kind == "theorem-like":
+        hard_end = _theorem_end_line(doc, start_line, candidate_end_line)
+        if hard_end is None:
+            facts.append("解析器明确条目结束标记（候选原子块内）: 无")
+        else:
+            facts.append(
+                f"解析器明确条目结束标记所在候选原子块末行: 第 {hard_end} 行"
+            )
     return facts
 
 

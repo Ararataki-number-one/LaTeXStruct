@@ -833,6 +833,7 @@ def test_pdf_ocr_inspects_once_then_processes_only_selected_original_pages():
 
             with (
                 patch("latexstruct.ocr.iter_pdf_pages", fake_render),
+                patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
                 patch("latexstruct.core.ai.LLMClient.chat_vision", fake_vision),
             ):
                 started = c.post(
@@ -897,6 +898,7 @@ def test_pdf_ocr_keeps_completed_pages_when_later_rendering_fails():
                 ).json()["id"]
             with (
                 patch("latexstruct.ocr.iter_pdf_pages", interrupted_render),
+                patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
                 patch("latexstruct.core.ai.LLMClient.chat_vision", fake_vision),
             ):
                 started = c.post(
@@ -966,6 +968,7 @@ def test_pdf_render_failure_does_not_block_later_pages_and_retry_rerenders_missi
                 ).json()["id"]
             with (
                 patch("latexstruct.ocr.iter_pdf_pages", flaky_render),
+                patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
                 patch("latexstruct.core.ai.LLMClient.chat_vision", fake_vision),
             ):
                 assert c.post(
@@ -1026,6 +1029,7 @@ def test_pdf_ocr_pause_stops_before_next_page_and_resumes_same_job():
                 return_value={"pages": 2, "outline": []},
             ),
             patch("latexstruct.ocr.iter_pdf_pages", fake_render),
+            patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
             patch("latexstruct.core.ai.LLMClient.chat_vision", controlled_vision),
         ):
             try:
@@ -1117,6 +1121,7 @@ def test_retry_failed_runs_in_background_sequentially_and_can_pause():
                 return_value={"pages": 2, "outline": []},
             ),
             patch("latexstruct.ocr.iter_pdf_pages", fake_render),
+            patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
             patch("latexstruct.core.ai.LLMClient.chat_vision", controlled_vision),
         ):
             try:
@@ -1217,6 +1222,7 @@ def test_pdf_ocr_preview_revision_grows_after_each_page_without_finishing_early(
                 ).json()["id"]
             with (
                 patch("latexstruct.ocr.iter_pdf_pages", controlled_render),
+                patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
                 patch("latexstruct.core.ai.LLMClient.chat_vision", controlled_vision),
             ):
                 started = c.post(
@@ -1526,11 +1532,13 @@ def test_rulesets_and_folder_import():
         r = c.get("/api/rulesets").json()
         assert "bilingual" in r["packs"] and "academic-paper" in r["packs"]
         templates = c.get("/api/templates").json()
-        assert templates["ocr_default"] == "elegantbook"
+        assert templates["ocr_default"] == "faithfulbook"
         assert templates["default"] == ""
         assert templates["export_default"] == ""
         assert templates["fixed"] is False
-        assert {item["id"] for item in templates["templates"]} == {"", "elegantbook"}
+        assert {item["id"] for item in templates["templates"]} == {
+            "", "faithfulbook", "elegantbook",
+        }
         invalid = c.post("/api/projects", json={
             "text": "\\documentclass{article}\n\\begin{document}\nX\n\\end{document}\n",
             "template": "model-generated-preamble",
@@ -2291,17 +2299,569 @@ def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_sepa
         raw = c.get(f"/api/projects/{pid}/source").text
         structured = c.get(f"/api/projects/{pid}/result").text
         assert "Theorem 1." in raw and "\\begin{theorem}" not in raw
-        assert "% LaTeXStruct template: elegantbook v4.7" in structured
-        assert "\\documentclass[lang=en,11pt]{elegantbook}" in structured
-        assert "\\begin{theorem*}[1]" in structured
+        assert "% LaTeXStruct template: faithfulbook v1" in structured
+        assert "\\documentclass[10pt,twoside,openany]{book}" in structured
+        assert "\\begin{theorem}[1]" in structured
         assert "Theorem 1. A recovered statement." not in structured
         assert "\\begin{proof}" in structured
         project = srv.get_store().get(pid)
         assert project["kind"] == "ocr"
         assert project["mode"] == "ai"
-        assert project["template"] == "elegantbook"
+        assert project["template"] == "faithfulbook"
         job = srv._ocr_jobs.pop(jid, {})
         shutil.rmtree(job.get("dir", ""), ignore_errors=True)
+
+
+def test_ocr_quality_gate_retry_forwards_controlled_correction_feedback():
+    with WorkspaceTmp() as tmp:
+        srv._store = srv.ProjectStore(root=os.path.join(tmp, "projects"))
+        srv._config = None
+        client = TestClient(srv.create_app())
+        users = []
+
+        def caption_retry(_self, _system, user, _image):
+            users.append(user)
+            if len(users) == 1:
+                return (
+                    r"\includegraphics{images/page_1_1} "
+                    r"% figure: Fig. 1.1. Visible caption"
+                )
+            return "\n".join([
+                r"\includegraphics{images/page_1_1} % figure: diagram",
+                r"Fig. 1.1. Visible caption",
+            ])
+
+        png = b"\x89PNG\r\n\x1a\n" + b"0" * 16
+        jid = ""
+        try:
+            with patch("latexstruct.core.ai.LLMClient.chat_vision", caption_retry):
+                created = _inspect_and_start_image(client, "a.png", png, "image/png")
+                jid = created.json()["id"]
+                for _ in range(100):
+                    state = client.get(f"/api/ocr/jobs/{jid}").json()
+                    if state["status"] != "running":
+                        break
+                    time.sleep(0.02)
+            assert state["status"] == "done", state
+            assert state["pages"]["1"]["attempts"] == 2
+            assert "retry_correction" in users[1]
+            assert "Fig. 1.1" in users[1]
+            assert "Fig. 1.1. Visible caption" in client.get(
+                f"/api/ocr/jobs/{jid}/result"
+            ).text
+        finally:
+            with srv._ocr_jobs_lock:
+                job = srv._ocr_jobs.pop(jid, {}) if jid else {}
+            shutil.rmtree(job.get("dir", ""), ignore_errors=True)
+
+
+def test_pdf_ocr_server_forwards_relation_regions_and_retries_to_local_pixel_evidence():
+    from latexstruct.ocr import RELATION_VERIFY_SYSTEM_PROMPT
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        jid = ""
+        calls = {"page": 0, "local": 0}
+        region = {
+            "evidence_id": "p41-relation-3",
+            "left": "n",
+            "right": "3",
+            "reference_operator": ">=",
+            "bbox_normalized": [0.104218, 0.486555, 0.299665, 0.525958],
+        }
+
+        def fake_render(_path, pages, _dpi):
+            assert list(pages) == [41]
+            yield 41, b"\x89PNG\r\n\x1a\n" + b"page-pixels"
+
+        def fake_vision(client, system, _user, _image):
+            client.last_usage = {"total_tokens": 10}
+            if system == RELATION_VERIFY_SYSTEM_PROMPT:
+                calls["local"] += 1
+                return r"\geq"
+            calls["page"] += 1
+            if calls["page"] == 1:
+                return r"For \(n>3\), this sufficiently long paragraph describes the graph."
+            return r"For \(n\geq3\), this sufficiently long paragraph describes the graph."
+
+        try:
+            with patch(
+                "latexstruct.ocr.pdf_document_info_bytes",
+                return_value={"pages": 41, "outline": []},
+            ):
+                inspected = c.post(
+                    "/api/ocr/inspect",
+                    files={"file": ("book.pdf", b"%PDF-1.7\nfake", "application/pdf")},
+                )
+            assert inspected.status_code == 200, inspected.text
+            jid = inspected.json()["id"]
+            with (
+                patch("latexstruct.ocr.iter_pdf_pages", fake_render),
+                patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
+                patch(
+                    "latexstruct.ocr.pdf_page_text_hint",
+                    return_value="For n ≥3, this sufficiently long paragraph describes the graph.",
+                ),
+                patch("latexstruct.ocr.pdf_page_italic_terms", return_value=[]),
+                patch(
+                    "latexstruct.ocr.pdf_page_relation_regions",
+                    return_value=[region],
+                ),
+                patch(
+                    "latexstruct.ocr._crop_normalized_image_region",
+                    return_value=(
+                        b"\x89PNG\r\n\x1a\n" + b"local-crop",
+                        [517, 159],
+                        "f" * 64,
+                    ),
+                ),
+                patch("latexstruct.core.ai.LLMClient.chat_vision", fake_vision),
+                patch("latexstruct.server.app._ocr_retry_wait", return_value=None),
+            ):
+                started = c.post(
+                    f"/api/ocr/jobs/{jid}/start",
+                    data={"start_page": "41", "end_page": "41", "dpi": "300"},
+                )
+                assert started.status_code == 200, started.text
+                for _ in range(150):
+                    state = c.get(f"/api/ocr/jobs/{jid}").json()
+                    if state["status"] != "running":
+                        break
+                    time.sleep(0.02)
+
+            assert state["status"] == "done", state
+            assert state["pages"]["41"]["attempts"] == 2
+            with srv._ocr_jobs_lock:
+                internal_page = dict(srv._ocr_jobs[jid]["pages"][41])
+            assert calls == {"page": 2, "local": 1}, (
+                internal_page.get("text_hint"),
+                internal_page.get("relation_regions"),
+                internal_page.get("quality_flags"),
+            )
+            assert state["pages"]["41"]["quality_flag_count"] == 1
+            assert state["pages"]["41"]["needs_review"] is False
+            assert r"\(n\geq3\)" in c.get(f"/api/ocr/jobs/{jid}/result").text
+            flag = dict(internal_page["quality_flags"][0])
+            assert flag["status"] == "corrected_after_local_visual_retry"
+            assert flag["local_visual_operator"] == ">="
+            assert flag["crop_sha256"] == "f" * 64
+        finally:
+            with srv._ocr_jobs_lock:
+                job = srv._ocr_jobs.pop(jid, {}) if jid else {}
+            shutil.rmtree(job.get("dir", ""), ignore_errors=True)
+
+
+def test_pdf_ocr_server_forwards_divider_regions_and_records_retry_evidence():
+    from latexstruct.ocr import DIVIDER_VERIFY_SYSTEM_PROMPT
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        jid = ""
+        calls = {"page": 0, "local": 0}
+        region = {
+            "evidence_id": "p36-divider-1",
+            "source_center_glyph_count": 2,
+            "source_left_rule_glyph_count": 5,
+            "source_right_rule_glyph_count": 5,
+            "bbox_normalized": [0.34, 0.73, 0.66, 0.79],
+            "line_bbox_normalized": [0.38, 0.75, 0.62, 0.77],
+            "source": "pdf_text_span_geometry",
+        }
+        incomplete = "\n".join([
+            "A sufficiently long exercise paragraph remains visible on this page.",
+            r"\begin{center}",
+            r"\rule{0.12\linewidth}{0.4pt}\(\wr\)\rule{0.12\linewidth}{0.4pt}",
+            r"\end{center}",
+        ])
+        complete = incomplete.replace(r"\(\wr\)", r"\(\wr\wr\)")
+
+        def fake_render(_path, pages, _dpi):
+            assert list(pages) == [36]
+            yield 36, b"\x89PNG\r\n\x1a\n" + b"page-pixels"
+
+        def fake_vision(client, system, _user, _image):
+            client.last_usage = {"total_tokens": 10}
+            if system == DIVIDER_VERIFY_SYSTEM_PROMPT:
+                calls["local"] += 1
+                return "COMPLETE_DOUBLE_DIVIDER"
+            calls["page"] += 1
+            return incomplete if calls["page"] == 1 else complete
+
+        try:
+            with patch(
+                "latexstruct.ocr.pdf_document_info_bytes",
+                return_value={"pages": 36, "outline": []},
+            ):
+                inspected = c.post(
+                    "/api/ocr/inspect",
+                    files={"file": ("book.pdf", b"%PDF-1.7\nfake", "application/pdf")},
+                )
+            assert inspected.status_code == 200, inspected.text
+            jid = inspected.json()["id"]
+            with (
+                patch("latexstruct.ocr.iter_pdf_pages", fake_render),
+                patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
+                patch(
+                    "latexstruct.ocr.pdf_page_text_hint",
+                    return_value="A sufficiently long exercise paragraph remains visible on this page.",
+                ),
+                patch("latexstruct.ocr.pdf_page_italic_terms", return_value=[]),
+                patch("latexstruct.ocr.pdf_page_relation_regions", return_value=[]),
+                patch("latexstruct.ocr.pdf_page_divider_regions", return_value=[region]),
+                patch(
+                    "latexstruct.ocr._crop_normalized_image_region",
+                    return_value=(
+                        b"\x89PNG\r\n\x1a\n" + b"divider-crop",
+                        [720, 180],
+                        "d" * 64,
+                    ),
+                ),
+                patch("latexstruct.core.ai.LLMClient.chat_vision", fake_vision),
+                patch("latexstruct.server.app._ocr_retry_wait", return_value=None),
+            ):
+                started = c.post(
+                    f"/api/ocr/jobs/{jid}/start",
+                    data={"start_page": "36", "end_page": "36", "dpi": "300"},
+                )
+                assert started.status_code == 200, started.text
+                for _ in range(150):
+                    state = c.get(f"/api/ocr/jobs/{jid}").json()
+                    if state["status"] != "running":
+                        break
+                    time.sleep(0.02)
+
+            assert state["status"] == "done", state
+            assert state["pages"]["36"]["attempts"] == 2
+            assert calls == {"page": 2, "local": 1}
+            with srv._ocr_jobs_lock:
+                internal_page = dict(srv._ocr_jobs[jid]["pages"][36])
+            assert internal_page["divider_regions"] == [region]
+            flag = dict(internal_page["quality_flags"][0])
+            assert flag["status"] == "corrected_after_local_visual_retry"
+            assert flag["active_wr_count"] == 2
+            assert flag["crop_sha256"] == "d" * 64
+            assert r"\(\wr\wr\)" in c.get(f"/api/ocr/jobs/{jid}/result").text
+        finally:
+            with srv._ocr_jobs_lock:
+                job = srv._ocr_jobs.pop(jid, {}) if jid else {}
+            shutil.rmtree(job.get("dir", ""), ignore_errors=True)
+
+
+def test_pdf_ocr_server_forwards_footnote_regions_and_records_retry_evidence():
+    from latexstruct.ocr import FOOTNOTE_VERIFY_SYSTEM_PROMPT
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        jid = ""
+        calls = {"page": 0, "local": 0}
+        region = {
+            "evidence_id": "p55-footnote-1",
+            "marker_hint": "1",
+            "reference_count": 2,
+            "reference_bboxes_normalized": [
+                [0.717655, 0.194633, 0.726686, 0.205102],
+                [0.545468, 0.468331, 0.554499, 0.4788],
+            ],
+            "definition_bbox_normalized": [0.105618, 0.864932, 0.740983, 0.895532],
+            "bbox_normalized": [0.070194, 0.849921, 0.768294, 0.910544],
+            "rule_present": True,
+            "rule_bbox_normalized": [0.097506, 0.870013, 0.210884, 0.870013],
+            "font_evidence": {
+                "reference_pt": 6.974,
+                "note_body_pt": 8.966,
+                "reference_fonts": ["CMR7"],
+                "note_fonts": ["CMR9", "CMMI9"],
+            },
+            "source": "pdf_text_font_geometry_plus_optional_vector_rule",
+        }
+        manual = (
+            r"A sufficiently long paragraph has a first mark\textsuperscript{1}. "
+            r"A later sentence repeats it\textsuperscript{1}. "
+            r"\rule{0.12\linewidth}{0.4pt}\textsuperscript{1} Note body."
+        )
+        semantic = (
+            r"A sufficiently long paragraph has a first mark\footnote[1]{Note body.} "
+            r"A later sentence repeats it\footnotemark[1]."
+        )
+
+        def fake_render(_path, pages, _dpi):
+            assert list(pages) == [55]
+            yield 55, b"\x89PNG\r\n\x1a\n" + b"page-pixels"
+
+        def fake_vision(client, system, _user, _image):
+            client.last_usage = {"total_tokens": 10}
+            if system == FOOTNOTE_VERIFY_SYSTEM_PROMPT:
+                calls["local"] += 1
+                return "FOOTNOTE_DEFINITION"
+            calls["page"] += 1
+            return manual if calls["page"] == 1 else semantic
+
+        try:
+            with patch(
+                "latexstruct.ocr.pdf_document_info_bytes",
+                return_value={"pages": 55, "outline": []},
+            ):
+                inspected = c.post(
+                    "/api/ocr/inspect",
+                    files={"file": ("book.pdf", b"%PDF-1.7\nfake", "application/pdf")},
+                )
+            assert inspected.status_code == 200, inspected.text
+            jid = inspected.json()["id"]
+            with (
+                patch("latexstruct.ocr.iter_pdf_pages", fake_render),
+                patch(
+                    "latexstruct.ocr.pdf_page_text_hint",
+                    return_value="A sufficiently long paragraph with a repeated footnote.",
+                ),
+                patch("latexstruct.ocr.pdf_page_italic_terms", return_value=[]),
+                patch("latexstruct.ocr.pdf_page_relation_regions", return_value=[]),
+                patch("latexstruct.ocr.pdf_page_divider_regions", return_value=[]),
+                patch("latexstruct.ocr.pdf_page_framed_insets", return_value=[]),
+                patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[region]),
+                patch(
+                    "latexstruct.ocr._crop_normalized_image_region",
+                    return_value=(
+                        b"\x89PNG\r\n\x1a\n" + b"footnote-crop",
+                        [698, 221],
+                        "e" * 64,
+                    ),
+                ),
+                patch("latexstruct.core.ai.LLMClient.chat_vision", fake_vision),
+                patch("latexstruct.server.app._ocr_retry_wait", return_value=None),
+            ):
+                started = c.post(
+                    f"/api/ocr/jobs/{jid}/start",
+                    data={"start_page": "55", "end_page": "55", "dpi": "300"},
+                )
+                assert started.status_code == 200, started.text
+                for _ in range(150):
+                    state = c.get(f"/api/ocr/jobs/{jid}").json()
+                    if state["status"] != "running":
+                        break
+                    time.sleep(0.02)
+
+            assert state["status"] == "done", state
+            assert state["pages"]["55"]["attempts"] == 2
+            assert calls == {"page": 2, "local": 1}
+            with srv._ocr_jobs_lock:
+                live_job = srv._ocr_jobs[jid]
+                internal_page = dict(live_job["pages"][55])
+                snapshot = srv._snapshot_ocr_bundle_job(live_job)
+            assert internal_page["footnote_regions"] == [region]
+            assert snapshot["pages"][55]["footnote_regions"] == [region]
+            flag = dict(internal_page["quality_flags"][0])
+            assert flag["status"] == "corrected_after_local_visual_retry"
+            assert flag["source_reference_count"] == 2
+            assert flag["active_reference_count"] == 2
+            assert flag["active_body_count"] == 1
+            assert flag["crop_sha256"] == "e" * 64
+            result = c.get(f"/api/ocr/jobs/{jid}/result").text
+            assert result.count(r"\footnote[1]") == 1
+            assert result.count(r"\footnotemark[1]") == 1
+            assert r"\textsuperscript" not in result
+        finally:
+            with srv._ocr_jobs_lock:
+                job = srv._ocr_jobs.pop(jid, {}) if jid else {}
+            shutil.rmtree(job.get("dir", ""), ignore_errors=True)
+
+
+def test_ocr_manifest_records_local_relation_pixel_evidence():
+    flag = {
+        "type": "relation_local_visual_evidence",
+        "status": "corrected_after_local_visual_retry",
+        "needs_review": False,
+        "left": "n",
+        "right": "2",
+        "occurrence": 1,
+        "reference_operator": ">=",
+        "visual_operator": "",
+        "initial_page_visual_operator": ">",
+        "local_visual_operator": ">=",
+        "evidence_id": "p29-relation-2",
+        "crop_bbox_normalized": [0.221115, 0.553063, 0.459414, 0.593684],
+        "crop_size_pixels": [629, 162],
+        "crop_sha256": "b" * 64,
+        "verifier": "reference_free_local_pixel_crop",
+    }
+    records = srv._ocr_manifest_page_records({
+        "pages": {
+            29: {
+                "image_size_pixels": [1343, 2036],
+                "text_hint_chars": 1234,
+                "text_hint_sha256": "a" * 64,
+                "figures": [],
+                "quality_flags": [flag],
+                "needs_review": False,
+            },
+        },
+    })
+
+    assert records[0]["source_page"] == 29
+    assert records[0]["needs_review"] is False
+    assert records[0]["quality_flags"] == [flag]
+
+
+def test_ocr_manifest_records_divider_integrity_evidence():
+    flag = {
+        "type": "divider_integrity_evidence",
+        "status": "corrected_after_local_visual_retry",
+        "needs_review": False,
+        "evidence_id": "p36-divider-1",
+        "source_center_glyph_count": 2,
+        "source_left_rule_glyph_count": 5,
+        "source_right_rule_glyph_count": 5,
+        "active_wr_count": 2,
+        "active_rule_count": 2,
+        "local_visual_status": "COMPLETE_DOUBLE_DIVIDER",
+        "line_bbox_normalized": [0.38, 0.75, 0.62, 0.77],
+        "crop_bbox_normalized": [0.34, 0.73, 0.66, 0.79],
+        "crop_size_pixels": [720, 180],
+        "crop_sha256": "c" * 64,
+        "verifier": "reference_free_local_pixel_crop",
+        "source": "pdf_text_span_geometry",
+    }
+    records = srv._ocr_manifest_page_records({
+        "pages": {36: {
+            "image_size_pixels": [2197, 3331],
+            "text_hint_chars": 1000,
+            "text_hint_sha256": "a" * 64,
+            "figures": [],
+            "quality_flags": [flag],
+            "needs_review": False,
+        }},
+    })
+
+    stored = records[0]["quality_flags"][0]
+    for key, value in flag.items():
+        assert stored[key] == value
+
+
+def test_ocr_manifest_records_only_bounded_framed_inset_evidence():
+    flag = {
+        "type": "framed_inset_vector_evidence",
+        "status": "source_geometry_and_active_match",
+        "needs_review": False,
+        "evidence_id": "p58-framed-inset-1",
+        "title": "Proof Technique: Induction",
+        "title_visible": True,
+        "position": "closed",
+        "environment": "lsframedinset",
+        "frame_bbox_normalized": [0.09393, 0.08132, 0.90329, 0.9001],
+        "model_bbox_normalized": [0.094, 0.081, 0.903, 0.9],
+        "model_bbox_pixels": [206, 271, 1984, 2998],
+        "title_bbox_normalized": [0.12, 0.095, 0.47, 0.112],
+        "edge_presence": {
+            "top": True, "left": True, "right": True, "bottom": True,
+            "unexpected": True,
+        },
+        "stroke_width_pt": 0.405,
+        "title_font_evidence": "small_caps_font",
+        "verifier": "pdf_vector_geometry_plus_structured_codex_output",
+        "untrusted_extra": "must not enter manifest",
+    }
+    records = srv._ocr_manifest_page_records({
+        "pages": {58: {
+            "image_size_pixels": [2197, 3331],
+            "text_hint_chars": 1000,
+            "text_hint_sha256": "a" * 64,
+            "figures": [],
+            "quality_flags": [flag],
+            "needs_review": False,
+        }},
+    })
+
+    stored = records[0]["quality_flags"][0]
+    for key in (
+        "type", "status", "needs_review", "evidence_id", "title",
+        "title_visible", "position",
+        "environment", "frame_bbox_normalized", "model_bbox_normalized",
+        "model_bbox_pixels", "title_bbox_normalized", "stroke_width_pt",
+        "title_font_evidence", "verifier",
+    ):
+        assert stored[key] == flag[key]
+    assert stored["edge_presence"] == {
+        "top": True, "left": True, "right": True, "bottom": True,
+    }
+    assert "untrusted_extra" not in stored
+
+
+def test_ocr_manifest_records_only_bounded_footnote_evidence():
+    region = {
+        "evidence_id": "p55-footnote-1",
+        "marker_hint": "1",
+        "reference_count": 2,
+        "reference_bboxes_normalized": [
+            [0.71, 0.19, 0.72, 0.20],
+            [0.54, 0.46, 0.55, 0.47],
+            *[[0.1, 0.1, 0.2, 0.2] for _ in range(7)],
+        ],
+        "definition_bbox_normalized": [0.10, 0.86, 0.74, 0.90],
+        "rule_present": True,
+        "rule_bbox_normalized": [0.09, 0.87, 0.21, 0.87],
+        "font_evidence": {
+            "reference_pt": 6.974,
+            "note_body_pt": 8.966,
+            "reference_fonts": ["CMR7"],
+            "note_fonts": ["CMR9", "CMMI9"],
+        },
+        "source": "pdf_text_font_geometry_plus_optional_vector_rule",
+        "body_text": "must never enter a manifest",
+        "untrusted_extra": "must never enter a manifest",
+    }
+    flag = {
+        "type": "footnote_structure_evidence",
+        "status": "corrected_after_local_visual_retry",
+        "needs_review": False,
+        "evidence_id": "p55-footnote-1",
+        "marker": "1",
+        "source_reference_count": 2,
+        "active_reference_count": 2,
+        "active_body_count": 1,
+        "reference_bboxes_normalized": [
+            [0.71, 0.19, 0.72, 0.20],
+            [0.54, 0.46, 0.55, 0.47],
+            [float("nan"), 0.1, 0.2, 0.3],
+        ],
+        "body_bbox_normalized": [0.10, 0.86, 0.74, 0.90],
+        "rule_bbox_normalized": [0.09, 0.87, 0.21, 0.87],
+        "rule_present": True,
+        "marker_font": "CMR7",
+        "body_font": "CMR9,CMMI9",
+        "marker_size_pt": 6.974,
+        "body_size_pt": 8.966,
+        "body_chars": 93,
+        "body_sha256": "b" * 64,
+        "crop_bbox_normalized": [0.07, 0.84, 0.77, 0.91],
+        "crop_size_pixels": [698, 221],
+        "crop_sha256": "c" * 64,
+        "verifier": "reference_free_local_pixel_crop",
+        "source": "pdf_text_font_geometry_plus_optional_vector_rule",
+        "body_text": "must never enter a manifest",
+        "untrusted_extra": "must never enter a manifest",
+    }
+    records = srv._ocr_manifest_page_records({
+        "pages": {55: {
+            "image_size_pixels": [2197, 3331],
+            "text_hint_chars": 1000,
+            "text_hint_sha256": "a" * 64,
+            "figures": [],
+            "footnote_regions": [region],
+            "quality_flags": [flag],
+            "needs_review": False,
+        }},
+    })
+
+    source = records[0]["footnote_source_evidence"][0]
+    stored = records[0]["quality_flags"][0]
+    assert len(source["reference_bboxes_normalized"]) == 8
+    assert len(stored["reference_bboxes_normalized"]) == 2
+    assert stored["source_reference_count"] == 2
+    assert stored["active_reference_count"] == 2
+    assert stored["active_body_count"] == 1
+    assert stored["body_sha256"] == "b" * 64
+    for item in (source, stored):
+        assert "body_text" not in item
+        assert "untrusted_extra" not in item
 
 
 def test_ocr_import_rejects_unknown_structure_mode():

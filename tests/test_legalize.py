@@ -210,6 +210,7 @@ def test_proof_end_markers_are_strict():
     assert not has_proof_end_marker("The final step shows our proof is complete.")
     assert has_proof_end_marker("The identity follows, and our proof is complete.")
     assert has_proof_end_marker(r"The identity follows. \hfill $\square$")
+    assert has_proof_end_marker(r"The theorem now follows. \(\square\)")
     assert has_proof_end_marker(r"$\square$")
     assert has_proof_end_marker(r"\hfill $\blacksquare$")
     assert has_proof_end_marker("∎")
@@ -275,6 +276,46 @@ def test_theorem_end_on_separator_blank_is_normalized():
     legalize_wrap(doc, decision, theorem)
     assert decision.body_span == (theorem.span.start_line, theorem.span.end_line)
     assert not hasattr(decision, "_legalize_error")
+
+
+def test_one_atom_theorem_terminal_square_beats_later_plain_prose():
+    text = (
+        r"\textbf{Theorem 4.3} A tree has one fewer edge. \hfill \(\square\)"
+        "\n\n"
+        "A new expository topic starts here.\n\n"
+        "Several unrelated paragraphs follow.\n\n"
+        "Lemma 4.4. The next formal result.\n"
+    )
+    doc = parse_latex(text)
+    theorem = next(
+        candidate for candidate in scan(doc).candidates
+        if candidate.kind == "theorem-like" and candidate.env_hint == "theorem"
+    )
+    decision = Decision(
+        candidate_id=theorem.id,
+        action="wrap",
+        env="theorem",
+        source="ai",
+        body_span=(theorem.span.start_line, theorem.span.end_line),
+    )
+    legalize_wrap(doc, decision, theorem)
+    assert decision.body_span == (
+        theorem.span.start_line,
+        theorem.span.end_line,
+    )
+    assert not hasattr(decision, "_legalize_error")
+
+    # The hard marker proves the candidate atom complete; it never permits an
+    # over-wide model range to be silently contracted.
+    overwide = Decision(
+        candidate_id=theorem.id,
+        action="wrap",
+        env="theorem",
+        source="ai",
+        body_span=(theorem.span.start_line, theorem.span.end_line + 2),
+    )
+    legalize_wrap(doc, overwide, theorem)
+    assert "保守跳过" in getattr(overwide, "_legalize_error", "")
 
 
 def test_proof_span_stops_before_next_title():

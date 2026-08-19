@@ -308,7 +308,11 @@ def test_chat_vision_uses_locked_down_temporary_image_and_structured_output(monk
             "schema": json.loads(schema_path.read_text(encoding="utf-8")),
         })
         result_path.write_text(
-            json.dumps({"latex": "```latex\n\\[x^2\\]\n```"}),
+            json.dumps({
+                "latex": "```latex\n\\[x^2\\]\n```",
+                "figures": [],
+                "framed_insets": [],
+            }),
             encoding="utf-8",
         )
         return _completed(
@@ -334,6 +338,18 @@ def test_chat_vision_uses_locked_down_temporary_image_and_structured_output(monk
     assert captured["image_path"].parent == Path(captured["kwargs"]["cwd"])
     assert not captured["image_path"].exists()
     assert captured["schema"] == codex_cli.OCR_OUTPUT_SCHEMA
+    assert set(captured["schema"]["required"]) == {
+        "latex", "figures", "framed_insets",
+    }
+    figure_schema = captured["schema"]["properties"]["figures"]["items"]
+    assert set(figure_schema["required"]) == {
+        "path", "index", "bbox_normalized", "bbox_pixels",
+    }
+    inset_schema = captured["schema"]["properties"]["framed_insets"]["items"]
+    assert set(inset_schema["required"]) == {
+        "index", "title", "position", "environment",
+        "bbox_normalized", "bbox_pixels",
+    }
     assert captured["args"][captured["args"].index("--sandbox") + 1] == "read-only"
     assert captured["args"][captured["args"].index("--image") + 1].endswith("page.png")
     assert 'forced_login_method="chatgpt"' in captured["args"]
@@ -379,6 +395,7 @@ def test_chat_json_reports_nonzero_runtime_failure_without_raw_secret(monkeypatc
 
 def test_chat_json_turns_subprocess_timeout_into_fail_closed_error(monkeypatch):
     _install_ready_status(monkeypatch)
+    monkeypatch.setattr(codex_cli, "_transient_text_retry_wait", lambda _attempt: None)
 
     def fake_run(args, **_kwargs):
         raise subprocess.TimeoutExpired(args, 0.01)
@@ -387,6 +404,45 @@ def test_chat_json_turns_subprocess_timeout_into_fail_closed_error(monkeypatch):
 
     with pytest.raises(LLMError, match="分析超时.*原项目保持不变"):
         CodexCLIClient(timeout=0.01).chat_json(DECIDE_SYSTEM, "document")
+
+
+def test_chat_json_retries_only_explicit_transient_failures(monkeypatch):
+    _install_ready_status(monkeypatch)
+    waits = []
+    monkeypatch.setattr(codex_cli, "_transient_text_retry_wait", waits.append)
+    client = CodexCLIClient()
+    outcomes = [
+        LLMError("Codex 订阅触发限流，请稍后重试"),
+        ({"decisions": []}, {"input_tokens": 2}),
+    ]
+
+    def fake_run(_path, _prompt, _schema):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(client, "_run", fake_run)
+    result, usage = client.chat_json(DECIDE_SYSTEM, "document")
+
+    assert result == {"decisions": []}
+    assert usage == {"input_tokens": 2}
+    assert waits == [1]
+
+
+def test_chat_json_does_not_retry_auth_or_protocol_failures(monkeypatch):
+    _install_ready_status(monkeypatch)
+    client = CodexCLIClient()
+    calls = []
+
+    def fake_run(_path, _prompt, _schema):
+        calls.append(1)
+        raise LLMError("Codex 的 ChatGPT 登录已失效，请运行 codex login 后重试")
+
+    monkeypatch.setattr(client, "_run", fake_run)
+    with pytest.raises(LLMError, match="登录已失效"):
+        client.chat_json(DECIDE_SYSTEM, "document")
+    assert calls == [1]
 
 
 def test_client_probes_runtime_only_once_across_candidate_batches(monkeypatch):

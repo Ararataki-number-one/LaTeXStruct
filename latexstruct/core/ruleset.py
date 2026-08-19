@@ -23,6 +23,18 @@ RULESETS_DIR = Path(__file__).resolve().parent.parent / "rulesets"
 
 CJK_RE = re.compile(r"^[\u4e00-\u9fff]+$")
 
+# OCR and publisher sources often use TeX spacing rather than a literal blank
+# between a styled result label and its name/body, for example
+# ``\textbf{Theorem 7.7}\quad \textsc{Main Theorem}`` and
+# ``\textbf{Proof}\quad Let ...``.  These commands are separators, not part of
+# the semantic keyword.  Keep the grammar deliberately bounded: arbitrary TeX
+# commands must not turn prose such as ``Theorem\ref{...} shows`` into a title.
+TEX_HORIZONTAL_SPACE_PATTERN = (
+    r"(?:~|\\(?:quad|qquad|enspace|enskip|space)\b|"
+    r"\\hspace\*?\s*\{[^{}\n]{1,80}\}|\\[,;:!>]|\\[ \t])"
+)
+SEMANTIC_SEPARATOR_PATTERN = rf"(?:\s+|{TEX_HORIZONTAL_SPACE_PATTERN}\s*)"
+
 _PROOF_TITLE_END = r"(?=\s*(?:[.:：。]|$))"
 _PROOF_REF_TOKEN = (
     r"\\(?![A-Za-z@]*(?i:h(?:yper)?ref)\b)[A-Za-z@]*ref\*?"
@@ -61,10 +73,10 @@ DEFAULT_PROOF_OF_START = (
 )
 
 DEFAULT_PROOF_STARTS = [
-    r"Proof(?!\s+of\b)\s*[:.]?(?:\s|$)",
-    r"Proof\s*\[[^\]]*\](?:\s*\.)?(?:\s|$)",
+    rf"Proof(?!\s+of\b)\s*[:.]?(?:{SEMANTIC_SEPARATOR_PATTERN}|$)",
+    rf"Proof\s*\[[^\]]*\](?:\s*\.)?(?:{SEMANTIC_SEPARATOR_PATTERN}|$)",
     DEFAULT_PROOF_OF_START,
-    r"Sketch of the proof\.?(?:\s|$)",
+    rf"Sketch of the proof\.?(?:{SEMANTIC_SEPARATOR_PATTERN}|$)",
     r"证明\s*[:：]\s*",
     r"证明\s*$",
     r"证明如下\s*[:：]?\s*",
@@ -156,10 +168,13 @@ def _title_regex(kw: str) -> re.Pattern:
     # 陈述，或标题在行尾。仅凭 ``Theorem 2 shows ...`` 这类引用句不能生成候选。
     return re.compile(
         rf"^{re.escape(kw)}\b(?:"
-        rf"\s+(\d+(?:\.\d+)*)(?:\s*[.:](?!\d)\s*|\s+(?=[A-Z\\$(（(])|\s*$)"
+        rf"\s+(\d+(?:\.\d+)*)(?:\s*[.:](?!\d)\s*|"
+        rf"\s*{TEX_HORIZONTAL_SPACE_PATTERN}\s*|"
+        rf"\s+(?=[A-Z\\$(（(])|\s*$)"
         rf"|\s+(?:\((?:[^()\n]|\([^()\n]{{1,80}}\)){{1,1024}}\)|"
         rf"\[[^\[\]\n]{{1,1024}}\])"
         rf"(?:\s*[.:]\s*|\s*$)"
+        rf"|\s*{TEX_HORIZONTAL_SPACE_PATTERN}\s*"
         rf"|\s*[.:]\s*"
         rf"|\s*$"
         rf")(?=\S|$|（|\()"

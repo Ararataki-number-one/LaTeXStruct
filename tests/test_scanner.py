@@ -43,6 +43,43 @@ def test_theorem_like_basic_book():
     assert line > 0 and not any(c.span.start_line == line for c in tl)
 
 
+def test_styled_result_and_proof_accept_bounded_tex_spacing_separators():
+    text = (
+        r"\textbf{Theorem 7.7}\quad \textsc{The Max-Flow Min-Cut Theorem}"
+        "\n\n"
+        r"\textit{In any network, a maximum equals a minimum.}"
+        "\n\n"
+        r"\textbf{Proof}\qquad Let $f$ be maximum. \hfill $\square$"
+        "\n"
+    )
+    for pack in (None, "english"):
+        candidates = scan(parse_latex(text), pack=pack).candidates
+        theorem = next(c for c in candidates if c.kind == "theorem-like")
+        proof = next(c for c in candidates if c.kind == "proof")
+        assert theorem.env_hint == "theorem"
+        assert theorem.payload["number"] == "7.7"
+        assert theorem.payload["title_prefix"] == r"\textbf{Theorem 7.7}\quad "
+        assert theorem.payload["title_remainder"] == (
+            r"\textsc{The Max-Flow Min-Cut Theorem}"
+        )
+        assert proof.payload["strip_prefix"] == r"\textbf{Proof}\qquad "
+        assert proof.payload["title_remainder"].startswith("Let $f$ be maximum")
+
+
+def test_arbitrary_tex_command_after_result_keyword_is_not_a_separator():
+    text = (
+        r"\textbf{Theorem 2}\ref{old-result} shows the estimate."
+        "\n\n"
+        r"\textbf{Proof}\ref{old-proof} is cited here."
+        "\n"
+    )
+    candidates = scan(parse_latex(text)).candidates
+    assert not [
+        candidate for candidate in candidates
+        if candidate.kind in {"theorem-like", "proof"}
+    ]
+
+
 def test_reference_sentences_are_not_bare_structure_titles():
     text = (
         "Note that the second step is essential.\n\n"

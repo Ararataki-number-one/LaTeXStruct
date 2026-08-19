@@ -15,6 +15,7 @@ const TASK_LABELS = {
 };
 const FALLBACK_TEMPLATES = [
   { id: "", label: "保持原排版（推荐）", description: "保留原文档类、宏包、章节层级和自定义环境，只整理明确的正文结构。" },
+  { id: "faithfulbook", label: "原书近似 · 出版书籍", description: "OCR 书稿专用双面版式；保持源页分页，生成结构化页眉和章内目录。" },
   { id: "elegantbook", label: "ElegantBook 专业讲义", description: "明确需要统一书籍版式时使用，会转换文档类、章节层级、目录和定理色块。" },
 ];
 

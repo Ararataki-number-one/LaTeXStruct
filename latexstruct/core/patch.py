@@ -44,6 +44,19 @@ NEW_THEOREM_RE = re.compile(r"\\newtheorem\s*(\*)?\s*\{([^{}]+)\}")
 
 ITEM_PREFIX_RE = re.compile(r"^(\s*\d+\.\s*)")
 
+# Private, deterministic payload metadata.  The pipeline always removes any
+# caller/model supplied value and derives it again from the source span.
+SUPPRESS_AUTO_QED_PAYLOAD_KEY = "_suppress_auto_qed"
+
+# Inserted immediately before one proof closer.  LaTeX environments are
+# groups, so the assignment is local; placing it after the source body also
+# leaves a source ``\\qed``/``\\qedhere`` fully functional.  Unknown proof
+# implementations that do not define ``\\qedsymbol`` simply take the guarded
+# no-op branch.
+LOCAL_QED_SUPPRESS_LINE = (
+    r"\ifcsname qedsymbol\endcsname\let\qedsymbol\empty\fi"
+)
+
 
 @dataclass
 class Decision:
@@ -109,10 +122,13 @@ def build_ops(decision: Decision, lines: List[str], ctx: PatchContext) -> Tuple[
         begin = f"\\begin{{{decision.env}}}"
         if decision.optional_arg:
             begin += f"[{decision.optional_arg}]"
-        ops = [
-            PendingOp("insert_line", bs - 1, new=begin),
-            PendingOp("insert_line", be, new=f"\\end{{{decision.env}}}"),
-        ]
+        ops = [PendingOp("insert_line", bs - 1, new=begin)]
+        if (
+            decision.env == "proof"
+            and decision.payload.get(SUPPRESS_AUTO_QED_PAYLOAD_KEY) is True
+        ):
+            ops.append(PendingOp("insert_line", be, new=LOCAL_QED_SUPPRESS_LINE))
+        ops.append(PendingOp("insert_line", be, new=f"\\end{{{decision.env}}}"))
         # 编号/标题词条剥离。标题与正文同处 \textbf{...} 等样式命令时，
         # 必须重写完整一行，避免删除半个命令后留下不配平花括号。
         prefix = decision.payload.get("title_prefix", "") if not decision.keep_title_text else ""

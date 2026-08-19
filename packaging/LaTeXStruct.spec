@@ -19,6 +19,8 @@ react_assets_dir = react_static_dir / "assets"
 elegantbook_assets_dir = repo_root / "latexstruct" / "assets" / "elegantbook"
 elegantbook_class = elegantbook_assets_dir / "elegantbook.cls"
 elegantbook_license = elegantbook_assets_dir / "ELEGANTBOOK-LICENSE.txt"
+faithfulbook_assets_dir = repo_root / "latexstruct" / "assets" / "faithfulbook"
+faithfulbook_preamble = faithfulbook_assets_dir / "faithfulbook-preamble.tex"
 
 if not react_index.is_file() or not react_assets_dir.is_dir():
     raise SystemExit(
@@ -26,6 +28,8 @@ if not react_index.is_file() or not react_assets_dir.is_dir():
     )
 if not elegantbook_class.is_file() or not elegantbook_license.is_file():
     raise SystemExit("Bundled ElegantBook class or LPPL license is missing")
+if not faithfulbook_preamble.is_file():
+    raise SystemExit("Bundled faithfulbook preamble is missing")
 if not app_icon.is_file():
     raise SystemExit("Windows application icon is missing")
 
@@ -35,6 +39,7 @@ datas = [
     (str(legacy_static_dir), "latexstruct/server/static"),
     (str(react_static_dir), "latexstruct/server/static-react"),
     (str(elegantbook_assets_dir), "latexstruct/assets/elegantbook"),
+    (str(faithfulbook_assets_dir), "latexstruct/assets/faithfulbook"),
 ] + codex_datas
 binaries = codex_binaries
 hiddenimports = [

@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from latexstruct.core.pipeline import run_pipeline  # noqa: E402
 from latexstruct.core.template import (  # noqa: E402
     ELEGANTBOOK,
+    FAITHFULBOOK,
     PRESERVE_SOURCE,
     PROFESSIONAL_HANDOUT,
     build_template_ops,
@@ -302,7 +303,9 @@ def test_template_compile_uses_pre_template_source_and_requires_final_success():
 
 def test_template_registry_and_professional_idempotence():
     presets = list_template_presets()
-    assert {item["id"] for item in presets} == {PRESERVE_SOURCE, ELEGANTBOOK}
+    assert {item["id"] for item in presets} == {
+        PRESERVE_SOURCE, FAITHFULBOOK, ELEGANTBOOK,
+    }
     assert normalize_template_id(None) == PRESERVE_SOURCE
     assert normalize_template_id(PROFESSIONAL_HANDOUT) == PROFESSIONAL_HANDOUT
     try:

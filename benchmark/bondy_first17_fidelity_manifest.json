@@ -1,0 +1,35 @@
+{
+  "schema": "latexstruct-pdf-fidelity-manifest-v1",
+  "source": {
+    "sha256": "FF22721E11CE5ACA53F3F83F495C3EF84AF5CDE9DA7D99A3F496E394EB362778",
+    "range": [3, 473],
+    "page_size_mm": [155, 235]
+  },
+  "page_size_tolerance_mm": 0.5,
+  "hard_gates": {
+    "normalized_text_accuracy": 0.98
+  },
+  "figure_caption_rule": "line-start Fig. x.y. with two numeric components and a terminal period",
+  "expected_chapter_count": 17,
+  "expected_total_figure_labels": 195,
+  "chapters": [
+    {"number": 1, "title": "1 Graphs", "source_start": 12, "source_end": 48, "figure_label_count": 27},
+    {"number": 2, "title": "2 Subgraphs", "source_start": 49, "source_end": 87, "figure_label_count": 16},
+    {"number": 3, "title": "3 Connected Graphs", "source_start": 88, "source_end": 107, "figure_label_count": 9},
+    {"number": 4, "title": "4 Trees", "source_start": 108, "source_end": 124, "figure_label_count": 5},
+    {"number": 5, "title": "5 Nonseparable Graphs", "source_start": 125, "source_end": 141, "figure_label_count": 11},
+    {"number": 6, "title": "6 Tree-Search Algorithms", "source_start": 142, "source_end": 163, "figure_label_count": 9},
+    {"number": 7, "title": "7 Flows in Networks", "source_start": 164, "source_end": 179, "figure_label_count": 8},
+    {"number": 8, "title": "8 Complexity of Algorithms", "source_start": 180, "source_end": 211, "figure_label_count": 3},
+    {"number": 9, "title": "9 Connectivity", "source_start": 212, "source_end": 248, "figure_label_count": 17},
+    {"number": 10, "title": "10 Planar Graphs", "source_start": 249, "source_end": 291, "figure_label_count": 30},
+    {"number": 11, "title": "11 The Four-Colour Problem", "source_start": 292, "source_end": 299, "figure_label_count": 3},
+    {"number": 12, "title": "12 Stable Sets and Cliques", "source_start": 300, "source_end": 332, "figure_label_count": 9},
+    {"number": 13, "title": "13 The Probabilistic Method", "source_start": 333, "source_end": 360, "figure_label_count": 1},
+    {"number": 14, "title": "14 Vertex Colourings", "source_start": 361, "source_end": 394, "figure_label_count": 10},
+    {"number": 15, "title": "15 Colourings of Maps", "source_start": 395, "source_end": 415, "figure_label_count": 12},
+    {"number": 16, "title": "16 Matchings", "source_start": 416, "source_end": 453, "figure_label_count": 16},
+    {"number": 17, "title": "17 Edge Colourings", "source_start": 454, "source_end": 473, "figure_label_count": 9}
+  ],
+  "representative_source_pages": [3, 10, 12, 20, 48, 49, 88, 108, 125, 142, 164, 180, 212, 249, 292, 300, 333, 361, 395, 416, 454, 473]
+}

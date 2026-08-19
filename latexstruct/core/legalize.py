@@ -33,6 +33,7 @@ from .scanner import (
     _declared_theorem_envs,
     _first_nonempty_line,
     _match_title,
+    _semantic_view,
 )
 
 
@@ -74,11 +75,30 @@ def _block_containing(doc: Document, line: int) -> Optional[Block]:
 
 _QED_COMMAND_RE = re.compile(r"\\qed(?:here)?\b", re.I)
 _QED_SQUARE_RE = re.compile(
-    r"(?:\\hfill\s*|^\s*)"
+    r"(?:\\hfill\s*|^\s*|[.!?。；;：:]\s+)"
     r"(?:\$\$?|\\\(|\\\[)?\s*(?:\\square|\\Box|\\blacksquare|□|∎|■)"
     r"\s*(?:\$\$?|\\\)|\\\])?"
     r"\s*[.!?。；;：:]?\s*(?:%[^\n]*)?$",
     re.I,
+)
+# A terminal source QED must remain visible after structural wrapping.  This
+# token regex is deliberately narrower than ``has_proof_end_marker``: prose
+# such as "This completes the proof" is a reliable *boundary*, but still
+# needs amsthm to typeset its normal QED symbol.
+_EXPLICIT_QED_TOKEN_RE = re.compile(
+    r"\\qed(?:here)?\b|\\(?:square|Box|blacksquare)(?![A-Za-z@])|[□∎■]",
+    re.I,
+)
+_QED_STRUCTURAL_TRAILER_RE = re.compile(
+    r"(?:"
+    r"\s+"
+    r"|[.!?。；;：:]"
+    r"|\\(?:\)|\])"
+    r"|\$\$?"
+    r"|}"
+    r"|\\\\(?:\[[^\]\n]*\])?"
+    r"|\\end\s*\{[^{}\n]+\}"
+    r")*\Z",
 )
 _PROOF_COMPLETION_RE = re.compile(
     r"(?:^|[.!?。；;：:]\s+|,\s+and\s+)"
@@ -105,6 +125,41 @@ def has_proof_end_marker(text: str) -> bool:
         or _PROOF_COMPLETION_RE.search(active)
         or _CN_PROOF_END_RE.search(active)
     )
+
+
+def proof_body_has_terminal_explicit_qed(
+    doc: Document,
+    start_line: int,
+    end_line: int,
+) -> bool:
+    """Return whether a proof body ends in a source-rendered QED marker.
+
+    ``\\qed``/``\\qedhere`` and literal square glyphs count; a natural-language
+    completion sentence does not.  Only whitespace, punctuation, math closers,
+    row closers, and nested environment closers may follow the marker.  This
+    distinction lets the patcher suppress an environment's *automatic* QED
+    without deleting or rewriting any source/math token.
+    """
+    lines = doc.masked.split("\n")
+    if not (1 <= start_line <= end_line <= len(lines)):
+        return False
+    active = "\n".join(lines[start_line - 1:end_line])
+    matches = list(_EXPLICIT_QED_TOKEN_RE.finditer(active))
+    if not matches:
+        return False
+    marker = matches[-1]
+    if not _QED_STRUCTURAL_TRAILER_RE.fullmatch(active[marker.end():]):
+        return False
+    if _QED_COMMAND_RE.fullmatch(marker.group(0)):
+        return True
+    # A square-like command is also a legitimate mathematical operator.  Reuse
+    # the strict boundary regex so only a standalone/punctuation-delimited QED
+    # is accepted, not (for example) a terminal modal ``p \\Box`` formula.
+    line_start = active.rfind("\n", 0, marker.start()) + 1
+    line_end = active.find("\n", marker.end())
+    if line_end < 0:
+        line_end = len(active)
+    return bool(_QED_SQUARE_RE.search(active[line_start:line_end]))
 
 
 def _atomic_end(doc: Document, line: int, wrap_start: Optional[int] = None) -> int:
@@ -229,7 +284,12 @@ def _reliable_stop_lines(
         first = _first_nonempty_line(b.text)
         if not first:
             continue
-        if _match_title(first) or PROOF_RE.match(first) or SECTION_START_RE.match(first):
+        semantic, _wrapper = _semantic_view(first)
+        if (
+            _match_title(first)
+            or PROOF_RE.match(semantic)
+            or SECTION_START_RE.match(first)
+        ):
             stops.add(b.span.start_line)
     result = tuple(sorted(stops))
     cache[supplied] = result
@@ -346,6 +406,16 @@ def _theorem_safe_end_line(
     ):
         return None
 
+    # A terminal square/QED in the candidate atom proves that atom complete,
+    # but does not authorise silently shrinking an over-wide model selection.
+    # The decision or reviewer must still select exactly that source atom.
+    explicit_candidate_end = _theorem_end_line(doc, start, cand.span.end_line)
+    if (
+        explicit_candidate_end is not None
+        and requested_atomic == explicit_candidate_end
+    ):
+        return explicit_candidate_end
+
     # A reliable successor makes every non-empty atom before it relevant to the
     # completeness proof.  In particular, do not accept a grammatically complete
     # first paragraph when another paragraph remains before the successor.  The
@@ -364,6 +434,26 @@ def _theorem_safe_end_line(
             else None
         )
     return None
+
+
+def _theorem_end_line(
+    doc: Document,
+    start: int,
+    candidate_end: int,
+) -> Optional[int]:
+    """Return a hard terminal marker within the scanner's theorem atom.
+
+    Publisher sources sometimes put an omitted-proof square directly at the
+    end of a one-line proposition or theorem.  That is a stronger boundary than
+    a much later result heading, so intervening prose must not make the complete
+    one-line statement look truncated.  Deliberately inspect only the original
+    candidate atom: searching later atoms could mistake an unrecognised proof's
+    QED for the theorem boundary and silently swallow that proof.
+    """
+    candidate_atomic_end = _atomic_end(doc, candidate_end, wrap_start=start)
+    lines = doc.masked.split("\n")
+    active = "\n".join(lines[start - 1:candidate_atomic_end])
+    return candidate_atomic_end if has_proof_end_marker(active) else None
 
 
 def legalize_wrap(

@@ -76,13 +76,13 @@ jobs:
           # amssymb.sty 属于 amsfonts，amsthm.sty 属于 amscls；这里必须使用
           # TeX Live 的发行包名，而不是 .sty 文件名。TinyTeX-0 不会随
           # tcolorbox 自动安装其运行时使用的 etoolbox，需显式列出。
-          & $tlmgr.FullName install xetex elegantbook amsmath amsfonts amscls geometry tcolorbox etoolbox graphics titlesec
+          & $tlmgr.FullName install xetex elegantbook amsmath amsfonts amscls geometry tcolorbox etoolbox graphics titlesec fancyhdr etoc caption microtype algorithms algorithmicx
           if ($LASTEXITCODE -ne 0) { Write-Error "TinyTeX 依赖安装失败"; exit 1 }
           $kpsewhich = Join-Path $bin 'kpsewhich.exe'
           $xelatex = Join-Path $bin 'xelatex.exe'
           if (-not (Test-Path $kpsewhich)) { Write-Error "TinyTeX 缺少 kpsewhich"; exit 1 }
           if (-not (Test-Path $xelatex)) { Write-Error "TinyTeX 缺少 xelatex"; exit 1 }
-          foreach ($file in @('elegantbook.cls', 'amsmath.sty', 'amssymb.sty', 'amsthm.sty', 'tcolorbox.sty', 'etoolbox.sty', 'titlesec.sty')) {
+          foreach ($file in @('elegantbook.cls', 'amsmath.sty', 'amssymb.sty', 'amsthm.sty', 'tcolorbox.sty', 'etoolbox.sty', 'titlesec.sty', 'fancyhdr.sty', 'etoc.sty', 'caption.sty', 'microtype.sty', 'algorithm.sty', 'algpseudocode.sty')) {
             $resolved = & $kpsewhich $file
             if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($resolved)) {
               Write-Error "TinyTeX 依赖缺失: $file"; exit 1
@@ -250,7 +250,7 @@ jobs:
         run: |
           # 只需在发布时更换这一处基线。测试下面的完整链路：
           # schedule_installer_after_exit -> 旧应用退出 -> 安装 -> 新应用重启。
-          $previousVersion = '1.1.10'
+          $previousVersion = '1.1.11'
           $previousTag = "v$previousVersion"
           $headers = @{
             'User-Agent' = 'latexstruct-upgrade-smoke'
@@ -308,7 +308,7 @@ jobs:
             $env:LATEXSTRUCT_SMOKE_INSTALLER = $currentSetup.FullName
             $env:LATEXSTRUCT_SMOKE_OLD_PID = [string]$oldProc.Id
             $env:LATEXSTRUCT_SMOKE_TARGET = $installedExe
-            $helperOutput = python -c "import os; from latexstruct.updater import schedule_installer_after_exit; print(schedule_installer_after_exit(os.environ['LATEXSTRUCT_SMOKE_INSTALLER'], app_pid=int(os.environ['LATEXSTRUCT_SMOKE_OLD_PID']), target_executable=os.environ['LATEXSTRUCT_SMOKE_TARGET'], previous_version='1.1.10', expected_version=os.environ['APP_VERSION']).pid)"
+            $helperOutput = python -c "import os; from latexstruct.updater import schedule_installer_after_exit; print(schedule_installer_after_exit(os.environ['LATEXSTRUCT_SMOKE_INSTALLER'], app_pid=int(os.environ['LATEXSTRUCT_SMOKE_OLD_PID']), target_executable=os.environ['LATEXSTRUCT_SMOKE_TARGET'], previous_version='1.1.11', expected_version=os.environ['APP_VERSION']).pid)"
             if ($LASTEXITCODE -ne 0) {
               Write-Error '应用内更新 helper 调度失败'; exit 1
             }

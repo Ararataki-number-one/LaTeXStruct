@@ -1,0 +1,178 @@
+% LaTeXStruct template: faithfulbook v1
+% This deterministic style layer is inserted into an OCR-derived book preamble.
+% It deliberately contains no title, author, source-page number, or OCR running head.
+\usepackage{geometry}
+\geometry{paperwidth=@@PAPER_WIDTH_MM@@mm,paperheight=@@PAPER_HEIGHT_MM@@mm,inner=@@INNER_MARGIN_MM@@mm,outer=@@OUTER_MARGIN_MM@@mm,top=@@TOP_MARGIN_MM@@mm,bottom=@@BOTTOM_MARGIN_MM@@mm,headheight=13.6pt,headsep=4.8mm,footskip=8mm}
+\usepackage{xcolor}
+\definecolor{LSBookInk}{gray}{0.12}
+\definecolor{LSBookMid}{gray}{0.42}
+\definecolor{LSBookRule}{gray}{0.68}
+\definecolor{LSBookWash}{gray}{0.965}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{etoc}
+\usepackage{etoolbox}
+\usepackage{caption}
+\usepackage{graphicx}
+\usepackage{tcolorbox}
+\tcbuselibrary{breakable,skins}
+\usepackage{amsthm}
+% OCR keeps an explicit printed theorem number as amsthm's optional note so
+% LaTeX does not renumber it.  The stock plain style encloses that note in
+% parentheses (``Theorem (7.7)''); this plain-compatible head spec keeps the
+% source number verbatim and directly after the theorem name instead.
+\newtheoremstyle{lsbookplain}%
+  {\topsep}{\topsep}% space above/below
+  {\itshape}{}% body font / indent
+  {\normalfont\bfseries}{.}% head font / punctuation
+  {5pt plus 1pt minus 1pt}% space after head
+  {\thmname{#1}\thmnumber{ #2}\thmnote{ #3}}
+\makeatletter
+\let\th@plain\th@lsbookplain
+\makeatother
+\IfFileExists{microtype.sty}{%
+  \usepackage{microtype}
+  % XeTeX supports protrusion/tracking, but not font expansion.
+  \microtypesetup{protrusion=true,expansion=false,tracking=true}%
+}{}
+
+% The class option establishes the nominal size; this fixes the requested
+% body leading without changing mathematics or OCR text.
+\AtBeginDocument{\fontsize{@@BODY_FONT_PT@@pt}{@@BODY_LEADING_PT@@pt}\selectfont}
+\setlength{\parindent}{1.15em}
+\setlength{\parskip}{0pt plus 0.15pt}
+\setlength{\emergencystretch}{1.5em}
+\clubpenalty=9000
+\widowpenalty=9000
+\displaywidowpenalty=9000
+\brokenpenalty=7000
+\raggedbottom
+
+% OCR books already carry an authoritative hard break at every source-page
+% boundary.  The standard book-class \mainmatter clears once more before it
+% resets pagination, which can ship an empty roman-numbered page at a chapter
+% boundary.  This wrapper suppresses only that redundant internal clear while
+% preserving the class's main-matter state and arabic page reset.
+\makeatletter
+\newcommand{\LSMainMatter}{%
+  \let\LSBookSavedClearDoublePage\cleardoublepage
+  \let\cleardoublepage\relax
+  \mainmatter
+  \let\cleardoublepage\LSBookSavedClearDoublePage
+}
+% A title/front-matter command may select ``plain`` after document start, so a
+% bare \thispagestyle{empty} there is not reliable.  Arm a one-shot flag and
+% enforce the empty style at the first actual output page; all later pages use
+% the normal faithfulbook styles.
+\newif\ifLSBookFirstPageEmpty
+\newcommand{\LSFirstPageEmpty}{\global\LSBookFirstPageEmptytrue}
+\pretocmd{\@outputpage}{%
+  \ifLSBookFirstPageEmpty
+    \global\LSBookFirstPageEmptyfalse
+    \thispagestyle{empty}%
+  \fi
+}{}{\PackageWarning{faithfulbook}{Could not install first-page style hook}}
+\makeatother
+
+% Generated running heads use only the structured chapter/section tree and
+% the newly typeset page number.  OCR page markers remain inert comments.
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE]{\small\sffamily\color{LSBookMid}\thepage}
+\fancyhead[RO]{\small\sffamily\color{LSBookMid}\thepage}
+\fancyhead[LO]{\small\sffamily\color{LSBookInk}\nouppercase{\rightmark}}
+\fancyhead[RE]{\small\sffamily\color{LSBookInk}\nouppercase{\leftmark}}
+\renewcommand{\headrulewidth}{0.35pt}
+\renewcommand{\footrulewidth}{0pt}
+\renewcommand{\chaptermark}[1]{\markboth{\thechapter\enspace #1}{}}
+\renewcommand{\sectionmark}[1]{\markright{\thesection\enspace #1}}
+\fancypagestyle{plain}{%
+  \fancyhf{}%
+  \fancyfoot[C]{\small\sffamily\color{LSBookMid}\thepage}%
+  \renewcommand{\headrulewidth}{0pt}%
+  \renewcommand{\footrulewidth}{0pt}%
+}
+
+% Restrained monochrome hierarchy intended for book-length mathematical text.
+\titleformat{\chapter}[display]
+  {\normalfont\sffamily\color{LSBookInk}}
+  {\filleft\small\bfseries\MakeUppercase{\chaptertitlename}\enspace
+   {\fontsize{30}{32}\selectfont\color{LSBookMid}\thechapter}}
+  {0.7ex}
+  {\titlerule\vspace{1.1ex}\Huge\bfseries\raggedright}
+  [\vspace{0.8ex}\titlerule]
+\titlespacing*{\chapter}{0pt}{-5mm}{7mm}
+\titleformat{\section}
+  {\normalfont\Large\sffamily\bfseries\color{LSBookInk}}
+  {\thesection}{0.7em}{}
+\titleformat{\subsection}
+  {\normalfont\large\sffamily\bfseries\color{LSBookInk}}
+  {\thesubsection}{0.65em}{}
+\titleformat{\subsubsection}
+  {\normalfont\normalsize\sffamily\bfseries\color{LSBookInk}}
+  {\thesubsubsection}{0.6em}{}
+\titlespacing*{\section}{0pt}{2.35ex plus .55ex minus .2ex}{.95ex}
+\titlespacing*{\subsection}{0pt}{1.9ex plus .4ex minus .15ex}{.7ex}
+
+% A local, second-pass chapter contents.  The transformer inserts this macro
+% only after numbered chapters that actually contain section descendants.
+\newcommand{\LSChapterContents}{%
+  \begingroup
+  \etocsetnexttocdepth{subsection}%
+  \etocsettocstyle
+    {\par\smallskip\noindent\color{LSBookRule}\rule{\linewidth}{0.35pt}%
+     \par\smallskip\small\sffamily\color{LSBookInk}}
+    {\par\smallskip\noindent\color{LSBookRule}\rule{\linewidth}{0.35pt}%
+     \par\medskip}%
+  \localtableofcontents
+  \endgroup
+}
+
+% The statement boxes are intentionally quiet: a light left rule preserves
+% the visual rhythm of traditional theorem typography without rewriting text.
+\newcommand{\LSBookStyleStatement}[1]{%
+  \ifcsname #1\endcsname
+    \tcolorboxenvironment{#1}{%
+      enhanced,breakable,blanker,
+      borderline west={0.55pt}{0pt}{LSBookRule},
+      left=2.2mm,right=0mm,top=0.6ex,bottom=0.6ex,
+      before skip=1.0ex plus .25ex,after skip=1.0ex plus .25ex}%
+  \fi
+}
+\AtBeginDocument{%
+  \LSBookStyleStatement{theorem}%
+  \LSBookStyleStatement{lemma}%
+  \LSBookStyleStatement{proposition}%
+  \LSBookStyleStatement{corollary}%
+  \LSBookStyleStatement{conjecture}%
+  \LSBookStyleStatement{claim}%
+  \LSBookStyleStatement{fact}%
+  \LSBookStyleStatement{definition}%
+  \LSBookStyleStatement{remark}%
+  \LSBookStyleStatement{observation}%
+  \LSBookStyleStatement{example}%
+  \LSBookStyleStatement{problem}%
+  \LSBookStyleStatement{question}%
+  \LSBookStyleStatement{exercise}%
+}
+\AtBeginEnvironment{proof}{\smallskip}
+\AtEndEnvironment{proof}{\smallskip}
+\makeatletter
+\AtBeginDocument{\@ifundefined{qedsymbol}{}{%
+  \renewcommand{\qedsymbol}{\rule{0.62em}{0.62em}}}}
+\makeatother
+
+% Algorithms keep the established float environment but receive the same
+% thin-rule vocabulary.  Captions use conventional book typography.
+\makeatletter
+\AtBeginDocument{%
+  \@ifundefined{algorithm}{}{%
+    \floatstyle{ruled}\restylefloat{algorithm}%
+    \floatname{algorithm}{Algorithm}%
+  }%
+  \@ifundefined{urlstyle}{}{\urlstyle{same}}%
+}
+\makeatother
+\captionsetup{font=small,labelfont=bf,labelsep=period,justification=centering,singlelinecheck=true,skip=5pt}
+\AtBeginEnvironment{table}{\captionsetup{position=top}}
+\setkeys{Gin}{keepaspectratio}

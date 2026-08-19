@@ -37,6 +37,10 @@ STYLE_RE = re.compile(
 )
 NUMBER_PREFIX_RE = re.compile(r"^\s*\d+(?:\.\d+)*\.?\s+")
 CHAPTER_MARKER_RE = re.compile(r"^\s*chapter\s+(\d+)\s*$", re.I)
+BARE_CHAPTER_MARKER_RE = re.compile(r"^\s*(\d+)\.?\s*$")
+NUMBERED_CHAPTER_TITLE_RE = re.compile(
+    r"^\s*(?P<number>\d+)\.?\s+(?P<title>\D\S*(?:\s+.*)?)\s*$"
+)
 PLAIN_NUMBERED_HEADING_RE = re.compile(
     r"^\s*(?P<title>\d+(?:\.\d+)+\.?\s+.+?[.!?])(?:\s+(?P<trailing>.+))?$"
 )
@@ -65,6 +69,31 @@ MATH_EVENT_RE = re.compile(
     + r")\}"
 )
 ACTIVE_TOC_RE = re.compile(r"\\tableofcontents(?![A-Za-z@])")
+LOCAL_TOC_MARKER = "% LaTeXStruct-Local-Contents"
+PRINTED_PAGE_MARKER_PREFIX = "% LaTeXStruct-Printed-Page: "
+PRINTED_DOT_LEADER_RE = re.compile(r"(?:\.\s*){3,}")
+EXERCISE_HEADING_RE = re.compile(
+    r"^(?P<prefix>\s*(?:\\noindent\s*)?)(?P<title>Exercises?)\s*$",
+    re.I,
+)
+FORMATTED_EXERCISE_HEADING_RE = re.compile(
+    r"^\s*(?:\\noindent\s*)?"
+    r"\\(?:textbf|section\*?|subsection\*?)\s*\{\s*Exercises?\s*\}\s*$",
+    re.I,
+)
+EXERCISE_DIFFICULTY_PREFIX = (
+    r"(?:(?:\\\(\s*\\(?:star|ast)\s*\\\)|\$\s*\\(?:star|ast)\s*\$|[★☆])\s*)?"
+)
+PLAIN_EXERCISE_LABEL_RE = re.compile(
+    rf"^(?P<prefix>\s*(?:\\noindent\s*)?{EXERCISE_DIFFICULTY_PREFIX})"
+    r"(?P<number>\d+\.\d+\.\d+)(?![\d.])(?P<suffix>.*)$"
+)
+FORMATTED_EXERCISE_LABEL_RE = re.compile(
+    rf"^\s*(?:\\noindent\s*)?{EXERCISE_DIFFICULTY_PREFIX}"
+    r"\\textbf\s*\{\s*(?P<number>\d+\.\d+\.\d+)\s*\}(?![\d.])"
+)
+BROKEN_EXERCISE_DIVIDER = r"\mathrel{))}"
+CANONICAL_EXERCISE_DIVIDER = r"\mathrel{\wr\wr}"
 
 
 @dataclass
@@ -97,6 +126,7 @@ def encode_ocr_metadata(
         title = str(item.get("title", "")).strip()[:300]
         if title:
             cleaned.append({"level": level, "title": title, "page": page})
+    cleaned = _normalize_book_outline_levels(cleaned, document_kind)
     payload = {
         "version": 1,
         "kind": "book" if document_kind == "book" else "article",
@@ -107,6 +137,92 @@ def encode_ocr_metadata(
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     token = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     return META_PREFIX + token
+
+
+def _outline_title_key(value: str) -> str:
+    """Return a conservative plain key for outline-only classification."""
+    value = unicodedata.normalize("NFKC", str(value or "")).casefold().strip()
+    value = re.sub(r"^\\(?:textbf|textit|emph|textsc)\s*\{(.*)\}$", r"\1", value)
+    return "".join(character for character in value if character.isalnum())
+
+
+def _normalize_book_outline_levels(outline: List[dict], document_kind: str) -> List[dict]:
+    """Promote explicitly numbered book chapters to the real book root.
+
+    Some publisher PDFs put unnumbered front matter at bookmark level 1 and all
+    numbered chapters at level 2, even though the chapters are the document's
+    structural root.  Mapping those raw bookmark depths literally turns every
+    chapter into ``\\section``.  At least two consecutive single-integer chapter
+    titles such as ``1 Graphs`` and ``2 Subgraphs``, with increasing source
+    pages, are required; every shallower bookmark before that run must be
+    recognized front matter.  Descendants shift by the same amount, while later
+    appendix/back-matter roots remain untouched.  Once promoted, a second pass
+    is intentionally a no-op.
+    """
+    if document_kind != "book" or not outline:
+        return outline
+    front_keys = {_outline_title_key(item) for item in FRONT_MATTER}
+    numbered_levels = sorted({
+        int(item.get("level", 0))
+        for item in outline
+        if int(item.get("level", 0)) > 0
+        and NUMBERED_CHAPTER_TITLE_RE.match(str(item.get("title", "")))
+    })
+    candidates = []
+    for level in numbered_levels:
+        first = next(
+            index for index, item in enumerate(outline)
+            if int(item.get("level", 0)) == level
+            and NUMBERED_CHAPTER_TITLE_RE.match(str(item.get("title", "")))
+        )
+        # Only roots before the first numbered chapter constrain promotion.
+        # A later Appendix/References root legitimately closes the numbered
+        # chapter run and must neither veto nor be shifted with it.
+        preceding_roots = [
+            item for item in outline[:first]
+            if int(item.get("level", 0)) < level
+        ]
+        if any(
+            _outline_title_key(item.get("title", "")) not in front_keys
+            for item in preceding_roots
+        ):
+            continue
+        stop = next(
+            (
+                index for index in range(first + 1, len(outline))
+                if int(outline[index].get("level", 0)) < level
+            ),
+            len(outline),
+        )
+        chapter_items = [
+            (int(match.group("number")), int(item.get("page", 0)))
+            for item in outline[first:stop]
+            if int(item.get("level", 0)) == level
+            and (match := NUMBERED_CHAPTER_TITLE_RE.match(str(item.get("title", ""))))
+        ]
+        numbers = [number for number, _page in chapter_items]
+        chapter_pages = [page for _number, page in chapter_items]
+        if len(numbers) < 2 or any(
+            right != left + 1 for left, right in zip(numbers, numbers[1:])
+        ) or any(
+            right <= left for left, right in zip(chapter_pages, chapter_pages[1:])
+        ):
+            continue
+        candidates.append((level, first, stop, len(numbers)))
+    if not candidates:
+        return outline
+    chapter_level, start, stop, _count = max(
+        candidates,
+        key=lambda item: (item[3], -item[0], -item[1]),
+    )
+    normalized = []
+    for index, item in enumerate(outline):
+        copy = dict(item)
+        level = int(copy.get("level", 0))
+        if start <= index < stop and level >= chapter_level:
+            copy["level"] = max(0, level - chapter_level)
+        normalized.append(copy)
+    return normalized
 
 
 def parse_ocr_metadata(text: str) -> dict:
@@ -136,6 +252,7 @@ def parse_ocr_metadata(text: str) -> dict:
         title = str(item.get("title", "")).strip()
         if 0 <= level <= 5 and page > 0 and title:
             outline.append({"level": level, "title": title[:300], "page": page})
+    outline = _normalize_book_outline_levels(outline, kind)
     return {
         "version": 1,
         "kind": kind,
@@ -343,17 +460,19 @@ def _near_page_segment_end(lines: List[str], line_no: int, lookahead: int = 7) -
 
 def _manual_toc_region_is_safe(lines: List[str], start: int, stop: int) -> bool:
     """目录区只有可证明的列表/点线/页码框架时才允许整体替换。"""
-    dotfill = 0
+    entries = 0
     for line_no in range(start, stop):
         stripped = lines[line_no - 1].strip()
         if not stripped or stripped.startswith("%"):
             continue
-        if r"\dotfill" in stripped:
-            dotfill += 1
+        if _is_manual_toc_entry(stripped):
+            entries += 1
             continue
         if re.fullmatch(r"\\(?:begin|end)\{(?:itemize|enumerate|center)\}", stripped):
             continue
         if re.match(r"^\\(?:vspace|vfill|smallskip|medskip|bigskip)\b", stripped):
+            continue
+        if stripped in {r"\clearpage", r"\newpage"}:
             continue
         visible = re.sub(r"\\textbf\s*\{([^{}]*)\}", r"\1", stripped).strip()
         if re.fullmatch(r"[ivxlcdm]+|\d+", visible, re.I):
@@ -368,7 +487,135 @@ def _manual_toc_region_is_safe(lines: List[str], start: int, stop: int) -> bool:
             continue
         # 未知活动文本可能是真实正文；整段不改，交给最终目录门禁拦截。
         return False
-    return dotfill >= 1
+    return entries >= 1
+
+
+def _printed_folio_number(value: str) -> Optional[int]:
+    """Decode only an inert positive decimal folio from a TOC row tail.
+
+    OCR may retain visual spacing (``\\quad 12``) or a harmless text style
+    wrapper (``\\textbf{12}``).  The wrapper grammar is deliberately closed and
+    its payload must be digits only; arbitrary commands, nested braces, suffixes,
+    and executable TeX are rejected rather than interpreted.
+    """
+    value = str(value or "").strip()
+    edge_spacing = r"(?:\\(?:quad|qquad)\b|\\[,;! ])"
+    value = re.sub(rf"^(?:{edge_spacing}\s*)+", "", value).strip()
+    value = re.sub(rf"(?:\s*{edge_spacing})+$", "", value).strip()
+    wrapper = re.fullmatch(
+        r"\\(?:textbf|textit|textsc|emph)\s*\{\s*(?P<page>\d+)\s*\}",
+        value,
+    )
+    digits = wrapper.group("page") if wrapper is not None else value
+    if re.fullmatch(r"\d+", digits) is None:
+        return None
+    page = int(digits)
+    return page if page > 0 else None
+
+
+def _manual_toc_entry_parts(line: str) -> Optional[Tuple[str, int]]:
+    """Return the inert title text and printed page from an unambiguous TOC row."""
+    stripped = str(line or "").strip()
+    if not stripped:
+        return None
+    if r"\dotfill" in stripped:
+        left, right = stripped.rsplit(r"\dotfill", 1)
+    else:
+        leaders = list(PRINTED_DOT_LEADER_RE.finditer(stripped))
+        if not leaders:
+            return None
+        marker = leaders[-1]
+        left = stripped[: marker.start()].strip()
+        right = stripped[marker.end() :].strip()
+    page = _printed_folio_number(right)
+    if not left or page is None:
+        return None
+    return left.strip(), page
+
+
+def _is_manual_toc_entry(line: str) -> bool:
+    """Recognize a printed TOC row without interpreting its title as code."""
+    if _manual_toc_entry_parts(line) is not None:
+        return True
+    stripped = str(line or "").strip()
+    if r"\dotfill" in stripped:
+        left, right = stripped.rsplit(r"\dotfill", 1)
+    else:
+        leaders = list(PRINTED_DOT_LEADER_RE.finditer(stripped))
+        if not leaders:
+            return False
+        marker = leaders[-1]
+        left = stripped[: marker.start()].strip()
+        right = stripped[marker.end() :].strip()
+    return bool(left.strip()) and bool(
+        re.fullmatch(r"[ivxlcdm]+", right.strip(), re.I)
+    )
+
+
+def _manual_toc_entry_heading(line: str) -> Optional[dict]:
+    """Extract a chapter-local heading claim from an unambiguous printed row."""
+    stripped = str(line or "").strip()
+    if not _is_manual_toc_entry(stripped):
+        return None
+    parts = _manual_toc_entry_parts(stripped)
+    if parts is None:
+        return None
+    left, _printed_page = parts
+    left = re.sub(r"\\(?:quad|qquad)\b", " ", left).strip()
+    left = re.sub(
+        r"^\s*\\hspace\*?\s*\{[^{}\r\n]*\}\s*",
+        "",
+        left,
+    )
+    styled = _candidate_from_line(left, 1, None)
+    if styled is not None and styled.kind == "styled" and styled.visible.strip():
+        styled_numbered = re.match(r"^\s*\d+(?:\.\d+)+\.?\s+", styled.visible)
+        if styled_numbered is None:
+            return {
+                "command": "subsection",
+                "starred": True,
+                "number": "",
+                "title": styled.visible.strip(),
+                "requires_styled_body": False,
+            }
+        # Bold is merely the visual style of a numbered section row here; the
+        # dotted number still supplies its actual relative hierarchy.
+        left = styled.visible.strip()
+    numbered = re.match(
+        r"^\s*(?P<number>\d+(?:\.\d+)+)\.?\s+(?P<title>\S.*)\s*$",
+        left,
+    )
+    if numbered is None:
+        # Some publisher local TOCs render their subordinate entries as plain
+        # text.  The TOC row alone does not prove that arbitrary matching prose
+        # is a heading, so the caller must require independent styled/command
+        # evidence from the body before accepting this claim.
+        if re.fullmatch(r"[^\\{}\r\n]*[A-Za-z][^\\{}\r\n]*", left):
+            return {
+                "command": "subsection",
+                "starred": True,
+                "number": "",
+                "title": left.strip(),
+                "requires_styled_body": True,
+            }
+        return None
+    components = numbered.group("number").split(".")
+    command_names = ("section", "subsection", "subsubsection")
+    title = numbered.group("title").strip()
+    styled_title = _candidate_from_line(title, 1, None)
+    if (
+        styled_title is not None
+        and styled_title.kind == "styled"
+        and not styled_title.trailing
+    ):
+        title = styled_title.visible.strip()
+    return {
+        "command": command_names[min(max(len(components) - 2, 0), 2)],
+        "starred": False,
+        "number": numbered.group("number"),
+        "title": title,
+        "requires_styled_body": False,
+    }
 
 
 def _center_bounds(lines: List[str], line_no: int) -> Tuple[int, int]:
@@ -406,6 +653,206 @@ def _find_math_close(lines: List[str], start: int, initial: List[str]) -> int:
         if not stack:
             return line_no
     return 0
+
+
+def _exercise_number_stem(number: str) -> str:
+    """Return the chapter/section stem of a three-part exercise number."""
+    return ".".join(str(number).split(".")[:2])
+
+
+def _exercise_label_stem(line: str) -> str:
+    """Return a proven exercise stem from one source line, if present."""
+    formatted = FORMATTED_EXERCISE_LABEL_RE.match(line)
+    if formatted is not None:
+        return _exercise_number_stem(formatted.group("number"))
+    plain = PLAIN_EXERCISE_LABEL_RE.match(line)
+    if plain is not None:
+        return _exercise_number_stem(plain.group("number"))
+    return ""
+
+
+def _is_exercise_body_heading(lines: List[str], line_no: int) -> bool:
+    """Distinguish a real exercise heading from a repeated running header.
+
+    A new exercise block is evidenced by the first following three-part label
+    having a different stem from the last preceding exercise label.  A repeated
+    ``Exercises`` at the top of a continuation page instead has the same stem.
+    If OCR lost all following labels, preserve the line rather than guessing it
+    is page furniture.
+    """
+    if not 1 <= line_no <= len(lines):
+        return False
+    line = lines[line_no - 1]
+    if (
+        EXERCISE_HEADING_RE.fullmatch(line) is None
+        and FORMATTED_EXERCISE_HEADING_RE.fullmatch(line) is None
+    ):
+        return False
+
+    next_stem = ""
+    for following_no in range(line_no + 1, min(len(lines), line_no + 40) + 1):
+        following = lines[following_no - 1]
+        stripped = following.strip()
+        if (
+            PAGE_RE.match(following)
+            or PAGE_BREAK_RE.match(following)
+            or stripped in {r"\clearpage", r"\newpage"}
+        ):
+            break
+        next_stem = _exercise_label_stem(following)
+        if next_stem:
+            break
+
+    if not next_stem:
+        return True
+
+    previous_stem = ""
+    for previous_no in range(line_no - 1, 0, -1):
+        previous_stem = _exercise_label_stem(lines[previous_no - 1])
+        if previous_stem:
+            break
+    return not previous_stem or previous_stem != next_stem
+
+
+def _build_exercise_fidelity_ops(lines: List[str]) -> Tuple[List[PendingOp], List[dict]]:
+    """Restore exercise typography only when the OCR text supplies evidence.
+
+    Bondy-style exercise identifiers have three numeric components, but a bare
+    ``1.2.3`` can also be a genuine third-level heading in another book.  A
+    numeric run is therefore treated as exercises only when its two-component
+    stem is anchored by an explicit ``Exercise(s)`` heading, a difficulty star,
+    or an already-bold peer.  The latter additionally requires at least two
+    distinct labels with that stem.  This preserves the words, numbering, and
+    page markers while avoiding section-number guesses.
+
+    The hard/easy-group ornament is equally conservative: only the exact OCR
+    corruption ``\\mathrel{))}`` between two explicit rules is repaired.  A
+    divider that disappeared completely has no textual anchor and is never
+    synthesized here.
+    """
+    operations: List[PendingOp] = []
+    notes: List[dict] = []
+    heading_lines: List[int] = []
+    labels_by_line: Dict[int, Tuple[str, bool]] = {}
+    plain_labels: List[Tuple[int, re.Match[str], str, str, bool]] = []
+    numbers_by_stem: Dict[str, set[str]] = {}
+    formatted_stems: set[str] = set()
+    starred_stems: set[str] = set()
+
+    for line_no, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("%"):
+            continue
+        exercise_heading = EXERCISE_HEADING_RE.fullmatch(line)
+        if exercise_heading is not None:
+            if not _is_exercise_body_heading(lines, line_no):
+                continue
+            heading_lines.append(line_no)
+            title = exercise_heading.group("title")
+            operations.append(PendingOp(
+                "replace_line",
+                line_no,
+                old=line,
+                new=(
+                    exercise_heading.group("prefix")
+                    + f"\\textbf{{{title}}}"
+                ),
+            ))
+            notes.append({
+                "line": line_no,
+                "status": "normalized-exercise-heading",
+                "reason": f"保留练习标题文字并恢复原书粗体层级：{title}",
+            })
+            continue
+        if FORMATTED_EXERCISE_HEADING_RE.fullmatch(line):
+            if _is_exercise_body_heading(lines, line_no):
+                heading_lines.append(line_no)
+            continue
+
+        formatted = FORMATTED_EXERCISE_LABEL_RE.match(line)
+        if formatted is not None:
+            number = formatted.group("number")
+            stem = _exercise_number_stem(number)
+            labels_by_line[line_no] = (stem, True)
+            numbers_by_stem.setdefault(stem, set()).add(number)
+            formatted_stems.add(stem)
+            continue
+
+        plain = PLAIN_EXERCISE_LABEL_RE.match(line)
+        if plain is not None:
+            number = plain.group("number")
+            stem = _exercise_number_stem(number)
+            prefix = plain.group("prefix")
+            starred = bool(re.search(r"\\(?:star|ast)\b|[★☆]", prefix))
+            labels_by_line[line_no] = (stem, False)
+            numbers_by_stem.setdefault(stem, set()).add(number)
+            plain_labels.append((line_no, plain, number, stem, starred))
+            if starred:
+                starred_stems.add(stem)
+
+    anchored_stems = set(starred_stems)
+    anchored_stems.update(
+        stem for stem in formatted_stems
+        if len(numbers_by_stem.get(stem, set())) >= 2
+    )
+
+    # An explicit Exercise(s) heading anchors only the first following numbered
+    # run.  Do not let a heading classify every later three-part heading in the
+    # document as an exercise.
+    for heading_line in heading_lines:
+        for line_no in range(heading_line + 1, min(len(lines), heading_line + 40) + 1):
+            label = labels_by_line.get(line_no)
+            if label is not None:
+                anchored_stems.add(label[0])
+                break
+            stripped = lines[line_no - 1].strip()
+            if not stripped or stripped.startswith("%"):
+                continue
+            if re.match(
+                r"^\\(?:chapter|section|subsection|subsubsection)\*?\s*\{",
+                stripped,
+            ) and not FORMATTED_EXERCISE_HEADING_RE.fullmatch(stripped):
+                break
+
+    for line_no, match, number, stem, _starred in plain_labels:
+        if stem not in anchored_stems:
+            continue
+        old = lines[line_no - 1]
+        new = (
+            match.group("prefix")
+            + f"\\textbf{{{number}}}"
+            + match.group("suffix")
+        )
+        operations.append(PendingOp("replace_line", line_no, old=old, new=new))
+        notes.append({
+            "line": line_no,
+            "status": "normalized-exercise-number",
+            "reason": f"练习编号由同组证据确认并恢复粗体：{number}",
+        })
+
+    for line_no, line in enumerate(lines, start=1):
+        active = line.split("%", 1)[0]
+        if (
+            active.count(r"\rule") >= 2
+            and active.count(BROKEN_EXERCISE_DIVIDER) == 1
+        ):
+            operations.append(PendingOp(
+                "replace_line",
+                line_no,
+                old=line,
+                new=line.replace(
+                    BROKEN_EXERCISE_DIVIDER,
+                    CANONICAL_EXERCISE_DIVIDER,
+                    1,
+                ),
+            ))
+            notes.append({
+                "line": line_no,
+                "status": "repaired-exercise-divider",
+                "reason": "两侧规则线确认了练习难度分隔饰符；将 OCR 的 )) 恢复为双 \\wr",
+            })
+
+    return sorted(operations, key=lambda op: (op.line, op.kind)), notes
 
 
 def _build_syntax_repair_ops(lines: List[str]) -> Tuple[List[PendingOp], List[dict]]:
@@ -451,14 +898,86 @@ def _build_syntax_repair_ops(lines: List[str]) -> Tuple[List[PendingOp], List[di
     return operations, notes
 
 
+def _pending_op_key(op: PendingOp) -> Tuple:
+    if op.kind == "insert_line":
+        return (op.line, op.kind, op.new)
+    return (op.line, op.kind)
+
+
+def _pending_ops_conflict(left: PendingOp, right: PendingOp) -> bool:
+    """Return true when two edits cannot safely share one source line."""
+    if left.line != right.line:
+        return False
+    if left == right:
+        return False
+    # Inserts deliberately use the original line as an anchor and may coexist
+    # with a replacement or deletion; the patch engine's delta accounting is
+    # tested for that legacy move/marker behavior.
+    if left.kind == "insert_line" or right.kind == "insert_line":
+        return False
+    # Same-kind edits retain the established deterministic last-wins behavior
+    # (for example ``Contents`` first maps as an outline title and is then
+    # replaced by the stronger, validated global TOC operation).
+    if left.kind == right.kind:
+        return False
+    # Different destructive kinds on one source line are ambiguous.  This is
+    # the P48 failure mode: delete_line and replace_line must never both apply.
+    return True
+
+
+def _add_pending_op_fail_safe(
+    operations: Dict[Tuple, PendingOp],
+    blocked_lines: set[int],
+    op: PendingOp,
+    notes: List[dict],
+) -> None:
+    """Add one edit, preserving the source line on any ambiguous collision."""
+    if op.line in blocked_lines:
+        return
+    key = _pending_op_key(op)
+    existing_exact = operations.get(key)
+    if existing_exact == op:
+        return
+    same_line = [
+        (existing_key, existing)
+        for existing_key, existing in operations.items()
+        if existing.line == op.line
+    ]
+    if any(_pending_ops_conflict(existing, op) for _key, existing in same_line):
+        # Drop every edit anchored to the line.  This keeps the original source
+        # byte-for-byte when different destructive interpretations disagree.
+        for existing_key, _existing in same_line:
+            operations.pop(existing_key, None)
+        blocked_lines.add(op.line)
+        notes.append({
+            "line": op.line,
+            "status": "conflict-preserved",
+            "reason": "同一源行出现互斥结构补丁；已全部放弃并逐字保留原行",
+        })
+        return
+    operations[key] = op
+
+
 def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
     """把 PDF 大纲映射为章节命令；所有改动都通过可逆 PendingOp 表达。"""
     metadata = parse_ocr_metadata(text)
     lines = text.split("\n")
+    exercise_ops, exercise_notes = _build_exercise_fidelity_ops(lines)
     if not metadata or not metadata.get("outline"):
         # 即使 PDF 没有书签，OCR 仍可能把 theorem/proof 的结束命令放进
         # 尚未闭合的公式中。该修复不依赖大纲，且只移动可证明的完整结束行。
-        return _build_syntax_repair_ops(lines)
+        syntax_ops, syntax_notes = _build_syntax_repair_ops(lines)
+        combined: Dict[Tuple, PendingOp] = {}
+        blocked_lines: set[int] = set()
+        combined_notes = list(exercise_notes) + list(syntax_notes)
+        for op in exercise_ops + syntax_ops:
+            _add_pending_op_fail_safe(
+                combined, blocked_lines, op, combined_notes,
+            )
+        return (
+            sorted(combined.values(), key=lambda op: (op.line, op.kind)),
+            combined_notes,
+        )
     pages = _page_map(lines)
     page_positions = _page_line_positions(lines)
     kind = metadata["kind"]
@@ -468,12 +987,17 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
     ]
     used: set[int] = set()
     operations: Dict[Tuple, PendingOp] = {}
-    notes: List[dict] = []
+    blocked_lines: set[int] = set()
+    notes: List[dict] = list(exercise_notes)
     matched_lines: set[int] = set()
+    mapped_chapter_lines: Dict[int, str] = {}
+    mapped_chapter_titles: Dict[int, str] = {}
 
     def set_op(op: PendingOp):
-        key = (op.line, op.kind, op.new) if op.kind == "insert_line" else (op.line, op.kind)
-        operations[key] = op
+        _add_pending_op_fail_safe(operations, blocked_lines, op, notes)
+
+    for exercise_op in exercise_ops:
+        set_op(exercise_op)
 
     for entry in metadata["outline"]:
         expected_page = int(entry["page"])
@@ -511,12 +1035,37 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
         command_line = hit.line
         delete_title_line = False
         if kind == "book" and int(entry["level"]) == 0 and not star:
-            # OCR 常把“Chapter 1”和真正章名拆成两个 section*；合并为一个 chapter。
+            # OCR 常把“Chapter 1”（或原书章首独立的一行 ``1``）和真正章名
+            # 拆成两行；只有数字与 PDF 大纲编号一致时才合并为一个 chapter。
+            expected_number_match = NUMBERED_CHAPTER_TITLE_RE.match(str(entry["title"]))
+            expected_number = (
+                expected_number_match.group("number") if expected_number_match else ""
+            )
+
+            def is_matching_marker(item: HeadingCandidate) -> bool:
+                chapter_match = CHAPTER_MARKER_RE.match(item.visible)
+                bare_match = BARE_CHAPTER_MARKER_RE.match(item.visible)
+                if chapter_match:
+                    number = chapter_match.group(1)
+                    # Publisher bookmarks commonly omit the visible chapter
+                    # number (``Ramsey numbers``), while OCR preserves it on a
+                    # separate immediately preceding ``Chapter 1`` line.  The
+                    # explicit word ``Chapter`` plus the same-page adjacency is
+                    # sufficient to identify that line as the chapter marker.
+                    # When the bookmark does carry a number, keep requiring an
+                    # exact match so a wrong marker cannot be silently removed.
+                    return not expected_number or number == expected_number
+                if bare_match:
+                    # A lone number may be a folio or genuine body text; only a
+                    # numbered bookmark can make that weaker marker removable.
+                    return bool(expected_number and bare_match.group(1) == expected_number)
+                return False
+
             previous = next(
                 (
                     item for item in candidates
                     if item.page == hit.page and item.line < hit.line
-                    and hit.line - item.line <= 2 and CHAPTER_MARKER_RE.match(item.visible)
+                    and hit.line - item.line <= 2 and is_matching_marker(item)
                 ),
                 None,
             )
@@ -530,7 +1079,18 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
         replacement = f"\\{command}{'*' if star else ''}{{{title}}}"
         if trailing:
             replacement += " " + trailing
-        set_op(PendingOp("replace_line", command_line, old=lines[command_line - 1], new=replacement))
+        set_op(PendingOp(
+            "replace_line",
+            command_line,
+            old=lines[command_line - 1],
+            new=replacement,
+        ))
+        if command == "chapter" and not star:
+            chapter_number = NUMBERED_CHAPTER_TITLE_RE.match(str(entry["title"]))
+            mapped_chapter_lines[command_line] = (
+                chapter_number.group("number") if chapter_number else ""
+            )
+            mapped_chapter_titles[command_line] = title
         if delete_title_line and hit.line != command_line:
             set_op(PendingOp("delete_line", hit.line, old=lines[hit.line - 1]))
         center_open, center_close = _center_bounds(lines, command_line)
@@ -546,26 +1106,119 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
         notes.append({
             "line": command_line,
             "status": "mapped",
-            "reason": f"PDF 大纲 L{int(entry['level']) + 1} → \\{command}{'*' if star else ''}{{{title}}}",
+            "reason": (
+                f"PDF 大纲 L{int(entry['level']) + 1} → "
+                f"\\{command}{'*' if star else ''}{{{title}}}"
+            ),
         })
 
     # 手抄目录只保存旧页码，重排后必然错误；换成可二次编译更新的真实目录。
     contents = next((hit for hit in candidates if _plain_text(hit.visible) == "contents"), None)
     if contents is not None and metadata.get("source_has_toc"):
-        stop = len(lines) + 1
-        for line_no in range(contents.line + 1, len(lines) + 1):
-            if PAGE_BREAK_RE.match(lines[line_no - 1]) or lines[line_no - 1].strip() in (
-                r"\clearpage", r"\newpage"
-            ):
-                stop = line_no
-                break
+        # A publisher TOC commonly spans several physical pages.  The next
+        # outline-mapped heading is a stronger boundary than the first OCR page
+        # break; using the latter leaves the second printed TOC page in the body.
+        later_mapped = sorted(line for line in matched_lines if line > contents.line)
+        stop = later_mapped[0] if later_mapped else len(lines) + 1
         if _manual_toc_region_is_safe(lines, contents.line + 1, stop):
+            # Some publisher PDFs omit intentionally blank verso pages while
+            # retaining the printed folio sequence.  Replacing the printed TOC
+            # with a live TOC must not silently shift every later chapter page.
+            # Accept folio claims only when chapter number + title match an
+            # outline-mapped chapter and the skipped-page offset is small and
+            # monotonically nondecreasing across at least three chapters.
+            printed_claims = []
+            for line_no in range(contents.line + 1, stop):
+                parts = _manual_toc_entry_parts(lines[line_no - 1])
+                if parts is None:
+                    continue
+                left, printed_page = parts
+                left = re.sub(r"\\(?:quad|qquad)\b", " ", left).strip()
+                chapter_claim = NUMBERED_CHAPTER_TITLE_RE.match(left)
+                if chapter_claim is None:
+                    continue
+                claim_number = chapter_claim.group("number")
+                claim_title = chapter_claim.group("title").strip()
+                matches = [
+                    chapter_line for chapter_line, chapter_number in mapped_chapter_lines.items()
+                    if chapter_number == claim_number
+                    and _score_title(
+                        mapped_chapter_titles.get(chapter_line, ""), claim_title
+                    ) >= 0.93
+                ]
+                if len(matches) == 1:
+                    chapter_line = matches[0]
+                    printed_claims.append({
+                        "chapter_line": chapter_line,
+                        "source_page": int(pages.get(chapter_line) or 0),
+                        "printed_page": printed_page,
+                    })
+            printed_claims.sort(key=lambda item: item["chapter_line"])
+            folios_are_safe = False
+            if len(printed_claims) >= 3 and all(
+                item["source_page"] > 0 for item in printed_claims
+            ):
+                first_source = printed_claims[0]["source_page"]
+                first_printed = printed_claims[0]["printed_page"]
+                adjustments = [
+                    item["printed_page"]
+                    - (first_printed + item["source_page"] - first_source)
+                    for item in printed_claims
+                ]
+                printed_pages = [item["printed_page"] for item in printed_claims]
+                folios_are_safe = (
+                    all(left < right for left, right in zip(printed_pages, printed_pages[1:]))
+                    and all(0 <= value <= 64 for value in adjustments)
+                    and all(
+                        0 <= right - left <= 8
+                        for left, right in zip(adjustments, adjustments[1:])
+                    )
+                )
+            if folios_are_safe:
+                for claim in printed_claims:
+                    chapter_line = int(claim["chapter_line"])
+                    printed_page = int(claim["printed_page"])
+                    set_op(PendingOp(
+                        "insert_line",
+                        chapter_line - 1,
+                        new=f"{PRINTED_PAGE_MARKER_PREFIX}{printed_page}",
+                    ))
+                notes.append({
+                    "line": contents.line,
+                    "status": "mapped-printed-folios",
+                    "reason": (
+                        f"全局目录与 PDF 大纲双重确认了 {len(printed_claims)} 个章首页码；"
+                        "保留省略空白页后的原印刷页码"
+                    ),
+                })
             set_op(PendingOp(
                 "replace_line", contents.line,
                 old=lines[contents.line - 1], new="\\tableofcontents",
             ))
+            boundaries = [
+                line_no for line_no in range(contents.line + 1, stop)
+                if lines[line_no - 1].strip() in {r"\clearpage", r"\newpage"}
+            ]
+            keep_boundary = boundaries[-1] if boundaries else 0
+            relocated_page_markers = []
             for line_no in range(contents.line + 1, stop):
+                if line_no == keep_boundary:
+                    continue
+                is_page_marker = bool(
+                    PAGE_RE.match(lines[line_no - 1])
+                    or PAGE_BREAK_RE.match(lines[line_no - 1])
+                )
+                if is_page_marker and keep_boundary and line_no > keep_boundary:
+                    # This marker already follows the retained final page
+                    # boundary and therefore belongs to the first body page.
+                    continue
+                if is_page_marker and keep_boundary:
+                    relocated_page_markers.append(lines[line_no - 1])
                 set_op(PendingOp("delete_line", line_no, old=lines[line_no - 1]))
+            for marker in relocated_page_markers:
+                # Keep source-page provenance without placing comments between
+                # ``\tableofcontents`` and its retained ``\clearpage``.
+                set_op(PendingOp("insert_line", keep_boundary, new=marker))
             notes.append({
                 "line": contents.line,
                 "status": "mapped",
@@ -578,12 +1231,176 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
                 "reason": "手抄目录区混有无法确认的正文，已完整保留并阻止自动导出",
             })
 
+    # Chapter-opening pages may contain a second, chapter-local printed TOC.
+    # Replace only a same-page Contents block immediately following a mapped
+    # chapter and containing at least three unambiguous leader/page rows.  A
+    # template can turn this inert marker into a live local TOC after AI has
+    # constructed the section tree; ordinary prose named "Contents" is untouched.
+    for local_contents in candidates:
+        if (
+            _plain_text(local_contents.visible) != "contents"
+            or local_contents.line in matched_lines
+        ):
+            continue
+        preceding_chapters = [
+            line_no for line_no in mapped_chapter_lines
+            if line_no < local_contents.line
+            and local_contents.line - line_no <= 5
+            and pages.get(line_no) == local_contents.page
+        ]
+        if not preceding_chapters:
+            continue
+        stop = local_contents.line + 1
+        entry_lines = []
+        removable = []
+        while stop <= len(lines):
+            stripped = lines[stop - 1].strip()
+            if not stripped:
+                removable.append(stop)
+                stop += 1
+                continue
+            if _is_manual_toc_entry(stripped):
+                entry_lines.append(stop)
+                removable.append(stop)
+                stop += 1
+                continue
+            break
+        if len(entry_lines) < 3:
+            continue
+        chapter_line = max(preceding_chapters)
+        chapter_number = mapped_chapter_lines.get(chapter_line, "")
+        later_chapters = sorted(
+            line_no for line_no in mapped_chapter_lines if line_no > chapter_line
+        )
+        chapter_stop = later_chapters[0] if later_chapters else len(lines) + 1
+        entry_line_set = set(entry_lines)
+        local_ops: List[PendingOp] = []
+        local_notes: List[dict] = []
+        local_body_lines: set[int] = set()
+        mapped_local_headings = 0
+        last_body_line = stop - 1
+        for entry_line in entry_lines:
+            heading = _manual_toc_entry_heading(lines[entry_line - 1])
+            if heading is None:
+                continue
+            printed_number = str(heading["number"])
+            if printed_number and chapter_number:
+                if printed_number.split(".", 1)[0] != chapter_number:
+                    continue
+            ranked = []
+            for hit in candidates:
+                if (
+                    hit.line <= last_body_line
+                    or hit.line >= chapter_stop
+                    or hit.line in local_body_lines
+                    or hit.line in entry_line_set
+                ):
+                    continue
+                if heading.get("requires_styled_body") and not (
+                    hit.kind == "styled"
+                    or (
+                        hit.kind == "command"
+                        and hit.command in {"subsection", "subsubsection"}
+                    )
+                ):
+                    continue
+                score = _score_title(str(heading["title"]), hit.visible)
+                if score >= 0.93:
+                    ranked.append((-score, hit.line, hit))
+            if not ranked:
+                continue
+            ranked.sort(key=lambda item: item[:2])
+            body_heading = ranked[0][2]
+            local_body_lines.add(body_heading.line)
+            last_body_line = body_heading.line
+            mapped_local_headings += 1
+            # A PDF-outline entry may already have mapped this exact body
+            # heading.  It still satisfies the local TOC transaction, but does
+            # not need a second competing replacement.
+            if body_heading.line in matched_lines:
+                continue
+            command = str(heading["command"])
+            starred = bool(heading["starred"])
+            claimed_title = str(heading["title"])
+            # The printed TOC is only structural evidence.  The matched body
+            # heading remains the content authority, including math commands,
+            # accents, and other TeX that a simplified TOC label may omit.
+            title = _title_without_number(body_heading.visible).strip()
+            styled_title = _candidate_from_line(title, body_heading.line, body_heading.page)
+            if (
+                styled_title is not None
+                and styled_title.kind == "styled"
+                and not styled_title.trailing
+            ):
+                title = styled_title.visible.strip()
+            if title.endswith(".") and not claimed_title.endswith("."):
+                title = title[:-1].rstrip()
+            if not title:
+                title = claimed_title
+            replacement = f"\\{command}{'*' if starred else ''}{{{title}}}"
+            if body_heading.trailing:
+                replacement += " " + body_heading.trailing
+            local_ops.append(PendingOp(
+                "replace_line",
+                body_heading.line,
+                old=lines[body_heading.line - 1],
+                new=replacement,
+            ))
+            if starred:
+                local_ops.append(PendingOp(
+                    "insert_line",
+                    body_heading.line,
+                    new=(
+                        f"\\addcontentsline{{toc}}{{{command}}}"
+                        f"{{{claimed_title}}}"
+                    ),
+                ))
+            local_notes.append({
+                "line": body_heading.line,
+                "status": "mapped-local-heading",
+                "reason": (
+                    "章首目录与正文标题双重确认 → "
+                    f"\\{command}{'*' if starred else ''}{{{title}}}"
+                ),
+            })
+        if mapped_local_headings != len(entry_lines):
+            notes.append({
+                "line": local_contents.line,
+                "status": "deferred-local-toc",
+                "reason": (
+                    f"章首目录仅确认 {mapped_local_headings}/{len(entry_lines)} 个正文标题；"
+                    "为避免丢失目录层级，原子化保留整个目录等待后续页面"
+                ),
+            })
+            continue
+        for op in local_ops:
+            set_op(op)
+        used.update(local_body_lines)
+        matched_lines.update(local_body_lines)
+        notes.extend(local_notes)
+        set_op(PendingOp(
+            "replace_line",
+            local_contents.line,
+            old=lines[local_contents.line - 1],
+            new=LOCAL_TOC_MARKER,
+        ))
+        for line_no in removable:
+            set_op(PendingOp("delete_line", line_no, old=lines[line_no - 1]))
+        notes.append({
+            "line": local_contents.line,
+            "status": "mapped-local-toc",
+            "reason": "已将章首手抄目录替换为可由成品模板重建的局部目录标记",
+        })
+
     # 重复、靠近段首且未映射到 PDF 大纲的短文本可确定为运行页眉污染。
     # OCR 既可能把它写成 section*，也可能只是普通文本/\noindent 文本。
     unmatched_commands = [
         hit for hit in candidates
         if hit.kind in {"command", "plain", "styled"} and hit.line not in matched_lines
+        and not hit.trailing
         and _plain_text(hit.visible) not in ("contents", "")
+        and not _is_exercise_body_heading(lines, hit.line)
+        and not _exercise_label_stem(lines[hit.line - 1])
     ]
     near_top = [
         hit for hit in unmatched_commands
@@ -694,6 +1511,16 @@ def check_ocr_structure(text: str) -> dict:
     if not metadata:
         return {"checked": False, "ok": True, "issues": [], "expected": 0, "matched": 0}
     issues = []
+    _exercise_ops, exercise_notes = _build_exercise_fidelity_ops(text.split("\n"))
+    exercise_issue_reasons = {
+        "normalized-exercise-heading": "练习标题仍是普通字重，未保留源书层级",
+        "normalized-exercise-number": "有证据确认的练习编号仍未加粗",
+        "repaired-exercise-divider": "练习难度分隔饰符仍含 OCR 错字 ))",
+    }
+    for note in exercise_notes:
+        reason = exercise_issue_reasons.get(str(note.get("status", "")))
+        if reason:
+            issues.append({"line": note.get("line", 1), "reason": reason})
     actual = _actual_headings(text)
     active_text = _active_latex(text)
     active_toc_count = len(ACTIVE_TOC_RE.findall(active_text))
@@ -702,6 +1529,10 @@ def check_ocr_structure(text: str) -> dict:
     )
     actual_class = class_match.group(1).strip().lower() if class_match else ""
     elegant_output = actual_class == "elegantbook"
+    faithful_output = (
+        actual_class == "book"
+        and "% LaTeXStruct template: faithfulbook v1" in text
+    )
     cursor = 0
     matched = 0
     for entry in metadata.get("outline", []):
@@ -715,7 +1546,7 @@ def check_ocr_structure(text: str) -> dict:
             # 也不能额外写进目录列表本身。
             matched += 1
             continue
-        if elegant_output and metadata["kind"] == "article":
+        if (elegant_output or faithful_output) and metadata["kind"] == "article":
             level = max(0, min(3, int(entry["level"])))
             expected_cmd = ("chapter", "section", "subsection", "subsubsection")[level]
         else:
@@ -755,10 +1586,16 @@ def check_ocr_structure(text: str) -> dict:
             })
 
     expected_class = metadata["kind"]
-    if actual_class not in {expected_class, "elegantbook"}:
+    allowed_classes = {expected_class, "elegantbook"}
+    if faithful_output:
+        allowed_classes.add("book")
+    if actual_class not in allowed_classes:
         issues.append({
             "line": 1,
-            "reason": f"OCR 大纲需要 documentclass={expected_class} 或固定 ElegantBook 成品",
+            "reason": (
+                f"OCR 大纲需要 documentclass={expected_class}，"
+                "或经过校验的 ElegantBook/faithfulbook 成品"
+            ),
         })
 
     if metadata.get("source_has_toc"):
@@ -774,10 +1611,54 @@ def check_ocr_structure(text: str) -> dict:
     lines = text.split("\n")
     pages = _page_map(lines)
     positions = _page_line_positions(lines)
+    for line_no, line in enumerate(lines, start=1):
+        local_contents = _candidate_from_line(line, line_no, pages[line_no])
+        if (
+            local_contents is None
+            or local_contents.kind not in {"plain", "styled", "command"}
+            or _plain_text(local_contents.visible) != "contents"
+        ):
+            continue
+        entry_count = 0
+        scan = line_no + 1
+        while scan <= len(lines):
+            stripped = lines[scan - 1].strip()
+            if not stripped:
+                scan += 1
+                continue
+            if _is_manual_toc_entry(stripped):
+                entry_count += 1
+                scan += 1
+                continue
+            break
+        if entry_count < 3:
+            continue
+        has_preceding_chapter = any(
+            (
+                (previous := _candidate_from_line(
+                    lines[previous_no - 1], previous_no, pages[previous_no]
+                ))
+                is not None
+                and previous.kind == "command"
+                and previous.command == "chapter"
+                and pages.get(previous_no) == pages.get(line_no)
+            )
+            for previous_no in range(max(1, line_no - 5), line_no)
+        )
+        if has_preceding_chapter:
+            issues.append({
+                "line": line_no,
+                "reason": "章首手抄目录尚未完成正文标题全量匹配，仍含旧页码",
+            })
+            break
     near_top = []
     for line_no, line in enumerate(lines, start=1):
         hit = _candidate_from_line(line, line_no, pages[line_no])
         if hit is None or hit.kind not in {"plain", "styled"}:
+            continue
+        if hit.trailing:
+            continue
+        if _is_exercise_body_heading(lines, line_no) or _exercise_label_stem(line):
             continue
         normalized = _plain_text(hit.visible)
         if positions.get(line_no, 10_000) <= 3 and len(normalized) >= 6:

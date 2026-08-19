@@ -17,6 +17,7 @@ from typing import Collection, Dict, List, Optional, Tuple
 
 from .parser import PROTECTED_ENVS, Block, Document, Span
 from .patch import NEW_THEOREM_RE
+from .ruleset import SEMANTIC_SEPARATOR_PATTERN, TEX_HORIZONTAL_SPACE_PATTERN
 
 # ---------------------------------------------------------------------------
 # 常量与模式
@@ -27,7 +28,9 @@ THEOREM_LIKE_ENVS = {
     "remark", "example", "conjecture", "problem", "claim",
     "question", "fact", "observation", "exercise", "problemset", "note",
 }
-BOX_ENVS = {"tcolorbox", "mdframed", "framed", "quote", "quotation"}
+BOX_ENVS = {
+    "tcolorbox", "mdframed", "framed", "quote", "quotation", "lsframedinset",
+}
 ITEM_ENVS = {"enumerate", "itemize", "description", "problemset", "exercise", "problem"}
 MATH_ENVS = {
     "math", "displaymath", "equation", "equation*", "align", "align*", "alignat",
@@ -68,9 +71,12 @@ EN_TITLE_RE = re.compile(
     r"^(Definition|Theorem|Lemma|Proposition|Corollary|Remark|Example|"
     r"Conjecture|Problem|Question|Claim|Fact|Observation|Note|Exercise)\b"
     r"(?:"
-    r"\s+(\d+(?:\.\d+)*)(?:\s*[.:](?!\d)\s*|\s+(?=[A-Z\\$(（(])|\s*$)"
+    r"\s+(\d+(?:\.\d+)*)(?:\s*[.:](?!\d)\s*|"
+    rf"\s*{TEX_HORIZONTAL_SPACE_PATTERN}\s*|"
+    r"\s+(?=[A-Z\\$(（(])|\s*$)"
     r"|\s+(?:\((?:[^()\n]|\([^()\n]{1,80}\)){1,1024}\)|\[[^\[\]\n]{1,1024}\])"
     r"(?:\s*[.:]\s*|\s*$)"
+    rf"|\s*{TEX_HORIZONTAL_SPACE_PATTERN}\s*"
     r"|\s*[.:]\s*"
     r"|\s*$"
     r")(?=\S|$|（|\()"
@@ -149,17 +155,18 @@ PROOF_OF_NATURAL_TARGET_PATTERN = (
     rf"{_PROOF_OF_TITLE_END_PATTERN}"
 )
 PROOF_RE = re.compile(
-    r"^(?:Proof(?!\s+of\b)\s*[:.]?(?:\s|$)|Proof\s*\[[^\]]*\](?:\s*\.)?(?:\s|$)|"
+    rf"^(?:Proof(?!\s+of\b)\s*[:.]?(?:{SEMANTIC_SEPARATOR_PATTERN}|$)|"
+    rf"Proof\s*\[[^\]]*\](?:\s*\.)?(?:{SEMANTIC_SEPARATOR_PATTERN}|$)|"
     rf"Proof of\s+(?:{PROOF_OF_TARGET_PATTERN}|{PROOF_OF_NAMED_TARGET_PATTERN}|"
     rf"{PROOF_OF_NATURAL_TARGET_PATTERN})|"
-    r"Sketch of the proof\.?(?:\s|$)|"
+    rf"Sketch of the proof\.?(?:{SEMANTIC_SEPARATOR_PATTERN}|$)|"
     r"证明\s*[:：]\s*|证明\s*$|证明如下\s*[:：]?\s*)"
 )
 # 可安全剥离的证明起始前缀（剩余正文非空时才剥离）
 PROOF_BRACKET_RE = re.compile(r"^Proof\s*\[([^\]]*)\](?:\s*\.)?\s*")
 PROOF_SKETCH_RE = re.compile(r"^Sketch of the proof\.?\s*")
 PROOF_SIMPLE_RE = re.compile(
-    r"^(?:Proof(?!\s+of\b)\s*[:.]\s*|Proof(?!\s+of\b)\s+|"
+    rf"^(?:Proof(?!\s+of\b)\s*[:.]?(?:{SEMANTIC_SEPARATOR_PATTERN}|$)|"
     r"证明[。：]\s*|证明如下[：:]\s*)"
 )
 PROOF_OF_RE = re.compile(
@@ -785,7 +792,17 @@ def _raw_semantic_prefix(
     # 避免删除半个 \textbf{...} 后留下不配平花括号。
     if inner[match_end:].strip():
         return ""
-    end = int(wrapper["closing"]) + 1
+    # ``semantic`` is exactly ``inner + trailing``.  If the title/proof regex
+    # consumed a bounded TeX separator from ``trailing``, include those exact
+    # source bytes in the removable structural prefix.  Ignoring them leaves a
+    # stray leading ``\quad`` inside the generated environment; consuming only
+    # one character would corrupt the command.  The match length provides a
+    # lossless source-coordinate mapping, so no generated text is trusted here.
+    trailing_consumed = max(0, match_end - len(inner))
+    end = min(
+        len(first),
+        int(wrapper["closing"]) + 1 + trailing_consumed,
+    )
     while end < len(first) and first[end].isspace():
         end += 1
     return first[:end]
