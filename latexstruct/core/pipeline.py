@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -43,6 +44,7 @@ from .scanner import _declared_theorem_envs, scan
 from .verify import check_display_tag_safety, compare_braces, compare_env_balance, known_issues
 
 DOC_CLASS_RE = re.compile(r"\\documentclass(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
+DETERMINISTIC_SEMANTIC_ANCHOR_KEY = "_deterministic_semantic_anchor"
 
 
 @dataclass
@@ -147,6 +149,103 @@ def build_preamble_decision(
     )
 
 
+def _semantic_span_hash(doc, body_span: Tuple[int, int]) -> str:
+    """Hash the exact normalized source bytes covered by a semantic anchor."""
+    start, end = body_span
+    lines = doc.text.split("\n")
+    if not (1 <= start <= end <= len(lines)):
+        return ""
+    source = "\n".join(lines[start - 1:end]).encode("utf-8")
+    return hashlib.sha256(source).hexdigest()
+
+
+def _build_ocr_semantic_anchors(
+    doc,
+    scan_res,
+    ctx: PatchContext,
+    rule_config: RuleConfig = None,
+    pack=None,
+) -> Tuple[List[Decision], set]:
+    """Build model-independent formal-entry decisions for OCR documents.
+
+    Only an explicit numbered theorem-like title, or a scanner-confirmed proof
+    whose complete boundary independently passes ``legalize_deterministic_wrap``,
+    is locked.  The exact kind, source span, and source hash travel with the
+    decision and are revalidated immediately before every patch application.
+    Any item that misses one gate is omitted here and remains on the normal AI
+    path; this function never guesses a fallback range.
+    """
+    from .legalize import legalize_deterministic_wrap
+
+    candidates_by_id = {candidate.id: candidate for candidate in scan_res.candidates}
+    rule_decisions, _rule_ambiguous = build_rule_decisions(
+        doc,
+        scan_res,
+        rule_config,
+        kinds={"theorem-like", "proof"},
+        pack=pack,
+    )
+    anchors: List[Decision] = []
+    locked_ids = set()
+    for decision in rule_decisions:
+        candidate = candidates_by_id.get(decision.candidate_id)
+        if candidate is None or decision.action != "wrap" or not decision.body_span:
+            continue
+        if candidate.kind == "theorem-like":
+            if (
+                candidate.rule_id != "bare-title"
+                or not str(candidate.payload.get("number", "") or "").strip()
+            ):
+                continue
+        elif candidate.kind == "proof":
+            if candidate.rule_id != "proof-start":
+                continue
+        else:
+            continue
+
+        legalize_deterministic_wrap(
+            doc,
+            decision,
+            candidate,
+            ctx.existing_envs,
+        )
+        if getattr(decision, "_legalize_error", ""):
+            continue
+        source_hash = _semantic_span_hash(doc, decision.body_span)
+        if not source_hash:
+            continue
+        start, end = decision.body_span
+        decision.source = "rule"
+        decision.reason = (
+            "OCR 显式编号标题经规则与独立边界门确认"
+            if candidate.kind == "theorem-like"
+            else "OCR 证明起始语经规则与 QED/下一结构边界门确认"
+        )
+        decision.payload = dict(decision.payload)
+        decision.payload[DETERMINISTIC_SEMANTIC_ANCHOR_KEY] = {
+            "candidate_id": candidate.id,
+            "kind": candidate.kind,
+            "env": candidate.env_hint if candidate.kind == "theorem-like" else "proof",
+            "body_span": [start, end],
+            "source_sha256": source_hash,
+        }
+        anchors.append(decision)
+        locked_ids.add(candidate.id)
+    return anchors, locked_ids
+
+
+def _merge_semantic_anchors(
+    decisions: List[Decision],
+    anchors: List[Decision],
+) -> List[Decision]:
+    """Replace stale/model decisions for locked IDs with canonical anchors."""
+    locked_ids = {decision.candidate_id for decision in anchors}
+    return [
+        decision for decision in decisions
+        if decision.candidate_id not in locked_ids
+    ] + copy.deepcopy(anchors)
+
+
 def _interval(d: Decision) -> Tuple[int, int]:
     if d.action == "wrap" and d.body_span:
         return d.body_span
@@ -210,7 +309,7 @@ def _apply_decisions(doc, decisions: List[Decision], ctx: PatchContext, ambiguou
     rejected: List[AppliedPatch] = []
     for d in decisions:
         candidate = _candidate_for_decision(d, candidates_by_id or {})
-        unsafe_reason = _unsafe_candidate_env_reason(d, candidate)
+        unsafe_reason = _unsafe_candidate_env_reason(d, candidate, doc)
         if not unsafe_reason:
             unsafe_reason = str(getattr(d, "_legalize_error", "") or "")
         if not unsafe_reason:
@@ -243,7 +342,7 @@ def _apply_decisions(doc, decisions: List[Decision], ctx: PatchContext, ambiguou
     return out, applied, rejected + rejected2, dropped
 
 
-def _unsafe_candidate_env_reason(decision: Decision, candidate) -> str:
+def _unsafe_candidate_env_reason(decision: Decision, candidate, doc=None) -> str:
     """最终应用门：复查/缓存也不能把 proof 候选改成定理，反之亦然。"""
     if decision.action != "wrap" or candidate is None:
         return ""
@@ -251,6 +350,30 @@ def _unsafe_candidate_env_reason(decision: Decision, candidate) -> str:
         return "证明候选只能使用 proof 环境；不兼容的 AI/复查环境已保守跳过"
     if candidate.kind == "theorem-like" and decision.env == "proof":
         return "定理类候选不能改成 proof 环境；不兼容的 AI/复查环境已保守跳过"
+    anchor = (
+        decision.payload.get(DETERMINISTIC_SEMANTIC_ANCHOR_KEY)
+        if isinstance(decision.payload, dict) else None
+    )
+    if anchor is not None:
+        if not isinstance(anchor, dict) or doc is None:
+            return "确定性语义锚点缺少可复验的源文档证据"
+        expected_env = str(anchor.get("env", "") or "")
+        actual_env = str(decision.env or "")
+        expected_span = anchor.get("body_span")
+        if anchor.get("candidate_id") != candidate.id:
+            return "确定性语义锚点的候选 ID 与当前源候选不一致"
+        if anchor.get("kind") != candidate.kind:
+            return "确定性语义锚点的结构类型与当前源候选不一致"
+        if actual_env.removesuffix("*") != expected_env.removesuffix("*"):
+            return "确定性语义锚点的目标环境被改写，已保守拒绝"
+        if (
+            not isinstance(expected_span, list)
+            or len(expected_span) != 2
+            or decision.body_span != tuple(expected_span)
+        ):
+            return "确定性语义锚点的源范围被改写，已保守拒绝"
+        if _semantic_span_hash(doc, decision.body_span) != anchor.get("source_sha256"):
+            return "确定性语义锚点覆盖的源内容或数学文本已变化，已保守拒绝"
     return ""
 
 
@@ -412,7 +535,8 @@ def run_pipeline(
     template_name = template_label(template) if template else ""
     ocr_structure_notes: List[dict] = []
     ocr_structure_patches: List[AppliedPatch] = []
-    if is_ocr_document(text):
+    ocr_semantic_lock_enabled = is_ocr_document(text)
+    if ocr_semantic_lock_enabled:
         emit("outline", 0.035, "正在根据 PDF 大纲校正章节与目录")
         ocr_ops, ocr_structure_notes = build_ocr_structure_ops(text)
         if ocr_ops:
@@ -472,6 +596,27 @@ def run_pipeline(
     ctx = _build_context(doc, known_structured_envs)
     scan_res = scan(doc, pack, structured_envs=ctx.existing_envs)
     candidates_by_id = {c.id: c for c in scan_res.candidates}
+    semantic_anchors: List[Decision] = []
+    locked_semantic_ids = set()
+    ocr_formal_candidate_ids = {
+        candidate.id for candidate in scan_res.candidates
+        if ocr_semantic_lock_enabled
+        and (
+            candidate.kind == "proof"
+            or (
+                candidate.kind == "theorem-like"
+                and str(candidate.payload.get("number", "") or "").strip()
+            )
+        )
+    }
+    if ocr_semantic_lock_enabled:
+        semantic_anchors, locked_semantic_ids = _build_ocr_semantic_anchors(
+            doc,
+            scan_res,
+            ctx,
+            rule_config,
+            pack,
+        )
     emit(
         "scan",
         0.20,
@@ -494,7 +639,10 @@ def run_pipeline(
     elif mode == "ai":
         deterministic_kinds = {"bilingual-title", "exercise-section"}
         rule_decisions, ambiguous = build_rule_decisions(doc, scan_res, rule_config, kinds=deterministic_kinds, pack=pack)
-        ai_candidates = [c for c in scan_res.candidates if c.kind in AI_KINDS]
+        ai_candidates = [
+            c for c in scan_res.candidates
+            if c.kind in AI_KINDS and c.id not in locked_semantic_ids
+        ]
         cfg = ai_config or AIConfig()
         client = ai_client or build_text_client(cfg, "decide")
         try:
@@ -555,7 +703,7 @@ def run_pipeline(
                 progress_callback=decision_progress,
                 control_callback=control,
             )
-            decisions = rule_decisions + ai_decisions
+            decisions = rule_decisions + semantic_anchors + ai_decisions
             ambiguous += ai_amb
             ai_usage["decide"] = usage
         except LLMError as e:
@@ -594,26 +742,43 @@ def run_pipeline(
             ambiguous=len(ambiguous),
         )
 
-    if not decisions_reused:
-        # Validate AI source ranges before deriving theorem declarations.  A
-        # fail-closed short wrap must not leave an orphan ``\newtheorem`` in an
-        # otherwise untouched document while it waits for pending review.
-        if candidates_by_id:
-            from .legalize import legalize_decisions
+    if mode == "ai" and semantic_anchors:
+        # Cached v1.2.1 decisions and model output are both subordinate to the
+        # current source-derived anchor.  Removing stale notes/manual items for
+        # these IDs prevents one candidate from appearing as both safely applied
+        # and unresolved.  Explicit user rejection is applied later via exclude.
+        decisions = _merge_semantic_anchors(decisions, semantic_anchors)
+        ambiguous = [
+            item for item in ambiguous
+            if str(item.get("candidate_id", "") or "") not in locked_semantic_ids
+        ]
+        ai_notes = [
+            item for item in ai_notes
+            if str(item.get("candidate_id", "") or "") not in locked_semantic_ids
+        ]
 
-            legalize_decisions(
-                doc, decisions, candidates_by_id, ctx.existing_envs
-            )
-        pre = build_preamble_decision(
-            doc,
-            ctx,
-            [
-                decision for decision in decisions
-                if not getattr(decision, "_legalize_error", "")
-            ],
+    # Revalidate cached/model ranges before deriving theorem declarations.  A
+    # v1.2.1 cache may not know about newly locked OCR formal entries, so its
+    # old preamble cannot be trusted to contain every required environment.
+    if candidates_by_id:
+        from .legalize import legalize_decisions
+
+        legalize_decisions(
+            doc, decisions, candidates_by_id, ctx.existing_envs
         )
-        if pre is not None:
-            decisions.append(pre)
+    decisions = [
+        decision for decision in decisions if decision.action != "preamble-add"
+    ]
+    pre = build_preamble_decision(
+        doc,
+        ctx,
+        [
+            decision for decision in decisions
+            if not getattr(decision, "_legalize_error", "")
+        ],
+    )
+    if pre is not None:
+        decisions.append(pre)
     for d in decisions:
         if d.action == "convert-to-exercise-env" and not d.env:
             d.env = ctx.exercise_env
@@ -648,15 +813,30 @@ def run_pipeline(
         completed_candidates=[d.candidate_id for d in decisions],
     )
 
+    active_semantic_anchors = [
+        decision for decision in decisions
+        if isinstance(decision.payload, dict)
+        and DETERMINISTIC_SEMANTIC_ANCHOR_KEY in decision.payload
+    ]
+    active_locked_semantic_ids = {
+        decision.candidate_id for decision in active_semantic_anchors
+    }
+    reviewable_applied = [
+        patch for patch in applied
+        if patch.decision.candidate_id not in active_locked_semantic_ids
+    ]
+    review_executed = False
+
     # AI 复查（默认开启）。即使没有补丁，只要初次 AI 留下 none/歧义项，
     # 也必须给复查器真实源片段；否则漏答会被静默当作整批通过。
     if (
         mode == "ai"
         and (ai_config is None or ai_config.review_enabled)
-        and (applied or ai_notes or ambiguous)
+        and (reviewable_applied or ai_notes or ambiguous)
         and not ai_degraded
         and not decisions_reused
     ):
+        review_executed = True
         cfg = ai_config or AIConfig()
         rclient = review_client or build_text_client(cfg, "review")
         # 漏报抽查：AI 判定"无需处理"的候选一并交复查复核（可 missed-extra 反悔）
@@ -681,12 +861,50 @@ def run_pipeline(
                     review_findings=state.get("findings", 0),
                 )
 
+            review_decisions = [
+                decision for decision in decisions
+                if decision.candidate_id not in active_locked_semantic_ids
+            ]
+
+            def review_apply(review_ds):
+                full_decisions = _merge_semantic_anchors(
+                    review_ds,
+                    active_semantic_anchors,
+                )
+                review_out, review_applied, review_rejected, review_dropped = (
+                    _apply_decisions(
+                        doc,
+                        full_decisions,
+                        ctx,
+                        ambiguous,
+                        candidates_by_id=candidates_by_id,
+                    )
+                )
+                # Locked OCR spans are present in every preview but are not
+                # exposed as editable review targets.  Thus a model cannot
+                # expand their range, change their kind, or remove them.
+                return (
+                    review_out,
+                    [
+                        patch for patch in review_applied
+                        if patch.decision.candidate_id not in active_locked_semantic_ids
+                    ],
+                    [
+                        patch for patch in review_rejected
+                        if patch.decision.candidate_id not in active_locked_semantic_ids
+                    ],
+                    [
+                        item for item in review_dropped
+                        if item[0].candidate_id not in active_locked_semantic_ids
+                    ],
+                )
+
             review_info = run_review(
                 rclient,
                 doc,
                 ctx,
-                decisions,
-                lambda ds: _apply_decisions(doc, ds, ctx, ambiguous, candidates_by_id=candidates_by_id),
+                review_decisions,
+                review_apply,
                 review_ambiguous,
                 cfg,
                 mode,
@@ -702,7 +920,10 @@ def run_pipeline(
             out = review_info["out"]
             applied = review_info["applied"]
             rejected = review_info["rejected"]
-            decisions = review_info["decisions"]
+            decisions = _merge_semantic_anchors(
+                review_info["decisions"],
+                active_semantic_anchors,
+            )
             # wrong-env / missed-extra 可能改变最终需要的定理环境。初次决策前
             # 生成的 preamble-add 已经陈旧，必须按最后一轮决策重建；否则会得到
             # ``\begin{lemma}`` 却没有 ``\newtheorem*{lemma}`` 的不可编译结果。
@@ -955,7 +1176,40 @@ def run_pipeline(
         item for item in ambiguous
         if str(item.get("candidate_id", "") or "") in candidate_ids
     ]
-    structure_safe = not missing_decision_ids and not unresolved_items
+    applied_wrap_ids = {
+        patch.decision.candidate_id for patch in applied
+        if patch.decision.action == "wrap"
+    }
+    explicitly_rejected_ids = {
+        decision.candidate_id for decision in user_rejected
+    }
+    residual_formal_ids = sorted(
+        ocr_formal_candidate_ids
+        - applied_wrap_ids
+        - explicitly_rejected_ids
+    )
+    for candidate_id in residual_formal_ids:
+        candidate = candidates_by_id.get(candidate_id)
+        item = {
+            "candidate_id": candidate_id,
+            "line": candidate.span.start_line if candidate is not None else 1,
+            "reason": (
+                "OCR 显式 formal 标题仍未形成完整环境；"
+                "已阻止导出，避免把漏套环境当成分析完成"
+            ),
+        }
+        if not any(
+            old.get("candidate_id") == candidate_id
+            and old.get("reason") == item["reason"]
+            for old in ambiguous
+        ):
+            ambiguous.append(item)
+            unresolved_items.append(item)
+    structure_safe = bool(
+        not missing_decision_ids
+        and not unresolved_items
+        and not residual_formal_ids
+    )
     verification["structure_decisions"] = {
         "ok": structure_safe,
         "candidate_total": len(candidate_ids),
@@ -966,13 +1220,11 @@ def run_pipeline(
         ),
         "missing_ids": missing_decision_ids,
         "manual_required": len(unresolved_items),
+        "formal_total": len(ocr_formal_candidate_ids),
+        "formal_wrapped": len(ocr_formal_candidate_ids & applied_wrap_ids),
+        "formal_residual_ids": residual_formal_ids,
     }
-    review_checked = bool(
-        mode == "ai"
-        and (ai_config is None or ai_config.review_enabled)
-        and (applied or ai_notes or ambiguous)
-        and not decisions_reused
-    )
+    review_checked = review_executed
     review_safe = bool(
         not review_checked
         or (

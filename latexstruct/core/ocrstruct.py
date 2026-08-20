@@ -70,6 +70,8 @@ MATH_EVENT_RE = re.compile(
 )
 ACTIVE_TOC_RE = re.compile(r"\\tableofcontents(?![A-Za-z@])")
 LOCAL_TOC_MARKER = "% LaTeXStruct-Local-Contents"
+RUNNING_HEADER_MAX_TOP_OFFSET = 3
+RUNNING_HEADER_COMMAND_MAX_TOP_OFFSET = 8
 PRINTED_PAGE_MARKER_PREFIX = "% LaTeXStruct-Printed-Page: "
 PRINTED_DOT_LEADER_RE = re.compile(r"(?:\.\s*){3,}")
 EXERCISE_HEADING_RE = re.compile(
@@ -513,6 +515,34 @@ def _printed_folio_number(value: str) -> Optional[int]:
     return page if page > 0 else None
 
 
+def _follows_display_math(lines: List[str], line_no: int) -> bool:
+    """Protect a prose tail that completes the display immediately above it."""
+    for previous in range(line_no - 1, max(0, line_no - 5), -1):
+        stripped = lines[previous - 1].strip()
+        if not stripped or stripped.startswith("%"):
+            continue
+        return bool(
+            stripped == r"\]"
+            or re.fullmatch(
+                r"\\end\{(?:equation|equation\*|align|align\*|gather|gather\*|multline|multline\*)\}",
+                stripped,
+            )
+        )
+    return False
+
+
+def _within_running_header_margin(hit: HeadingCandidate, position: int) -> bool:
+    """Require page-margin placement plus syntax evidence for a wider band."""
+    limit = RUNNING_HEADER_MAX_TOP_OFFSET
+    # OCR engines commonly encode running heads as starred section commands.
+    # That explicit non-body syntax is strong enough to tolerate a few other
+    # page-furniture lines above it; plain/styled prose gets only the strict
+    # three-line outer-margin allowance.
+    if hit.kind == "command" and hit.starred:
+        limit = RUNNING_HEADER_COMMAND_MAX_TOP_OFFSET
+    return position <= limit
+
+
 def _manual_toc_entry_parts(line: str) -> Optional[Tuple[str, int]]:
     """Return the inert title text and printed page from an unambiguous TOC row."""
     stripped = str(line or "").strip()
@@ -856,16 +886,25 @@ def _build_exercise_fidelity_ops(lines: List[str]) -> Tuple[List[PendingOp], Lis
 
 
 def _build_syntax_repair_ops(lines: List[str]) -> Tuple[List[PendingOp], List[dict]]:
-    """修复 OCR 唯一可证明的外层环境/数学环境交叉闭合。
+    """修复 OCR 可证明的数学环境闭合和非法段落空行。
 
     只移动一条完整的 ``\\end{theorem}``（及同类环境），公式和正文逐字不改；
-    所有改动仍通过 PendingOp 进入可逆补丁与内容不变校验。
+    展示数学环境内的纯空白行会产生非法 ``\\par``，因此只删除这类零字符
+    行。所有改动仍通过 PendingOp 进入可逆补丁与内容不变校验。
     """
     outer_stack: List[Tuple[str, int]] = []
     math_stack: List[str] = []
     operations = []
     notes = []
     for line_no, line in enumerate(lines, start=1):
+        if math_stack and not line.strip():
+            operations.append(PendingOp("delete_line", line_no, old=line))
+            notes.append({
+                "line": line_no,
+                "status": "normalized-display-spacing",
+                "reason": "删除展示数学环境内会产生非法 \\par 的纯空白行",
+            })
+            continue
         env = EXACT_ENV_LINE_RE.match(line.split("%", 1)[0])
         if env and env.group("name") in OUTER_TEXT_ENVS:
             kind, name = env.group("kind"), env.group("name")
@@ -1392,8 +1431,10 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
             "reason": "已将章首手抄目录替换为可由成品模板重建的局部目录标记",
         })
 
-    # 重复、靠近段首且未映射到 PDF 大纲的短文本可确定为运行页眉污染。
-    # OCR 既可能把它写成 section*，也可能只是普通文本/\noindent 文本。
+    # 重复、位于稳定页首外边距且未映射到 PDF 大纲的短文本才可确定为
+    # 运行页眉污染。普通/样式文本三行以后已经进入正文版心；只有明确的
+    # starred section 页眉语法可使用稍宽边距。紧跟展示公式的短句尤其常见于
+    # 定理陈述尾部，始终视为正文证据。
     unmatched_commands = [
         hit for hit in candidates
         if hit.kind in {"command", "plain", "styled"} and hit.line not in matched_lines
@@ -1404,7 +1445,10 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
     ]
     near_top = [
         hit for hit in unmatched_commands
-        if page_positions.get(hit.line, 10_000) <= 8
+        if _within_running_header_margin(
+            hit, page_positions.get(hit.line, 10_000),
+        )
+        and not _follows_display_math(lines, hit.line)
     ]
     counts = Counter(_plain_text(hit.visible) for hit in near_top)
     pages_by_title = {
@@ -1414,7 +1458,10 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
     for hit in unmatched_commands:
         normalized = _plain_text(hit.visible)
         if (
-            page_positions.get(hit.line, 10_000) <= 8
+            _within_running_header_margin(
+                hit, page_positions.get(hit.line, 10_000),
+            )
+            and not _follows_display_math(lines, hit.line)
             and counts[normalized] >= 2
             and len(pages_by_title.get(normalized, set())) >= 2
         ):
@@ -1503,6 +1550,26 @@ def _actual_headings(text: str) -> List[dict]:
             "normalized": _plain_text(hit.visible),
         })
     return result
+
+
+def _metadata_supports_generated_toc(metadata: dict) -> bool:
+    """Return true when the PDF outline is substantial enough for a TOC.
+
+    ``source_has_toc`` records whether the source visibly printed a directory;
+    it does not say whether the PDF outline already proves a navigable chapter
+    tree.  Publication templates should generate a TOC for the latter as well.
+    """
+    outline = [item for item in metadata.get("outline", []) if item.get("title")]
+    if not outline:
+        return False
+    minimum_level = min(int(item.get("level", 0)) for item in outline)
+    top_titles = {
+        _plain_text(str(item.get("title", "")))
+        for item in outline
+        if int(item.get("level", 0)) == minimum_level
+        and _plain_text(str(item.get("title", "")))
+    }
+    return len(top_titles) >= 2 or (len(top_titles) == 1 and len(outline) >= 4)
 
 
 def check_ocr_structure(text: str) -> dict:
@@ -1598,9 +1665,15 @@ def check_ocr_structure(text: str) -> dict:
             ),
         })
 
-    if metadata.get("source_has_toc"):
+    toc_expected = bool(metadata.get("source_has_toc")) or (
+        (elegant_output or faithful_output)
+        and _metadata_supports_generated_toc(metadata)
+    )
+    if toc_expected:
         if active_toc_count == 0:
-            issues.append({"reason": "源文档含目录，但结果没有 \\tableofcontents"})
+            issues.append({
+                "reason": "源目录或可靠章节树要求全局目录，但结果没有 \\tableofcontents",
+            })
         elif active_toc_count > 1:
             issues.append({"reason": f"结果含 {active_toc_count} 个活动 \\tableofcontents，必须且只能保留一个"})
         if re.search(r"\\dotfill\b", active_text):
@@ -1660,8 +1733,13 @@ def check_ocr_structure(text: str) -> dict:
             continue
         if _is_exercise_body_heading(lines, line_no) or _exercise_label_stem(line):
             continue
+        if _follows_display_math(lines, line_no):
+            continue
         normalized = _plain_text(hit.visible)
-        if positions.get(line_no, 10_000) <= 3 and len(normalized) >= 6:
+        if (
+            positions.get(line_no, 10_000) <= RUNNING_HEADER_MAX_TOP_OFFSET
+            and len(normalized) >= 6
+        ):
             near_top.append((line_no, hit.page, normalized, hit.visible))
     top_counts = Counter(item[2] for item in near_top)
     for line_no, _page, normalized, visible in near_top:
@@ -1717,5 +1795,5 @@ def check_ocr_structure(text: str) -> dict:
         "expected": len(metadata.get("outline", [])),
         "matched": matched,
         "actual": len(actual),
-        "toc_expected": bool(metadata.get("source_has_toc")),
+        "toc_expected": toc_expected,
     }

@@ -25,7 +25,7 @@ DOC_CLASS_CAPTURE_RE = re.compile(
     r"^\s*\\documentclass(?:\[[^\]]*\])?\s*\{\s*([^{}]+?)\s*\}\s*$"
 )
 BEGIN_DOCUMENT_RE = re.compile(r"^\s*\\begin\s*\{document\}\s*$")
-TABLEOFCONTENTS_RE = re.compile(r"^\s*\\tableofcontents\s*$")
+TABLEOFCONTENTS_RE = re.compile(r"^\s*\\tableofcontents\s*(?:%.*)?$")
 PAGE_BREAK_COMMAND_RE = re.compile(r"^\s*\\(?:clearpage|newpage)\s*$")
 FRONTMATTER_RE = re.compile(r"^\s*\\frontmatter\s*$")
 MAINMATTER_RE = re.compile(r"^\s*\\mainmatter\s*$")
@@ -38,6 +38,15 @@ CIRCLED_LINE_RE = re.compile(r"^\s*\\newcommand\*?\\circled\b.*$")
 CHAPTER_RE = re.compile(r"^\d+\s+\S")
 TOC_ENTRY_SUFFIX_RE = re.compile(r"\s+\d+\s*$")
 CONTENTS_TITLE_RE = re.compile(r"^contents$", re.I)
+MANUAL_CONTENTS_HEADING_RE = re.compile(
+    r"^\s*(?:\\(?:chapter|section|subsection)\*?\s*\{\s*contents\s*\}"
+    r"|\\(?:textbf|textsc|textit|emph)\s*\{\s*contents\s*\}|contents)\s*$",
+    re.I,
+)
+MANUAL_TOC_ENTRY_RE = re.compile(
+    r"^\s*.+?(?:\\dotfill|\.{3,})\s*(?:[ivxlcdm]+|\d+)\s*$",
+    re.I,
+)
 LOCAL_CONTENTS_MARKER_RE = re.compile(
     r"^\s*%\s*LaTeXStruct-Local-Contents\s*$", re.I,
 )
@@ -51,6 +60,10 @@ MAX_PRINTED_PAGE = 999_999
 SECTION_COMMAND_LINE_RE = re.compile(
     r"^(?P<indent>\s*)\\(?P<cmd>section|subsection|subsubsection)"
     r"(?P<rest>\*?\s*\{)"
+)
+ADD_CONTENTS_LINE_RE = re.compile(
+    r"^(?P<prefix>\s*\\addcontentsline\s*\{toc\}\s*\{)"
+    r"(?P<cmd>section|subsection|subsubsection)(?P<rest>\}\s*\{.*)$"
 )
 ELEGANT_NEW_THEOREM_RE = re.compile(r"\\elegantnewtheorem\s*\{([^{}]+)\}")
 
@@ -430,6 +443,139 @@ def _non_box_sections(doc):
     return out
 
 
+def _promote_article_toc_entry_ops(lines: List[str]) -> List[PendingOp]:
+    """Keep manual ``addcontentsline`` levels aligned with article promotion."""
+    command_map = {
+        "section": "chapter",
+        "subsection": "section",
+        "subsubsection": "subsection",
+    }
+    ops = []
+    for line_no, line in enumerate(lines, start=1):
+        match = ADD_CONTENTS_LINE_RE.match(line)
+        if match is None:
+            continue
+        target = command_map[match.group("cmd")]
+        ops.append(PendingOp(
+            "replace_line",
+            line_no,
+            old=line,
+            new=match.group("prefix") + target + match.group("rest"),
+        ))
+    return ops
+
+
+def _active_standalone_toc_lines(text: str) -> List[int]:
+    """Return active, standalone global-TOC commands as one-based lines.
+
+    Restricting this to standalone commands avoids treating a command inside a
+    macro definition as the document's actual table of contents.  Commented
+    examples are removed by ``mask_comments`` before matching.
+    """
+    active_lines = mask_comments(text).split("\n")
+    return [
+        line_no
+        for line_no, line in enumerate(active_lines, start=1)
+        if TABLEOFCONTENTS_RE.match(line)
+    ]
+
+
+def _has_manual_contents_block(text: str) -> bool:
+    """Detect only a strong, visibly printed contents block.
+
+    A lone sentence or heading named ``Contents`` is not enough.  Requiring at
+    least two leader/page-number rows matches the minimum two-heading evidence
+    used to generate a global TOC and keeps automatic TOC generation from
+    placing a second directory beside a source-authored one.  OCR documents
+    with authoritative outline/TOC metadata are normalized earlier by
+    ``ocrstruct``; an unverified manual block is deliberately preserved here.
+    """
+    active_lines = mask_comments(text).split("\n")
+    for index, line in enumerate(active_lines):
+        if not MANUAL_CONTENTS_HEADING_RE.match(line):
+            continue
+        entries = 0
+        inspected = 0
+        for following in active_lines[index + 1:index + 61]:
+            stripped = following.strip()
+            if not stripped:
+                continue
+            if re.match(r"^\\(?:chapter|section|subsection)\*?\s*\{", stripped):
+                break
+            inspected += 1
+            if MANUAL_TOC_ENTRY_RE.match(stripped):
+                entries += 1
+                if entries >= 2:
+                    return True
+            elif inspected >= 8 and entries == 0:
+                break
+    return False
+
+
+def _global_toc_structure_anchor(text: str, doc) -> Tuple[int | None, str]:
+    """Return a safe insertion anchor before the first top-level heading.
+
+    Explicit, numbered LaTeX headings are the content authority.  Two distinct
+    top-level headings are sufficient evidence for a global directory; one
+    top-level heading is accepted only when it has at least three additional
+    numbered descendants.  This avoids adding a mostly empty TOC to short
+    one-section notes while covering article, book, ctex and ElegantBook input.
+    """
+    sections = [section for section in _non_box_sections(doc) if not section.starred]
+    if not sections:
+        return None, "没有可验证的编号章节结构"
+
+    active = mask_comments(text)
+    class_match = re.search(
+        r"(?m)^\s*\\documentclass(?:\[[^\]]*\])?\s*\{\s*([^{}]+?)\s*\}\s*$",
+        active,
+    )
+    document_class = class_match.group(1).strip().lower() if class_match else ""
+    if document_class in ARTICLE_CLASSES:
+        top_command = "section"
+    elif any(section.cmd == "chapter" for section in sections):
+        top_command = "chapter"
+    else:
+        top_command = "section"
+
+    top_sections = [section for section in sections if section.cmd == top_command]
+    normalized_titles = {
+        re.sub(r"\s+", " ", str(section.title or "")).strip().casefold()
+        for section in top_sections
+        if str(section.title or "").strip()
+    }
+    enough_structure = (
+        len(normalized_titles) >= 2
+        or (len(normalized_titles) == 1 and len(sections) >= 4)
+    )
+    if not enough_structure:
+        return None, "编号章节不足，未生成空洞的全局目录"
+    if _has_manual_contents_block(text):
+        return None, "检测到含页码的手排目录，已保留且未叠加第二份目录"
+    return min(section.span.start_line for section in top_sections) - 1, (
+        f"已由 {len(top_sections)} 个顶层标题确认全局目录结构"
+    )
+
+
+def _deduplicate_global_toc_ops(
+    text: str,
+) -> Tuple[List[PendingOp], List[int], List[dict]]:
+    """Keep the first active global TOC and remove command-only duplicates."""
+    lines = text.split("\n")
+    toc_lines = _active_standalone_toc_lines(text)
+    ops = [
+        PendingOp("delete_line", line_no, old=lines[line_no - 1])
+        for line_no in toc_lines[1:]
+    ]
+    notes = []
+    if ops:
+        notes.append({
+            "line": toc_lines[1],
+            "reason": f"已删除 {len(ops)} 个重复的全局目录命令；全文只保留一个目录",
+        })
+    return ops, toc_lines, notes
+
+
 def _build_elegantbook_ops(
     text: str,
     context: Dict[str, str] | None = None,
@@ -506,6 +652,7 @@ def _build_elegantbook_ops(
     # article -> book 是文档类语义适配，不是标题猜测。所有已解析层级整体上移，
     # 因而不会出现 book 类中只有 section 时的 0.1 编号。
     shifted = 0
+    promoted_toc_entries: List[PendingOp] = []
     sections = _non_box_sections(doc)
     if original_class in ARTICLE_CLASSES and not any(section.cmd == "chapter" for section in sections):
         command_map = {
@@ -528,10 +675,20 @@ def _build_elegantbook_ops(
             )
             ops.append(PendingOp("replace_line", line_no, old=old, new=new))
             shifted += 1
+        promoted_toc_entries = _promote_article_toc_entry_ops(lines)
+        ops.extend(promoted_toc_entries)
         if shifted:
             notes.append({
                 "line": 1,
                 "reason": f"文章型标题层级已整体上移 {shifted} 处，避免 ElegantBook 出现 0.1 章节",
+            })
+        if promoted_toc_entries:
+            notes.append({
+                "line": promoted_toc_entries[0].line,
+                "reason": (
+                    f"已同步上移 {len(promoted_toc_entries)} 个手动目录条目层级；"
+                    "无编号 References 不再误列为 section"
+                ),
             })
 
     # 补齐 ElegantBook 未内置、但 LaTeXStruct 会识别的常用定理环境。输出实际
@@ -570,10 +727,10 @@ def _build_elegantbook_ops(
     if has_title and not has_maketitle:
         ops.append(PendingOp("insert_line", begin_index + 1, new=r"\maketitle"))
 
-    toc_index = next(
-        (index for index, line in enumerate(lines) if TABLEOFCONTENTS_RE.match(line)),
-        None,
-    )
+    toc_dedupe_ops, toc_lines, toc_notes = _deduplicate_global_toc_ops(text)
+    ops.extend(toc_dedupe_ops)
+    notes.extend(toc_notes)
+    toc_index = toc_lines[0] - 1 if toc_lines else None
     if toc_index is not None:
         active_lines = active.split("\n")
         has_frontmatter = any(FRONTMATTER_RE.match(line) for line in active_lines[:toc_index])
@@ -597,10 +754,38 @@ def _build_elegantbook_ops(
             "reason": "真实目录使用前置页码，正文从第 1 页重新编号；目录条目由 LaTeX 二次编译生成",
         })
     else:
-        notes.append({
-            "line": 1,
-            "reason": "未凭数字标题臆造目录；只有 OCR 大纲或原文件明确目录时才使用 \\tableofcontents",
-        })
+        toc_anchor, toc_reason = _global_toc_structure_anchor(text, doc)
+        if toc_anchor is None:
+            notes.append({"line": 1, "reason": toc_reason})
+        else:
+            active_lines = active.split("\n")
+            existing_mainmatter = next(
+                (
+                    index for index, line in enumerate(active_lines[:toc_anchor])
+                    if MAINMATTER_RE.match(line)
+                ),
+                None,
+            )
+            if existing_mainmatter is not None:
+                toc_anchor = existing_mainmatter
+            has_frontmatter = any(
+                FRONTMATTER_RE.match(line) for line in active_lines[:toc_anchor]
+            )
+            if not has_frontmatter:
+                ops.append(PendingOp("insert_line", toc_anchor, new=r"\frontmatter"))
+            ops.extend([
+                PendingOp("insert_line", toc_anchor, new=r"\tableofcontents"),
+                PendingOp("insert_line", toc_anchor, new=r"\clearpage"),
+            ])
+            if existing_mainmatter is None:
+                ops.append(PendingOp("insert_line", toc_anchor, new=r"\mainmatter"))
+            notes.append({
+                "line": toc_anchor + 1,
+                "reason": (
+                    f"{toc_reason}；已自动生成唯一的全局目录，"
+                    "正文从第 1 页重新编号"
+                ),
+            })
     return ops, notes
 
 
@@ -615,6 +800,9 @@ def _build_faithfulbook_ops(
     copying OCR body lines into the preamble.
     """
     if uses_faithfulbook_style(text):
+        duplicate_ops, _toc_lines, duplicate_notes = _deduplicate_global_toc_ops(text)
+        if duplicate_ops:
+            return duplicate_ops, duplicate_notes
         return [], [{"line": 1, "reason": "faithfulbook 模板已存在，未重复插入"}]
 
     try:
@@ -669,6 +857,15 @@ def _build_faithfulbook_ops(
     class_line = rf"\documentclass[{class_options}]{{{target_class}}}"
     ops: List[PendingOp] = []
     notes: List[dict] = []
+    toc_dedupe_ops, global_toc_lines, toc_notes = _deduplicate_global_toc_ops(text)
+    ops.extend(toc_dedupe_ops)
+    notes.extend(toc_notes)
+    auto_toc_anchor = None
+    auto_toc_reason = ""
+    if not global_toc_lines:
+        auto_toc_anchor, auto_toc_reason = _global_toc_structure_anchor(text, doc)
+        if auto_toc_anchor is None:
+            notes.append({"line": 1, "reason": auto_toc_reason})
     if lines[dc_idx] != class_line:
         ops.append(PendingOp("replace_line", dc_idx + 1, old=lines[dc_idx], new=class_line))
 
@@ -710,6 +907,7 @@ def _build_faithfulbook_ops(
     sections = _non_box_sections(doc)
     article_source = original_class in ARTICLE_CLASSES
     shifted = 0
+    promoted_toc_entries: List[PendingOp] = []
     chapter_nodes = []
     if article_source and not any(section.cmd == "chapter" for section in sections):
         command_map = {
@@ -734,6 +932,8 @@ def _build_faithfulbook_ops(
             shifted += 1
             if target == "chapter" and not section.starred:
                 chapter_nodes.append(section)
+        promoted_toc_entries = _promote_article_toc_entry_ops(lines)
+        ops.extend(promoted_toc_entries)
     else:
         chapter_nodes.extend(
             section for section in sections
@@ -772,16 +972,36 @@ def _build_faithfulbook_ops(
                 "insert_line", begin_index + 1, new=r"\LSFirstPageEmpty",
             ))
             first_front_page_emptied = True
-        if not any(MAINMATTER_RE.match(line) for line in active_lines):
-            mainmatter_anchor = first_chapter_line - 1
-            markers_before_first_chapter = [
-                line_no for line_no, _ in printed_page_markers
-                if begin_index + 1 < line_no < first_chapter_line
-            ]
-            if markers_before_first_chapter:
-                # Switch to arabic book semantics before applying the source's
-                # first authoritative printed-page counter.
-                mainmatter_anchor = max(markers_before_first_chapter) - 1
+        mainmatter_line = next(
+            (
+                line_no for line_no, line in enumerate(active_lines, start=1)
+                if MAINMATTER_RE.match(line)
+            ),
+            None,
+        )
+        mainmatter_anchor = first_chapter_line - 1
+        markers_before_first_chapter = [
+            line_no for line_no, _ in printed_page_markers
+            if begin_index + 1 < line_no < first_chapter_line
+        ]
+        if markers_before_first_chapter:
+            # Switch to arabic book semantics before applying the source's
+            # first authoritative printed-page counter.
+            mainmatter_anchor = max(markers_before_first_chapter) - 1
+        if mainmatter_line is not None and mainmatter_line < first_chapter_line:
+            mainmatter_anchor = mainmatter_line - 1
+        if auto_toc_anchor is not None:
+            ops.extend([
+                PendingOp("insert_line", mainmatter_anchor, new=r"\tableofcontents"),
+                PendingOp("insert_line", mainmatter_anchor, new=r"\clearpage"),
+            ])
+            notes.append({
+                "line": mainmatter_anchor + 1,
+                "reason": (
+                    f"{auto_toc_reason}；已在正文前自动生成唯一的全局目录"
+                ),
+            })
+        if mainmatter_line is None:
             ops.append(PendingOp(
                 "insert_line", mainmatter_anchor, new=r"\LSMainMatter",
             ))
@@ -849,6 +1069,14 @@ def _build_faithfulbook_ops(
         notes.append({
             "line": 1,
             "reason": f"文章型标题层级已整体上移 {shifted} 处以适配 book 章结构",
+        })
+    if promoted_toc_entries:
+        notes.append({
+            "line": promoted_toc_entries[0].line,
+            "reason": (
+                f"已同步上移 {len(promoted_toc_entries)} 个手动目录条目层级；"
+                "无编号 References 不再误列为 section"
+            ),
         })
     if pagination_added:
         notes.append({

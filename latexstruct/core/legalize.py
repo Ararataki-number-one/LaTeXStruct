@@ -534,6 +534,335 @@ def legalize_wrap(
     d.body_span = (bs, be)
 
 
+_DETERMINISTIC_STATEMENT_PUNCTUATION_RE = re.compile(
+    r"[.!?。？！]\s*(?:[}\])]|\\(?:textit|textbf|emph)\s*)*\s*$"
+)
+_DETERMINISTIC_STATEMENT_CLOSER_RE = re.compile(
+    r"(?:"
+    r"\\\]"
+    r"|\\end\s*\{(?:equation\*?|align\*?|alignat\*?|flalign\*?|"
+    r"gather\*?|multline\*?|eqnarray\*?|itemize|enumerate|description|cases)\}"
+    r")\s*(?:%[^\n]*)?$"
+)
+_DETERMINISTIC_STATEMENT_CONTINUATION_RE = re.compile(
+    r"^(?:"
+    r"as\s+(?:\$|\\\()"
+    r"|for\s+(?:all|every|each|any|some|no|sufficiently\b|infinitely\b)"
+    r"|then\b"
+    r"|or\b"
+    r"|where\b"
+    r"|whenever\b"
+    r"|provided(?:\s+that)?\b"
+    r"|subject\s+to\b"
+    r"|such\s+that\b"
+    r"|with\s+probability\b"
+    r"|independent\s+sets?\b"
+    r")",
+    re.I,
+)
+_DETERMINISTIC_STATEMENT_BODY_OPEN_RE = re.compile(
+    r"^(?:"
+    r"(?:every|each|any|no)\b"
+    r"|there\s+(?:exists?|are)\b"
+    r"|\$"
+    r"|\\\("
+    r"|\\\["
+    r"|\\begin\b"
+    r")",
+    re.I,
+)
+_DETERMINISTIC_STATEMENT_CONDITIONAL_OPEN_RE = re.compile(
+    r"^(?:let|suppose|assume|given|if|whenever)\b",
+    re.I,
+)
+_DETERMINISTIC_STATEMENT_MATH_EVIDENCE_RE = re.compile(
+    r"(?:"
+    r"\$[^$\n]+\$"
+    r"|\\\([^\n]*\\\)"
+    r"|\\\[[^\n]*\\\]"
+    r"|\\begin\s*\{(?:equation\*?|align\*?|gather\*?|multline\*?|cases)\}"
+    r"|(?<![<>=])(?:=|<=|>=|<|>)(?![<>=])"
+    r"|[≤≥≠∈∉⊂⊆⊃⊇≈≡]"
+    r")",
+)
+_DETERMINISTIC_STATEMENT_STRUCTURAL_ENVS = {
+    "equation", "equation*", "align", "align*", "alignat", "alignat*",
+    "flalign", "flalign*", "gather", "gather*", "multline", "multline*",
+    "eqnarray", "eqnarray*", "itemize", "enumerate", "description", "cases",
+}
+_DETERMINISTIC_PROOF_NATURAL_CLOSER_RE = re.compile(
+    r"(?:^|\n\s*|[.!?。；;：:]\s+)"
+    r"(?:"
+    r"as\s+(?:required|claimed|desired|needed)"
+    r"|which\s+(?:proves|establishes|completes)\s+"
+    r"(?:the\s+)?(?:claim|result|proof|theorem|lemma)"
+    r")\s*[.!?。]?\s*(?:%[^\n]*)?$",
+    re.I,
+)
+
+
+def _next_top_level_content_block(doc: Document, end_line: int) -> Optional[Block]:
+    """Return the first source atom after *end_line*, excluding outer wrappers."""
+    candidates = [
+        block
+        for block in doc.blocks
+        if block.span.start_line > end_line
+        and not (block.kind == "env" and block.name == "document")
+        and not block.in_env
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda block: (block.span.start_line, block.span.end_line))
+
+
+def _deterministic_statement_is_closed(doc: Document, start: int, end: int) -> bool:
+    """Prove a formal statement has a local source-level closing boundary.
+
+    This is deliberately narrower than ordinary AI legalization.  OCR formal
+    labels are locked only when a second, non-model gate can see either terminal
+    sentence punctuation or a complete display/list closer at the rule-selected
+    boundary.  The check never derives or rewrites mathematical content.
+    """
+    lines = doc.masked.split("\n")
+    if not (1 <= start <= end <= len(lines)):
+        return False
+    active = "\n".join(lines[start - 1:end]).rstrip()
+    if not active:
+        return False
+    return bool(
+        _DETERMINISTIC_STATEMENT_PUNCTUATION_RE.search(active)
+        or _DETERMINISTIC_STATEMENT_CLOSER_RE.search(active)
+    )
+
+
+def _deterministic_statement_body_opens_formally(text: str) -> bool:
+    """Validate the first prose body after an otherwise title-only atom."""
+    stripped = text.lstrip()
+    conditional = _DETERMINISTIC_STATEMENT_CONDITIONAL_OPEN_RE.match(stripped)
+    if conditional:
+        return bool(_DETERMINISTIC_STATEMENT_MATH_EVIDENCE_RE.search(stripped))
+    return bool(
+        _DETERMINISTIC_STATEMENT_BODY_OPEN_RE.match(stripped)
+        or _DETERMINISTIC_STATEMENT_CONTINUATION_RE.match(stripped)
+    )
+
+
+def _deterministic_statement_extension_is_supported(doc: Document, cand, end: int) -> bool:
+    """Reject rule-only lowercase paragraph expansion outside the title atom.
+
+    Rule scanning deliberately treats a lowercase paragraph as a possible
+    continuation.  That is useful recall evidence, but it is not strong enough
+    to create an immutable OCR anchor: a normal discussion paragraph can have
+    exactly the same shape.  Cross-atom deterministic statements therefore
+    admit only complete display/list atoms plus narrowly grammatical formal
+    continuations.  Every prose continuation must carry its own narrow formal
+    connector; an unstyled continuation additionally requires a preceding
+    display/list.  Uncertain multi-paragraph prose stays on the AI/manual path.
+    """
+    start = cand.span.start_line
+    candidate_atomic_end = _atomic_end(doc, cand.span.end_line, wrap_start=start)
+    if end <= candidate_atomic_end:
+        return True
+
+    body_seen = _candidate_atom_has_body(doc, cand)
+    structural_seen = False
+    cursor = candidate_atomic_end
+    extension_blocks = sorted(
+        (
+            block for block in doc.blocks
+            if block.span.start_line > candidate_atomic_end
+            and block.span.start_line <= end
+            and not (block.kind == "env" and block.name == "document")
+        ),
+        key=lambda block: (
+            block.span.start_line,
+            -(block.span.end_line - block.span.start_line),
+        ),
+    )
+    for block in extension_blocks:
+        # An outer display/list atom consumes its nested parser blocks.
+        if block.span.start_line <= cursor:
+            continue
+        if block.span.end_line > end:
+            return False
+        if block.kind == "displaymath" or (
+            block.kind == "env"
+            and block.name in _DETERMINISTIC_STATEMENT_STRUCTURAL_ENVS
+        ):
+            structural_seen = True
+            body_seen = True
+            cursor = block.span.end_line
+            continue
+        if block.kind != "para" or block.in_env:
+            return False
+        if _is_ocr_page_separator_text(block.text):
+            cursor = block.span.end_line
+            continue
+
+        first = _first_nonempty_line(block.text)
+        if not first:
+            cursor = block.span.end_line
+            continue
+        semantic, wrapper = _semantic_view(first)
+        formal_connector = bool(
+            _DETERMINISTIC_STATEMENT_CONTINUATION_RE.match(semantic.lstrip())
+        )
+        if not body_seen:
+            # A title-only atom may take exactly its first source paragraph as
+            # the statement body, but only when that paragraph opens with
+            # formal mathematical grammar.  This restores common
+            # ``Theorem 1.`` / ``Every graph ...`` layout without reviving the
+            # unconditional lowercase/styled expansion that caused over-wraps.
+            if not _deterministic_statement_body_opens_formally(semantic):
+                return False
+            body_seen = True
+            cursor = block.span.end_line
+            continue
+        # Every cross-atom prose paragraph must carry its own formal grammar
+        # evidence.  Typography is not semantic evidence, and a preceding
+        # display/list proves only that atom complete; neither may authorise an
+        # arbitrary historical or explanatory paragraph that follows it.
+        if not formal_connector:
+            return False
+        if wrapper is not None:
+            cursor = block.span.end_line
+            continue
+        if not structural_seen:
+            return False
+        cursor = block.span.end_line
+    return cursor >= end
+
+
+def _is_ocr_page_separator_text(text: str) -> bool:
+    """Recognise the isolated page commands inserted by OCR page merging."""
+    active = "\n".join(
+        line for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("%")
+    ).strip()
+    return active in (r"\clearpage", r"\newpage")
+
+
+def _deterministic_proof_is_closed(
+    doc: Document,
+    start: int,
+    end: int,
+    structured_envs: Optional[Collection[str]] = None,
+) -> bool:
+    """Require a source QED, or a natural closer backed by a reliable stop."""
+    if proof_body_has_terminal_explicit_qed(doc, start, end):
+        return True
+    stop = _next_stop_line(doc, start, structured_envs)
+    if stop is None or end >= stop:
+        return False
+    lines = doc.masked.split("\n")
+    if not (1 <= start <= end <= len(lines)):
+        return False
+    active = "\n".join(lines[start - 1:end]).rstrip()
+    return bool(
+        _PROOF_COMPLETION_RE.search(active)
+        or _CN_PROOF_END_RE.search(active)
+        or _DETERMINISTIC_PROOF_NATURAL_CLOSER_RE.search(active)
+    )
+
+
+def legalize_deterministic_wrap(
+    doc: Document,
+    d,
+    cand,
+    structured_envs: Optional[Collection[str]] = None,
+) -> None:
+    """Validate a rule-selected OCR formal span with an independent hard gate.
+
+    Proofs reuse the established QED/next-structure legalizer.  Numbered
+    theorem-like entries additionally require an exact keyword-derived
+    environment, an atomic rule boundary, a locally closed statement, and no
+    unconsumed lowercase/styled/display continuation.  Failure leaves the item
+    unlocked so the normal AI path can decide it; no partial wrap is emitted.
+    """
+    if hasattr(d, "_legalize_error"):
+        delattr(d, "_legalize_error")
+    if d.action != "wrap" or not d.body_span:
+        setattr(d, "_legalize_error", "确定性结构项缺少可验证的 wrap 范围")
+        return
+    if getattr(cand, "kind", "") == "proof":
+        if d.env != "proof":
+            setattr(d, "_legalize_error", "证明锚点的目标环境不是 proof")
+            return
+        legalize_wrap(doc, d, cand, structured_envs)
+        if hasattr(d, "_legalize_error"):
+            return
+        if not d.body_span or not _deterministic_proof_is_closed(
+            doc, d.body_span[0], d.body_span[1], structured_envs
+        ):
+            setattr(
+                d,
+                "_legalize_error",
+                "无显式 QED 的证明缺少可靠结构停点和终结语证据，未进入确定性锁定",
+            )
+        return
+    if getattr(cand, "kind", "") != "theorem-like":
+        setattr(d, "_legalize_error", "仅定理类或证明候选可成为确定性语义锚点")
+        return
+    expected_env = str(getattr(cand, "env_hint", "") or "")
+    if not expected_env or d.env != expected_env:
+        setattr(d, "_legalize_error", "目标环境与显式标题关键词不一致")
+        return
+    if not str(getattr(cand, "payload", {}).get("number", "") or "").strip():
+        setattr(d, "_legalize_error", "无显式编号的定理类标题不进入确定性锁定路径")
+        return
+
+    start, end = d.body_span
+    if start != cand.span.start_line or end < cand.span.end_line:
+        setattr(d, "_legalize_error", "确定性范围未完整覆盖标题原子")
+        return
+    atomic_end = _atomic_end(doc, end, wrap_start=start)
+    if atomic_end != end:
+        setattr(d, "_legalize_error", "确定性终点未落在完整段落、公式或列表边界")
+        return
+    stop = _next_stop_line(doc, start, structured_envs)
+    if stop is not None and end >= stop:
+        setattr(d, "_legalize_error", "确定性范围跨越下一可靠结构标题")
+        return
+    candidate_atomic_end = _atomic_end(
+        doc, cand.span.end_line, wrap_start=cand.span.start_line
+    )
+    if not _candidate_atom_has_body(doc, cand) and end <= candidate_atomic_end:
+        setattr(d, "_legalize_error", "标题原子没有可验证正文")
+        return
+    if not _deterministic_statement_extension_is_supported(doc, cand, end):
+        setattr(d, "_legalize_error", "普通小写叙述段不能作为定理跨原子扩展的锁定证据")
+        return
+    if not _deterministic_statement_is_closed(doc, start, end):
+        setattr(d, "_legalize_error", "定理陈述缺少局部可证明的句末或完整公式/列表边界")
+        return
+
+    next_block = _next_top_level_content_block(doc, end)
+    if next_block is not None:
+        if next_block.kind == "displaymath":
+            setattr(d, "_legalize_error", "规则终点之后仍有未包含的展示公式")
+            return
+        if next_block.kind == "env" and next_block.name in MATH_ENVS:
+            setattr(d, "_legalize_error", "规则终点之后仍有未包含的数学环境")
+            return
+        if next_block.kind == "para":
+            first = _first_nonempty_line(next_block.text)
+            semantic, wrapper = _semantic_view(first)
+            stripped = semantic.lstrip()
+            is_new_structure = bool(
+                _match_title(first)
+                or PROOF_RE.match(semantic)
+                or SECTION_START_RE.match(first)
+            )
+            if not is_new_structure and (
+                wrapper is not None
+                or stripped[:1].islower()
+                or stripped.startswith(("\\(", "$", "\\[", "\\begin"))
+            ):
+                setattr(d, "_legalize_error", "规则终点之后仍有语法承接段，未锁定该范围")
+                return
+    d.body_span = (start, end)
+
+
 def legalize_decisions(
     doc: Document,
     decisions,

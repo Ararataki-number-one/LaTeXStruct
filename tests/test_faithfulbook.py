@@ -60,6 +60,34 @@ def _apply(text=BOOK, context=None):
     return "\n".join(output), notes
 
 
+def _compile_rendered_page_texts(text):
+    """Compile twice and return rendered PDF text, or None without XeLaTeX."""
+    from latexstruct.core.compilecheck import find_xelatex
+
+    executable = find_xelatex()
+    if not executable:
+        return None
+    with tempfile.TemporaryDirectory(prefix="ls-faithfulbook-pages-") as tmp:
+        tex_path = Path(tmp) / "main.tex"
+        tex_path.write_text(text, encoding="utf-8")
+        for _pass in range(2):
+            proc = subprocess.run(
+                [executable, "-interaction=nonstopmode", "-halt-on-error", "main.tex"],
+                cwd=tmp,
+                capture_output=True,
+                timeout=240,
+            )
+            assert proc.returncode == 0, (Path(tmp) / "main.log").read_text(
+                encoding="utf-8", errors="replace"
+            )[-4000:]
+        try:
+            import fitz
+        except ImportError:
+            return None
+        with fitz.open(str(Path(tmp) / "main.pdf")) as document:
+            return [page.get_text().strip() for page in document]
+
+
 def test_faithfulbook_has_stable_public_template_id():
     assert normalize_template_id("faithfulbook") == FAITHFULBOOK
     assert FAITHFULBOOK in {item["id"] for item in list_template_presets()}
@@ -80,8 +108,12 @@ def test_faithfulbook_default_geometry_headers_and_source_page_boundaries():
 
     # Page breaks and inert source-page markers survive exactly; headers are
     # built from LaTeX marks/new pagination rather than copied OCR strings.
-    assert output.count(r"\clearpage") == BOOK.count(r"\clearpage") == 2
+    # The two physical source-page boundaries survive; the one additional
+    # clearpage belongs to the generated global TOC/main-matter transition.
+    assert output.count(r"\clearpage") == BOOK.count(r"\clearpage") + 1 == 3
     assert output.count("% Page ") == BOOK.count("% Page ") == 3
+    assert output.count(r"\tableofcontents") == 1
+    assert r"\tableofcontents" + "\n" + r"\clearpage" + "\n" + r"\LSMainMatter" in output
     assert r"\fancyhead[LO]" in output and r"\rightmark" in output
     assert r"\fancyhead[RE]" in output and r"\leftmark" in output
     header_block = output[output.index(r"\pagestyle{fancy}"):output.index(r"\titleformat{\chapter}")]
@@ -155,7 +187,8 @@ Body two.
     assert r"\chapter{First chapter}" in output
     assert r"\section{First section}" in output
     assert r"\chapter{Second chapter}" in output
-    assert output.count(r"\clearpage") == 1
+    assert output.count(r"\clearpage") == article.count(r"\clearpage") + 1 == 2
+    assert output.count(r"\tableofcontents") == 1
     assert "Body." in output and "Body two." in output
 
 
@@ -231,7 +264,14 @@ Last chapter.
     assert "LaTeXStruct-Printed-Page" not in output
     assert output.count(r"\setcounter{page}{1}") == 1
     assert output.count(r"\setcounter{page}{451}") == 1
-    assert output.count(r"\clearpage") == source.count(r"\clearpage") == 2
+    assert output.count(r"\clearpage") == source.count(r"\clearpage") + 1 == 3
+    assert output.count(r"\tableofcontents") == 1
+    assert (
+        output.index("Front title page.")
+        < output.index(r"\tableofcontents")
+        < output.index("\n\\LSMainMatter\n")
+        < output.index(r"\setcounter{page}{1}")
+    )
     assert (
         output.index(r"\LSMainMatter")
         < output.index(r"\setcounter{page}{1}")
@@ -242,6 +282,17 @@ Last chapter.
         < output.index(r"\chapter{Edge Colourings}")
     )
     assert any("2 个可信印刷页码锚点" in item["reason"] for item in notes)
+
+    page_texts = _compile_rendered_page_texts(output)
+    if page_texts is not None:
+        # Front title, generated global TOC, and the two chapters each occupy
+        # one non-empty physical page; no transition invents a blank sheet.
+        assert len(page_texts) == 4
+        assert all(page_texts)
+        assert "Front title page" in page_texts[0]
+        assert "Contents" in page_texts[1]
+        assert "Graphs" in page_texts[2]
+        assert "Edge Colourings" in page_texts[3]
 
     # Applying the same stable template again is a no-op, so counters cannot
     # duplicate even when a caller retries import/export.
