@@ -15,8 +15,8 @@ const TASK_LABELS = {
 };
 const FALLBACK_TEMPLATES = [
   { id: "", label: "保持原排版（推荐）", description: "保留原文档类、宏包、章节层级和自定义环境，只整理明确的正文结构。" },
-  { id: "faithfulbook", label: "原书近似 · 出版书籍", description: "OCR 书稿专用双面版式；保持源页分页，生成结构化页眉和章内目录。" },
-  { id: "elegantbook", label: "ElegantBook 专业讲义", description: "明确需要统一书籍版式时使用，会转换文档类、章节层级、目录和定理色块。" },
+  { id: "faithfulbook", label: "出版书籍（接近原稿）", description: "适合 OCR 图书的双面版式；保留源页分隔并生成结构化页眉和章内目录，不代表逐页复刻或出版质量保证。" },
+  { id: "elegantbook", label: "统一讲义（ElegantBook）", description: "明确需要统一书籍版式时使用，会转换文档类、章节层级、目录和定理色块。" },
 ];
 
 function extension(name) {
@@ -330,6 +330,25 @@ export default function Projects({ onOpen }) {
           <div><h2>导入 LaTeX 项目</h2><p>拖入单个 .tex、整个项目文件夹，或 ZIP 压缩包。</p></div>
           <input placeholder="项目名称（可选）" value={name} onChange={(event) => setName(event.target.value)} />
         </div>
+        <div className="template-first-choice">
+          <label>
+            <span>成品版式</span>
+            <select
+              value={template}
+              onChange={(event) => setTemplate(event.target.value)}
+              aria-label="排版方案"
+            >
+              {templates.map((item) => (
+                <option key={item.id || "preserve"} value={item.id}>{item.label}</option>
+              ))}
+            </select>
+          </label>
+          <div>
+            <b>{(templates.find((item) => item.id === template) || FALLBACK_TEMPLATES[0]).label}</b>
+            <p>{(templates.find((item) => item.id === template) || FALLBACK_TEMPLATES[0]).description}</p>
+            <small>先确定版式，再导入内容；AI 只提交可审阅的结构补丁，不自由生成整套样式。</small>
+          </div>
+        </div>
         <div
           className={`drop-zone ${dragging ? "dragging" : ""} ${busy ? "busy" : ""}`}
           onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
@@ -387,20 +406,7 @@ export default function Projects({ onOpen }) {
             <select value={pack} onChange={(event) => setPack(event.target.value)}>
               {packs.map((item) => <option key={item} value={item}>{item}</option>)}
             </select>
-            <select
-              value={template}
-              onChange={(event) => setTemplate(event.target.value)}
-              aria-label="排版方案"
-            >
-              {templates.map((item) => (
-                <option key={item.id || "preserve"} value={item.id}>{item.label}</option>
-              ))}
-            </select>
           </div>
-          <p className="template-description">
-            {(templates.find((item) => item.id === template) || FALLBACK_TEMPLATES[0]).description}
-            {" "}AI 只提交可审阅的结构补丁，不自由改写正文；标准 TeX 默认不做模板迁移。
-          </p>
           <textarea
             placeholder="也可以在这里粘贴 .tex 全文……"
             value={text}

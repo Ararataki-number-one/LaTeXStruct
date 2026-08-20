@@ -121,7 +121,7 @@ def test_ci_installs_texlive_distribution_packages():
     assert "elegantbook.cls" in workflow
 
 
-def test_frontend_preserves_standard_tex_but_ocr_uses_faithfulbook():
+def test_frontend_preserves_standard_tex_and_freezes_ocr_quality_and_template():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, "frontend", "src", "Projects.jsx"), encoding="utf-8") as f:
         projects = f.read()
@@ -130,14 +130,21 @@ def test_frontend_preserves_standard_tex_but_ocr_uses_faithfulbook():
 
     assert 'const [template, setTemplate] = useState("")' in projects
     assert '保持原排版（推荐）' in projects
-    assert 'ElegantBook 专业讲义' in projects
+    assert '统一讲义（ElegantBook）' in projects
+    assert '不代表逐页复刻或出版质量保证' in projects
     assert 'api("/api/templates")' in projects
     assert 'aria-label="排版方案"' in projects
-    assert '标准 TeX 默认不做模板迁移' in projects
+    assert 'className="template-first-choice"' in projects
+    assert '先确定版式，再导入内容' in projects
     assert 'const [mode, setMode] = useState("ai")' in projects
     assert 'AI 深度整理（默认，章节 + 定理 + 复查）' in projects
-    assert 'const importTemplate = "faithfulbook"' in ocr
-    assert '原书近似 · 出版书籍（固定）' in ocr
+    assert 'const [qualityProfile, setQualityProfile] = useState(OCR_QUALITY_PUBLICATION)' in ocr
+    assert 'api("/api/templates")' in ocr
+    assert 'fd.append("quality_profile", qualityProfile)' in ocr
+    assert 'fd.append("output_template", outputTemplate)' in ocr
+    assert 'const importTemplate = "faithfulbook"' not in ocr
+    assert '版式在任务启动时冻结并随任务恢复' in ocr
+    assert '未测量文字或数学准确率，也不代表出版就绪' in ocr
     assert 'const [importMode, setImportMode] = useState("ai")' in ocr
     assert '<option value="ai">AI 深度整理（默认，重点维护）</option>' in ocr
     assert '<option value="rule">旧规则兼容模式（不再主动优化）</option>' in ocr
@@ -323,8 +330,8 @@ def test_release_build_safety_guards():
     assert "v1.1.4" not in workflow
     assert "name: LaTeXStruct-v${{ env.APP_VERSION }}" in workflow
     assert "name: LaTeXStruct-${{ github.ref_name }}" not in workflow
-    assert "$previousVersion = '1.1.11'" in workflow
-    assert "previous_version='1.1.11'" in workflow
+    assert "$previousVersion = '1.2.0'" in workflow
+    assert "previous_version='1.2.0'" in workflow
     assert "[string]$health.version -eq $previousVersion" in workflow
     assert "            if (-not $oldHealthy)" in workflow
     # 升级冒烟必须走应用内真实的独立 helper，不能绕过第一阶段

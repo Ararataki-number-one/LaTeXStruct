@@ -140,6 +140,12 @@ def test_templates_api_defaults_to_preserve_while_ocr_uses_faithfulbook():
             ELEGANTBOOK,
             FAITHFULBOOK,
         }
+        faithful = next(
+            item for item in payload["templates"] if item["id"] == FAITHFULBOOK
+        )
+        assert faithful["layout_change"] is True
+        assert faithful["qa_profile"] == "publication"
+        assert "不代表逐页复刻" in faithful["description"]
 
 
 def test_preserve_pipeline_leaves_standard_article_and_beamer_byte_for_byte():
@@ -301,3 +307,36 @@ def test_ocr_import_uses_faithfulbook_when_template_is_omitted():
         result = client.get(f"/api/projects/{pid}/result").text
         assert "\\documentclass[10pt,twoside,openany]{book}" in result
         assert "% LaTeXStruct template: faithfulbook v1" in result
+
+
+def test_ocr_import_honors_template_frozen_when_job_started():
+    with _workspace_client() as (client, root), patch(
+        "latexstruct.core.compilecheck.compile_latex",
+        side_effect=_compile_unavailable,
+    ):
+        jid = "ocr-explicit-template"
+        job_dir = root / "ocr-explicit-job"
+        job_dir.mkdir()
+        with srv._ocr_jobs_lock:
+            srv._ocr_jobs[jid] = {
+                "id": jid,
+                "dir": str(job_dir),
+                "status": "done",
+                "raw_ready": True,
+                "raw_tex": ARTICLE,
+                "raw_revision": 1,
+                "usage_revision": 1,
+                "page_revision": 1,
+                "pages": {},
+                "selected_pages": [],
+                "output_template": ELEGANTBOOK,
+                "importing": False,
+                "saving": False,
+            }
+
+        imported = client.post(
+            f"/api/ocr/jobs/{jid}/import?mode=rule&template=faithfulbook"
+        )
+        assert imported.status_code == 200, imported.text
+        project = client.get(f"/api/projects/{imported.json()['id']}").json()
+        assert project["template"] == ELEGANTBOOK

@@ -360,6 +360,69 @@ def test_chat_vision_uses_locked_down_temporary_image_and_structured_output(monk
     assert client.last_usage["billing_mode"] == CODEX_BILLING_MODE
 
 
+def test_chat_vision_structured_images_keeps_one_call_and_stable_image_order(monkeypatch):
+    _install_ready_status(monkeypatch)
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        image_paths = [
+            Path(args[index + 1])
+            for index, token in enumerate(args)
+            if token == "--image"
+        ]
+        captured.update({
+            "paths": image_paths,
+            "bytes": [path.read_bytes() for path in image_paths],
+            "prompt": kwargs["input"],
+        })
+        result_path = Path(args[args.index("--output-last-message") + 1])
+        result_path.write_text(
+            json.dumps({
+                "latex": "```latex\n\\[x^2+y^2\\]\n```",
+                "figures": [],
+                "framed_insets": [],
+            }),
+            encoding="utf-8",
+        )
+        return _completed(args)
+
+    monkeypatch.setattr(codex_cli.subprocess, "run", fake_run)
+    images = [
+        b"\x89PNG\r\n\x1a\nwhole-page",
+        b"\x89PNG\r\n\x1a\nformula-one",
+        b"\xff\xd8\xffformula-two",
+    ]
+    result = CodexCLIClient().chat_vision_structured_images_bytes(
+        "只转写页面。",
+        '{"formula_visual_evidence": []}',
+        images,
+    )
+
+    assert result["latex"] == "```latex\n\\[x^2+y^2\\]\n```"
+    assert captured["bytes"] == images
+    assert [path.name for path in captured["paths"]] == [
+        "page.png", "formula-01.png", "formula-02.jpg",
+    ]
+    assert all(not path.exists() for path in captured["paths"])
+    assert "第一张图片是唯一待转写的完整页面" in captured["prompt"]
+    assert "不得把局部图当成额外页面" in captured["prompt"]
+
+
+def test_chat_vision_structured_images_rejects_more_than_four_crops_before_probe(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        codex_cli,
+        "codex_status",
+        lambda: pytest.fail("image-count validation must run before probing Codex"),
+    )
+    image = b"\x89PNG\r\n\x1a\nimage"
+    with pytest.raises(LLMError, match="至多 4 张局部图"):
+        CodexCLIClient().chat_vision_structured_images_bytes(
+            "system", "user", [image] * 6,
+        )
+
+
 def test_chat_vision_data_uri_rejects_mime_mismatch_without_running_codex(monkeypatch):
     monkeypatch.setattr(
         codex_cli,

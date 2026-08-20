@@ -306,6 +306,15 @@ def test_template_registry_and_professional_idempotence():
     assert {item["id"] for item in presets} == {
         PRESERVE_SOURCE, FAITHFULBOOK, ELEGANTBOOK,
     }
+    assert all(item["qa_profile"] in {"structural", "publication"} for item in presets)
+    assert next(item for item in presets if item["id"] == PRESERVE_SOURCE)[
+        "layout_change"
+    ] is False
+    faithful = next(item for item in presets if item["id"] == FAITHFULBOOK)
+    assert faithful["layout_change"] is True
+    assert faithful["qa_profile"] == "publication"
+    assert "保证" in faithful["description"]
+    assert all("bondy" not in str(item).lower() for item in presets)
     assert normalize_template_id(None) == PRESERVE_SOURCE
     assert normalize_template_id(PROFESSIONAL_HANDOUT) == PROFESSIONAL_HANDOUT
     try:

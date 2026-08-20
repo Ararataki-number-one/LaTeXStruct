@@ -410,6 +410,10 @@ class BookRunner:
                 "start_page": options.get("start_page"),
                 "end_page": options.get("end_page"),
                 "dpi": options.get("dpi", 220),
+                # 整书编排器以出版审校为目标：在付费调用前冻结严格页级门
+                # 和成品模板，避免 GUI/全局设置在长任务中途改变结果语义。
+                "quality_profile": "publication",
+                "output_template": "faithfulbook",
                 # Codex 模式冻结全局配置，不传任何 API Key/付费端点。
                 "base_url": "",
                 "model": "",
@@ -847,7 +851,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("pdf", type=Path)
     run.add_argument("--start-page", type=int, default=1)
     run.add_argument("--end-page", type=int)
-    run.add_argument("--dpi", type=int, default=220)
+    run.add_argument("--dpi", type=int, default=220, help="出版审校渲染 DPI（200-300）")
     run.add_argument("--ocr-retries", type=int, default=2)
     run.add_argument("--reasoning-effort", choices=("low", "medium"), default="medium")
     run.add_argument("--codex-model", default="", help="留空使用 Codex 默认模型")
@@ -890,8 +894,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             pdf = args.pdf.resolve(strict=True)
             if pdf.suffix.lower() != ".pdf":
                 raise RunnerError("run 当前只接受 PDF")
-            if not 72 <= args.dpi <= 300:
-                raise RunnerError("DPI 必须在 72-300 之间")
+            if not 200 <= args.dpi <= 300:
+                raise RunnerError("整书出版审校的 DPI 必须在 200-300 之间")
             if args.start_page < 1 or (args.end_page is not None and args.end_page < args.start_page):
                 raise RunnerError("页码范围无效")
             state_path = (args.state or _default_state(pdf)).resolve()

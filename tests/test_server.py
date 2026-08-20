@@ -2701,6 +2701,116 @@ def test_ocr_manifest_records_local_relation_pixel_evidence():
     assert records[0]["quality_flags"] == [flag]
 
 
+def test_publication_formula_evidence_uses_stored_hash_and_exports_no_private_path():
+    import latexstruct.core.ocrformula as formula
+
+    class MultiImageClient:
+        def chat_vision_structured_images_bytes(self, *_args):
+            raise AssertionError("preparation must not invoke the model")
+
+    class Region:
+        region_id = "p0085-f001"
+        bbox_points = (100.0, 200.0, 300.0, 260.0)
+
+    class Evidence:
+        region = Region()
+        crop_bbox_points = (80.0, 180.0, 320.0, 280.0)
+        image_sha256 = "b" * 64
+        dpi = 420
+        image_size_pixels = (1400, 580)
+        crop_path = Path("C:/private/formula-crops/p0085-f001.png")
+
+    captured = {}
+
+    def fake_render(_source, source_sha256, regions, _directory, *, dpi):
+        captured["source_sha256"] = source_sha256
+        captured["regions"] = list(regions)
+        captured["dpi"] = dpi
+        return [Evidence()]
+
+    region = Region()
+    with tempfile.TemporaryDirectory(prefix="ls-formula-test-") as temp_dir:
+        job = {
+            "quality_profile": "publication",
+            "source_type": "pdf",
+            "target": str(Path(temp_dir) / "source.pdf"),
+            "dir": temp_dir,
+            "_source_sha256": "a" * 64,
+            "client": MultiImageClient(),
+        }
+        with (
+            patch.object(formula, "detect_pdf_formula_regions", return_value=[region]),
+            patch.object(formula, "render_pdf_formula_evidence", side_effect=fake_render),
+            patch.object(
+                formula,
+                "target_bbox_normalized",
+                return_value=(0.083333, 0.2, 0.916667, 0.8),
+            ),
+        ):
+            internal = srv._prepare_page_formula_evidence(job, 85)
+
+    assert captured == {
+        "source_sha256": "a" * 64,
+        "regions": [region],
+        "dpi": 420,
+    }
+    assert Path(internal[0]["crop_path"]).as_posix().startswith("C:/private")
+    public_record = {
+        **internal[0],
+        "attached": True,
+        "untrusted_extra": "must-not-export",
+    }
+    records = srv._ocr_manifest_page_records({
+        "pages": {85: {
+            "png": "C:/private/page-85.png",
+            "status": "done",
+            "visual_input_sha256": "c" * 64,
+            "formula_evidence": [public_record],
+        }},
+    })
+    formula_record = records[0]["formula_visual_evidence"][0]
+    assert formula_record == {
+        "id": "p0085-f001",
+        "target_bbox_normalized_in_crop": [0.083333, 0.2, 0.916667, 0.8],
+        "source_bbox_points": [100.0, 200.0, 300.0, 260.0],
+        "crop_bbox_points": [80.0, 180.0, 320.0, 280.0],
+        "crop_sha256": "b" * 64,
+        "dpi": 420,
+        "attached": True,
+        "image_size_pixels": [1400, 580],
+    }
+    assert records[0]["visual_input_sha256"] == "c" * 64
+    assert "private" not in json.dumps(records)
+    assert "untrusted_extra" not in json.dumps(records)
+
+
+def test_formula_crop_preparation_is_noop_without_codex_multi_image_support():
+    import latexstruct.core.ocrformula as formula
+
+    job = {
+        "quality_profile": "publication",
+        "source_type": "pdf",
+        "client": object(),
+    }
+    with patch.object(
+        formula,
+        "detect_pdf_formula_regions",
+        side_effect=AssertionError("API publication must not render unused crops"),
+    ):
+        assert srv._prepare_page_formula_evidence(job, 1) == []
+
+        class MultiImageClient:
+            def chat_vision_structured_images_bytes(self, *_args):
+                return None
+
+        standard_job = {
+            "quality_profile": "standard",
+            "source_type": "pdf",
+            "client": MultiImageClient(),
+        }
+        assert srv._prepare_page_formula_evidence(standard_job, 1) == []
+
+
 def test_ocr_manifest_records_divider_integrity_evidence():
     flag = {
         "type": "divider_integrity_evidence",
@@ -3571,6 +3681,17 @@ def test_ocr_frontend_keeps_job_recovery_and_retry_reconnect_guards():
     assert "inspectFile(selected, sequence)" in source
     assert "`/api/ocr/jobs/${pdfInfo.jobId}/start`" in source
     assert 'endpoint = "/api/ocr/jobs"' not in source
+    assert 'api("/api/templates")' in source
+    assert 'fd.append("quality_profile", qualityProfile)' in source
+    assert 'fd.append("output_template", outputTemplate)' in source
+    assert 'useState(OCR_QUALITY_PUBLICATION)' in source
+    assert 'qualityReport?.page_gate_passed !== true' in source
+    assert "页级质量门未通过，暂不能进入审阅" in source
+    assert "未测量文字或数学准确率，也不代表出版就绪" in source
+    assert 'const importTemplate = "faithfulbook"' not in source
+    assert "bondybook" not in source
+    assert ".ocr-quality-gate" in styles
+    assert ".ocr-output-template" in styles
     assert "ocrSnapshotPreserved(latestJob)" in source
     assert "rawSaved.usage_revision" in source
     assert "rawSaved.page_revision" in source

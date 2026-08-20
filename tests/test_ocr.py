@@ -2,6 +2,7 @@
 """OCR 转写模块测试（Fake 视觉客户端，不依赖网络与 PDF 渲染库）。"""
 
 import io
+import hashlib
 import json
 import os
 import re
@@ -10,6 +11,8 @@ import struct
 import sys
 import urllib.error
 from unittest.mock import patch
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -89,6 +92,100 @@ def test_transcribe_page_prefers_direct_bytes_for_codex_compatible_client():
 
     assert result == "% Page 4\nDirect image path."
     assert client.received[2] is image
+
+
+def test_formula_crops_attach_to_the_same_structured_page_call_without_path_leak(
+    tmp_path,
+):
+    class MultiImageVisionClient:
+        backend = "codex_cli"
+        last_usage = {}
+
+        def __init__(self):
+            self.calls = []
+
+        def chat_vision_structured_images_bytes(self, _system, user, images):
+            self.calls.append((user, images))
+            return {
+                "latex": "```latex\nA complete page with \\[x^2+y^2=z^2\\].\n```",
+                "figures": [],
+                "framed_insets": [],
+            }
+
+        def chat_vision_structured_bytes(self, *_args):
+            raise AssertionError("formula evidence must not create a second page call")
+
+    page_image = _sized_png(1000, 1400)
+    crop_image = _sized_png(420, 180)
+    private_crop = tmp_path / "private-formula-location.png"
+    private_crop.write_bytes(crop_image)
+    client = MultiImageVisionClient()
+    result = transcribe_page_result(
+        client,
+        page_image,
+        85,
+        reference_formula_evidence=[{
+            "id": "p0085-f001",
+            "target_bbox_normalized_in_crop": [0.1, 0.2, 0.9, 0.8],
+            "source_bbox_points": [100.0, 200.0, 300.0, 260.0],
+            "crop_bbox_points": [80.0, 180.0, 320.0, 280.0],
+            "crop_sha256": hashlib.sha256(crop_image).hexdigest(),
+            "dpi": 420,
+            "image_size_pixels": [420, 180],
+            "crop_path": str(private_crop),
+            "text_hint": "must-never-reach-the-model",
+        }],
+    )
+
+    assert len(client.calls) == 1
+    user, images = client.calls[0]
+    assert images == [page_image, crop_image]
+    payload = json.loads(user[user.index("{"):])
+    formula = payload["formula_visual_evidence"]
+    assert formula == [{
+        "id": "p0085-f001",
+        "target_bbox_normalized_in_crop": [0.1, 0.2, 0.9, 0.8],
+        "crop_sha256": hashlib.sha256(crop_image).hexdigest(),
+        "dpi": 420,
+    }]
+    assert "crop_path" not in user
+    assert private_crop.name not in user
+    assert "must-never-reach-the-model" not in user
+    assert result.formula_evidence == [{
+        **formula[0],
+        "source_bbox_points": [100.0, 200.0, 300.0, 260.0],
+        "crop_bbox_points": [80.0, 180.0, 320.0, 280.0],
+        "image_size_pixels": [420, 180],
+        "attached": True,
+    }]
+
+
+def test_formula_crop_hash_mismatch_fails_before_structured_page_call(tmp_path):
+    class MultiImageVisionClient:
+        backend = "codex_cli"
+        last_usage = {}
+
+        def chat_vision_structured_images_bytes(self, *_args):
+            raise AssertionError("invalid crop must fail before model invocation")
+
+    crop = _sized_png(320, 120)
+    crop_path = tmp_path / "crop.png"
+    crop_path.write_bytes(crop)
+    with pytest.raises(LLMError, match="哈希不匹配"):
+        transcribe_page_result(
+            MultiImageVisionClient(),
+            _sized_png(),
+            213,
+            reference_formula_evidence=[{
+                "id": "p0213-f001",
+                "target_bbox_normalized_in_crop": [0.1, 0.1, 0.9, 0.9],
+                "source_bbox_points": [100.0, 200.0, 300.0, 260.0],
+                "crop_bbox_points": [80.0, 180.0, 320.0, 280.0],
+                "crop_sha256": "0" * 64,
+                "dpi": 420,
+                "crop_path": str(crop_path),
+            }],
+        )
 
 
 def test_codex_vision_error_is_not_rewritten_as_qwen_api_advice():

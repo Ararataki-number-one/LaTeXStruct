@@ -222,6 +222,9 @@ def test_runner_retries_ocr_and_exports_blocked_analysis(tmp_path):
         "codex_reasoning_effort": "medium",
         "codex_model": "",
     }
+    start_call = next(call for call in api.calls if call[1].endswith("/start"))
+    assert start_call[2]["form"]["quality_profile"] == "publication"
+    assert start_call[2]["form"]["output_template"] == "faithfulbook"
     import_call = next(call for call in api.calls if call[1].endswith("/import"))
     assert import_call[2]["query"]["mode"] == "ai"
     assert import_call[2]["query"]["template"] == "faithfulbook"

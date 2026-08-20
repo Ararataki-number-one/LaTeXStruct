@@ -89,18 +89,24 @@ TEMPLATE_PRESETS = (
         "label": "保持原排版（推荐）",
         "description": "保留原 documentclass、宏包、章节层级和自定义环境，只整理明确的正文结构。",
         "recommended_for": "tex",
+        "layout_change": False,
+        "qa_profile": "structural",
     },
     {
         "id": FAITHFULBOOK,
-        "label": "原书近似 · 出版书籍",
-        "description": "OCR 书稿专用双面书籍版式；保持源页分页，生成结构化页眉和章内目录。",
+        "label": "出版书籍（接近原稿）",
+        "description": "适合 OCR 图书的双面书籍版式；保持源页分隔并生成结构化页眉和章内目录，不代表逐页复刻或出版质量保证。",
         "recommended_for": "ocr",
+        "layout_change": True,
+        "qa_profile": "publication",
     },
     {
         "id": ELEGANTBOOK,
-        "label": "ElegantBook 专业讲义",
+        "label": "统一讲义（ElegantBook）",
         "description": "明确需要统一书籍版式时使用；会适配文档类、章节层级、目录与定理色块。",
         "recommended_for": "ocr",
+        "layout_change": True,
+        "qa_profile": "publication",
     },
 )
 _TEMPLATE_LABELS = {

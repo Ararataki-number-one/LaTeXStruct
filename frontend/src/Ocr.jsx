@@ -5,6 +5,26 @@ import { apiAuthority, sameApiAuthority } from "./providerUrl";
 
 const OCR_SESSION_JOB_KEY = "latexstruct-current-ocr-job-v1";
 const CODEX_BACKEND = "codex_cli";
+const OCR_QUALITY_PUBLICATION = "publication";
+const OCR_QUALITY_STANDARD = "standard";
+const OCR_TEMPLATE_IDS = new Set(["", "faithfulbook", "elegantbook"]);
+const OCR_FALLBACK_TEMPLATES = [
+  {
+    id: "faithfulbook",
+    label: "出版书籍版式（推荐）",
+    description: "适合 OCR 图书；使用双面页眉、章内目录并保留源页分隔。",
+  },
+  {
+    id: "",
+    label: "保持原排版",
+    description: "保留 OCR 生成的文档类和样式，只进行明确的结构整理。",
+  },
+  {
+    id: "elegantbook",
+    label: "统一讲义（ElegantBook）",
+    description: "转换为统一讲义风格，文档类、章节层级和定理外观变化较大。",
+  },
+];
 // 兼容 v1.1.2 的 10 位旧任务号；新任务使用完整 UUID4 hex（128-bit）。
 const OCR_JOB_ID_RE = /^(?:[0-9a-f]{10}|[0-9a-f]{32})$/;
 const OCR_ACTIVE_STATUSES = new Set(["starting", "running", "pausing", "paused"]);
@@ -55,6 +75,91 @@ function ocrStatusLabel(status) {
     error: "处理失败",
     paused: "已暂停",
   })[status] || "等待处理";
+}
+
+function qualityProfileLabel(profile) {
+  return profile === OCR_QUALITY_PUBLICATION ? "出版审校" : "标准转写";
+}
+
+function selectableOcrTemplates(payload) {
+  const items = Array.isArray(payload?.templates) ? payload.templates : [];
+  const selected = items.filter((item) => (
+    item && typeof item.id === "string" && OCR_TEMPLATE_IDS.has(item.id)
+  ));
+  return selected.length ? selected : OCR_FALLBACK_TEMPLATES;
+}
+
+function qualityPageNumbers(report) {
+  const pages = report?.pages || {};
+  return new Set([
+    ...(pages.failed_or_incomplete || []),
+    ...(pages.low_confidence || []),
+    ...(pages.needs_review || []),
+    ...(pages.missing_provenance || []),
+  ].map(Number).filter(Number.isInteger));
+}
+
+function QualityGateCard({ job, onSelectPage }) {
+  const report = job?.quality_report;
+  if (!report) return null;
+  const profile = job?.quality_profile === OCR_QUALITY_PUBLICATION
+    ? OCR_QUALITY_PUBLICATION : OCR_QUALITY_STANDARD;
+  const running = report.status === "running";
+  const passed = report.page_gate_passed === true;
+  const blocked = profile === OCR_QUALITY_PUBLICATION && !running && !passed;
+  const findings = running ? [] : [
+    ...(Array.isArray(report.blockers) ? report.blockers : []),
+    ...(Array.isArray(report.warnings) ? report.warnings : []),
+  ];
+  const counts = report.counts || {};
+  const statusLabel = running ? "检查中" : passed ? "页级门通过" : blocked ? "阻断导入" : "有警告";
+
+  return (
+    <section
+      className={`ocr-quality-gate ${running ? "running" : passed ? "passed" : "blocked"}`}
+      role={blocked ? "alert" : "status"}
+      aria-label={`${qualityProfileLabel(profile)}页级质量门`}
+    >
+      <div className="quality-gate-heading">
+        <div>
+          <b>{qualityProfileLabel(profile)} · 页级质量门</b>
+          <span>{profile === OCR_QUALITY_PUBLICATION
+            ? "低置信、待人工复核或来源记录缺失都会阻止进入结构化审阅"
+            : "页级问题会显示为警告，但完整转写仍可进入结构化审阅"}</span>
+        </div>
+        <strong>{statusLabel}</strong>
+      </div>
+      <div className="quality-gate-metrics">
+        <span>完成 {counts.completed_pages || 0}/{counts.selected_pages || 0} 页</span>
+        <span>低置信 {counts.low_confidence_pages || 0}</span>
+        <span>待复核 {counts.needs_review_pages || 0}</span>
+        <span>来源缺失 {counts.missing_provenance_pages || 0}</span>
+        <span>局部证据 {counts.local_evidence_pages || 0} 页</span>
+      </div>
+      {findings.length > 0 && (
+        <div className="quality-gate-findings">
+          {findings.map((finding, index) => (
+            <div key={`${finding.code || "finding"}-${index}`}>
+              <span>{finding.message || "发现页级质量问题"}</span>
+              {Array.isArray(finding.pages) && finding.pages.length > 0 && (
+                <span className="quality-page-links">
+                  {finding.pages.slice(0, 12).map((page) => (
+                    <button type="button" key={page} onClick={() => onSelectPage(Number(page))}>
+                      P{page}
+                    </button>
+                  ))}
+                  {finding.pages.length > 12 && <small>另有 {finding.pages.length - 12} 页</small>}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="quality-gate-limit">
+        这只是已知页级问题、视觉来源记录和资源完整性的流程门；未测量文字或数学准确率，也不代表出版就绪。最终交付仍需逐页对照、公式复核和 PDF 视觉验收。
+      </p>
+    </section>
+  );
 }
 
 function ocrSnapshotPreserved(job) {
@@ -168,7 +273,11 @@ export default function Ocr({ onImport, onOpenSettings }) {
   const [startPage, setStartPage] = useState("1");
   const [endPage, setEndPage] = useState("");
   const [pdfInfo, setPdfInfo] = useState({ status: "idle", total: 0, maxPages: 500, jobId: null });
-  const [dpi, setDpi] = useState(150);
+  const [dpi, setDpi] = useState(200);
+  const [qualityProfile, setQualityProfile] = useState(OCR_QUALITY_PUBLICATION);
+  const [outputTemplates, setOutputTemplates] = useState(OCR_FALLBACK_TEMPLATES);
+  const [ocrDefaultTemplate, setOcrDefaultTemplate] = useState("faithfulbook");
+  const [outputTemplate, setOutputTemplate] = useState("faithfulbook");
   const [model, setModel] = useState("");
   const [setup, setSetup] = useState({ status: "loading", config: null, providers: [] });
   const [customVisionConfirmed, setCustomVisionConfirmed] = useState(false);
@@ -181,7 +290,6 @@ export default function Ocr({ onImport, onOpenSettings }) {
   const [liveRevision, setLiveRevision] = useState(0);
   const [rawSaved, setRawSaved] = useState(null);
   const [importMode, setImportMode] = useState("ai");
-  const importTemplate = "faithfulbook";
   const [importingProject, setImportingProject] = useState(false);
   const [msg, setMsg] = useState("");
   const [starting, setStarting] = useState(false);
@@ -219,6 +327,15 @@ export default function Ocr({ onImport, onOpenSettings }) {
       jobId: next.id,
       revision: Number.isFinite(revision) ? revision : previous.jobId === next.id ? previous.revision : -1,
     };
+    if ([OCR_QUALITY_STANDARD, OCR_QUALITY_PUBLICATION].includes(next.quality_profile)) {
+      setQualityProfile(next.quality_profile);
+    }
+    if (typeof next.output_template === "string" && OCR_TEMPLATE_IDS.has(next.output_template)) {
+      setOutputTemplate(next.output_template);
+    }
+    if (Number.isFinite(Number(next.dpi)) && Number(next.dpi) >= 72) {
+      setDpi(Number(next.dpi));
+    }
     setJob(next);
     return true;
   };
@@ -396,6 +513,10 @@ export default function Ocr({ onImport, onOpenSettings }) {
       return;
     }
     if (!file) return alert("请选择 PDF 或图片");
+    if (qualityProfile === OCR_QUALITY_PUBLICATION && dpi < 200) {
+      setMsg("出版审校工作流要求至少 200 DPI；请提高渲染清晰度后再开始");
+      return;
+    }
     if (pdfInfo.status !== "ready" || !pdfInfo.jobId || (isPdf && pageRangeError)) {
       setMsg(pageRangeError || "请等待文件上传与页数读取完成后再开始");
       return;
@@ -403,6 +524,8 @@ export default function Ocr({ onImport, onOpenSettings }) {
     const fd = new FormData();
     fd.append("dpi", String(dpi));
     fd.append("model", model);
+    fd.append("quality_profile", qualityProfile);
+    fd.append("output_template", outputTemplate);
     const endpoint = `/api/ocr/jobs/${pdfInfo.jobId}/start`;
     if (isPdf) {
       fd.append("start_page", startPage);
@@ -439,6 +562,9 @@ export default function Ocr({ onImport, onOpenSettings }) {
         raw_chars: 0,
         usage_revision: 0,
         page_revision: 0,
+        quality_profile: qualityProfile,
+        output_template: outputTemplate,
+        dpi,
         pages: {},
       });
       setMsg((isPdf ? "正在逐页处理所选范围……" : "正在处理图片……")
@@ -457,6 +583,9 @@ export default function Ocr({ onImport, onOpenSettings }) {
               ? Number(recovered.state_revision) : -1,
           };
           inspectedJobId.current = null;
+          if (typeof recovered.output_template === "string" && OCR_TEMPLATE_IDS.has(recovered.output_template)) {
+            setOutputTemplate(recovered.output_template);
+          }
           setJob(recovered);
           setRestoreFailed(false);
           setMsg("启动响应曾中断，已通过原任务编号恢复，未重复创建 OCR 任务");
@@ -686,7 +815,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
         name: projectName,
         title: sourceStem,
         mode: importMode,
-        template: importTemplate,
+        template: (typeof job.output_template === "string" ? job.output_template : outputTemplate),
       });
       const r = await api(`/api/ocr/jobs/${job.id}/import?${params.toString()}`, {
         method: "POST",
@@ -795,6 +924,9 @@ export default function Ocr({ onImport, onOpenSettings }) {
       setPreviewMode("live");
       setLiveTex("");
       setLiveRevision(0);
+      setQualityProfile(OCR_QUALITY_PUBLICATION);
+      setDpi(200);
+      setOutputTemplate(ocrDefaultTemplate);
       setPdfInfo({ status: "idle", total: 0, maxPages: 500, jobId: null });
       setMsg("本次 OCR 临时结果已清除");
     } catch (error) {
@@ -807,7 +939,8 @@ export default function Ocr({ onImport, onOpenSettings }) {
     Promise.all([
       api("/api/config").then((r) => r.json()),
       api("/api/providers").then((r) => r.json()),
-    ]).then(async ([config, data]) => {
+      api("/api/templates").then((r) => r.json()).catch(() => null),
+    ]).then(async ([config, data, templateData]) => {
       let codexStatus = null;
       let codexStatusError = "";
       if (config.analysis_backend === CODEX_BACKEND) {
@@ -818,6 +951,15 @@ export default function Ocr({ onImport, onOpenSettings }) {
         }
       }
       if (!active) return;
+      const templates = selectableOcrTemplates(templateData);
+      const requestedDefault = typeof templateData?.ocr_default === "string"
+        && OCR_TEMPLATE_IDS.has(templateData.ocr_default)
+        ? templateData.ocr_default : "faithfulbook";
+      const defaultTemplate = templates.some((item) => item.id === requestedDefault)
+        ? requestedDefault : "faithfulbook";
+      setOutputTemplates(templates);
+      setOcrDefaultTemplate(defaultTemplate);
+      setOutputTemplate(defaultTemplate);
       setSetup({
         status: "ready",
         config,
@@ -866,6 +1008,13 @@ export default function Ocr({ onImport, onOpenSettings }) {
             ? Number(restored.state_revision) : -1,
         };
         inspectedJobId.current = restored.status === "ready" ? remembered : null;
+        if (
+          restored.status !== "ready"
+          && typeof restored.output_template === "string"
+          && OCR_TEMPLATE_IDS.has(restored.output_template)
+        ) {
+          setOutputTemplate(restored.output_template);
+        }
         setJob(restored.status === "ready" ? null : restored);
         setCurrent(null);
         setCurrentTex("");
@@ -1078,6 +1227,22 @@ export default function Ocr({ onImport, onOpenSettings }) {
   const jobBackend = job?.analysis_backend || job?.ai_backend || job?.backend || job?.cost?.backend;
   const jobUsesCodex = jobBackend === CODEX_BACKEND || (usesCodex && !jobBackend);
   const currentTaskIndex = current == null ? 0 : (job?.pages?.[current]?.task_index || 0);
+  const activeQualityProfile = job
+    ? (job.quality_profile === OCR_QUALITY_PUBLICATION
+      ? OCR_QUALITY_PUBLICATION : OCR_QUALITY_STANDARD)
+    : qualityProfile;
+  const activeOutputTemplate = job
+    && typeof job.output_template === "string"
+    && OCR_TEMPLATE_IDS.has(job.output_template)
+    ? job.output_template : outputTemplate;
+  const selectedOutputPreset = outputTemplates.find((item) => item.id === activeOutputTemplate)
+    || OCR_FALLBACK_TEMPLATES.find((item) => item.id === activeOutputTemplate)
+    || OCR_FALLBACK_TEMPLATES[0];
+  const qualityReport = job?.quality_report || null;
+  const qualityRetryPageSet = qualityPageNumbers(qualityReport);
+  const qualityImportBlocked = job?.status === "done"
+    && activeQualityProfile === OCR_QUALITY_PUBLICATION
+    && qualityReport?.page_gate_passed !== true;
 
   return (
     <div className="ocr">
@@ -1107,6 +1272,52 @@ export default function Ocr({ onImport, onOpenSettings }) {
             <button type="button" onClick={onOpenSettings}>前往设置</button>
           )}
         </div>
+        <div className={`ocr-quality-profile ${activeQualityProfile}`}>
+          <label>
+            <span>OCR 工作流</span>
+            <select
+              aria-label="OCR 质量工作流"
+              value={activeQualityProfile}
+              disabled={Boolean(job?.id) || starting || restoringJob || restoreFailed}
+              onChange={(event) => {
+                const next = event.target.value === OCR_QUALITY_STANDARD
+                  ? OCR_QUALITY_STANDARD : OCR_QUALITY_PUBLICATION;
+                setQualityProfile(next);
+                if (next === OCR_QUALITY_PUBLICATION && dpi < 200) setDpi(200);
+              }}
+            >
+              <option value={OCR_QUALITY_PUBLICATION}>出版审校（默认，严格页级门）</option>
+              <option value={OCR_QUALITY_STANDARD}>标准转写（更快，允许警告）</option>
+            </select>
+          </label>
+          <div>
+            <b>{activeQualityProfile === OCR_QUALITY_PUBLICATION ? "出版审校已启用" : "标准转写已启用"}</b>
+            <p>{activeQualityProfile === OCR_QUALITY_PUBLICATION
+              ? "至少使用 200 DPI；Codex 推理强度为“低”时，本任务会提升到“中”。低置信、待人工复核或视觉来源记录缺失的页面会阻止导入，但原始 OCR 工程始终可以保存。"
+              : "完整转写可以带页级警告进入结构化审阅；适合草稿和快速检查。"}</p>
+            <small>该流程门不测量文字或数学准确率，也不代表出版就绪。</small>
+          </div>
+        </div>
+        <div className="ocr-output-template">
+          <label>
+            <span>成品版式</span>
+            <select
+              aria-label="OCR 成品版式"
+              value={activeOutputTemplate}
+              disabled={Boolean(job?.id) || starting || restoringJob || restoreFailed}
+              onChange={(event) => setOutputTemplate(event.target.value)}
+            >
+              {outputTemplates.map((item) => (
+                <option key={item.id || "preserve"} value={item.id}>{item.label}</option>
+              ))}
+            </select>
+          </label>
+          <div>
+            <b>{selectedOutputPreset.label}</b>
+            <p>{selectedOutputPreset.description}</p>
+            <small>版式在任务启动时冻结并随任务恢复；之后的设置变化不会改动本任务。</small>
+          </div>
+        </div>
         <div className="row">
           <input
             type="file"
@@ -1118,8 +1329,13 @@ export default function Ocr({ onImport, onOpenSettings }) {
               if (!accepted) event.target.value = "";
             }}
           />
-          <select aria-label="PDF 渲染清晰度" value={dpi} onChange={(e) => setDpi(Number(e.target.value))}>
-            <option value={150}>150 DPI</option>
+          <select
+            aria-label="PDF 渲染清晰度"
+            value={dpi}
+            disabled={Boolean(job?.id) || starting || restoringJob || restoreFailed}
+            onChange={(e) => setDpi(Number(e.target.value))}
+          >
+            <option value={150} disabled={activeQualityProfile === OCR_QUALITY_PUBLICATION}>150 DPI（仅标准转写）</option>
             <option value={200}>200 DPI</option>
             <option value={300}>300 DPI</option>
           </select>
@@ -1226,6 +1442,9 @@ export default function Ocr({ onImport, onOpenSettings }) {
               )}
               <span>Token：{(job.cost?.total_tokens || job.usage?.total_tokens || 0).toLocaleString()}</span>
               {jobUsesCodex && <span>引擎：Codex CLI（云端视觉）</span>}
+              <span>工作流：{qualityProfileLabel(activeQualityProfile)}</span>
+              {job.dpi > 0 && <span>渲染：{job.dpi} DPI</span>}
+              {jobUsesCodex && job.reasoning_effort && <span>推理强度：{job.reasoning_effort}</span>}
               <span>费用：{jobUsesCodex
                 ? "Codex 订阅额度（非 API 计费）"
                 : job.cost?.estimated_cost_cny == null ? "暂无估价"
@@ -1300,6 +1519,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
             )}
           </div>
         )}
+        {job && <QualityGateCard job={job} onSelectPage={selectPage} />}
         <div className="status">{msg}</div>
         {job?.status === "done" && (
           <div className="ocr-import-options">
@@ -1314,15 +1534,15 @@ export default function Ocr({ onImport, onOpenSettings }) {
                 <option value="rule">旧规则兼容模式（不再主动优化）</option>
               </select>
             </label>
-            <div className="template-choice fixed-template" aria-label="固定排版方案">
-              <span>结构化后的成品</span>
-              <b>原书近似 · 出版书籍（固定）</b>
+            <div className="template-choice frozen-template" aria-label="本任务成品版式">
+              <span>本任务成品版式</span>
+              <b>{selectedOutputPreset.label}</b>
             </div>
             <small>
               {importMode === "ai"
                 ? "AI 会判断章节层级、删除 OCR 粘贴的目录页并插入真正的 \\tableofcontents，同时校正定理与证明边界。AI 不可用时会明确停止，不会悄悄换成规则结果。"
                 : "旧规则模式仅为已有项目保留，不使用额外 AI 调用，也不再作为主要整理流程。"}
-              {" "}结构校正通过后才套用 faithfulbook：保持源页比例和分页，重建奇偶页眉、章内目录并使用 300 DPI 插图裁片；安全检查未通过时仍可导出当前草稿，导出物会明确标记 UNVERIFIED 警告。
+              {" "}{selectedOutputPreset.description} 成品版式只决定结构化结果的外观，不表示逐页复刻原书，也不构成准确率或出版就绪证明；安全检查未通过时导出物会明确标记 UNVERIFIED 警告。
             </small>
           </div>
         )}
@@ -1331,12 +1551,14 @@ export default function Ocr({ onImport, onOpenSettings }) {
             {job.status === "done" && (
               <button
                 className="primary"
-                disabled={importingProject || rawSaving || retryBusy || Boolean(controlAction)}
+                disabled={importingProject || rawSaving || retryBusy || Boolean(controlAction) || qualityImportBlocked}
                 onClick={importProject}
               >
                 {importingProject
                   ? "正在创建项目……"
-                  : `进入${importMode === "ai" ? " AI 深度" : "规则"}整理（保留原始 OCR）`}
+                  : qualityImportBlocked
+                    ? "页级质量门未通过，暂不能进入审阅"
+                    : `进入${importMode === "ai" ? " AI 深度" : "规则"}整理（保留原始 OCR）`}
               </button>
             )}
             <button className="primary" type="button" disabled={rawSaving || retryBusy || Boolean(controlAction)} onClick={saveRawResult}>
@@ -1346,6 +1568,9 @@ export default function Ocr({ onImport, onOpenSettings }) {
             <button type="button" disabled={retryBusy || Boolean(controlAction)} onClick={browserDownloadRaw}>浏览器下载 OCR 工程 ZIP（备用）</button>
             {rawSaved && <button type="button" onClick={openDownloadFolder}>打开保存位置</button>}
             {job.status === "partial" && <span className="warning">请重试失败页后再进入结构化审阅。</span>}
+            {qualityImportBlocked && (
+              <span className="warning">出版审校页级质量门未通过；请点击上方页码检查并重试。保存 OCR 工程不受影响。</span>
+            )}
           </div>
         )}
         {job && ["done", "partial", "error"].includes(job.status) && (
@@ -1372,7 +1597,11 @@ export default function Ocr({ onImport, onOpenSettings }) {
                   <span className="badge">{job.source_type === "pdf" ? `原 P${n}` : `P${n}`}</span>
                   <span className="page-task-index">{p.task_index || 1}/{totalPages}</span>
                   <span className="m">
-                    {p.retrying ? "重试中" : p.status === "done" ? (p.low_conf ? "⚠ 低置信" : "OK") :
+                    {p.retrying ? "重试中" : p.status === "done" ? (
+                      p.low_conf ? "⚠ 低置信" :
+                        p.needs_review ? "⚠ 待复核" :
+                          qualityRetryPageSet.has(n) ? "⚠ 质量门" : "OK"
+                    ) :
                       p.status === "error" ? "失败，可重试" :
                         p.status === "pending" ? "等待处理" : "处理中"}
                   </span>
@@ -1438,7 +1667,10 @@ export default function Ocr({ onImport, onOpenSettings }) {
                 <b>{job.source_type === "pdf" ? `原第 ${current} 页` : "图片"} LaTeX
                   {currentTaskIndex > 0 && ` · ${currentTaskIndex}/${totalPages}`}</b>
                 <button type="button" onClick={() => setPreviewMode("live")}>回到实时结果</button>
-                {(job.pages[current]?.status === "error" || job.pages[current]?.low_conf) && (
+                {(job.pages[current]?.status === "error"
+                  || job.pages[current]?.low_conf
+                  || job.pages[current]?.needs_review
+                  || qualityRetryPageSet.has(current)) && (
                   <button
                     disabled={retryBusy || rawSaving || Boolean(controlAction) || job.pages[current]?.retrying}
                     onClick={() => retry(current)}

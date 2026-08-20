@@ -1561,7 +1561,7 @@ def test_ocr_package_contains_hash_verified_preserved_images():
             kind="ocr",
         )
         project_dir = Path(store._dir(pid))
-        image = b"real-png-resource"
+        image = _png_bytes(b"real-png-resource")
         image_path = project_dir / "images" / "page_08_01.png"
         image_path.parent.mkdir(parents=True)
         image_path.write_bytes(image)

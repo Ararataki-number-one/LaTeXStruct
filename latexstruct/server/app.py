@@ -31,6 +31,11 @@ from pydantic import BaseModel, Field
 
 from ..config import AppConfig, load_config, save_config
 from ..core.invariants import IMG_RE
+from ..core.ocr_quality import (
+    OCR_QUALITY_PUBLICATION,
+    assess_ocr_quality,
+    normalize_ocr_quality_profile,
+)
 from ..core.parser import parse_latex
 from ..core.pipeline import run_pipeline
 from ..providers import list_provider_presets
@@ -162,6 +167,26 @@ def _public_ocr_job(job: dict) -> dict:
                 "figure_bbox_ready": bool(page.get("figures")),
                 "text_reference_chars": int(page.get("text_hint_chars") or 0),
                 "quality_flag_count": len(page.get("quality_flags") or []),
+                "visual_input_sha256": (
+                    str(page.get("visual_input_sha256") or "").lower()
+                    if re.fullmatch(
+                        r"[0-9a-f]{64}",
+                        str(page.get("visual_input_sha256") or "").lower(),
+                    )
+                    else ""
+                ),
+                "formula_visual_evidence": _bounded_formula_evidence(
+                    page.get("formula_evidence") or []
+                ),
+                "formula_evidence_count": len(
+                    _bounded_formula_evidence(page.get("formula_evidence") or [])
+                ),
+                "formula_evidence_attached": any(
+                    item.get("attached")
+                    for item in _bounded_formula_evidence(
+                        page.get("formula_evidence") or []
+                    )
+                ),
             }
             for n, page in job.get("pages", {}).items()
         }
@@ -173,6 +198,7 @@ def _public_ocr_job(job: dict) -> dict:
                 "pause_requested",
                 "_transcribe_one", "_refresh_raw_preview", "_merge_job", "_render_one",
                 "_mark_page_error",
+                "_source_sha256",
             )
         }
         public["raw_revision"] = int(job.get("raw_revision") or 0)
@@ -185,6 +211,7 @@ def _public_ocr_job(job: dict) -> dict:
         public["can_resume"] = job.get("status") in {"pausing", "paused"}
         public["can_cancel"] = False
         public["pages"] = pages_summary
+        public["quality_report"] = assess_ocr_quality(job)
         return public
 
 
@@ -1078,20 +1105,41 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
 
 def _ocr_bundle_bytes(job: dict, raw_tex: str) -> tuple[bytes, dict]:
     """Build a self-contained raw OCR snapshot without mutating project state."""
+    verified_job = _verified_ocr_bundle_snapshot(job)
     with tempfile.TemporaryDirectory(prefix="ls-ocr-bundle-") as tmp:
         bundle_root = Path(tmp).resolve()
-        resources = _preserve_ocr_resources(job, raw_tex, bundle_root)
+        resources = _preserve_ocr_resources(verified_job, raw_tex, bundle_root)
+        source_sha256 = str(verified_job.get("_source_sha256") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+            source_sha256 = ""
+        quality_report = assess_ocr_quality(verified_job, resources)
         manifest = {
             "format": "latexstruct-ocr-bundle-v1",
-            "source_type": str(job.get("source_type") or ""),
-            "status": str(job.get("status") or ""),
-            "selected_start": int(job.get("selected_start") or 1),
-            "selected_end": int(job.get("selected_end") or job.get("selected_start") or 1),
-            "raw_revision": int(job.get("raw_revision") or 0),
-            "usage_revision": int(job.get("usage_revision") or 0),
-            "page_revision": int(job.get("page_revision") or 0),
-            "pages": _ocr_manifest_page_records(job),
+            "source_type": str(verified_job.get("source_type") or ""),
+            "source_sha256": source_sha256,
+            "status": str(verified_job.get("status") or ""),
+            "selected_start": int(verified_job.get("selected_start") or 1),
+            "selected_end": int(
+                verified_job.get("selected_end") or verified_job.get("selected_start") or 1
+            ),
+            "raw_revision": int(verified_job.get("raw_revision") or 0),
+            "usage_revision": int(verified_job.get("usage_revision") or 0),
+            "page_revision": int(verified_job.get("page_revision") or 0),
+            "pages": _ocr_manifest_page_records(verified_job),
             "resources": resources,
+            "evidence_errors": list(verified_job.get("evidence_errors") or []),
+            "processing": {
+                "profile": str(verified_job.get("quality_profile") or "standard"),
+                "transcription_source": "full_page_visual_plus_bounded_pdf_evidence",
+                "backend": str(verified_job.get("backend") or "unknown"),
+                "model": str(verified_job.get("model") or ""),
+                "reasoning_effort": str(verified_job.get("reasoning_effort") or ""),
+                "dpi": int(verified_job.get("dpi") or 0),
+                "target_template": str(
+                    verified_job.get("output_template") or "faithfulbook"
+                ),
+            },
+            "quality_report": quality_report,
         }
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -1134,6 +1182,129 @@ def _bounded_ocr_bbox(value, *, allow_line: bool = False) -> list[float]:
     elif x0 >= x1 or y0 >= y1:
         return []
     return result
+
+
+def _bounded_formula_evidence(value) -> list[dict]:
+    """Export at most four path-free, finite formula-crop evidence records."""
+    def _points_bbox(raw) -> list[float]:
+        if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+            return []
+        values = []
+        for item in raw:
+            if isinstance(item, bool) or not isinstance(item, (int, float)):
+                return []
+            number = float(item)
+            if not math.isfinite(number) or not -100_000.0 <= number <= 100_000.0:
+                return []
+            values.append(round(number, 3))
+        if values[0] >= values[2] or values[1] >= values[3]:
+            return []
+        return values
+
+    output = []
+    for item in (value or [])[:4]:
+        if not isinstance(item, dict):
+            continue
+        evidence_id = str(item.get("id") or "")
+        target_bbox = _bounded_ocr_bbox(
+            item.get("target_bbox_normalized_in_crop")
+        )
+        source_bbox = _points_bbox(item.get("source_bbox_points"))
+        crop_bbox = _points_bbox(item.get("crop_bbox_points"))
+        crop_sha256 = str(item.get("crop_sha256") or "").lower()
+        dpi = item.get("dpi")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", evidence_id)
+            or not target_bbox
+            or not source_bbox
+            or not crop_bbox
+            or source_bbox[0] < crop_bbox[0]
+            or source_bbox[1] < crop_bbox[1]
+            or source_bbox[2] > crop_bbox[2]
+            or source_bbox[3] > crop_bbox[3]
+            or not re.fullmatch(r"[0-9a-f]{64}", crop_sha256)
+            or isinstance(dpi, bool)
+            or not isinstance(dpi, int)
+            or not 144 <= dpi <= 600
+        ):
+            continue
+        record = {
+            "id": evidence_id,
+            "target_bbox_normalized_in_crop": target_bbox,
+            "source_bbox_points": source_bbox,
+            "crop_bbox_points": crop_bbox,
+            "crop_sha256": crop_sha256,
+            "dpi": dpi,
+            "attached": bool(item.get("attached")),
+        }
+        size = item.get("image_size_pixels")
+        if (
+            isinstance(size, (list, tuple))
+            and len(size) == 2
+            and all(
+                not isinstance(number, bool)
+                and isinstance(number, int)
+                and 1 <= number <= 100_000
+                for number in size
+            )
+        ):
+            record["image_size_pixels"] = [int(size[0]), int(size[1])]
+        output.append(record)
+    return output
+
+
+def _prepare_page_formula_evidence(job: dict, page_no: int) -> list[dict]:
+    """Detect/render publication PDF formula crops; failures intentionally propagate."""
+    if (
+        str(job.get("quality_profile") or "standard") != OCR_QUALITY_PUBLICATION
+        or str(job.get("source_type") or "") != "pdf"
+        or not callable(getattr(
+            job.get("client"), "chat_vision_structured_images_bytes", None,
+        ))
+    ):
+        return []
+    from ..core.ocrformula import (
+        DEFAULT_FORMULA_DPI,
+        FormulaDetectionConfig,
+        detect_pdf_formula_regions,
+        render_pdf_formula_evidence,
+        target_bbox_normalized,
+    )
+
+    source_sha256 = str(job.get("_source_sha256") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+        raise RuntimeError("出版审校缺少可验证的源 PDF 哈希")
+    regions = detect_pdf_formula_regions(
+        job["target"],
+        [page_no],
+        config=FormulaDetectionConfig(max_regions_per_page=4),
+    )
+    if len(regions) > 4:
+        raise RuntimeError(f"第 {page_no} 页公式局部证据超过 4 张上限")
+    if not regions:
+        return []
+    evidence = render_pdf_formula_evidence(
+        job["target"],
+        source_sha256,
+        regions,
+        Path(job["dir"]) / "formula-evidence",
+        dpi=DEFAULT_FORMULA_DPI,
+    )
+    if len(evidence) != len(regions) or len(evidence) > 4:
+        raise RuntimeError(f"第 {page_no} 页公式局部证据生成不完整")
+    return [
+        {
+            "id": item.region.region_id,
+            "target_bbox_normalized_in_crop": list(target_bbox_normalized(item)),
+            "source_bbox_points": list(item.region.bbox_points),
+            "crop_bbox_points": list(item.crop_bbox_points),
+            "crop_sha256": item.image_sha256,
+            "dpi": int(item.dpi),
+            "image_size_pixels": list(item.image_size_pixels),
+            "crop_path": str(item.crop_path),
+        }
+        for item in evidence
+    ]
 
 
 def _ocr_manifest_page_records(job: dict) -> list[dict]:
@@ -1361,14 +1532,25 @@ def _ocr_manifest_page_records(job: dict) -> list[dict]:
                 ):
                     source_record[target_key] = round(float(value), 4)
             footnote_source_evidence.append(source_record)
+        visual_sha256 = str(page.get("visual_input_sha256") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", visual_sha256):
+            visual_sha256 = ""
         records.append({
             "source_page": page_no,
+            "status": str(page.get("status") or "pending"),
+            "attempts": int(page.get("attempts") or 0),
+            "low_confidence": bool(page.get("low_conf")),
             "image_size_pixels": list(page.get("image_size_pixels") or []),
+            "visual_input_sha256": visual_sha256,
+            "transcription_source": "full_page_visual_plus_bounded_pdf_evidence",
             "reference_text": {
                 "chars": int(page.get("text_hint_chars") or 0),
                 "sha256": str(page.get("text_hint_sha256") or ""),
             },
             "figures": figures,
+            "formula_visual_evidence": _bounded_formula_evidence(
+                page.get("formula_evidence") or []
+            ),
             "footnote_source_evidence": footnote_source_evidence,
             "quality_flags": quality_flags,
             "needs_review": bool(
@@ -1383,8 +1565,15 @@ def _snapshot_ocr_bundle_job(job: dict) -> dict:
     """Copy only immutable/bundle-relevant OCR fields while holding the job lock."""
     return {
         "source_type": str(job.get("source_type") or ""),
+        "_source_sha256": str(job.get("_source_sha256") or ""),
         "target": str(job.get("target") or ""),
         "status": str(job.get("status") or ""),
+        "quality_profile": str(job.get("quality_profile") or "standard"),
+        "backend": str(job.get("backend") or "unknown"),
+        "model": str(job.get("model") or ""),
+        "reasoning_effort": str(job.get("reasoning_effort") or ""),
+        "dpi": int(job.get("dpi") or 0),
+        "output_template": str(job.get("output_template") or "faithfulbook"),
         "selected_start": int(job.get("selected_start") or 1),
         "selected_end": int(job.get("selected_end") or job.get("selected_start") or 1),
         "selected_pages": [int(page) for page in (job.get("selected_pages") or [])],
@@ -1396,15 +1585,213 @@ def _snapshot_ocr_bundle_job(job: dict) -> dict:
                 "png": str(page.get("png") or ""),
                 "figures": deepcopy(page.get("figures") or []),
                 "image_size_pixels": list(page.get("image_size_pixels") or []),
+                "visual_input_sha256": str(page.get("visual_input_sha256") or ""),
+                "formula_evidence": _bounded_formula_evidence(
+                    page.get("formula_evidence") or []
+                ),
                 "text_hint_chars": int(page.get("text_hint_chars") or 0),
                 "text_hint_sha256": str(page.get("text_hint_sha256") or ""),
                 "footnote_regions": deepcopy(page.get("footnote_regions") or []),
                 "quality_flags": deepcopy(page.get("quality_flags") or []),
                 "needs_review": bool(page.get("needs_review")),
+                "status": str(page.get("status") or "pending"),
+                "low_conf": bool(page.get("low_conf")),
+                "error": str(page.get("error") or ""),
+                "attempts": int(page.get("attempts") or 0),
             }
             for page_no, page in (job.get("pages") or {}).items()
         },
     }
+
+
+def _verified_ocr_bundle_snapshot(job: dict) -> dict:
+    """Revalidate frozen source/page pixels before claiming OCR provenance.
+
+    Page paths are deliberately kept private.  A missing or changed file clears
+    the copied provenance hash so ``assess_ocr_quality`` fails publication mode,
+    while the caller can still offer the raw, explicitly unverified snapshot.
+    """
+    from ..ocr import image_pixel_size
+
+    snapshot = deepcopy(job)
+    evidence_errors: list[str] = []
+    expected_source_hash = str(snapshot.get("_source_sha256") or "").lower()
+    source_path = Path(str(snapshot.get("target") or ""))
+    try:
+        if (
+            re.fullmatch(r"[0-9a-f]{64}", expected_source_hash) is None
+            or source_path.is_symlink()
+            or not source_path.is_file()
+        ):
+            raise ValueError("source unavailable")
+        actual_source_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        if not hmac.compare_digest(expected_source_hash, actual_source_hash):
+            raise ValueError("source changed")
+    except (OSError, ValueError):
+        snapshot["_source_sha256"] = ""
+        evidence_errors.append("原始 OCR 输入已丢失或与冻结哈希不一致")
+
+    pages = snapshot.get("pages") if isinstance(snapshot.get("pages"), dict) else {}
+    selected = snapshot.get("selected_pages") or list(pages)
+    for raw_page_no in selected:
+        try:
+            page_no = int(raw_page_no)
+        except (TypeError, ValueError):
+            continue
+        page = pages.get(page_no, pages.get(str(page_no)))
+        if not isinstance(page, dict) or str(page.get("status") or "") != "done":
+            continue
+        expected_hash = str(page.get("visual_input_sha256") or "").lower()
+        page_path = Path(str(page.get("png") or ""))
+        try:
+            if (
+                re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None
+                or page_path.is_symlink()
+                or not page_path.is_file()
+            ):
+                raise ValueError("page image unavailable")
+            data = page_path.read_bytes()
+            if _raster_extension(data) not in {".png", ".jpg"}:
+                raise ValueError("page image format invalid")
+            if not hmac.compare_digest(expected_hash, hashlib.sha256(data).hexdigest()):
+                raise ValueError("page image changed")
+            expected_size = [int(value) for value in (page.get("image_size_pixels") or [])]
+            if len(expected_size) != 2 or list(image_pixel_size(data)) != expected_size:
+                raise ValueError("page image dimensions changed")
+        except (OSError, TypeError, ValueError):
+            page["visual_input_sha256"] = ""
+            evidence_errors.append(f"第 {page_no} 页视觉输入已丢失或被改变")
+    snapshot["evidence_errors"] = evidence_errors[:100]
+    return snapshot
+
+
+def _preserve_original_ocr_source(job: dict, project_dir: Path) -> dict:
+    """Atomically retain the immutable upload used by OCR for later audits."""
+    source = Path(str(job.get("target") or ""))
+    if source.is_symlink() or not source.is_file():
+        raise RuntimeError("原始 OCR 文件已不可用，无法建立可追溯项目")
+    data = source.read_bytes()
+    if not data or len(data) > MAX_OCR_UPLOAD_BYTES:
+        raise RuntimeError("原始 OCR 文件为空或超过保存上限")
+    actual_hash = hashlib.sha256(data).hexdigest()
+    expected_hash = str(job.get("_source_sha256") or "").lower()
+    has_frozen_hash = re.fullmatch(r"[0-9a-f]{64}", expected_hash) is not None
+    if has_frozen_hash and not hmac.compare_digest(expected_hash, actual_hash):
+        raise RuntimeError("原始 OCR 文件在识别后发生改变，哈希校验失败")
+    if (
+        not has_frozen_hash
+        and str(job.get("quality_profile") or "") == OCR_QUALITY_PUBLICATION
+    ):
+        raise RuntimeError("原始 OCR 文件缺少启动时冻结的哈希，不能建立出版审校证据")
+    source_type = str(job.get("source_type") or "")
+    if source_type == "pdf":
+        if not data.startswith(b"%PDF-"):
+            raise RuntimeError("原始 OCR PDF 内容已损坏")
+        extension = ".pdf"
+    elif source_type == "image":
+        extension = _raster_extension(data)
+    else:
+        raise RuntimeError("原始 OCR 文件类型未知")
+    destination = (project_dir / f"ocr-source{extension}").resolve()
+    destination.relative_to(project_dir.resolve())
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    committed = False
+    try:
+        with open(temporary, "xb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+        stored = destination.read_bytes()
+        if stored != data:
+            raise RuntimeError("原始 OCR 文件落盘校验失败")
+        committed = True
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+        if not committed and destination.exists():
+            destination.unlink()
+    return {
+        "available": True,
+        "path": destination.name,
+        "bytes": len(data),
+        "sha256": actual_hash,
+        "source_type": source_type,
+        "source_pages": int(job.get("source_total") or 1),
+        "selected_start": int(job.get("selected_start") or 1),
+        "selected_end": int(job.get("selected_end") or job.get("selected_start") or 1),
+        "immutable_evidence": has_frozen_hash,
+        "reason": "" if has_frozen_hash else "legacy_job_without_frozen_hash",
+    }
+
+
+def _verified_ocr_source_bytes(
+    project_dir: Path,
+    source_info: dict,
+    *,
+    required: bool,
+) -> tuple[str, bytes, dict] | None:
+    """Return a hash-bound project OCR source, never an unchecked local path."""
+    from ..core.project import safe_project_relpath
+
+    if not isinstance(source_info, dict) or not source_info.get("available"):
+        if required:
+            raise ValueError("OCR 原始来源证据缺失，已阻止出版审校工程导出")
+        return None
+    if required and source_info.get("immutable_evidence") is not True:
+        raise ValueError("OCR 原始来源未绑定启动时哈希，已阻止出版审校工程导出")
+    rel = safe_project_relpath(str(source_info.get("path") or ""))
+    if not rel.startswith("ocr-source."):
+        raise ValueError("OCR 原始来源路径无效")
+    root = project_dir.resolve()
+    path = root / Path(rel)
+    if path.is_symlink():
+        raise ValueError("OCR 原始来源不能是符号链接")
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(root)
+        data = resolved.read_bytes()
+    except (ValueError, OSError):
+        raise ValueError("OCR 原始来源文件丢失") from None
+    expected_size = source_info.get("bytes")
+    if expected_size is None or int(expected_size) != len(data):
+        raise ValueError("OCR 原始来源大小校验失败")
+    expected_hash = str(source_info.get("sha256") or "").lower()
+    if re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None or not hmac.compare_digest(
+        expected_hash,
+        hashlib.sha256(data).hexdigest(),
+    ):
+        raise ValueError("OCR 原始来源哈希校验失败")
+    source_type = str(source_info.get("source_type") or "")
+    if source_type == "pdf":
+        if not data.startswith(b"%PDF-") or not rel.lower().endswith(".pdf"):
+            raise ValueError("OCR 原始 PDF 格式校验失败")
+    elif source_type == "image":
+        detected = _raster_extension(data)
+        if detected not in {".png", ".jpg"} or _canonical_image_extension(
+            Path(rel).suffix
+        ) != detected:
+            raise ValueError("OCR 原始图片格式校验失败")
+    else:
+        raise ValueError("OCR 原始来源类型无效")
+    public_record = {
+        key: deepcopy(source_info.get(key))
+        for key in (
+            "available",
+            "path",
+            "bytes",
+            "sha256",
+            "source_type",
+            "source_pages",
+            "selected_start",
+            "selected_end",
+            "immutable_evidence",
+            "reason",
+        )
+        if key in source_info
+    }
+    public_record["path"] = rel
+    return rel, data, public_record
 
 
 def _verified_ocr_resource_bytes(
@@ -1438,6 +1825,13 @@ def _verified_ocr_resource_bytes(
             hashlib.sha256(data).hexdigest(),
         ):
             raise ValueError(f"OCR 图片哈希校验失败：{rel}")
+        detected_extension = _raster_extension(data)
+        if (
+            item.get("format_matches_extension") is False
+            or detected_extension not in {".png", ".jpg"}
+            or _canonical_image_extension(Path(rel).suffix) != detected_extension
+        ):
+            raise ValueError(f"OCR 图片格式与扩展名不一致：{rel}")
         previous = files.get(rel)
         if previous is not None and previous != data:
             raise ValueError(f"OCR 图片路径冲突：{rel}")
@@ -2407,6 +2801,21 @@ def create_app(updated_from: str = "") -> FastAPI:
     def _write_ocr_package_resources(zf, pid: str, meta: dict, reserved: dict) -> None:
         resource_info = meta.get("ocr_resources") or {}
         project_dir = Path(get_store()._dir(pid)).resolve()
+        processing = meta.get("ocr_processing") if isinstance(
+            meta.get("ocr_processing"), dict
+        ) else {}
+        quality = meta.get("ocr_quality") if isinstance(
+            meta.get("ocr_quality"), dict
+        ) else {}
+        profile = str(processing.get("profile") or quality.get("profile") or "standard")
+        try:
+            source_file = _verified_ocr_source_bytes(
+                project_dir,
+                meta.get("ocr_source") or {},
+                required=profile == OCR_QUALITY_PUBLICATION,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
         try:
             resource_files = _verified_ocr_resource_bytes(
                 project_dir,
@@ -2415,13 +2824,43 @@ def create_app(updated_from: str = "") -> FastAPI:
             )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
+        existing = set(zf.namelist())
+        if source_file is not None:
+            source_rel, source_bytes, source_record = source_file
+            if source_rel in reserved or source_rel in existing or source_rel == "main.tex":
+                raise HTTPException(409, f"OCR 原始来源路径与工程文件冲突：{source_rel}")
+            zf.writestr(source_rel, source_bytes)
+            existing.add(source_rel)
+        else:
+            source_record = {
+                "available": False,
+                "immutable_evidence": False,
+                "reason": "legacy_project_without_source",
+            }
         for rel, data in resource_files.items():
-            if rel in reserved or rel == "main.tex":
+            if rel in reserved or rel in existing or rel == "main.tex":
                 raise HTTPException(409, f"OCR 图片路径与工程文件冲突：{rel}")
             zf.writestr(rel, data)
+            existing.add(rel)
+        for manifest_name in ("OCR-RESOURCES.json", "OCR-QUALITY.json"):
+            if manifest_name in reserved or manifest_name in existing:
+                raise HTTPException(409, f"OCR 证据清单与工程文件冲突：{manifest_name}")
         zf.writestr(
             "OCR-RESOURCES.json",
             json.dumps(resource_info, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+        zf.writestr(
+            "OCR-QUALITY.json",
+            json.dumps(
+                {
+                    "format": "latexstruct-ocr-quality-v1",
+                    "source": source_record,
+                    "processing": deepcopy(processing),
+                    "quality": deepcopy(quality),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ).encode("utf-8"),
         )
 
     def _current_package_bytes(pid: str) -> tuple[bytes, bool]:
@@ -3392,6 +3831,7 @@ def create_app(updated_from: str = "") -> FastAPI:
             "source_type": "pdf" if suffix == ".pdf" else "image",
             "source_total": source_total,
             "source_outline": list(source_outline or []),
+            "_source_sha256": hashlib.sha256(upload).hexdigest(),
             "progress": 0.0,
             "total": 0,
             "done": 0,
@@ -3417,6 +3857,9 @@ def create_app(updated_from: str = "") -> FastAPI:
             "error": "",
             "usage": {},
             "backend": "unknown",
+            "quality_profile": "standard",
+            "output_template": "faithfulbook",
+            "reasoning_effort": "",
             "created": time.time(),
             "updated": time.time(),
             "state_revision": 1,
@@ -3456,6 +3899,9 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "retrying": False,
                 "figures": [],
                 "image_size_pixels": [],
+                "visual_input_sha256": "",
+                "formula_evidence_inputs": [],
+                "formula_evidence": [],
                 "text_hint": "",
                 "text_hint_chars": 0,
                 "text_hint_sha256": "",
@@ -3476,11 +3922,25 @@ def create_app(updated_from: str = "") -> FastAPI:
         base_url: str,
         model: str,
         api_key: str,
+        quality_profile: str = "standard",
     ):
         # 启动时冻结后端选择；后续设置变化不应改变本任务的重试/计费身份。
-        launch_cfg = get_config()
+        launch_cfg = deepcopy(get_config())
+        quality_profile = normalize_ocr_quality_profile(quality_profile)
+        if (
+            quality_profile == OCR_QUALITY_PUBLICATION
+            and launch_cfg.analysis_backend == "codex_cli"
+            and launch_cfg.codex_reasoning_effort == "low"
+        ):
+            # 出版审校优先稳定性；只把 low 提升到 medium，不覆盖用户显式 high。
+            launch_cfg.codex_reasoning_effort = "medium"
         with _ocr_jobs_lock:
             job["backend"] = str(launch_cfg.analysis_backend or "api")
+            job["quality_profile"] = quality_profile
+            job["reasoning_effort"] = (
+                str(launch_cfg.codex_reasoning_effort or "")
+                if launch_cfg.analysis_backend == "codex_cli" else ""
+            )
             _bump_ocr_state(job)
         def _transcribe_one(job, client, page_no: int, png_path: str, max_attempts: int = 2):
             """转写单页；非空结果始终保留，仅明确暂时性失败自动重试。"""
@@ -3490,6 +3950,8 @@ def create_app(updated_from: str = "") -> FastAPI:
                 transcribe_page_result,
             )
 
+            if job.get("quality_profile") == OCR_QUALITY_PUBLICATION:
+                max_attempts = max(max_attempts, 3)
             page = job["pages"][page_no]
             with _ocr_jobs_lock:
                 page["status"] = "running"
@@ -3530,6 +3992,9 @@ def create_app(updated_from: str = "") -> FastAPI:
                         reference_footnote_regions=deepcopy(
                             page.get("footnote_regions") or []
                         ),
+                        reference_formula_evidence=deepcopy(
+                            page.get("formula_evidence_inputs") or []
+                        ),
                     )
                     tex = transcription.tex
                     quality_flags = deepcopy(transcription.quality_flags or [])
@@ -3556,6 +4021,9 @@ def create_app(updated_from: str = "") -> FastAPI:
                             transcription.image_size_pixels or []
                         )
                         page["quality_flags"] = quality_flags
+                        page["formula_evidence"] = _bounded_formula_evidence(
+                            transcription.formula_evidence or []
+                        )
                         job["page_revision"] = int(job.get("page_revision") or 0) + 1
                         _bump_ocr_state(job)
                     return True
@@ -3659,6 +4127,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                     raise RuntimeError(
                         f"第 {page_no} 页脚注源证据提取失败：{str(exc)[:180]}"
                     ) from None
+                formula_evidence_inputs = _prepare_page_formula_evidence(job, page_no)
             else:
                 if page_no != 1:
                     raise RuntimeError("单张图片任务仅有第 1 页")
@@ -3670,6 +4139,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 divider_regions = []
                 framed_inset_regions = []
                 footnote_regions = []
+                formula_evidence_inputs = []
             if not image_bytes:
                 raise RuntimeError(f"第 {page_no} 页渲染结果为空")
             try:
@@ -3702,6 +4172,15 @@ def create_app(updated_from: str = "") -> FastAPI:
                 page["framed_inset_regions"] = deepcopy(framed_inset_regions)
                 page["footnote_regions"] = deepcopy(footnote_regions)
                 page["image_size_pixels"] = list(pixel_size)
+                page["visual_input_sha256"] = hashlib.sha256(image_bytes).hexdigest()
+                page["formula_evidence_inputs"] = deepcopy(formula_evidence_inputs)
+                page["formula_evidence"] = [
+                    {
+                        **item,
+                        "attached": False,
+                    }
+                    for item in _bounded_formula_evidence(formula_evidence_inputs)
+                ]
                 _bump_ocr_state(job)
             return page["png"]
 
@@ -3774,7 +4253,11 @@ def create_app(updated_from: str = "") -> FastAPI:
                     job["client"] = client
                     job["model"] = selected_model
                     job["backend"] = backend
-                    job["phase"] = "逐页渲染与忠实转写"
+                    job["phase"] = (
+                        "出版审校：逐页视觉转写与证据核验"
+                        if quality_profile == OCR_QUALITY_PUBLICATION
+                        else "逐页渲染与忠实转写"
+                    )
                     _bump_ocr_state(job)
                 for index, page_no in enumerate(page_nos, start=1):
                     _ocr_control(job)
@@ -3863,12 +4346,26 @@ def create_app(updated_from: str = "") -> FastAPI:
         base_url: str = Form(""),
         model: str = Form(""),
         api_key: str = Form(""),
+        quality_profile: str = Form("standard"),
+        output_template: str = Form("faithfulbook"),
     ):
         _cleanup_ocr_jobs()
         if not 72 <= dpi <= 300:
             raise HTTPException(400, "DPI 必须在 72-300 之间")
         if len(model) > 160 or len(base_url) > 500:
             raise HTTPException(400, "模型或 Base URL 输入过长")
+        try:
+            quality_profile = normalize_ocr_quality_profile(quality_profile)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        if quality_profile == OCR_QUALITY_PUBLICATION and dpi < 200:
+            raise HTTPException(400, "出版审校工作流要求至少 200 DPI")
+        from ..core.template import normalize_template_id
+
+        try:
+            output_template = normalize_template_id(output_template)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
         with _ocr_jobs_lock:
             job = _ocr_jobs.get(jid)
             if job is None:
@@ -3900,9 +4397,12 @@ def create_app(updated_from: str = "") -> FastAPI:
                     }
                 job["status"] = "starting"
                 _set_ocr_selection(job, page_nos)
+                job["output_template"] = output_template
                 job["status"] = "running"
                 _bump_ocr_state(job)
-        _launch_ocr_job(job, page_nos, dpi, base_url, model, api_key)
+        _launch_ocr_job(
+            job, page_nos, dpi, base_url, model, api_key, quality_profile,
+        )
         return {"id": jid, "reused": False, "status": "running"}
 
     @app.delete("/api/ocr/jobs/{jid}")
@@ -3938,6 +4438,15 @@ def create_app(updated_from: str = "") -> FastAPI:
             if job is None:
                 raise HTTPException(404, "任务不存在")
             return _public_ocr_job(job)
+
+    @app.get("/api/ocr/jobs/{jid}/quality")
+    def ocr_quality(jid: str):
+        """Return the live evidence gate without claiming measured accuracy."""
+        with _ocr_jobs_lock:
+            job = _ocr_jobs.get(jid)
+            if job is None:
+                raise HTTPException(404, "任务不存在")
+            return assess_ocr_quality(job)
 
     @app.post("/api/ocr/jobs/{jid}/pause")
     def ocr_pause(jid: str):
@@ -4195,7 +4704,10 @@ def create_app(updated_from: str = "") -> FastAPI:
             status = job["status"]
         return PlainTextResponse(
             raw_tex,
-            headers={"X-LaTeXStruct-OCR-Complete": "true" if status == "done" else "false"},
+            headers={
+                "X-LaTeXStruct-OCR-Complete": "true" if status == "done" else "false",
+                "X-LaTeXStruct-Publication-Ready": "false",
+            },
         )
 
     @app.get("/api/ocr/jobs/{jid}/package")
@@ -4218,6 +4730,7 @@ def create_app(updated_from: str = "") -> FastAPI:
             headers={
                 "Content-Disposition": f'attachment; filename="OCR{partial_label}-{jid}.zip"',
                 "X-LaTeXStruct-OCR-Complete": "true" if status == "done" else "false",
+                "X-LaTeXStruct-Publication-Ready": "false",
             },
         )
 
@@ -4310,16 +4823,7 @@ def create_app(updated_from: str = "") -> FastAPI:
         mode = str(mode or "").strip().lower()
         if mode not in {"rule", "ai"}:
             raise HTTPException(400, "结构化整理方式只能是 AI 或规则")
-        normalize_template_id(template)
-        # OCR 成品固定使用近似原书的双面出版模板。显式参数仍先经过
-        # allowlist 校验，但不会让旧客户端把 OCR 又切回讲义风格。
-        template = FAITHFULBOOK
-        import_options = {
-            "mode": mode,
-            "template": template,
-            "title": title.strip(),
-            "name": name.strip(),
-        }
+        requested_template = normalize_template_id(template)
         with _update_state_lock:
             _raise_if_update_preparing()
             with _ocr_jobs_lock:
@@ -4330,6 +4834,20 @@ def create_app(updated_from: str = "") -> FastAPI:
                     raise HTTPException(409, "OCR 结果正在导入，请勿重复点击")
                 if job.get("saving"):
                     raise HTTPException(409, "OCR 结果正在保存，请等待完成后再导入")
+                # 新任务在启动前冻结成品版式；旧任务沿用请求值，并以
+                # faithfulbook 作为缺失字段的兼容默认值。
+                template = normalize_template_id(
+                    job.get("output_template", requested_template or FAITHFULBOOK)
+                )
+                if "output_template" not in job and not template:
+                    template = FAITHFULBOOK
+                import_options = {
+                    "mode": mode,
+                    "template": template,
+                    "title": title.strip(),
+                    "name": name.strip(),
+                }
+                import_snapshot = _snapshot_ocr_bundle_job(job)
                 revision = int(job.get("raw_revision") or 0)
                 usage_revision = int(job.get("usage_revision") or 0)
                 page_revision = int(job.get("page_revision") or 0)
@@ -4352,7 +4870,25 @@ def create_app(updated_from: str = "") -> FastAPI:
                 job["importing"] = True
                 raw_tex = job["raw_tex"]
         # 原始 OCR 永远作为 source.tex 保存；结构化结果单独写 result.tex，二者不混写。
+        pid = ""
+        process_started = False
         try:
+            # Hashing hundreds of rendered pages can take noticeable time.  It
+            # must happen after the immutable snapshot/importing flag is frozen,
+            # but outside the global OCR lock so other jobs can still poll,
+            # pause, and finish their current page.
+            verified_snapshot = _verified_ocr_bundle_snapshot(import_snapshot)
+            quality_report = assess_ocr_quality(verified_snapshot)
+            if (
+                import_snapshot.get("quality_profile") == OCR_QUALITY_PUBLICATION
+                and not quality_report.get("page_gate_passed")
+            ):
+                blocker = (quality_report.get("blockers") or [{}])[0]
+                message = str(blocker.get("message") or "出版审校质量门尚未通过")
+                raise HTTPException(
+                    409,
+                    f"{message}；请检查并重试标记页面，原始 OCR 工程仍可保存。",
+                )
             pid = get_store().create(
                 raw_tex,
                 name,
@@ -4362,7 +4898,23 @@ def create_app(updated_from: str = "") -> FastAPI:
                 template_title=title or name,
             )
             project_dir = Path(get_store()._dir(pid))
-            resource_result = _preserve_ocr_resources(job, raw_tex, project_dir)
+            source_evidence = {
+                "available": False,
+                "immutable_evidence": False,
+                "reason": "legacy_job_without_source",
+            }
+            if Path(str(import_snapshot.get("target") or "")).is_file():
+                try:
+                    source_evidence = _preserve_original_ocr_source(
+                        import_snapshot, project_dir
+                    )
+                except Exception:
+                    get_store().delete(pid)
+                    raise
+            elif import_snapshot.get("quality_profile") == OCR_QUALITY_PUBLICATION:
+                get_store().delete(pid)
+                raise HTTPException(409, "原始 PDF 证据已不可用，出版审校项目不能继续导入")
+            resource_result = _preserve_ocr_resources(import_snapshot, raw_tex, project_dir)
             unresolved = [
                 str(path) for path in (resource_result.get("unresolved") or []) if str(path)
             ]
@@ -4380,8 +4932,33 @@ def create_app(updated_from: str = "") -> FastAPI:
                     "请先重试对应页面或保存 OCR 工程 ZIP，未进入分析与审阅。",
                 )
             meta = json.loads((project_dir / "meta.json").read_text(encoding="utf-8"))
+            meta["ocr_source"] = source_evidence
             meta["ocr_resources"] = resource_result
+            final_quality = assess_ocr_quality(verified_snapshot, resource_result)
+            if (
+                import_snapshot.get("quality_profile") == OCR_QUALITY_PUBLICATION
+                and not final_quality.get("workflow_gate_passed")
+            ):
+                get_store().delete(pid)
+                blocker = (final_quality.get("blockers") or [{}])[0]
+                raise HTTPException(
+                    409,
+                    str(blocker.get("message") or "OCR 出版审校证据未通过完整性校验"),
+                )
+            meta["ocr_quality"] = final_quality
+            meta["ocr_processing"] = {
+                "profile": str(import_snapshot.get("quality_profile") or "standard"),
+                "transcription_source": "full_page_visual_plus_bounded_pdf_evidence",
+                "backend": str(import_snapshot.get("backend") or "unknown"),
+                "model": str(import_snapshot.get("model") or ""),
+                "reasoning_effort": str(import_snapshot.get("reasoning_effort") or ""),
+                "dpi": int(import_snapshot.get("dpi") or 0),
+                "target_template": template,
+            }
             get_store()._write_json(str(project_dir), "meta.json", meta)
+            # 立即进入工作台，再由标准后台任务提供进度、暂停与实时 TeX 草稿。
+            process_job = process_start(pid)
+            process_started = True
             with _ocr_jobs_lock:
                 current = _ocr_jobs.get(jid)
                 if (
@@ -4397,13 +4974,14 @@ def create_app(updated_from: str = "") -> FastAPI:
                     current["imported_project_id"] = pid
                     current["imported_options"] = import_options
                     current["imported_processed"] = False
-            # 立即进入工作台，再由标准后台任务提供进度、暂停与实时 TeX 草稿。
-            process_job = process_start(pid)
-            with _ocr_jobs_lock:
-                current = _ocr_jobs.get(jid)
-                if current is not None and current.get("imported_project_id") == pid:
-                    current["imported_processed"] = False
             return {"id": pid, "processed": False, "process": process_job}
+        except Exception:
+            if pid and not process_started:
+                active = _process_jobs.active(pid)
+                if active is not None:
+                    _process_jobs.fail(active["id"], "项目处理任务未能启动")
+                get_store().delete(pid)
+            raise
         finally:
             with _ocr_jobs_lock:
                 current = _ocr_jobs.get(jid)

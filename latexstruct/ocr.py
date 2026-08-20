@@ -18,6 +18,7 @@ import re
 import struct
 import unicodedata
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List
 
 from .core.ai import LLMClient, LLMError, RoleConfig
@@ -173,6 +174,7 @@ class OcrPageTranscription:
     image_size_pixels: List[int] = field(default_factory=list)
     reference_text_chars: int = 0
     quality_flags: List[dict] = field(default_factory=list)
+    formula_evidence: List[dict] = field(default_factory=list)
 
 
 class _OcrQualityGateError(LLMError):
@@ -3449,6 +3451,140 @@ def _validate_framed_inset_integrity(
     return flags
 
 
+_FORMULA_EVIDENCE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
+_FORMULA_EVIDENCE_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_MAX_FORMULA_EVIDENCE_IMAGES = 4
+_MAX_FORMULA_EVIDENCE_BYTES = 100 * 1024 * 1024
+
+
+def _validated_formula_visual_evidence(
+    evidence: List[dict] | None,
+    *,
+    load_images: bool,
+) -> tuple[List[dict], List[bytes]]:
+    """Validate private crop inputs and return path-free records in image order."""
+    if evidence is None:
+        return [], []
+    if not isinstance(evidence, (list, tuple)):
+        raise LLMError("公式视觉证据必须是有序列表")
+    if len(evidence) > _MAX_FORMULA_EVIDENCE_IMAGES:
+        raise LLMError("单页公式视觉证据不得超过 4 张")
+    records: List[dict] = []
+    images: List[bytes] = []
+    total_bytes = 0
+    seen_ids = set()
+
+    def _points_bbox(raw, label: str) -> List[float]:
+        if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+            raise LLMError(f"公式视觉证据 {label} 无效")
+        values = []
+        for value in raw:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise LLMError(f"公式视觉证据 {label} 无效")
+            number = float(value)
+            if not math.isfinite(number) or not -100_000.0 <= number <= 100_000.0:
+                raise LLMError(f"公式视觉证据 {label} 超出安全范围")
+            values.append(round(number, 3))
+        if values[0] >= values[2] or values[1] >= values[3]:
+            raise LLMError(f"公式视觉证据 {label} 为空或倒置")
+        return values
+
+    for item in evidence:
+        if not isinstance(item, dict):
+            raise LLMError("公式视觉证据记录无效")
+        evidence_id = str(item.get("id") or "")
+        if (
+            not _FORMULA_EVIDENCE_ID_RE.fullmatch(evidence_id)
+            or evidence_id in seen_ids
+        ):
+            raise LLMError("公式视觉证据 ID 无效或重复")
+        seen_ids.add(evidence_id)
+        bbox = item.get("target_bbox_normalized_in_crop")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            raise LLMError("公式视觉证据 bbox 无效")
+        normalized_bbox = []
+        for value in bbox:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise LLMError("公式视觉证据 bbox 无效")
+            number = float(value)
+            if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+                raise LLMError("公式视觉证据 bbox 超出图片范围")
+            normalized_bbox.append(round(number, 6))
+        if (
+            normalized_bbox[0] >= normalized_bbox[2]
+            or normalized_bbox[1] >= normalized_bbox[3]
+        ):
+            raise LLMError("公式视觉证据 bbox 为空或倒置")
+        source_bbox_points = _points_bbox(
+            item.get("source_bbox_points"), "source_bbox_points",
+        )
+        crop_bbox_points = _points_bbox(
+            item.get("crop_bbox_points"), "crop_bbox_points",
+        )
+        if (
+            source_bbox_points[0] < crop_bbox_points[0]
+            or source_bbox_points[1] < crop_bbox_points[1]
+            or source_bbox_points[2] > crop_bbox_points[2]
+            or source_bbox_points[3] > crop_bbox_points[3]
+        ):
+            raise LLMError("公式视觉证据源 bbox 不在裁片 bbox 内")
+        crop_sha256 = str(item.get("crop_sha256") or "").lower()
+        if not _FORMULA_EVIDENCE_SHA256_RE.fullmatch(crop_sha256):
+            raise LLMError("公式视觉证据 SHA-256 无效")
+        dpi = item.get("dpi")
+        if isinstance(dpi, bool) or not isinstance(dpi, int) or not 144 <= dpi <= 600:
+            raise LLMError("公式视觉证据 DPI 无效")
+        image_size = item.get("image_size_pixels")
+        normalized_size: List[int] = []
+        if image_size not in (None, [], ()):
+            if (
+                not isinstance(image_size, (list, tuple))
+                or len(image_size) != 2
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or not 1 <= value <= 100_000
+                    for value in image_size
+                )
+            ):
+                raise LLMError("公式视觉证据图片尺寸无效")
+            normalized_size = [int(image_size[0]), int(image_size[1])]
+        if load_images:
+            raw_path = item.get("crop_path")
+            if not isinstance(raw_path, (str, Path)) or not str(raw_path):
+                raise LLMError("公式视觉证据缺少私有裁片路径")
+            try:
+                crop_path = Path(raw_path)
+                if crop_path.is_symlink() or not crop_path.is_file():
+                    raise OSError
+                crop = crop_path.read_bytes()
+            except OSError:
+                raise LLMError("公式视觉证据裁片不可读取") from None
+            total_bytes += len(crop)
+            if not crop or total_bytes > _MAX_FORMULA_EVIDENCE_BYTES:
+                raise LLMError("公式视觉证据为空或合计超过 100 MB")
+            if hashlib.sha256(crop).hexdigest() != crop_sha256:
+                raise LLMError("公式视觉证据裁片哈希不匹配")
+            try:
+                actual_size = list(image_pixel_size(crop))
+            except (LLMError, TypeError, ValueError):
+                raise LLMError("公式视觉证据裁片不是有效 PNG/JPEG") from None
+            if normalized_size and normalized_size != actual_size:
+                raise LLMError("公式视觉证据裁片尺寸不匹配")
+            normalized_size = actual_size
+            images.append(crop)
+        records.append({
+            "id": evidence_id,
+            "target_bbox_normalized_in_crop": normalized_bbox,
+            "source_bbox_points": source_bbox_points,
+            "crop_bbox_points": crop_bbox_points,
+            "crop_sha256": crop_sha256,
+            "dpi": dpi,
+            "image_size_pixels": normalized_size,
+        })
+    return records, images
+
+
 def _page_request(
     page_no: int,
     image_size: tuple[int, int] | None,
@@ -3456,6 +3592,7 @@ def _page_request(
     reference_italic_terms: List[str] = None,
     reference_framed_insets: List[dict] = None,
     reference_footnote_regions: List[dict] = None,
+    reference_formula_evidence: List[dict] = None,
     correction_feedback: str = "",
 ) -> str:
     request = {
@@ -3546,6 +3683,18 @@ def _page_request(
             "必须直接看像素读取印刷编号和正文；用带显式编号的 LaTeX 脚注语义，"
             "每处正文标记都保留而同一脚注正文仅定义一次。不得用普通上标、手工横线或页底复制模拟。"
         )
+    if reference_formula_evidence:
+        request["formula_visual_evidence"] = [
+            {
+                "id": str(item["id"]),
+                "target_bbox_normalized_in_crop": list(
+                    item["target_bbox_normalized_in_crop"]
+                ),
+                "crop_sha256": str(item["crop_sha256"]),
+                "dpi": int(item["dpi"]),
+            }
+            for item in reference_formula_evidence[:_MAX_FORMULA_EVIDENCE_IMAGES]
+        ]
     feedback = _sanitize_pdf_text_hint(str(correction_feedback or ""), max_chars=1600)
     if feedback:
         request["retry_correction"] = feedback
@@ -3607,6 +3756,7 @@ def transcribe_page_result(
     reference_divider_regions: List[dict] = None,
     reference_framed_insets: List[dict] = None,
     reference_footnote_regions: List[dict] = None,
+    reference_formula_evidence: List[dict] = None,
 ) -> OcrPageTranscription:
     """Transcribe one page and retain validated structured figure metadata.
 
@@ -3614,7 +3764,19 @@ def transcribe_page_result(
     keep using their historical string method and safely return no bbox data.
     """
     structured_vision = getattr(client, "chat_vision_structured_bytes", None)
-    image_size = image_pixel_size(png_bytes) if callable(structured_vision) else None
+    multi_structured_vision = getattr(
+        client, "chat_vision_structured_images_bytes", None,
+    )
+    image_size = (
+        image_pixel_size(png_bytes)
+        if callable(structured_vision) or callable(multi_structured_vision)
+        else None
+    )
+    formula_records, formula_images = _validated_formula_visual_evidence(
+        reference_formula_evidence,
+        load_images=bool(reference_formula_evidence) and callable(multi_structured_vision),
+    )
+    formula_attached = bool(formula_records) and callable(multi_structured_vision)
     user = _page_request(
         page_no,
         image_size,
@@ -3622,13 +3784,28 @@ def transcribe_page_result(
         reference_italic_terms=reference_italic_terms,
         reference_framed_insets=reference_framed_insets,
         reference_footnote_regions=reference_footnote_regions,
+        reference_formula_evidence=formula_records if formula_attached else None,
         correction_feedback=correction_feedback,
     )
     raw_figures = []
     raw_framed_insets = None
     structured = False
     try:
-        if callable(structured_vision):
+        if formula_attached:
+            # One full-page raster followed by 0-4 source-PDF formula crops.
+            # This remains one structured Codex request and one usage record.
+            response = multi_structured_vision(
+                OCR_SYSTEM_PROMPT,
+                user,
+                [png_bytes, *formula_images],
+            )
+            if not isinstance(response, dict) or not isinstance(response.get("latex"), str):
+                raise LLMError("Codex OCR 结构化响应缺少 latex")
+            raw = response["latex"]
+            raw_figures = response.get("figures")
+            raw_framed_insets = response.get("framed_insets")
+            structured = True
+        elif callable(structured_vision):
             # Codex returns latex + one required record for every figure.  It
             # receives only this controlled page raster and bounded text hint.
             response = structured_vision(OCR_SYSTEM_PROMPT, user, png_bytes)
@@ -3721,6 +3898,13 @@ def transcribe_page_result(
         image_size_pixels=list(image_size or ()),
         reference_text_chars=len(hint),
         quality_flags=quality_flags,
+        formula_evidence=[
+            {
+                **record,
+                "attached": formula_attached,
+            }
+            for record in formula_records
+        ],
     )
 
 
@@ -3736,6 +3920,7 @@ def transcribe_page(
     reference_divider_regions: List[dict] = None,
     reference_framed_insets: List[dict] = None,
     reference_footnote_regions: List[dict] = None,
+    reference_formula_evidence: List[dict] = None,
 ) -> str:
     """Backward-compatible one-page API returning only the LaTeX string."""
     return transcribe_page_result(
@@ -3750,6 +3935,7 @@ def transcribe_page(
         reference_divider_regions=reference_divider_regions,
         reference_framed_insets=reference_framed_insets,
         reference_footnote_regions=reference_footnote_regions,
+        reference_formula_evidence=reference_formula_evidence,
     ).tex
 
 
