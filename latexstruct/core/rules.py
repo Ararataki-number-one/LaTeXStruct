@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -53,6 +54,56 @@ def _is_ocr_page_separator(text: str) -> bool:
     return active in (r"\clearpage", r"\newpage")
 
 
+def _proof_prose_start(first: str) -> tuple[str, object]:
+    """Return visible proof prose after harmless paragraph-layout commands."""
+    semantic, wrapper = _semantic_view(first)
+    stripped = semantic.lstrip()
+    for _ in range(4):
+        updated = re.sub(
+            r"^\\(?:noindent|leavevmode|ignorespaces)\b\s*",
+            "",
+            stripped,
+            count=1,
+        )
+        if updated == stripped:
+            break
+        stripped = updated.lstrip()
+    return stripped, wrapper
+
+
+def _proof_terminal_end_before_structure(doc: Document, c, idx: int, proof_re) -> int:
+    """Return the first explicit proof terminator before a new structure.
+
+    A source QED (or a canonical terminal completion sentence) is stronger
+    boundary evidence than paragraph-capitalisation heuristics.  Looking ahead
+    only until the next theorem/proof/section lets long proofs cross page breaks
+    and narrative-reset paragraphs without swallowing the following result.
+    """
+    from .legalize import has_proof_end_marker
+
+    start = c.span.start_line
+    for block in doc.blocks[idx:]:
+        if block.span.end_line < start:
+            continue
+        is_initial = (
+            block.kind == "para"
+            and block.span.start_line == c.span.start_line
+        )
+        if block.kind == "para" and not is_initial:
+            first = _first_nonempty_line(block.text)
+            if first:
+                semantic, _wrapper = _semantic_view(first)
+                if (
+                    _match_title(first)
+                    or proof_re.match(semantic)
+                    or SECTION_START_RE.match(first)
+                ):
+                    break
+        if has_proof_end_marker(block.text):
+            return block.span.end_line
+    return 0
+
+
 def _extend_proof_body(doc: Document, c, proof_re=None, continue_re=None) -> int:
     """规则模式启发式：证明环境覆盖整段证明（正则可由 Rule Pack 定制）。
 
@@ -73,6 +124,9 @@ def _extend_proof_body(doc: Document, c, proof_re=None, continue_re=None) -> int
     )
     if idx is None:
         return end
+    terminal_end = _proof_terminal_end_before_structure(doc, c, idx, proof_re)
+    if terminal_end:
+        return terminal_end
     has_body = bool(str(c.payload.get("title_remainder", "")).strip())
     for b in blocks[idx + 1 :]:
         if b.span.start_line <= end:
@@ -105,8 +159,7 @@ def _extend_proof_body(doc: Document, c, proof_re=None, continue_re=None) -> int
             break
         if _match_title(first) or _proof_matches(proof_re, first) or SECTION_START_RE.match(first):
             break
-        semantic, wrapper = _semantic_view(first)
-        stripped = semantic.lstrip()
+        stripped, wrapper = _proof_prose_start(first)
         # 配平环境会被 parser 归为 env；普通段落以 begin 开头说明源环境未闭合。
         if stripped.startswith("\\begin"):
             break

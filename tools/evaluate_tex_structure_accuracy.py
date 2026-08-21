@@ -13,13 +13,21 @@ Truth manifest example::
       "schema": "latexstruct-tex-structure-truth-v1",
       "items": [
         {"kind": "theorem", "id": "1.1", "start_line": 20, "end_line": 24},
-        {"kind": "proof", "id": "P1.1", "start_line": 26, "end_line": 30}
+        {"kind": "proof", "id": "P1.1", "start_line": 26, "end_line": 30},
+        {
+          "kind": "remark",
+          "id": "remark-after-1.1",
+          "heading_label": "Remark",
+          "start_line": 32,
+          "end_line": 34
+        }
       ]
     }
 
-Without a manifest, simple bold formal headings and italic proof headings are
-discovered automatically.  Release evidence should use a reviewed manifest so
-that a detector cannot silently define its own ground truth.
+Without a manifest, simple formal and proof headings are discovered
+automatically.  That mode is diagnostic only: release evidence must use a
+reviewed manifest so that a detector cannot silently define its own ground
+truth or infer statement boundaries from blank lines.
 """
 
 from __future__ import annotations
@@ -98,12 +106,70 @@ PLAIN_OUTLINE_STRUCTURAL_RE = re.compile(
     r"(?mi)^\s*(?:\d+\.\s+[A-Z][A-Z\s.'’\\\-–—]+|REFERENCES)\s*$"
 )
 TOKEN_RE = re.compile(r"\\[A-Za-z@]+|\\[^\s]|[^\W_]+|_|[^\s]", re.UNICODE)
+FORMAL_LABEL_RE = re.compile(
+    rf"^(?P<kind>{KIND_PATTERN})(?:\s+(?P<number>\d+(?:\.\d+)*))?"
+    r"(?P<tail>(?:\s+\([^\n]*\))?\.?)\s*$",
+    re.IGNORECASE,
+)
+PROOF_LABEL_RE = re.compile(
+    r"^(?:proof(?:\s+of\s+.+?)?|sketch\s+of\s+the\s+proof)\.?\s*$",
+    re.IGNORECASE,
+)
+PLAIN_FORMAL_PREFIX_RE = re.compile(
+    rf"^(?P<label>(?P<kind>{KIND_PATTERN})"
+    r"(?:\s+(?P<number>\d+(?:\.\d+)*))?"
+    r"(?:\s+\([^\n]*?\))?\.)(?=\s|$)",
+    re.IGNORECASE,
+)
+PLAIN_NUMBERED_FORMAL_PREFIX_RE = re.compile(
+    rf"^(?P<label>(?P<kind>{KIND_PATTERN})\s+"
+    r"(?P<number>\d+(?:\.\d+)*))(?=\s+\(|\s*$)",
+    re.IGNORECASE,
+)
+PLAIN_PROOF_PREFIX_RE = re.compile(
+    r"^(?P<label>(?:Proof(?:\s+of\s+[^\n]*?)?|Sketch\s+of\s+the\s+proof)\.)"
+    r"(?=\s|$)",
+    re.IGNORECASE,
+)
+
+PRESENTATION_ONE_ARG = {
+    "emph",
+    "mbox",
+    "textbf",
+    "textit",
+    "textnormal",
+    "textrm",
+    "textsc",
+    "textsf",
+    "textsl",
+    "texttt",
+    "textup",
+    "underline",
+}
+PRESENTATION_TWO_ARG = {"colorbox", "href", "textcolor"}
+PRESENTATION_DECLARATIONS = {
+    "bf",
+    "bfseries",
+    "em",
+    "it",
+    "itshape",
+    "mdseries",
+    "normalfont",
+    "rmfamily",
+    "scshape",
+    "sffamily",
+    "slshape",
+    "ttfamily",
+    "upshape",
+}
 
 
 @dataclass(frozen=True)
 class TruthItem:
     kind: str
     item_id: str
+    heading_label: str
+    heading_number: str
     start_line: int
     end_line: int
     tokens: tuple[str, ...]
@@ -120,8 +186,40 @@ class CandidateEnvironment:
     tokens: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class SourceHeading:
+    kind: str
+    number: str
+    label: str
+    start_offset: int
+    end_offset: int
+    line: int
+
+
+@dataclass(frozen=True)
+class TruthHeading:
+    level: int
+    title: str
+    title_key: str
+    start_line: int
+    end_line: int
+
+
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _normalise_text_for_hash(text: str) -> str:
+    """Canonicalise decoded text only; never claim this is a file-byte hash."""
+    return text.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+
+
+def _normalised_text_sha256(text: str) -> str:
+    return _sha256_text(_normalise_text_for_hash(text))
 
 
 def _strip_comments(text: str) -> str:
@@ -174,6 +272,189 @@ def _balanced_group_end(text: str, opening_brace: int) -> int | None:
     return None
 
 
+def _skip_space(text: str, index: int) -> int:
+    while index < len(text) and text[index].isspace():
+        index += 1
+    return index
+
+
+def _command_name(text: str, index: int) -> tuple[str, int] | None:
+    match = re.match(r"\\([A-Za-z@]+)\*?", text[index:])
+    if match is None:
+        return None
+    return match.group(1).casefold(), index + match.end()
+
+
+def _required_group(text: str, index: int) -> tuple[int, int] | None:
+    opening = _skip_space(text, index)
+    if opening >= len(text) or text[opening] != "{":
+        return None
+    end = _balanced_group_end(text, opening)
+    if end is None:
+        return None
+    return opening, end
+
+
+def _leading_styled_span(line: str) -> tuple[int, int] | None:
+    """Return one complete leading presentation atom, if present."""
+    start = _skip_space(line, 0)
+    if start >= len(line):
+        return None
+    if line[start] == "{":
+        end = _balanced_group_end(line, start)
+        if end is None:
+            return None
+        inner = line[start + 1:end - 1].lstrip()
+        command = _command_name(inner, 0) if inner.startswith("\\") else None
+        if command is None or command[0] not in PRESENTATION_DECLARATIONS | {"color"}:
+            return None
+        return start, end
+    if line[start] != "\\":
+        return None
+    command = _command_name(line, start)
+    if command is None:
+        return None
+    name, cursor = command
+    if name in PRESENTATION_ONE_ARG:
+        group = _required_group(line, cursor)
+        return (start, group[1]) if group else None
+    if name in PRESENTATION_TWO_ARG:
+        first = _required_group(line, cursor)
+        if first is None:
+            return None
+        second = _required_group(line, first[1])
+        return (start, second[1]) if second else None
+    return None
+
+
+def _flatten_presentation(text: str) -> str:
+    """Remove visual wrappers while retaining their visible heading text."""
+    output: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "~":
+            output.append(" ")
+            index += 1
+            continue
+        if char in "{}":
+            index += 1
+            continue
+        if char != "\\":
+            output.append(char)
+            index += 1
+            continue
+        command = _command_name(text, index)
+        if command is None:
+            index += 1
+            continue
+        name, cursor = command
+        if name in PRESENTATION_DECLARATIONS:
+            index = cursor
+            continue
+        if name == "color":
+            group = _required_group(text, cursor)
+            index = group[1] if group else cursor
+            continue
+        if name in PRESENTATION_ONE_ARG:
+            group = _required_group(text, cursor)
+            if group is None:
+                index = cursor
+                continue
+            output.append(_flatten_presentation(text[group[0] + 1:group[1] - 1]))
+            index = group[1]
+            continue
+        if name in PRESENTATION_TWO_ARG:
+            first = _required_group(text, cursor)
+            second = _required_group(text, first[1]) if first else None
+            if first is None or second is None:
+                index = cursor
+                continue
+            # textcolor/colorbox hide their colour argument; href hides its URL.
+            output.append(_flatten_presentation(text[second[0] + 1:second[1] - 1]))
+            index = second[1]
+            continue
+        # Unknown control words are formatting for the purposes of a heading
+        # label.  Preserve separation so adjacent words cannot accidentally join.
+        output.append(" ")
+        index = cursor
+    return re.sub(r"\s+", " ", "".join(output)).strip()
+
+
+def _canonical_heading_label(value: str) -> str:
+    visible = _flatten_presentation(value).casefold().rstrip(" .")
+    return " ".join(re.findall(r"[^\W_]+|\d+(?:\.\d+)*", visible, re.UNICODE))
+
+
+def _parse_heading_label(value: str) -> tuple[str, str, str] | None:
+    visible = re.sub(r"\s+", " ", _flatten_presentation(value)).strip()
+    formal = FORMAL_LABEL_RE.fullmatch(visible)
+    if formal:
+        number = (formal.group("number") or "").rstrip(".")
+        tail = formal.group("tail") or ""
+        if not number and not tail.rstrip().endswith("."):
+            return None
+        return formal.group("kind").casefold(), number, visible.rstrip(" .")
+    if PROOF_LABEL_RE.fullmatch(visible):
+        return "proof", "", visible.rstrip(" .")
+    return None
+
+
+def _find_source_headings(text: str) -> list[SourceHeading]:
+    """Find line-anchored source headings, including nested visual wrappers."""
+    result: list[SourceHeading] = []
+    offset = 0
+    for line_number, line_with_end in enumerate(text.splitlines(keepends=True), start=1):
+        line = line_with_end.rstrip("\r\n")
+        styled = _leading_styled_span(line)
+        if styled is not None:
+            start, end = styled
+            parsed = _parse_heading_label(line[start:end])
+            if parsed is not None:
+                kind, number, label = parsed
+                result.append(SourceHeading(
+                    kind=kind,
+                    number=number,
+                    label=label,
+                    start_offset=offset + start,
+                    end_offset=offset + end,
+                    line=line_number,
+                ))
+                offset += len(line_with_end)
+                continue
+
+        stripped_start = _skip_space(line, 0)
+        fragment = line[stripped_start:]
+        match = (
+            PLAIN_FORMAL_PREFIX_RE.match(fragment)
+            or PLAIN_NUMBERED_FORMAL_PREFIX_RE.match(fragment)
+            or PLAIN_PROOF_PREFIX_RE.match(fragment)
+        )
+        if match is not None:
+            parsed = _parse_heading_label(match.group("label"))
+            if parsed is not None:
+                kind, number, label = parsed
+                result.append(SourceHeading(
+                    kind=kind,
+                    number=number,
+                    label=label,
+                    start_offset=offset + stripped_start,
+                    end_offset=offset + stripped_start + match.end("label"),
+                    line=line_number,
+                ))
+        offset += len(line_with_end)
+    return result
+
+
+def _remove_source_headings(text: str) -> str:
+    chars = list(text)
+    for heading in _find_source_headings(text):
+        chars[heading.start_offset:heading.end_offset] = (
+            " " * (heading.end_offset - heading.start_offset)
+        )
+    return "".join(chars)
+
+
 def _remove_balanced_commands(text: str, pattern: re.Pattern[str]) -> str:
     output: list[str] = []
     cursor = 0
@@ -194,6 +475,7 @@ def _remove_balanced_commands(text: str, pattern: re.Pattern[str]) -> str:
 
 
 def _remove_formal_markup(text: str) -> str:
+    text = _remove_source_headings(text)
     text = FORMAL_HEADING_RE.sub(" ", text)
     text = PLAIN_FORMAL_HEADING_RE.sub(" ", text)
     text = PROOF_HEADING_RE.sub(" ", text)
@@ -270,6 +552,10 @@ def _validate_truth_items(raw_items: object, lines: Sequence[str]) -> list[Truth
             raise ValueError(f"truth item {index} must be an object")
         kind = str(raw.get("kind", "")).strip().lower()
         item_id = str(raw.get("id", "")).strip()
+        raw_heading_label = raw.get("heading_label")
+        if raw_heading_label is not None and not isinstance(raw_heading_label, str):
+            raise ValueError(f"truth item {index} heading_label must be a string")
+        heading_label = str(raw_heading_label or "").strip()
         start = raw.get("start_line")
         end = raw.get("end_line")
         if kind not in ALL_KINDS or not item_id:
@@ -293,52 +579,60 @@ def _validate_truth_items(raw_items: object, lines: Sequence[str]) -> list[Truth
                     f"overlapping truth bounds: {kind}:{item_id} and {other_key}"
                 )
         source = "\n".join(lines[start - 1:end])
-        if kind == "proof":
-            if not (PROOF_HEADING_RE.search(source) or PLAIN_PROOF_HEADING_RE.search(source)):
-                raise ValueError(f"truth proof {item_id} has no proof heading at its boundary")
-        else:
-            header = FORMAL_HEADING_RE.search(source) or PLAIN_FORMAL_HEADING_RE.search(source)
-            if not header:
-                raise ValueError(f"truth item {kind}:{item_id} has no formal heading")
-            if (
-                header.group("kind").casefold() != kind
-                or header.group("id").rstrip(".") != item_id.rstrip(".")
-            ):
+        headings = _find_source_headings(source)
+        if not headings:
+            noun = "proof" if kind == "proof" else "formal"
+            raise ValueError(f"truth item {kind}:{item_id} has no {noun} heading")
+        if len(headings) != 1:
+            raise ValueError(f"truth item {kind}:{item_id} contains multiple headings")
+        header = headings[0]
+        if header.kind != kind:
+            raise ValueError(f"truth heading does not match {kind}:{item_id}")
+        if heading_label:
+            if _canonical_heading_label(heading_label) != _canonical_heading_label(header.label):
+                raise ValueError(f"truth heading_label does not match {kind}:{item_id}")
+        elif kind != "proof" and header.number:
+            # Preserve the concise v1 manifest form for numbered formal items.
+            if header.number.rstrip(".") != item_id.rstrip("."):
                 raise ValueError(f"truth heading does not match {kind}:{item_id}")
+        heading_label = heading_label or header.label
         tokens = _normalise_item(source)
         if not tokens:
             raise ValueError(f"truth item {kind}:{item_id} has an empty body")
         seen.add(key)
         occupied.append((start, end, f"{kind}:{item_id}"))
-        result.append(TruthItem(kind, item_id, start, end, tokens))
+        result.append(TruthItem(
+            kind=kind,
+            item_id=item_id,
+            heading_label=heading_label,
+            heading_number=header.number,
+            start_line=start,
+            end_line=end,
+            tokens=tokens,
+        ))
     return result
 
 
 def _infer_truth_items(text: str) -> list[TruthItem]:
     lines = text.splitlines()
     raw: list[dict[str, object]] = []
-    for line_number, line in enumerate(lines, start=1):
-        formal = FORMAL_HEADING_RE.search(line) or PLAIN_FORMAL_HEADING_RE.search(line)
-        proof = PROOF_HEADING_RE.search(line) or PLAIN_PROOF_HEADING_RE.search(line)
-        if not formal and not proof:
-            continue
+    for heading in _find_source_headings(text):
+        line_number = heading.line
         end = line_number
         while end < len(lines) and lines[end].strip():
             end += 1
-        if formal:
-            raw.append({
-                "kind": formal.group("kind").casefold(),
-                "id": formal.group("id").rstrip("."),
-                "start_line": line_number,
-                "end_line": end,
-            })
-        else:
-            raw.append({
-                "kind": "proof",
-                "id": f"P{line_number}",
-                "start_line": line_number,
-                "end_line": end,
-            })
+        item_id = (
+            heading.number
+            if heading.number
+            else f"{'P' if heading.kind == 'proof' else heading.kind}@L{line_number}"
+        )
+        raw.append({
+            "kind": heading.kind,
+            "id": item_id,
+            "heading_label": heading.label,
+            "start_line": line_number,
+            "end_line": end,
+        })
     if not raw:
         raise ValueError("no formal truth items were discovered")
     return _validate_truth_items(raw, lines)
@@ -352,6 +646,57 @@ def load_truth(text: str, manifest: dict[str, object] | None) -> list[TruthItem]
     return _validate_truth_items(manifest.get("items"), text.splitlines())
 
 
+def _validate_truth_headings(
+    raw_headings: object, lines: Sequence[str]
+) -> list[TruthHeading]:
+    if not isinstance(raw_headings, list):
+        raise ValueError("truth manifest headings must be an array")
+    result: list[TruthHeading] = []
+    for index, raw in enumerate(raw_headings):
+        if not isinstance(raw, dict):
+            raise ValueError(f"truth heading {index} must be an object")
+        level = raw.get("level")
+        title = raw.get("title")
+        start = raw.get("start_line")
+        end = raw.get("end_line")
+        if isinstance(level, bool) or not isinstance(level, int) or level < 0:
+            raise ValueError(f"truth heading {index} has invalid level")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError(f"truth heading {index} has invalid title")
+        if (
+            isinstance(start, bool)
+            or isinstance(end, bool)
+            or not isinstance(start, int)
+            or not isinstance(end, int)
+            or start < 1
+            or end < start
+            or end > len(lines)
+        ):
+            raise ValueError(f"truth heading {index} has invalid line bounds")
+        expected_key = _outline_title(title)
+        source = "\n".join(lines[start - 1:end])
+        source_key = _outline_title(source)
+        if not expected_key or source_key != expected_key:
+            raise ValueError(f"truth heading {index} title does not match source lines")
+        result.append(TruthHeading(
+            level=level,
+            title=title.strip(),
+            title_key=expected_key,
+            start_line=start,
+            end_line=end,
+        ))
+    return result
+
+
+def load_truth_headings(
+    text: str, manifest: dict[str, object] | None
+) -> tuple[list[TruthHeading] | None, bool]:
+    """Return reviewed headings and whether the manifest explicitly supplied them."""
+    if manifest is None or "headings" not in manifest:
+        return None, False
+    return _validate_truth_headings(manifest.get("headings"), text.splitlines()), True
+
+
 def _line_number(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
 
@@ -362,11 +707,12 @@ def _id_from_title(kind: str, title: str, body: str) -> str:
     number = re.search(r"(?<!\d)(\d+(?:\.\d+)+|\d+)(?!\d)", title)
     if number:
         return number.group(1).rstrip(".")
-    heading = FORMAL_HEADING_RE.search(body)
-    if heading is None:
-        heading = PLAIN_FORMAL_HEADING_RE.search(body)
-    if heading and heading.group("kind").casefold() == kind:
-        return heading.group("id").rstrip(".")
+    heading = next((
+        value for value in _find_source_headings(body)
+        if value.kind == kind and value.number
+    ), None)
+    if heading is not None:
+        return heading.number.rstrip(".")
     label = re.search(
         rf"\\label\s*\{{(?:{kind[:3]}|{kind})[:._-]?(\d+(?:\.\d+)*)\}}",
         body,
@@ -424,10 +770,11 @@ def _is_contiguous(needle: Sequence[str], haystack: Sequence[str]) -> bool:
 
 
 def _outline_title(title: str) -> str:
+    title = re.sub(r"\\(?:begin|end)\{center\}", " ", title, flags=re.IGNORECASE)
+    title = _flatten_presentation(title)
     title = re.sub(r"^\s*\d+(?:\.\d+)*\.?\s*", "", title)
-    title = re.sub(r"\\(?:textbf|textit|emph|textsc)\s*", "", title)
     title = title.rstrip(" .")
-    tokens = TOKEN_RE.findall(title.casefold())
+    tokens = re.findall(r"[^\W_]+", title.casefold(), flags=re.UNICODE)
     return "".join(tokens)
 
 
@@ -484,6 +831,22 @@ def _masked_outside_environments(
         chars[environment.start_offset:environment.end_offset] = (
             " " * (environment.end_offset - environment.start_offset)
         )
+    return "".join(chars)
+
+
+def _masked_truth_heading_lines(text: str, headings: Sequence[TruthHeading]) -> str:
+    if not headings:
+        return text
+    chars = list(text)
+    line_offsets: list[tuple[int, int]] = []
+    cursor = 0
+    for line in text.splitlines(keepends=True):
+        line_offsets.append((cursor, cursor + len(line.rstrip("\r\n"))))
+        cursor += len(line)
+    for heading in headings:
+        for line_number in range(heading.start_line, heading.end_line + 1):
+            start, end = line_offsets[line_number - 1]
+            chars[start:end] = " " * (end - start)
     return "".join(chars)
 
 
@@ -547,11 +910,32 @@ def evaluate_tex_structure(
     manifest: dict[str, object] | None = None,
     threshold: float = 0.95,
     require_toc: bool = True,
+    original_binary_sha256: str | None = None,
+    candidate_binary_sha256: str | None = None,
 ) -> dict[str, object]:
     """Return a content-free, JSON-serialisable accuracy report."""
     if not 0 <= threshold <= 1:
         raise ValueError("threshold must be between zero and one")
+    for name, value in (
+        ("original_binary_sha256", original_binary_sha256),
+        ("candidate_binary_sha256", candidate_binary_sha256),
+    ):
+        if value is not None and re.fullmatch(r"[0-9a-fA-F]{64}", value) is None:
+            raise ValueError(f"{name} must be a 64-character hexadecimal digest")
+    original_binary_digest = (
+        original_binary_sha256.casefold()
+        if original_binary_sha256 is not None
+        else _sha256_bytes(original.encode("utf-8"))
+    )
+    candidate_binary_digest = (
+        candidate_binary_sha256.casefold()
+        if candidate_binary_sha256 is not None
+        else _sha256_bytes(candidate.encode("utf-8"))
+    )
+    original_text_digest = _normalised_text_sha256(original)
+    candidate_text_digest = _normalised_text_sha256(candidate)
     truth = load_truth(original, manifest)
+    reviewed_headings, headings_explicit = load_truth_headings(original, manifest)
     predicted = extract_candidate_environments(candidate)
 
     used_predictions: set[int] = set()
@@ -560,70 +944,93 @@ def evaluate_tex_structure(
     boundary_errors: list[dict[str, object]] = []
     duplicates: list[dict[str, object]] = []
 
-    for expected in truth:
-        if expected.kind == "proof":
-            same_key = [
-                (index, item) for index, item in enumerate(predicted)
-                if item.kind == "proof"
-            ]
-        else:
-            same_key = [
-                (index, item) for index, item in enumerate(predicted)
-                if item.kind == expected.kind
-                and item.item_id.rstrip(".") == expected.item_id.rstrip(".")
-            ]
-        exact = [(index, item) for index, item in same_key
-                 if item.tokens == expected.tokens]
-        if exact:
-            chosen_index, chosen = next(
-                ((index, item) for index, item in exact if index not in used_predictions),
-                exact[0],
-            )
-            if chosen_index not in used_predictions:
-                used_predictions.add(chosen_index)
-                exact_matches.append({
-                    "kind": expected.kind,
-                    "id": expected.item_id,
-                    "candidate_start_line": chosen.start_line,
-                    "candidate_end_line": chosen.end_line,
-                })
-            extra_exact = [item for index, item in exact if index != chosen_index]
-            if extra_exact:
-                duplicates.append({
-                    "kind": expected.kind,
-                    "id": expected.item_id,
-                    "candidate_lines": [item.start_line for _, item in exact],
-                })
-            continue
+    def same_structural_key(expected: TruthItem, item: CandidateEnvironment) -> bool:
+        if item.kind != expected.kind:
+            return False
+        # Proofs and unnumbered formal items have no stable identifier in the
+        # rendered LaTeX environment.  Their reviewed body tokens are the key.
+        if expected.kind == "proof" or not expected.heading_number:
+            return True
+        return item.item_id.rstrip(".") == expected.heading_number.rstrip(".")
 
+    matched_prediction_for_truth: dict[int, int] = {}
+    unresolved_truth: list[int] = []
+    # Match every reviewed item by exact body tokens before diagnosing any
+    # partial boundary.  This prevents one proof from stealing another proof's
+    # exact candidate merely because both use the same environment name.
+    for truth_index, expected in enumerate(truth):
+        exact = [
+            (index, item) for index, item in enumerate(predicted)
+            if index not in used_predictions
+            and same_structural_key(expected, item)
+            and item.tokens == expected.tokens
+        ]
+        if not exact:
+            unresolved_truth.append(truth_index)
+            continue
+        chosen_index, chosen = exact[0]
+        used_predictions.add(chosen_index)
+        matched_prediction_for_truth[truth_index] = chosen_index
+        exact_matches.append({
+            "kind": expected.kind,
+            "id": expected.item_id,
+            "candidate_start_line": chosen.start_line,
+            "candidate_end_line": chosen.end_line,
+        })
+
+    for truth_index in unresolved_truth:
+        expected = truth[truth_index]
         missing.append(f"{expected.kind}:{expected.item_id}")
-        candidates = [(index, item) for index, item in same_key
-                      if index not in used_predictions]
-        if expected.kind == "proof":
+        candidates = [
+            (index, item) for index, item in enumerate(predicted)
+            if index not in used_predictions and same_structural_key(expected, item)
+        ]
+        if expected.kind == "proof" or not expected.heading_number:
             candidates = [
                 (index, item) for index, item in candidates
                 if _is_contiguous(item.tokens, expected.tokens)
                 or _is_contiguous(expected.tokens, item.tokens)
             ]
-        if candidates:
-            index, closest = min(
-                candidates,
-                key=lambda pair: abs(len(pair[1].tokens) - len(expected.tokens)),
-            )
-            used_predictions.add(index)
-            if _is_contiguous(expected.tokens, closest.tokens):
-                error = "overwrapped"
-            elif _is_contiguous(closest.tokens, expected.tokens):
-                error = "underwrapped"
-            else:
-                error = "content_mismatch"
-            boundary_errors.append({
-                "kind": expected.kind,
-                "id": expected.item_id,
-                "error": error,
-                "candidate_start_line": closest.start_line,
-                "candidate_end_line": closest.end_line,
-            })
+        if not candidates:
+            continue
+        index, closest = min(
+            candidates,
+            key=lambda pair: abs(len(pair[1].tokens) - len(expected.tokens)),
+        )
+        used_predictions.add(index)
+        if _is_contiguous(expected.tokens, closest.tokens):
+            error = "overwrapped"
+        elif _is_contiguous(closest.tokens, expected.tokens):
+            error = "underwrapped"
+        else:
+            error = "content_mismatch"
+        boundary_errors.append({
+            "kind": expected.kind,
+            "id": expected.item_id,
+            "error": error,
+            "candidate_start_line": closest.start_line,
+            "candidate_end_line": closest.end_line,
+        })
+
+    duplicate_predictions: dict[int, list[int]] = {}
+    for prediction_index, item in enumerate(predicted):
+        if prediction_index in used_predictions:
+            continue
+        matching_truth = next((
+            truth_index for truth_index, expected in enumerate(truth)
+            if same_structural_key(expected, item) and item.tokens == expected.tokens
+        ), None)
+        if matching_truth is not None:
+            duplicate_predictions.setdefault(matching_truth, []).append(prediction_index)
+    for truth_index, prediction_indexes in duplicate_predictions.items():
+        expected = truth[truth_index]
+        primary = matched_prediction_for_truth.get(truth_index)
+        all_indexes = ([primary] if primary is not None else []) + prediction_indexes
+        duplicates.append({
+            "kind": expected.kind,
+            "id": expected.item_id,
+            "candidate_lines": [predicted[index].start_line for index in all_indexes],
+        })
 
     unmatched = [
         {
@@ -645,38 +1052,38 @@ def evaluate_tex_structure(
     outside = _masked_outside_environments(candidate, predicted)
     residual = [
         {
-            "kind": match.group("kind").casefold(),
-            "id": match.group("id").rstrip("."),
-            "line": _line_number(outside, match.start()),
+            "kind": heading.kind,
+            "id": heading.number or None,
+            "line": heading.line,
         }
-        for match in FORMAL_HEADING_RE.finditer(outside)
+        for heading in _find_source_headings(outside)
     ]
-    residual.extend({
-        "kind": match.group("kind").casefold(),
-        "id": match.group("id").rstrip("."),
-        "line": _line_number(outside, match.start()),
-    } for match in PLAIN_FORMAL_HEADING_RE.finditer(outside))
-    residual.extend({
-        "kind": "proof",
-        "id": None,
-        "line": _line_number(outside, match.start()),
-    } for match in PROOF_HEADING_RE.finditer(outside))
-    residual.extend({
-        "kind": "proof",
-        "id": None,
-        "line": _line_number(outside, match.start()),
-    } for match in PLAIN_PROOF_HEADING_RE.finditer(outside))
 
-    original_tokens = _normalise_fragment(original, document_scope=True)
+    original_body_source = (
+        _masked_truth_heading_lines(original, reviewed_headings)
+        if reviewed_headings is not None
+        else original
+    )
+    original_tokens = _normalise_fragment(original_body_source, document_scope=True)
     candidate_tokens = _normalise_fragment(candidate, document_scope=True)
     original_counter = Counter(original_tokens)
     candidate_counter = Counter(candidate_tokens)
     missing_token_count = sum((original_counter - candidate_counter).values())
     excess_token_count = sum((candidate_counter - original_counter).values())
-    missing_lines, excess_lines = _line_token_deficits(original, candidate)
+    missing_lines, excess_lines = _line_token_deficits(original_body_source, candidate)
     token_conserved = original_tokens == candidate_tokens
 
-    expected_outline = extract_outline(original)
+    if reviewed_headings is None:
+        expected_outline = extract_outline(original)
+    else:
+        expected_outline = [
+            {
+                "level": heading.level,
+                "title": heading.title_key,
+                "line": heading.start_line,
+            }
+            for heading in reviewed_headings
+        ]
     candidate_outline = extract_outline(candidate)
     expected_outline_counts = Counter(
         (item["level"], item["title"]) for item in expected_outline
@@ -719,9 +1126,30 @@ def evaluate_tex_structure(
         "threshold": threshold,
         "score_passed": score_passed,
         "inputs": {
-            "original_sha256": _sha256_text(original),
-            "candidate_sha256": _sha256_text(candidate),
+            "original": {
+                "binary_sha256": original_binary_digest,
+                "normalized_text_sha256": original_text_digest,
+            },
+            "candidate": {
+                "binary_sha256": candidate_binary_digest,
+                "normalized_text_sha256": candidate_text_digest,
+            },
+            "original_binary_sha256": original_binary_digest,
+            "candidate_binary_sha256": candidate_binary_digest,
+            "original_normalized_text_sha256": original_text_digest,
+            "candidate_normalized_text_sha256": candidate_text_digest,
+            # Deprecated v1 aliases retained for report consumers.  They have
+            # always represented decoded text, never arbitrary file bytes.
+            "original_sha256": original_text_digest,
+            "candidate_sha256": candidate_text_digest,
+            "binary_sha256_source": (
+                "file-bytes"
+                if original_binary_sha256 is not None and candidate_binary_sha256 is not None
+                else "utf8-serialization"
+            ),
             "truth_mode": "manifest" if manifest is not None else "auto-discovery",
+            "outline_truth_mode": "manifest" if headings_explicit else "auto-discovery",
+            "release_evidence_eligible": manifest is not None and headings_explicit,
         },
         "exact_structure": {
             "true_positive": true_positive,
@@ -750,6 +1178,7 @@ def evaluate_tex_structure(
         "document_structure": {
             "toc_required": require_toc,
             "toc_present": toc_present,
+            "outline_truth_mode": "manifest" if headings_explicit else "auto-discovery",
             "expected_outline_nodes": outline_total,
             "candidate_outline_nodes": sum(candidate_outline_counts.values()),
             "matched_outline_nodes": outline_matched,
@@ -783,12 +1212,16 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    original_bytes = args.original.read_bytes()
+    candidate_bytes = args.candidate.read_bytes()
     report = evaluate_tex_structure(
-        args.original.read_text(encoding="utf-8"),
-        args.candidate.read_text(encoding="utf-8"),
+        original_bytes.decode("utf-8-sig"),
+        candidate_bytes.decode("utf-8-sig"),
         manifest=_load_manifest(args.truth),
         threshold=args.threshold,
         require_toc=not args.no_require_toc,
+        original_binary_sha256=_sha256_bytes(original_bytes),
+        candidate_binary_sha256=_sha256_bytes(candidate_bytes),
     )
     payload = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     if args.json_output:

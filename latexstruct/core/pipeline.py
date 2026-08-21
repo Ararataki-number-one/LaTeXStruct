@@ -45,6 +45,12 @@ from .verify import check_display_tag_safety, compare_braces, compare_env_balanc
 
 DOC_CLASS_RE = re.compile(r"\\documentclass(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
 DETERMINISTIC_SEMANTIC_ANCHOR_KEY = "_deterministic_semantic_anchor"
+OCR_EXPLICIT_FORMAL_STYLE_RE = re.compile(
+    r"^\s*(?:\\noindent\s*)?(?:"
+    r"\\(?:textbf|textit|emph|textsc)\s*\{"
+    r"|\{\s*\\(?:bfseries|itshape|slshape|scshape)\b"
+    r")"
+)
 
 
 @dataclass
@@ -157,6 +163,24 @@ def _semantic_span_hash(doc, body_span: Tuple[int, int]) -> str:
         return ""
     source = "\n".join(lines[start - 1:end]).encode("utf-8")
     return hashlib.sha256(source).hexdigest()
+
+
+def _is_ocr_formal_inventory_candidate(candidate) -> bool:
+    """Return whether an OCR candidate must be resolved before publication.
+
+    Proof starts and numbered result titles are always explicit.  An unnumbered
+    result is also explicit when OCR preserved a dedicated visual title wrapper
+    (for example ``\\textbf{Remark.}``).  Plain unnumbered words remain AI-owned
+    candidates so prose such as ``Note.`` is not promoted into a mandatory
+    theorem merely because it begins a paragraph.
+    """
+    if candidate.kind == "proof":
+        return True
+    if candidate.kind != "theorem-like":
+        return False
+    if str(candidate.payload.get("number", "") or "").strip():
+        return True
+    return bool(OCR_EXPLICIT_FORMAL_STYLE_RE.match(str(candidate.title_text or "")))
 
 
 def _build_ocr_semantic_anchors(
@@ -601,13 +625,7 @@ def run_pipeline(
     ocr_formal_candidate_ids = {
         candidate.id for candidate in scan_res.candidates
         if ocr_semantic_lock_enabled
-        and (
-            candidate.kind == "proof"
-            or (
-                candidate.kind == "theorem-like"
-                and str(candidate.payload.get("number", "") or "").strip()
-            )
-        )
+        and _is_ocr_formal_inventory_candidate(candidate)
     }
     if ocr_semantic_lock_enabled:
         semantic_anchors, locked_semantic_ids = _build_ocr_semantic_anchors(

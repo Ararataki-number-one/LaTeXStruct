@@ -72,6 +72,8 @@ ACTIVE_TOC_RE = re.compile(r"\\tableofcontents(?![A-Za-z@])")
 LOCAL_TOC_MARKER = "% LaTeXStruct-Local-Contents"
 RUNNING_HEADER_MAX_TOP_OFFSET = 3
 RUNNING_HEADER_COMMAND_MAX_TOP_OFFSET = 8
+MAX_OUTLINE_HEADING_SPAN_LINES = 3
+GENERIC_OUTLINE_PLACEHOLDER_KEYS = frozenset({"heading", "bookmark"})
 PRINTED_PAGE_MARKER_PREFIX = "% LaTeXStruct-Printed-Page: "
 PRINTED_DOT_LEADER_RE = re.compile(r"(?:\.\s*){3,}")
 EXERCISE_HEADING_RE = re.compile(
@@ -146,6 +148,33 @@ def _outline_title_key(value: str) -> str:
     value = unicodedata.normalize("NFKC", str(value or "")).casefold().strip()
     value = re.sub(r"^\\(?:textbf|textit|emph|textsc)\s*\{(.*)\}$", r"\1", value)
     return "".join(character for character in value if character.isalnum())
+
+
+def _outline_noise_reason(entry: dict, outline: Iterable[dict]) -> str:
+    """Classify only publisher placeholder bookmarks with corroborating evidence.
+
+    A literal chapter called ``Heading`` is unusual but possible, so the word
+    alone is insufficient.  Rejection additionally requires a different,
+    meaningful bookmark on the same PDF page.  The decision is surfaced in
+    planning notes and the final structure report rather than silently dropped.
+    """
+    key = _outline_title_key(entry.get("title", ""))
+    if key not in GENERIC_OUTLINE_PLACEHOLDER_KEYS:
+        return ""
+    try:
+        page = int(entry.get("page", 0))
+    except (TypeError, ValueError):
+        return ""
+    corroborated = any(
+        other is not entry
+        and int(other.get("page", 0) or 0) == page
+        and _outline_title_key(other.get("title", ""))
+        not in GENERIC_OUTLINE_PLACEHOLDER_KEYS | {""}
+        for other in outline
+    )
+    if not corroborated:
+        return ""
+    return "PDF 大纲中的通用占位书签，且同页已有可验证的真实标题"
 
 
 def _normalize_book_outline_levels(outline: List[dict], document_kind: str) -> List[dict]:
@@ -356,6 +385,79 @@ def _candidate_from_line(line: str, line_no: int, page: Optional[int]) -> Option
     return None
 
 
+def _candidate_bounds(hit: HeadingCandidate) -> Tuple[int, int]:
+    start = hit.open_line or hit.line
+    stop = hit.close_line or hit.line
+    return start, max(start, stop)
+
+
+def _outline_heading_span_candidates(
+    lines: List[str],
+    pages: Dict[int, Optional[int]],
+    line_candidates: List[HeadingCandidate],
+) -> List[HeadingCandidate]:
+    """Build conservative same-page title candidates spanning 2--3 lines.
+
+    OCR may split one visible publisher heading either across independent plain
+    or styled LaTeX lines, or inside one multi-line heading command.  Spans are
+    strictly adjacent and never cross an empty line, comment, or PDF page.  They
+    are only candidates: the caller still requires an exact normalized outline
+    title before consuming any continuation line.
+    """
+    by_line = {hit.line: hit for hit in line_candidates}
+    spans: List[HeadingCandidate] = []
+    seen: set[Tuple[int, int, str]] = set()
+
+    def add_span(start: int, stop: int, visible: str) -> None:
+        visible = visible.strip()
+        key = (start, stop, visible)
+        if not visible or key in seen:
+            return
+        seen.add(key)
+        spans.append(HeadingCandidate(
+            line=start,
+            page=pages[start],
+            visible=visible,
+            trailing="",
+            kind="span",
+            open_line=start,
+            close_line=stop,
+        ))
+
+    for start in range(1, len(lines) + 1):
+        page = pages.get(start)
+        if page is None:
+            continue
+        for width in range(2, MAX_OUTLINE_HEADING_SPAN_LINES + 1):
+            stop = start + width - 1
+            if stop > len(lines):
+                break
+            raw_lines = [lines[line_no - 1] for line_no in range(start, stop + 1)]
+            if (
+                any(pages.get(line_no) != page for line_no in range(start, stop + 1))
+                or any(not line.strip() or line.lstrip().startswith("%") for line in raw_lines)
+            ):
+                break
+
+            # First cover a command/style group whose braces themselves span
+            # physical OCR lines, e.g. ``\\section*{Sharp`` + ``Bounds}``.
+            joined_raw = " ".join(line.strip() for line in raw_lines)
+            parsed = _candidate_from_line(joined_raw, start, page)
+            if parsed is not None and not parsed.trailing:
+                add_span(start, stop, parsed.visible)
+
+            # Also cover independently wrapped or plain visual title lines,
+            # e.g. ``\\textbf{Sharp}`` + ``\\textbf{Bounds}``.
+            components = [by_line.get(line_no) for line_no in range(start, stop + 1)]
+            if all(component is not None and not component.trailing for component in components):
+                add_span(
+                    start,
+                    stop,
+                    " ".join(component.visible for component in components if component),
+                )
+    return spans
+
+
 def _plain_text(value: str) -> str:
     value = unicodedata.normalize("NFKD", value)
     value = re.sub(r"\\(?:'|`|\^|\"|~|c|v|H|u)\s*\{?([A-Za-z])\}?", r"\1", value)
@@ -388,6 +490,12 @@ def _score_title(expected: str, candidate: str) -> float:
     if left.startswith(right) and len(right) >= 8:
         return 0.94
     return difflib.SequenceMatcher(a=left, b=right, autojunk=False).ratio()
+
+
+def _outline_title_is_exact(expected: str, candidate: str) -> bool:
+    """Require the entire normalized bookmark title, never only a prefix/suffix."""
+    left, right = _plain_text(expected), _plain_text(candidate)
+    return bool(left) and left == right
 
 
 def _command_for(level: int, kind: str) -> str:
@@ -1024,6 +1132,9 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
         hit for index, line in enumerate(lines, start=1)
         if (hit := _candidate_from_line(line, index, pages[index])) is not None
     ]
+    outline_candidates = candidates + _outline_heading_span_candidates(
+        lines, pages, candidates,
+    )
     used: set[int] = set()
     operations: Dict[Tuple, PendingOp] = {}
     blocked_lines: set[int] = set()
@@ -1038,19 +1149,61 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
     for exercise_op in exercise_ops:
         set_op(exercise_op)
 
-    for entry in metadata["outline"]:
+    outline = metadata["outline"]
+    for entry in outline:
+        noise_reason = _outline_noise_reason(entry, outline)
+        if noise_reason:
+            notes.append({
+                "line": 1,
+                "page": int(entry.get("page", 1)),
+                "status": "outline-noise-rejected",
+                "title": str(entry.get("title", "")),
+                "reason": noise_reason,
+            })
+            continue
         expected_page = int(entry["page"])
         ranked = []
-        for hit in candidates:
-            if hit.line in used:
+        for hit in outline_candidates:
+            hit_start, hit_stop = _candidate_bounds(hit)
+            if any(line_no in used for line_no in range(hit_start, hit_stop + 1)):
                 continue
             page_delta = abs((hit.page or expected_page) - expected_page)
             if page_delta > 1:
                 continue
-            score = _score_title(entry["title"], hit.visible)
-            if score < 0.82:
+            if not _outline_title_is_exact(entry["title"], hit.visible):
                 continue
-            ranked.append((page_delta, -score, hit.line, hit))
+            if hit_stop > hit_start:
+                first_piece = _candidate_from_line(
+                    lines[hit_start - 1], hit_start, pages[hit_start],
+                )
+                first_visible = first_piece.visible if first_piece is not None else ""
+                chapter_marker = CHAPTER_MARKER_RE.match(first_visible)
+                bare_marker = BARE_CHAPTER_MARKER_RE.match(first_visible)
+                if chapter_marker or bare_marker:
+                    expected_number_match = NUMBERED_CHAPTER_TITLE_RE.match(
+                        str(entry["title"])
+                    )
+                    expected_number = (
+                        expected_number_match.group("number")
+                        if expected_number_match else ""
+                    )
+                    numbered_book_chapter = (
+                        kind == "book"
+                        and int(entry["level"]) == 0
+                        and not _front_matter(entry["title"])
+                    )
+                    marker_number = (
+                        chapter_marker.group(1) if chapter_marker else bare_marker.group(1)
+                    )
+                    if (
+                        not numbered_book_chapter
+                        or (expected_number and marker_number != expected_number)
+                        or (bare_marker and not expected_number)
+                    ):
+                        continue
+            # Exact spans rank before a later suffix-only line.  Among candidates
+            # with the same anchor, prefer the shortest confirmed span.
+            ranked.append((page_delta, hit_start, hit_stop - hit_start, hit))
         if not ranked:
             notes.append({
                 "line": 1,
@@ -1060,8 +1213,10 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
             continue
         ranked.sort(key=lambda row: row[:3])
         hit = ranked[0][3]
-        used.add(hit.line)
-        matched_lines.add(hit.line)
+        hit_start, hit_stop = _candidate_bounds(hit)
+        hit_lines = set(range(hit_start, hit_stop + 1))
+        used.update(hit_lines)
+        matched_lines.update(hit_lines)
         command = _command_for(int(entry["level"]), kind)
         title = _title_without_number(hit.visible) or _title_without_number(entry["title"])
         expected_title = _title_without_number(entry["title"])
@@ -1071,8 +1226,7 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
             title = title[:-1].rstrip()
         star = _front_matter(entry["title"]) and not NUMBER_PREFIX_RE.match(entry["title"])
 
-        command_line = hit.line
-        delete_title_line = False
+        command_line = hit_start
         if kind == "book" and int(entry["level"]) == 0 and not star:
             # OCR 常把“Chapter 1”（或原书章首独立的一行 ``1``）和真正章名
             # 拆成两行；只有数字与 PDF 大纲编号一致时才合并为一个 chapter。
@@ -1112,7 +1266,6 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
                 command_line = previous.line
                 used.add(previous.line)
                 matched_lines.add(previous.line)
-                delete_title_line = True
 
         trailing = hit.trailing
         replacement = f"\\{command}{'*' if star else ''}{{{title}}}"
@@ -1130,8 +1283,14 @@ def build_ocr_structure_ops(text: str) -> Tuple[List[PendingOp], List[dict]]:
                 chapter_number.group("number") if chapter_number else ""
             )
             mapped_chapter_titles[command_line] = title
-        if delete_title_line and hit.line != command_line:
-            set_op(PendingOp("delete_line", hit.line, old=lines[hit.line - 1]))
+        # Only lines belonging to an exact outline-confirmed span are consumed.
+        # The first line becomes the structural command; every confirmed
+        # continuation line is removed, while the following body line remains.
+        for consumed_line in sorted(hit_lines):
+            if consumed_line != command_line:
+                set_op(PendingOp(
+                    "delete_line", consumed_line, old=lines[consumed_line - 1],
+                ))
         center_open, center_close = _center_bounds(lines, command_line)
         if center_open:
             set_op(PendingOp("delete_line", center_open, old=lines[center_open - 1]))
@@ -1602,7 +1761,20 @@ def check_ocr_structure(text: str) -> dict:
     )
     cursor = 0
     matched = 0
-    for entry in metadata.get("outline", []):
+    outline = metadata.get("outline", [])
+    rejected_outline = []
+    meaningful_outline = []
+    for entry in outline:
+        noise_reason = _outline_noise_reason(entry, outline)
+        if noise_reason:
+            rejected_outline.append({
+                "title": str(entry.get("title", "")),
+                "page": int(entry.get("page", 1)),
+                "reason": noise_reason,
+            })
+        else:
+            meaningful_outline.append(entry)
+    for entry in meaningful_outline:
         expected = _plain_text(entry["title"])
         if (
             expected == "contents"
@@ -1620,7 +1792,7 @@ def check_ocr_structure(text: str) -> dict:
             expected_cmd = _command_for(int(entry["level"]), metadata["kind"])
         found = None
         for index in range(cursor, len(actual)):
-            if _score_title(expected, actual[index]["normalized"]) >= 0.88:
+            if _outline_title_is_exact(expected, actual[index]["normalized"]):
                 found = index
                 break
         if found is None:
@@ -1637,7 +1809,7 @@ def check_ocr_structure(text: str) -> dict:
 
     normalized_counts = Counter(item["normalized"] for item in actual if item["normalized"])
     expected_counts = Counter(
-        _plain_text(item["title"]) for item in metadata.get("outline", [])
+        _plain_text(item["title"]) for item in meaningful_outline
         if _plain_text(item["title"])
     )
     for title, count in normalized_counts.items():
@@ -1788,12 +1960,15 @@ def check_ocr_structure(text: str) -> dict:
             seen = {value for value in seen if value < level}
             seen.add(level)
 
-    return {
+    result = {
         "checked": True,
         "ok": not issues,
         "issues": issues[:50],
-        "expected": len(metadata.get("outline", [])),
+        "expected": len(meaningful_outline),
         "matched": matched,
         "actual": len(actual),
         "toc_expected": toc_expected,
     }
+    if rejected_outline:
+        result["rejected_outline"] = rejected_outline
+    return result

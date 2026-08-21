@@ -252,6 +252,40 @@ def test_unbounded_ocr_proof_remains_ai_owned_and_residual_blocks_export():
     assert any("显式 formal 标题" in item["reason"] for item in result.ambiguous)
 
 
+def test_styled_unnumbered_formal_is_inventory_owned_and_cannot_be_silently_preserved():
+    text = "\n".join([
+        r"\documentclass{article}",
+        r"\begin{document}",
+        _ocr_marker(),
+        r"\textbf{Remark.} This is a formal observation.",
+        r"\end{document}",
+        "",
+    ])
+    remark = next(
+        candidate for candidate in scan(parse_latex(text)).candidates
+        if candidate.kind == "theorem-like"
+    )
+    client = _StaticClient({"decisions": [{
+        "candidate_id": remark.id,
+        "action": "none",
+        "confidence": 0.99,
+        "reason": "preserve the styled heading",
+    }]})
+
+    result = run_pipeline(
+        text,
+        mode="ai",
+        ai_config=_config(review_enabled=False),
+        ai_client=client,
+    )
+
+    assert result.ok is False
+    assert result.verification["structure_decisions"]["formal_total"] == 1
+    assert result.verification["structure_decisions"]["formal_residual_ids"] == [
+        remark.id
+    ]
+
+
 def test_lowercase_discussion_after_closed_statement_is_not_locked():
     text = "\n".join([
         r"\documentclass{article}",

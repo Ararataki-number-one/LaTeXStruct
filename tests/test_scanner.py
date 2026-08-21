@@ -66,6 +66,36 @@ def test_styled_result_and_proof_accept_bounded_tex_spacing_separators():
         assert proof.payload["title_remainder"].startswith("Let $f$ be maximum")
 
 
+def test_old_style_formal_and_presentation_wrapped_proof_are_semantic_candidates():
+    text = (
+        r"{\bfseries Conjecture 1.1 (Erdos and Sos, [15]).}"
+        "\n\n"
+        r"\[\lim_{m\to\infty} f(m)=\infty.\]"
+        "\n\n"
+        r"\textbf{Proof of \textcolor{cyan}{Theorem 2.1}.} "
+        r"Consider the ordered choices. \(\blacksquare\)"
+        "\n"
+    )
+    for pack in (None, "academic-paper"):
+        candidates = scan(parse_latex(text), pack=pack).candidates
+        conjecture = next(c for c in candidates if c.kind == "theorem-like")
+        proof = next(c for c in candidates if c.kind == "proof")
+        assert conjecture.env_hint == "conjecture"
+        assert conjecture.payload["number"] == (
+            r"1.1 {(Erdos and Sos, {\char91}15{\char93})}"
+        )
+        assert conjecture.payload["title_prefix"] == (
+            r"{\bfseries Conjecture 1.1 (Erdos and Sos, [15]).}"
+        )
+        assert conjecture.payload["title_line_old"] == ""
+        assert conjecture.payload["title_line_new"] == ""
+        assert proof.payload["proof_arg"] == "Proof of Theorem 2.1"
+        assert proof.payload["strip_prefix"] == (
+            r"\textbf{Proof of \textcolor{cyan}{Theorem 2.1}.} "
+        )
+        assert proof.payload["title_remainder"].startswith("Consider the ordered choices")
+
+
 def test_arbitrary_tex_command_after_result_keyword_is_not_a_separator():
     text = (
         r"\textbf{Theorem 2}\ref{old-result} shows the estimate."

@@ -104,6 +104,12 @@ _MULTILINE_NAMED_TITLE_HEAD_RE = re.compile(
 _TITLE_TRAILING_PUNCTUATION = frozenset({"", ".", ":", "：", "。"})
 _MAX_MULTILINE_TITLE_CHARS = 4096
 _MAX_MULTILINE_TITLE_LINES = 24
+_NUMBERED_TITLE_NOTE_RE = re.compile(
+    r"^\s*(?P<note>"
+    r"\((?:[^()\n]|\([^()\n]{1,160}\)){1,2048}\)"
+    r"|\[[^\[\]\n]{1,2048}\]"
+    r")\s*[.:：。]?\s*$"
+)
 
 _PROOF_OF_TITLE_END_PATTERN = r"(?=\s*(?:[.:：。]|$))"
 _PROOF_OF_REF_TOKEN_PATTERN = (
@@ -118,12 +124,28 @@ _PROOF_OF_TYPED_QUALIFIER_PATTERN = (
     r"(?:\s+(?:up\s+to|for|on|in|under|with|of)\s+"
     r"[^.\n:：。]{1,160})?"
 )
-PROOF_OF_TARGET_PATTERN = (
-    # A typed target must finish as a title.  Previously the bare ``Theorem``
-    # alternative accepted prose such as ``Proof of Theorem 1 appears ...``.
+_PROOF_OF_TYPED_CORE_PATTERN = (
     r"(?:Theorem|Lemma|Proposition|Corollary|Conjecture|Claim|Fact|Observation|"
     r"Definition|Result|Question|Problem|Exercise)\b"
     rf"(?:\s*~?\s*(?:\d+(?:\.\d+)*|{_PROOF_OF_REF_TOKEN_PATTERN}))?"
+)
+_PROOF_OF_PRESENTATION_TARGET_PATTERN = (
+    # Born-digital PDFs commonly expose a link's colour as TeX styling.  The
+    # wrapper is bounded and the wrapped text must still be a complete typed
+    # result target; a generic hyperlink caption therefore remains excluded.
+    rf"(?:{_PROOF_OF_TYPED_CORE_PATTERN}"
+    rf"|\\(?:textbf|textit|emph|textsc)\s*\{{{_PROOF_OF_TYPED_CORE_PATTERN}\}}"
+    rf"|\\textcolor\s*\{{[^{{}}\n]{{1,64}}\}}\s*"
+    rf"\{{{_PROOF_OF_TYPED_CORE_PATTERN}\}}"
+    rf"|\\href\s*\{{[^{{}}\n]{{1,320}}\}}\s*"
+    rf"\{{{_PROOF_OF_TYPED_CORE_PATTERN}\}}"
+    rf"|\\hyperref\s*\[[^\[\]\n]{{1,160}}\]\s*"
+    rf"\{{{_PROOF_OF_TYPED_CORE_PATTERN}\}})"
+)
+PROOF_OF_TARGET_PATTERN = (
+    # A typed target must finish as a title.  Previously the bare ``Theorem``
+    # alternative accepted prose such as ``Proof of Theorem 1 appears ...``.
+    rf"{_PROOF_OF_PRESENTATION_TARGET_PATTERN}"
     rf"{_PROOF_OF_TYPED_QUALIFIER_PATTERN}{_PROOF_OF_TITLE_END_PATTERN}"
     r"|\d+(?:\.\d+)*"
     rf"{_PROOF_OF_TITLE_END_PATTERN}"
@@ -179,6 +201,16 @@ STYLED_SEMANTIC_RE = re.compile(
     r"^(?P<leading>\s*(?:\\noindent\s*)?)"
     r"\\(?P<style>textbf|textit|emph|textsc)\s*\{"
 )
+OLD_STYLE_SEMANTIC_RE = re.compile(
+    r"^(?P<leading>\s*(?:\\noindent\s*)?)\{\s*"
+    r"\\(?P<style>bfseries|itshape|slshape|scshape)\b\s*"
+)
+_PRESENTATION_TEXT_PATTERNS = (
+    re.compile(r"\\textcolor\s*\{[^{}\n]{1,64}\}\s*\{([^{}\n]{1,320})\}"),
+    re.compile(r"\\href\s*\{[^{}\n]{1,320}\}\s*\{([^{}\n]{1,320})\}"),
+    re.compile(r"\\hyperref\s*\[[^\[\]\n]{1,160}\]\s*\{([^{}\n]{1,320})\}"),
+    re.compile(r"\\(?:textbf|textit|emph|textsc)\s*\{([^{}\n]{1,320})\}"),
+)
 
 # 证明范围扩展（规则模式启发式）
 SECTION_START_RE = re.compile(r"^\s*\\(chapter|section|subsection|subsubsection)\b")
@@ -187,8 +219,9 @@ PROOF_CONTINUE_RE = re.compile(
     r"^(?:now|then|hence|thus|therefore|consequently|it\s+follows|we|by|if|since|"
     r"suppose|assume|let|for|conversely|moreover|in\s+particular|indeed|first|second|third|"
     r"finally|also|this|from|because|note|observe|recall|clearly|obviously|as|so|but|"
-    r"combining|substituting|using|taking|when|"
-    r"to\s+(?:see|prove|show|complete|finish|obtain|establish|verify)|"
+    r"combining|substituting|using|taking|setting|putting|set|when|provided|"
+    r"dividing|multiplying|adding|subtracting|expanding|simplifying|rearranging|"
+    r"to\s+(?:see|prove|show|complete|finish|obtain|establish|verify|get|derive)|"
     r"consider|claim|next|on\s+the\s+other\s+hand|which|where|and|the|of|it)\b",
     re.I,
 )
@@ -717,8 +750,11 @@ def _semantic_view(first: str) -> Tuple[str, Optional[dict]]:
     """返回可匹配的可见文本，并记录安全可剥离的行首样式包装。"""
     match = STYLED_SEMANTIC_RE.match(first)
     if not match:
-        return first, None
+        match = OLD_STYLE_SEMANTIC_RE.match(first)
+        if not match:
+            return first, None
     opening = first.find("{", match.start())
+    content_start = match.end()
     depth = 0
     escaped = False
     closing = -1
@@ -739,14 +775,28 @@ def _semantic_view(first: str) -> Tuple[str, Optional[dict]]:
                 break
     if closing < 0:
         return first, None
-    inner = first[opening + 1 : closing]
+    inner = first[content_start:closing]
     trailing = first[closing + 1 :]
     return inner + trailing, {
         "opening": opening,
+        "content_start": content_start,
         "inner": inner,
         "closing": closing,
         "trailing": trailing,
     }
+
+
+def _strip_presentation_commands(value: str) -> str:
+    """Remove bounded visual/link wrappers while preserving their visible text."""
+    current = str(value or "")
+    for _ in range(8):
+        updated = current
+        for pattern in _PRESENTATION_TEXT_PATTERNS:
+            updated = pattern.sub(r"\1", updated)
+        if updated == current:
+            break
+        current = updated
+    return re.sub(r"\s+", " ", current).strip()
 
 
 def _raw_semantic_prefix(
@@ -791,9 +841,9 @@ def _styled_semantic_replacement(
     # 内没有正文，则也没有必要重写整行。
     if match_end > len(inner) or not inner[match_end:].strip():
         return ""
-    opening = int(wrapper["opening"])
+    content_start = int(wrapper.get("content_start", int(wrapper["opening"]) + 1))
     remainder = inner[match_end:].lstrip()
-    return first[: opening + 1] + remainder + "}" + str(wrapper["trailing"])
+    return first[:content_start] + remainder + "}" + str(wrapper["trailing"])
 
 
 def _structural_title_match_end(match: re.Match) -> int:
@@ -816,6 +866,38 @@ def _structural_title_match_end(match: re.Match) -> int:
     return match.start() + min(openings)
 
 
+def _numbered_title_note(
+    semantic: str,
+    structural_end: int,
+    number: Optional[str],
+) -> tuple[str, int]:
+    """Move an isolated post-number attribution/name into the environment title.
+
+    Publisher TeX often writes a complete heading as ``Theorem 1 (Author).``.
+    The parenthetical is title metadata, not statement prose.  Keeping it in the
+    body creates an over-wrapped formal item and duplicates the visual heading.
+    Only an isolated, balanced parenthetical/bracketed suffix is accepted; if
+    ordinary statement text follows, the suffix remains untouched in the body.
+
+    The note is grouped inside the optional argument.  This is important for
+    citations such as ``[15]``: a bracket inside a TeX group cannot prematurely
+    terminate the surrounding optional argument.
+    """
+    if not number:
+        return "", structural_end
+    match = _NUMBERED_TITLE_NOTE_RE.fullmatch(semantic[structural_end:])
+    if match is None:
+        return number, structural_end
+    note = re.sub(r"\s+", " ", match.group("note")).strip()
+    if not note:
+        return number, structural_end
+    # A literal ``]`` would terminate both TeX's optional argument and the
+    # independent structure evaluator's bounded parser.  Preserve its printed
+    # form with primitive character commands instead of embedding delimiters.
+    note = note.replace("[", r"{\char91}").replace("]", r"{\char93}")
+    return f"{number} {{{note}}}", len(semantic)
+
+
 def _title_metadata(source: str, title_res) -> Optional[tuple]:
     """Return the exact metadata used to patch a production title candidate."""
     first, multiline = _title_probe(source)
@@ -826,6 +908,9 @@ def _title_metadata(source: str, title_res) -> Optional[tuple]:
             continue
         number = match.group(1) if match.groups() else None
         structural_end = _structural_title_match_end(match)
+        number, structural_end = _numbered_title_note(
+            semantic, structural_end, number
+        )
         if multiline:
             raw_prefix = ""
             title_line_old, replacement = _multiline_title_line_rewrite(source)
@@ -911,7 +996,9 @@ def _proof_metadata(first: str):
         else:
             m = PROOF_OF_RE.match(semantic)
             if m:
-                label = m.group(1).rstrip(".。:：").strip()
+                label = _strip_presentation_commands(
+                    m.group(1).rstrip(".。:：").strip()
+                )
             else:
                 m = PROOF_SIMPLE_RE.match(semantic)
                 label = ""

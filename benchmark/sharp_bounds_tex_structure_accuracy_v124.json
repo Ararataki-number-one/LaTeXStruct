@@ -1,0 +1,91 @@
+{
+  "schema": "latexstruct-tex-structure-accuracy-report-v1",
+  "passed": true,
+  "threshold": 0.95,
+  "score_passed": true,
+  "inputs": {
+    "original": {
+      "binary_sha256": "e6dc2f57cf5aeb62dfde58f919e75971cf0dcf44980b64ea412d32e560d4ef07",
+      "normalized_text_sha256": "60e1ccdee6051ce8e4b7133d2e555d8c89289290178f276666d51d67d7d8f537"
+    },
+    "candidate": {
+      "binary_sha256": "c0da49e97c45408ab47a30241d789fa0de1e68948bee6a8a20265d16abada603",
+      "normalized_text_sha256": "89a6e770af73e780a646fe6957d50dbf35e216887b5ae657663128c327b4d361"
+    },
+    "original_binary_sha256": "e6dc2f57cf5aeb62dfde58f919e75971cf0dcf44980b64ea412d32e560d4ef07",
+    "candidate_binary_sha256": "c0da49e97c45408ab47a30241d789fa0de1e68948bee6a8a20265d16abada603",
+    "original_normalized_text_sha256": "60e1ccdee6051ce8e4b7133d2e555d8c89289290178f276666d51d67d7d8f537",
+    "candidate_normalized_text_sha256": "89a6e770af73e780a646fe6957d50dbf35e216887b5ae657663128c327b4d361",
+    "original_sha256": "60e1ccdee6051ce8e4b7133d2e555d8c89289290178f276666d51d67d7d8f537",
+    "candidate_sha256": "89a6e770af73e780a646fe6957d50dbf35e216887b5ae657663128c327b4d361",
+    "binary_sha256_source": "file-bytes",
+    "truth_mode": "manifest",
+    "outline_truth_mode": "manifest",
+    "release_evidence_eligible": true
+  },
+  "exact_structure": {
+    "true_positive": 19,
+    "predicted": 19,
+    "expected": 19,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "matches": [
+      {"kind": "conjecture", "id": "1.1", "candidate_start_line": 253, "candidate_end_line": 259},
+      {"kind": "theorem", "id": "2.1", "candidate_start_line": 323, "candidate_end_line": 338},
+      {"kind": "lemma", "id": "2.2", "candidate_start_line": 344, "candidate_end_line": 354},
+      {"kind": "lemma", "id": "3.1", "candidate_start_line": 446, "candidate_end_line": 450},
+      {"kind": "theorem", "id": "3.2", "candidate_start_line": 471, "candidate_end_line": 473},
+      {"kind": "remark", "id": "unnumbered-after-3.2", "candidate_start_line": 523, "candidate_end_line": 525},
+      {"kind": "lemma", "id": "3.3", "candidate_start_line": 535, "candidate_end_line": 540},
+      {"kind": "theorem", "id": "3.4", "candidate_start_line": 562, "candidate_end_line": 571},
+      {"kind": "lemma", "id": "3.5", "candidate_start_line": 586, "candidate_end_line": 588},
+      {"kind": "lemma", "id": "3.6", "candidate_start_line": 594, "candidate_end_line": 596},
+      {"kind": "theorem", "id": "3.7", "candidate_start_line": 656, "candidate_end_line": 665},
+      {"kind": "theorem", "id": "3.8", "candidate_start_line": 671, "candidate_end_line": 680},
+      {"kind": "theorem", "id": "3.9", "candidate_start_line": 684, "candidate_end_line": 695},
+      {"kind": "proof", "id": "proof-lemma-2.2", "candidate_start_line": 356, "candidate_end_line": 380},
+      {"kind": "proof", "id": "proof-theorem-2.1", "candidate_start_line": 382, "candidate_end_line": 434},
+      {"kind": "proof", "id": "proof-lemma-3.1", "candidate_start_line": 452, "candidate_end_line": 463},
+      {"kind": "proof", "id": "proof-theorem-3.2", "candidate_start_line": 477, "candidate_end_line": 521},
+      {"kind": "proof", "id": "proof-lemma-3.3", "candidate_start_line": 542, "candidate_end_line": 545},
+      {"kind": "proof", "id": "proof-lemma-3.6", "candidate_start_line": 598, "candidate_end_line": 650}
+    ],
+    "missing": [],
+    "duplicates": [],
+    "boundary_errors": [],
+    "unmatched_environments": []
+  },
+  "residual_formal_headings": [],
+  "body_token_conservation": {
+    "conserved": true,
+    "original_token_count": 13708,
+    "candidate_token_count": 13708,
+    "missing_token_count": 0,
+    "excess_token_count": 0,
+    "first_difference_index": null,
+    "missing_original_lines": [],
+    "excess_candidate_lines": []
+  },
+  "document_structure": {
+    "toc_required": true,
+    "toc_present": true,
+    "outline_truth_mode": "manifest",
+    "expected_outline_nodes": 9,
+    "candidate_outline_nodes": 9,
+    "matched_outline_nodes": 9,
+    "outline_coverage": 1.0,
+    "missing_outline_nodes": [],
+    "unexpected_outline_nodes": []
+  },
+  "blockers": {
+    "missing": false,
+    "duplicate": false,
+    "boundary_error": false,
+    "unmatched_environment": false,
+    "residual_formal_heading": false,
+    "body_token_change": false,
+    "outline_incomplete": false,
+    "toc_missing": false
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "schema": "latexstruct-tex-structure-truth-v1",
+  "headings": [
+    {"level": 0, "title": "Introduction", "start_line": 48, "end_line": 48},
+    {"level": 0, "title": "The number of independent sets in graphs with small nontrivial eigenvalues", "start_line": 108, "end_line": 109},
+    {"level": 0, "title": "Tight bounds for Ramsey numbers", "start_line": 244, "end_line": 244},
+    {"level": 1, "title": "Triangles", "start_line": 269, "end_line": 269},
+    {"level": 1, "title": "Bipartite graphs and 4-cycles", "start_line": 328, "end_line": 328},
+    {"level": 1, "title": "Complete bipartite graphs", "start_line": 378, "end_line": 378},
+    {"level": 1, "title": "Additional even cycles", "start_line": 460, "end_line": 460},
+    {"level": 0, "title": "Concluding remarks", "start_line": 488, "end_line": 488},
+    {"level": 0, "title": "References", "start_line": 526, "end_line": 526}
+  ],
+  "items": [
+    {"kind": "conjecture", "id": "1.1", "start_line": 66, "end_line": 70},
+    {"kind": "theorem", "id": "2.1", "start_line": 138, "end_line": 151},
+    {"kind": "lemma", "id": "2.2", "start_line": 158, "end_line": 166},
+    {"kind": "lemma", "id": "3.1", "start_line": 254, "end_line": 256},
+    {"kind": "theorem", "id": "3.2", "start_line": 276, "end_line": 276},
+    {"kind": "remark", "id": "unnumbered-after-3.2", "heading_label": "Remark", "start_line": 325, "end_line": 325},
+    {"kind": "lemma", "id": "3.3", "start_line": 338, "end_line": 341},
+    {"kind": "theorem", "id": "3.4", "start_line": 361, "end_line": 368},
+    {"kind": "lemma", "id": "3.5", "start_line": 385, "end_line": 385},
+    {"kind": "lemma", "id": "3.6", "start_line": 392, "end_line": 392},
+    {"kind": "theorem", "id": "3.7", "start_line": 451, "end_line": 458},
+    {"kind": "theorem", "id": "3.8", "start_line": 464, "end_line": 471},
+    {"kind": "theorem", "id": "3.9", "start_line": 475, "end_line": 485},
+    {"kind": "proof", "id": "proof-lemma-2.2", "heading_label": "Proof", "start_line": 168, "end_line": 189},
+    {"kind": "proof", "id": "proof-theorem-2.1", "heading_label": "Proof of Theorem 2.1", "start_line": 191, "end_line": 242},
+    {"kind": "proof", "id": "proof-lemma-3.1", "heading_label": "Proof", "start_line": 258, "end_line": 266},
+    {"kind": "proof", "id": "proof-theorem-3.2", "heading_label": "Proof", "start_line": 281, "end_line": 323},
+    {"kind": "proof", "id": "proof-lemma-3.3", "heading_label": "Proof", "start_line": 343, "end_line": 343},
+    {"kind": "proof", "id": "proof-lemma-3.6", "heading_label": "Proof", "start_line": 394, "end_line": 444}
+  ]
+}

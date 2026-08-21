@@ -79,7 +79,7 @@ OCR_SYSTEM_PROMPT = """你是「数学文档页面转写专家」。把给定书
    不得用 ``\\textsuperscript``、手工 ``\\rule`` 和页底普通段落模拟脚注，也不得把
    普通数学上标、页码、定理/习题编号或 figure caption 误判为脚注。
 11. 若 page_request 中有 publisher_equation_tag_evidence，说明 PDF 几何检测到正文区
-   右侧独立排印的公式编号。必须直接查看对应位置的页面像素，把每个可见编号放进所属的
+   左侧或右侧边缘独立排印的公式编号。必须直接查看对应位置的页面像素，把每个可见编号放进所属的
    AMS 展示公式环境并用活动 ``\\tag{...}`` 恰好保留一次；源页显示 ``(15)`` 时必须写
    ``\\tag{15}``，不得写 ``\\tag{(15)}``，否则 amsmath 会排成双括号。不得把编号写进
    注释、普通正文，也不得把 ``\\tag`` 放进 ``\\[...\\]``。label_hint 只是文字层提示，
@@ -1294,10 +1294,13 @@ def pdf_page_equation_tag_regions(pdf_path: str, page_no: int) -> List[dict]:
     """Locate high-confidence printed equation numbers by page geometry.
 
     A candidate must be an isolated parenthesized number on its PDF text line,
-    inside the body height and in the far-right equation-number column.  The
-    extracted label remains an untrusted hint: it nominates the page pixels and
-    provides a deterministic completeness check, but never authorises an
-    automatic edit of mathematical content.
+    inside the body height and in a far-left or far-right equation-number
+    column.  It must also have inward, vertically adjacent mathematical text;
+    this rejects page furniture, isolated list numbers and ordinary inline
+    references such as ``proof of (3)``.  The extracted label remains an
+    untrusted hint: it nominates the page pixels and provides a deterministic
+    completeness check, but never authorises an automatic edit of mathematical
+    content.
     """
     import fitz  # PyMuPDF
 
@@ -1330,32 +1333,98 @@ def pdf_page_equation_tag_regions(pdf_path: str, page_no: int) -> List[dict]:
             key = (word[5], word[6])
             line_counts[key] = line_counts.get(key, 0) + 1
 
-        result = []
+        def word_box(word) -> tuple[float, float, float, float] | None:
+            try:
+                box = tuple(float(word[index]) for index in range(4))
+            except (IndexError, TypeError, ValueError):
+                return None
+            x0, y0, x1, y1 = box
+            if (
+                not all(math.isfinite(value) for value in box)
+                or x1 <= x0
+                or y1 <= y0
+            ):
+                return None
+            return x0, y0, x1, y1
+
+        def math_like_word(value: object) -> bool:
+            text = unicodedata.normalize("NFKC", str(value or "")).strip()
+            if not text or _PDF_EQUATION_TAG_WORD_RE.fullmatch(text):
+                return False
+            if any(char in "=<>±×÷≤≥≠≈∼∑∏∫√∞−" for char in text):
+                return True
+            greek_or_math = False
+            for char in text:
+                try:
+                    name = unicodedata.name(char)
+                except ValueError:
+                    continue
+                if "GREEK" in name or "MATHEMATICAL" in name:
+                    greek_or_math = True
+                    break
+            if greek_or_math:
+                return True
+            # A bare year or list ordinal in nearby prose is not formula
+            # evidence.  Digits become evidence only when the same compact PDF
+            # word also carries explicit mathematical punctuation.
+            return bool(
+                any(char.isdigit() for char in text)
+                and any(char in "+-/()[]{}^_" for char in text)
+            )
+
+        valid_words = [
+            (word, box)
+            for word in words
+            if (box := word_box(word)) is not None
+        ]
+
+        def has_inward_formula_evidence(
+            candidate_word,
+            candidate_box: tuple[float, float, float, float],
+            column: str,
+        ) -> bool:
+            x0, y0, x1, y1 = candidate_box
+            center_y = (y0 + y1) / 2.0
+            tag_height = y1 - y0
+            minimum_gap = page_width * 0.08
+            for other, (ox0, oy0, ox1, oy1) in valid_words:
+                if other is candidate_word or not math_like_word(other[4]):
+                    continue
+                other_center_y = (oy0 + oy1) / 2.0
+                vertical_tolerance = max(18.0, 1.75 * max(tag_height, oy1 - oy0))
+                if abs(other_center_y - center_y) > vertical_tolerance:
+                    continue
+                if column == "left":
+                    if ox0 >= max(x1 + minimum_gap, float(rect.x0) + page_width * 0.24):
+                        return True
+                elif ox1 <= min(x0 - minimum_gap, float(rect.x0) + page_width * 0.76):
+                    return True
+            return False
+
+        candidates = []
         seen: set[tuple[str, int, int]] = set()
-        for word in words:
+        for word, box in valid_words:
             value = unicodedata.normalize("NFKC", str(word[4] or "")).strip()
             match = _PDF_EQUATION_TAG_WORD_RE.fullmatch(value)
             if match is None or line_counts.get((word[5], word[6])) != 1:
                 continue
-            try:
-                x0, y0, x1, y1 = (float(word[index]) for index in range(4))
-            except (TypeError, ValueError):
-                continue
+            x0, y0, x1, y1 = box
             center_y = ((y0 + y1) / 2.0 - float(rect.y0)) / page_height
             left_ratio = (x0 - float(rect.x0)) / page_width
             right_ratio = (x1 - float(rect.x0)) / page_width
-            if not (
-                0.80 <= left_ratio < right_ratio <= 0.98
-                and 0.07 <= center_y <= 0.93
-            ):
+            left_column = 0.04 <= left_ratio < right_ratio <= 0.22
+            right_column = 0.80 <= left_ratio < right_ratio <= 0.98
+            if not (0.07 <= center_y <= 0.93 and (left_column or right_column)):
+                continue
+            column = "left" if left_column else "right"
+            if not has_inward_formula_evidence(word, box, column):
                 continue
             label = match.group("label")
             position_key = (label.casefold(), round(y0), round(y1))
             if position_key in seen:
                 continue
             seen.add(position_key)
-            result.append({
-                "evidence_id": f"p{page_no}-equation-tag-{len(result) + 1}",
+            candidates.append({
                 "label_hint": label,
                 "bbox_points": [
                     round(x0, 3), round(y0, 3), round(x1, 3), round(y1, 3),
@@ -1366,9 +1435,17 @@ def pdf_page_equation_tag_regions(pdf_path: str, page_no: int) -> List[dict]:
                     round((x1 - float(rect.x0)) / page_width, 6),
                     round((y1 - float(rect.y0)) / page_height, 6),
                 ],
-                "source": "isolated_right_margin_pdf_word_geometry",
+                "source": f"isolated_{column}_margin_pdf_word_geometry",
             })
-        return result[:MAX_EQUATION_TAGS_PER_PAGE]
+        candidates.sort(key=lambda item: (
+            item["bbox_points"][1], item["bbox_points"][0], item["label_hint"],
+        ))
+        return [
+            {"evidence_id": f"p{page_no}-equation-tag-{index}", **item}
+            for index, item in enumerate(
+                candidates[:MAX_EQUATION_TAGS_PER_PAGE], start=1,
+            )
+        ]
     finally:
         document.close()
 
@@ -2852,7 +2929,7 @@ def _validate_equation_tag_integrity(
     if len(regions) > MAX_EQUATION_TAGS_PER_PAGE:
         raise _OcrQualityGateError(
             f"第 {page_no} 页公式编号候选超过自动完整性核验上限；页面不得标记完成",
-            "本页右侧公式编号候选过多，自动核验已安全停止。请人工逐项核对；"
+            "本页边缘公式编号候选过多，自动核验已安全停止。请人工逐项核对；"
             "不得依据文字层猜测或自动补写。",
         )
 
@@ -2867,8 +2944,8 @@ def _validate_equation_tag_integrity(
     )
     if invalid_active or invalid_display or actual != expected:
         raise _OcrQualityGateError(
-            f"第 {page_no} 页活动公式编号与原页右侧编号证据不一致；页面不得标记完成",
-            "重新查看本页每个正文区右侧独立公式编号，并在所属 AMS 展示公式环境中"
+            f"第 {page_no} 页活动公式编号与原页边缘编号证据不一致；页面不得标记完成",
+            "重新查看本页每个正文区左侧或右侧边缘独立公式编号，并在所属 AMS 展示公式环境中"
             "按原页顺序用活动 \\tag{...} 恰好保留一次；源页 (15) 应写 \\tag{15}，"
             "不得写 \\tag{(15)}；不得写入注释或普通正文，也不得把 \\tag 放进 \\[...\\]。"
             "程序不会依据文字层自动补写编号。",
@@ -3859,7 +3936,7 @@ def _page_request(
             :MAX_EQUATION_TAGS_PER_PAGE
         ]
         request["equation_tag_policy"] = (
-            "这些记录由正文区右侧独立编号的 PDF 几何检测产生，只用于定位与完整性核对。"
+            "这些记录由正文区左侧或右侧边缘独立编号的 PDF 几何检测产生，只用于定位与完整性核对。"
             "必须直接看页面像素读取编号，在所属 AMS 展示公式环境中按原页顺序用活动 "
             "\\tag{...} 逐个且仅保留一次；源页 (15) 应写 \\tag{15}，不得写 \\tag{(15)}，"
             "否则 amsmath 会排成双括号。label_hint 不是内容权威，图像冲突时以图像为准。"

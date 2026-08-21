@@ -45,6 +45,7 @@ def test_equation_tag_evidence_is_in_request_and_requires_one_active_tag():
     payload = json.loads(request[request.index("{"):])
     assert payload["publisher_equation_tag_evidence"][0]["label_hint"] == "15"
     assert "图像" in payload["equation_tag_policy"]
+    assert "左侧或右侧" in payload["equation_tag_policy"]
     assert r"\tag{15}" in payload["equation_tag_policy"]
     assert r"\tag{(15)}" in payload["equation_tag_policy"]
 
@@ -186,6 +187,9 @@ def test_pdf_equation_tag_geometry_accepts_only_isolated_body_right_margin_words
             assert sort is True
             return [
                 (510.0, 200.0, 530.0, 212.0, "(15)", 1, 0, 0),
+                # Inward mathematical text on a separate PDF text line proves
+                # this isolated right-column number belongs to a display.
+                (220.0, 200.0, 280.0, 212.0, "x=15", 1, 1, 0),
                 # Far right, but not isolated on its PDF line.
                 (450.0, 300.0, 490.0, 312.0, "value", 2, 0, 0),
                 (510.0, 300.0, 530.0, 312.0, "(16)", 2, 0, 1),
@@ -224,6 +228,44 @@ def test_pdf_equation_tag_geometry_accepts_only_isolated_body_right_margin_words
         "bbox_normalized": [0.85, 0.25, 0.883333, 0.265],
         "source": "isolated_right_margin_pdf_word_geometry",
     }]
+
+
+def test_synthetic_pdf_accepts_left_and_right_equation_columns_without_body_noise(
+    tmp_path,
+):
+    import fitz
+
+    pdf_path = tmp_path / "left-and-right-equation-tags.pdf"
+    document = fitz.open()
+    page = document.new_page(width=600, height=800)
+
+    # Two real displays: the parenthesized number is isolated in its edge
+    # column and a compact mathematical row sits well inward at the same height.
+    page.insert_text((40, 220), "(1)", fontsize=11)
+    page.insert_text((230, 220), "x=1", fontsize=11)
+    page.insert_text((540, 320), "(2)", fontsize=11)
+    page.insert_text((240, 320), "y=2", fontsize=11)
+
+    # Negative controls: a bare parenthesized list number, an inline reference,
+    # a prose item whose text starts too close to the marker, and page furniture.
+    page.insert_text((40, 420), "(3)", fontsize=11)
+    page.insert_text((180, 500), "The proof of (4) is immediate.", fontsize=11)
+    page.insert_text((40, 580), "(5)", fontsize=11)
+    # Even far-inward prose containing a bare numeral is not mathematical
+    # evidence for the isolated marker.
+    page.insert_text((230, 580), "Step 5 starts here.", fontsize=11)
+    page.insert_text((540, 30), "(9)", fontsize=11)
+    page.insert_text((230, 30), "x=9", fontsize=11)
+    document.save(pdf_path)
+    document.close()
+
+    regions = pdf_page_equation_tag_regions(str(pdf_path), 1)
+
+    assert [item["label_hint"] for item in regions] == ["1", "2"]
+    assert [item["source"] for item in regions] == [
+        "isolated_left_margin_pdf_word_geometry",
+        "isolated_right_margin_pdf_word_geometry",
+    ]
 
 
 def test_pdf_equation_tag_geometry_failure_is_not_silently_an_empty_inventory():

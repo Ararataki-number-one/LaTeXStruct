@@ -44,10 +44,20 @@ _PROOF_TYPED_QUALIFIER = (
     r"(?:\s+(?:up\s+to|for|on|in|under|with|of)\s+"
     r"[^.\n:：。]{1,160})?"
 )
-_PROOF_TYPED_TARGET = (
+_PROOF_TYPED_CORE = (
     r"(?:Theorem|Lemma|Proposition|Corollary|Conjecture|Claim|Fact|Observation|"
     r"Definition|Result|Question|Problem|Exercise)\b"
     rf"(?:\s*~?\s*(?:\d+(?:\.\d+)*|{_PROOF_REF_TOKEN}))?"
+)
+_PROOF_PRESENTATION_TARGET = (
+    rf"(?:{_PROOF_TYPED_CORE}"
+    rf"|\\(?:textbf|textit|emph|textsc)\s*\{{{_PROOF_TYPED_CORE}\}}"
+    rf"|\\textcolor\s*\{{[^{{}}\n]{{1,64}}\}}\s*\{{{_PROOF_TYPED_CORE}\}}"
+    rf"|\\href\s*\{{[^{{}}\n]{{1,320}}\}}\s*\{{{_PROOF_TYPED_CORE}\}}"
+    rf"|\\hyperref\s*\[[^\[\]\n]{{1,160}}\]\s*\{{{_PROOF_TYPED_CORE}\}})"
+)
+_PROOF_TYPED_TARGET = (
+    rf"{_PROOF_PRESENTATION_TARGET}"
     rf"{_PROOF_TYPED_QUALIFIER}{_PROOF_TITLE_END}"
 )
 _PROOF_NAMED_TARGET = (
@@ -213,6 +223,18 @@ def load_pack(spec=None) -> RulePack:
             if not p.is_file():
                 raise ValueError(f"规则包不存在：{spec}（内置包位于 latexstruct/rulesets/）")
             data = json.loads(p.read_text(encoding="utf-8"))
+        elif str(spec) == "english":
+            # The English-only pack predates the canonical proof-of grammar and
+            # carries a serialized copy of it.  Replace that one stale slot at
+            # load time so additions such as bounded presentation wrappers can
+            # never make ``english`` diverge from ``default`` again, while the
+            # pack still excludes the Chinese proof starters.
+            proof_starts = [
+                pattern for pattern in data.get("proof_starts", [])
+                if not str(pattern).startswith(r"Proof of\s+")
+            ]
+            proof_starts.insert(min(2, len(proof_starts)), DEFAULT_PROOF_OF_START)
+            data = {**data, "proof_starts": proof_starts}
     base = _default_data()
     merged = {**base, **{k: v for k, v in data.items() if v is not None and v != []}}
     pack = RulePack(

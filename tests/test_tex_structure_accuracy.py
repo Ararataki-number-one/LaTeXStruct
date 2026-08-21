@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Independent, fail-closed structure-accuracy acceptance tests."""
 
+import hashlib
+
 import pytest
 
 from tools.evaluate_tex_structure_accuracy import (
@@ -55,6 +57,58 @@ Final words.
 """
 
 
+REVIEWED_ORIGINAL = r"""\documentclass{article}
+\begin{document}
+\begin{center}
+2. A reviewed multi-line
+heading
+\end{center}
+Narrative outside the reviewed structures.
+
+{\bfseries Theorem 4.2 (Synthetic source).} Alpha theorem body.
+
+{\bfseries Remark.} Beta unnumbered formal body.
+
+\textcolor{cyan}{\textit{Proof of \textcolor{black}{Theorem 4.2}.}} First proof token alpha.
+
+{\itshape Proof.} Second proof token beta.
+
+\begin{center}
+\textbf{References}
+\end{center}
+Reference text remains ordinary body text.
+\end{document}
+"""
+
+
+REVIEWED_PERFECT = r"""\documentclass{book}
+\begin{document}
+\tableofcontents
+\chapter{A reviewed multi-line heading}
+Narrative outside the reviewed structures.
+
+\begin{theorem*}[4.2]
+Alpha theorem body.
+\end{theorem*}
+
+\begin{remark*}
+Beta unnumbered formal body.
+\end{remark*}
+
+\begin{proof}
+First proof token alpha.
+\end{proof}
+
+\begin{proof}
+Second proof token beta.
+\end{proof}
+
+\chapter*{References}
+Reference text remains ordinary body text.
+\end{document}
+"""
+
+
 def _line_number(text, prefix):
     return next(
         index for index, line in enumerate(text.splitlines(), start=1)
@@ -81,6 +135,55 @@ def _manifest():
                 "id": "P1.1",
                 "start_line": proof_start,
                 "end_line": proof_end,
+            },
+        ],
+    }
+
+
+def _reviewed_manifest():
+    return {
+        "schema": TRUTH_SCHEMA,
+        "headings": [
+            {
+                "level": 0,
+                "title": "A reviewed multi-line heading",
+                "start_line": _line_number(REVIEWED_ORIGINAL, "2. A reviewed"),
+                "end_line": _line_number(REVIEWED_ORIGINAL, "heading"),
+            },
+            {
+                "level": 0,
+                "title": "References",
+                "start_line": _line_number(REVIEWED_ORIGINAL, r"\textbf{References}"),
+                "end_line": _line_number(REVIEWED_ORIGINAL, r"\textbf{References}"),
+            },
+        ],
+        "items": [
+            {
+                "kind": "theorem",
+                "id": "4.2",
+                "start_line": _line_number(REVIEWED_ORIGINAL, r"{\bfseries Theorem"),
+                "end_line": _line_number(REVIEWED_ORIGINAL, r"{\bfseries Theorem"),
+            },
+            {
+                "kind": "remark",
+                "id": "remark-after-4.2",
+                "heading_label": "Remark",
+                "start_line": _line_number(REVIEWED_ORIGINAL, r"{\bfseries Remark"),
+                "end_line": _line_number(REVIEWED_ORIGINAL, r"{\bfseries Remark"),
+            },
+            {
+                "kind": "proof",
+                "id": "proof-theorem-4.2",
+                "heading_label": "Proof of Theorem 4.2",
+                "start_line": _line_number(REVIEWED_ORIGINAL, r"\textcolor{cyan}"),
+                "end_line": _line_number(REVIEWED_ORIGINAL, r"\textcolor{cyan}"),
+            },
+            {
+                "kind": "proof",
+                "id": "proof-second",
+                "heading_label": "Proof",
+                "start_line": _line_number(REVIEWED_ORIGINAL, r"{\itshape Proof"),
+                "end_line": _line_number(REVIEWED_ORIGINAL, r"{\itshape Proof"),
             },
         ],
     }
@@ -241,5 +344,107 @@ def test_auto_discovery_is_available_but_identified_as_weaker_truth_mode():
     report = evaluate_tex_structure(ORIGINAL, PERFECT, manifest=None)
 
     assert report["inputs"]["truth_mode"] == "auto-discovery"
+    assert report["inputs"]["release_evidence_eligible"] is False
     assert report["exact_structure"]["expected"] == 2
     assert report["exact_structure"]["f1"] == 1.0
+
+
+def test_reviewed_manifest_handles_old_style_unnumbered_and_nested_proof_titles():
+    report = evaluate_tex_structure(
+        REVIEWED_ORIGINAL,
+        REVIEWED_PERFECT,
+        manifest=_reviewed_manifest(),
+    )
+
+    assert report["passed"] is True
+    assert report["inputs"]["truth_mode"] == "manifest"
+    assert report["inputs"]["outline_truth_mode"] == "manifest"
+    assert report["inputs"]["release_evidence_eligible"] is True
+    assert report["exact_structure"]["true_positive"] == 4
+    assert report["exact_structure"]["expected"] == 4
+    assert report["document_structure"]["matched_outline_nodes"] == 2
+    assert report["document_structure"]["expected_outline_nodes"] == 2
+    assert report["body_token_conservation"]["conserved"] is True
+
+
+def test_proofs_are_matched_individually_by_reviewed_body_tokens():
+    duplicated_proof = REVIEWED_PERFECT.replace(
+        "Second proof token beta.",
+        "First proof token alpha.",
+    )
+
+    report = evaluate_tex_structure(
+        REVIEWED_ORIGINAL,
+        duplicated_proof,
+        manifest=_reviewed_manifest(),
+    )
+
+    assert report["passed"] is False
+    assert report["exact_structure"]["true_positive"] == 3
+    assert "proof:proof-second" in report["exact_structure"]["missing"]
+    assert any(
+        duplicate["id"] == "proof-theorem-4.2"
+        for duplicate in report["exact_structure"]["duplicates"]
+    )
+
+
+def test_old_style_and_nested_residual_headings_fail_closed():
+    unwrapped = REVIEWED_PERFECT.replace(
+        "\\begin{remark*}\nBeta unnumbered formal body.\n\\end{remark*}",
+        "{\\bfseries Remark.} Beta unnumbered formal body.",
+    ).replace(
+        "\\begin{proof}\nFirst proof token alpha.\n\\end{proof}",
+        "\\textcolor{cyan}{\\textit{Proof of "
+        "\\textcolor{black}{Theorem 4.2}.}} First proof token alpha.",
+        1,
+    )
+
+    report = evaluate_tex_structure(
+        REVIEWED_ORIGINAL,
+        unwrapped,
+        manifest=_reviewed_manifest(),
+    )
+
+    residual_kinds = {item["kind"] for item in report["residual_formal_headings"]}
+    assert {"remark", "proof"} <= residual_kinds
+    assert report["blockers"]["residual_formal_heading"] is True
+    assert report["passed"] is False
+
+
+def test_reviewed_multiline_outline_rejects_truncated_candidate_and_bad_truth():
+    truncated = REVIEWED_PERFECT.replace(
+        "\\chapter{A reviewed multi-line heading}",
+        "\\chapter{A reviewed multi-line}",
+    )
+    report = evaluate_tex_structure(
+        REVIEWED_ORIGINAL,
+        truncated,
+        manifest=_reviewed_manifest(),
+    )
+    assert report["document_structure"]["matched_outline_nodes"] == 1
+    assert report["document_structure"]["outline_coverage"] == 0.5
+    assert report["blockers"]["outline_incomplete"] is True
+
+    bad_manifest = _reviewed_manifest()
+    bad_manifest["headings"][0]["end_line"] -= 1
+    with pytest.raises(ValueError, match="title does not match source lines"):
+        evaluate_tex_structure(
+            REVIEWED_ORIGINAL,
+            REVIEWED_PERFECT,
+            manifest=bad_manifest,
+        )
+
+
+def test_binary_and_normalized_text_hashes_have_explicit_distinct_semantics():
+    original_crlf = ORIGINAL.replace("\n", "\r\n")
+    report = evaluate_tex_structure(original_crlf, PERFECT, manifest=_manifest())
+    inputs = report["inputs"]
+
+    binary_digest = hashlib.sha256(original_crlf.encode("utf-8")).hexdigest()
+    normalized_digest = hashlib.sha256(ORIGINAL.encode("utf-8")).hexdigest()
+    assert inputs["original"]["binary_sha256"] == binary_digest
+    assert inputs["original"]["normalized_text_sha256"] == normalized_digest
+    assert inputs["original_binary_sha256"] == binary_digest
+    assert inputs["original_normalized_text_sha256"] == normalized_digest
+    assert inputs["original_sha256"] == normalized_digest
+    assert binary_digest != normalized_digest

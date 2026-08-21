@@ -103,8 +103,10 @@ AI 复查与 OCR 模型；开启「系统凭据管理器」后，密钥会存入
 # 1) 修改 latexstruct/_version.py 后同步生成元数据
 $version = "X.Y.Z"
 python packaging/sync_version.py --version $version
-# 2) 提交并打 tag 推送 → CI 自动：测试 → 构建 exe → 构建安装器 → 发布 Release
-git add -A
+# 2) 精确暂存本次改动（避免把无关未跟踪文件带入发布），再提交并打 tag 推送
+git add -u
+git add <本次新增文件路径...>
+git status --short
 git commit -m "release: v$version"
 git push origin HEAD
 git tag "v$version"
@@ -112,7 +114,7 @@ git push origin "v$version"
 # 3) 已安装客户端下次启动自动提示更新
 ```
 
-## 当前状态（v1.2.3）
+## 当前状态（v1.2.4）
 
 - 核心流水线已具备解析、扫描、保守 AI 决策、独立复查、可逆补丁和统一安全检查；
   定理/证明边界、自定义环境、label/ref、图片路径、花括号、项目文件集合与编译前后对比
@@ -122,10 +124,18 @@ git push origin "v$version"
   多套或跨边界的 formal 条目会 fail-closed。用户确认的固定样本含 44 个正式条目和 11 个证明，
   独立评估 exact 55/55、正文 30,732/30,732 token、24/24 大纲节点，并只生成一个目录；该结果
   只说明这份已审阅样本通过，并非对所有文档、OCR 文字或数学语义准确率的通用保证；
+- 多行 PDF 标题现在按同页连续 1--3 行候选处理，并要求与完整书签标题精确相等；只有命中的标题
+  续行会被消费。OCR formal 清点同时支持 `{\bfseries ...}` 旧式标题、带展示/链接包装的 Proof
+  标题和带样式的无编号 Remark。针对 17 页 Sharp Bounds 固定人工真值，9/9 个有效标题、13/13
+  个定理类条目和 6/6 个证明精确命中（formal/proof 合计 19/19），正文/数学守恒并只生成一个
+  目录；[人工真值清单](benchmark/sharp_bounds_tex_structure_truth_v1.json)和
+  [v1.2.4 独立评测结果](benchmark/sharp_bounds_tex_structure_accuracy_v124.json)记录了口径、哈希与
+  边界；原始 OCR/候选全文因版权不随仓库分发，因此该结果只代表这个已审阅样本；
 - 结构决策的封闭样本、评分口径、安全门和 Wilson 区间记录在
   [外部准确率报告](benchmark/EXTERNAL_ACCURACY_REPORT.md)。该报告只衡量其固定样本与任务，不是对 OCR、
   任意书籍或出版质量的通用承诺；
-- OCR 项目还会校验所选 PDF 书签节点、目录命令、真实图片文件、公式编号与脚注清单；公式编号
+- OCR 项目还会校验所选 PDF 书签节点、目录命令、真实图片文件、公式编号与脚注清单；正文左侧或
+  右侧边缘的公式编号只有在邻近数学内容提供证据时才进入清点，公式编号
   必须以活动 AMS `\tag{...}` 按源页顺序匹配，清点失败、双括号写法、顺序交换或缺失证据都会
   阻止出版审校导入。本机存在 XeLaTeX 时会实际编译并标记结果是否通过。未通过检查的当前草稿
   仍可由用户以 `UNVERIFIED` TEX/ZIP 导出，但不会冒充已验证成品；
