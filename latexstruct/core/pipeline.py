@@ -41,6 +41,7 @@ from .report import build_report
 from .review import run_review
 from .rules import RuleConfig, build_rule_decisions
 from .scanner import _declared_theorem_envs, scan
+from .semantic_ir import build_ocr_semantic_ops
 from .verify import check_display_tag_safety, compare_braces, compare_env_balance, known_issues
 
 DOC_CLASS_RE = re.compile(r"\\documentclass(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
@@ -71,6 +72,11 @@ class PipelineResult:
     review: Dict = field(default_factory=dict)
     decision_items: List[dict] = field(default_factory=list)  # 审阅式 UI 决策清单
     error: str = ""
+    compiled_pdf: bytes = b""
+    compiled_pdf_name: str = ""
+    compiled_tex: str = ""
+    compiled_snapshot: str = ""
+    compiled_extra_files: Dict[str, bytes] = field(default_factory=dict)
 
 
 def _build_context(doc, structured_envs=None) -> PatchContext:
@@ -538,6 +544,7 @@ def run_pipeline(
     require_resources: bool = False,
     compile_extra_files: dict = None,
     compile_project_main_rel: str = None,
+    capture_compile_artifact: bool = False,
     known_structured_envs=None,
 ) -> PipelineResult:
     def control():
@@ -559,6 +566,11 @@ def run_pipeline(
     template_name = template_label(template) if template else ""
     ocr_structure_notes: List[dict] = []
     ocr_structure_patches: List[AppliedPatch] = []
+    ocr_semantic_notes: List[dict] = []
+    ocr_semantic_patches: List[AppliedPatch] = []
+    ocr_semantic_report = {
+        "checked": False, "ok": True, "issues": [], "operations": 0,
+    }
     ocr_semantic_lock_enabled = is_ocr_document(text)
     if ocr_semantic_lock_enabled:
         emit("outline", 0.035, "正在根据 PDF 大纲校正章节与目录")
@@ -578,6 +590,34 @@ def run_pipeline(
                     "status": "rejected",
                     "reason": f"章节树补丁校验失败，已保留原文：{ocr_rejected[0].error}",
                 })
+        emit("semantic", 0.045, "正在核对公式编号、前置信息与参考文献清单")
+        semantic_ops, ocr_semantic_notes, ocr_semantic_report = (
+            build_ocr_semantic_ops(text)
+        )
+        if semantic_ops:
+            semantic_lines = text.split("\n")
+            semantic_planned, semantic_rejected = validate_ops(
+                semantic_lines,
+                [(Decision(candidate_id="ocr-semantic-ir", action="none"), semantic_ops)],
+            )
+            if not semantic_rejected:
+                out, ocr_semantic_patches, _ = apply_patches(
+                    semantic_lines, semantic_planned,
+                )
+                text = "\n".join(out)
+            else:
+                reason = (
+                    "语义 IR 补丁校验失败，已保留该阶段原文："
+                    f"{semantic_rejected[0].error}"
+                )
+                ocr_semantic_notes.append({
+                    "line": 1, "status": "rejected", "reason": reason,
+                })
+                ocr_semantic_report["ok"] = False
+                ocr_semantic_report.setdefault("issues", []).append({
+                    "line": 1, "reason": reason,
+                })
+        ocr_semantic_report["notes"] = list(ocr_semantic_notes)
     pre_template_text = text
     template_notes: List[dict] = []
     template_applied = False
@@ -1074,7 +1114,7 @@ def run_pipeline(
         "content_invariant": content_invariant(
             source_text.split("\n"),
             out,
-            ocr_structure_patches + template_patches + applied,
+            ocr_structure_patches + ocr_semantic_patches + template_patches + applied,
         ),
         "env_balance": compare_env_balance(transformed_source_text, result_text),
         "braces": compare_braces(transformed_source_text, result_text),
@@ -1087,6 +1127,7 @@ def run_pipeline(
         "known_issues": known_issues(result_text),
         "display_tags": check_display_tag_safety(result_text),
         "ocr_structure": check_ocr_structure(result_text),
+        "ocr_semantic_ir": ocr_semantic_report,
         "template": {
             "ok": template_safe,
             "applied": template_applied,
@@ -1110,11 +1151,17 @@ def run_pipeline(
         or require_compile_when_available
         or template_applied
     )
+    compiled_pdf = b""
+    compiled_pdf_name = ""
     if compile_check:
         emit("compile", 0.91, "正在比较编译结果")
         from .compilecheck import compile_latex
 
-        def compile_snapshot(snapshot: str) -> Dict:
+        def compile_snapshot(
+            snapshot: str,
+            *,
+            capture_pdf: bool = False,
+        ) -> Tuple[Dict, str, Dict[str, bytes]]:
             """Compile either a single TEX file or a reconstructed folder snapshot.
 
             The analysis representation for folder projects deliberately contains
@@ -1126,24 +1173,81 @@ def run_pipeline(
             byte-for-byte original resources instead.
             """
             if not compile_project_main_rel:
-                return compile_latex(snapshot, extra_files=compile_extra_files)
+                if capture_pdf:
+                    compiled = compile_latex(
+                        snapshot, extra_files=compile_extra_files, include_pdf=True,
+                    )
+                else:
+                    compiled = compile_latex(
+                        snapshot, extra_files=compile_extra_files,
+                    )
+                return compiled, snapshot, dict(compile_extra_files or {})
 
-            from .project import safe_project_relpath, split_project
+            from .project import project_compile_inputs, safe_project_relpath, split_project
 
             main_rel = safe_project_relpath(compile_project_main_rel)
             per_file = split_project(snapshot)
-            files = dict(compile_extra_files or {})
-            files.pop(main_rel, None)
-            for rel, content in per_file.items():
-                if not rel:
-                    continue
-                files[safe_project_relpath(rel)] = content.encode("utf-8")
-            return compile_latex(per_file.get("", ""), extra_files=files)
+            compiled_candidate, files = project_compile_inputs(
+                dict(compile_extra_files or {}), main_rel, per_file
+            )
+            if capture_pdf:
+                compiled = compile_latex(
+                    compiled_candidate, extra_files=files, include_pdf=True
+                )
+            else:
+                compiled = compile_latex(compiled_candidate, extra_files=files)
+            return compiled, compiled_candidate, files
 
         # The baseline must precede template conversion.  Using the converted
         # draft for both snapshots hides class/template regressions as a no-op.
-        verification["compile_before"] = compile_snapshot(pre_template_text)
-        verification["compile_after"] = compile_snapshot(result_text)
+        (
+            verification["compile_before"],
+            _compiled_before_tex,
+            _compiled_before_extra_files,
+        ) = compile_snapshot(pre_template_text)
+        (
+            verification["compile_after"],
+            compiled_candidate_tex,
+            compiled_candidate_extra_files,
+        ) = compile_snapshot(result_text, capture_pdf=capture_compile_artifact)
+        captured = verification["compile_after"].pop("pdf_bytes", b"")
+        if isinstance(captured, (bytes, bytearray, memoryview)) and captured:
+            from .preview import preview_descriptor
+
+            compiled_pdf = bytes(captured)
+            descriptor = preview_descriptor(
+                verification["compile_after"].get("preview_status")
+            )
+            compiled_pdf_name = descriptor.filename
+            compiled_pdf_sha256 = hashlib.sha256(compiled_pdf).hexdigest()
+            from .compilecheck import build_compile_input_manifest
+            from .preview import preview_artifact_path
+
+            compile_inputs = build_compile_input_manifest(
+                compiled_candidate_tex, compiled_candidate_extra_files
+            )
+            recorded_inputs = verification["compile_after"].get("input_manifest")
+            if recorded_inputs and recorded_inputs != compile_inputs:
+                raise ValueError("编译输入清单与实际候选不一致")
+
+            verification["preview_artifact"] = {
+                **descriptor.as_dict(),
+                "display_filename": descriptor.filename,
+                "filename": preview_artifact_path(
+                    descriptor.status, compiled_pdf_sha256
+                ),
+                "sha256": compiled_pdf_sha256,
+                "bytes": len(compiled_pdf),
+                "tex_sha256": hashlib.sha256(
+                    compiled_candidate_tex.encode("utf-8")
+                ).hexdigest(),
+                "tex_lf_normalized_sha256": hashlib.sha256(
+                    compiled_candidate_tex.replace("\r\n", "\n")
+                    .replace("\r", "\n")
+                    .encode("utf-8")
+                ).hexdigest(),
+                "compile_inputs": compile_inputs,
+            }
     compile_safe = not require_compile
     compile_unverified = False
     if compile_check:
@@ -1267,6 +1371,9 @@ def run_pipeline(
         "checked": bool(compile_check and verification.get("compile_after", {}).get("available")),
         "unverified": compile_unverified,
     }
+    from .runbundle import preview_state_from_verification
+
+    verification["preview_state"] = preview_state_from_verification(verification)
     ok = (
         verification["content_invariant"]
         and verification["env_balance"]["ok"]
@@ -1274,6 +1381,7 @@ def run_pipeline(
         and verification["invariants"]["ok"]
         and verification["display_tags"]["ok"]
         and verification["ocr_structure"]["ok"]
+        and verification["ocr_semantic_ir"]["ok"]
         and template_safe
         and resources_safe
         and compile_safe
@@ -1300,6 +1408,12 @@ def run_pipeline(
             "label": "章节树与目录对应 PDF 大纲",
             "ok": verification["ocr_structure"]["ok"],
             "skipped": not verification["ocr_structure"]["checked"],
+        },
+        {
+            "id": "ocr-semantic-ir",
+            "label": "OCR 公式编号、前置信息与参考文献证据闭环",
+            "ok": verification["ocr_semantic_ir"]["ok"],
+            "skipped": not verification["ocr_semantic_ir"]["checked"],
         },
         {
             "id": "template",
@@ -1349,6 +1463,7 @@ def run_pipeline(
         preview_label="安全检查通过的结果" if ok else "已安全回退到原文",
         usage=ai_usage,
         safe_to_export=ok,
+        preview_state=verification["preview_state"],
     )
 
     # 审阅式 UI 决策清单：候选元信息 + 状态
@@ -1460,6 +1575,13 @@ def run_pipeline(
         ai_notes=ai_notes,
         review=review_info,
         decision_items=decision_items,
+        compiled_pdf=compiled_pdf,
+        compiled_pdf_name=compiled_pdf_name,
+        compiled_tex=compiled_candidate_tex if compiled_pdf else "",
+        compiled_snapshot=result_text if compiled_pdf else "",
+        compiled_extra_files=(
+            compiled_candidate_extra_files if compiled_pdf else {}
+        ),
     )
     # The pipeline result is complete in memory, but the server still has to
     # atomically commit result/report/decisions/verification.  Only the job
@@ -1470,5 +1592,6 @@ def run_pipeline(
         preview_label="已验证、尚待保存的最终结果",
         usage=ai_usage,
         safe_to_export=ok,
+        preview_state=verification["preview_state"],
     )
     return result

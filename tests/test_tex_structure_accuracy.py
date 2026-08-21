@@ -234,6 +234,113 @@ def test_page_break_normalization_does_not_consume_next_line_bracket_text():
     assert report["body_token_conservation"]["conserved"] is True
 
 
+def _semantic_number_sources():
+    original = ORIGINAL.replace(
+        "w = 1.",
+        r"\text{(1)}\qquad w = 1.",
+    ).replace(
+        "Final words.",
+        "Final words.\n\\section*{References}\n"
+        "[1] First reference payload.\n\n"
+        "\\noindent [2]\\quad Second reference payload.",
+    )
+    candidate = PERFECT.replace(
+        "\\[\nw = 1.\n\\]",
+        "\\begin{equation}\nw = 1.\n\\tag{1}\n\\end{equation}",
+    ).replace(
+        "Final words.",
+        "Final words.\n\\begin{thebibliography}{2}\n"
+        "\\bibitem{ref1} First reference payload.\n\n"
+        "\\bibitem{ref2} Second reference payload.\n"
+        "\\end{thebibliography}",
+    )
+    return original, candidate
+
+
+def test_semantic_ir_equation_tags_and_bibitems_are_scored_as_representations():
+    original, candidate = _semantic_number_sources()
+
+    report = evaluate_tex_structure(original, candidate, manifest=_manifest())
+
+    assert report["passed"] is True
+    assert report["exact_structure"]["f1"] == 1.0
+    assert report["body_token_conservation"]["conserved"] is True
+    assert report["document_structure"]["outline_coverage"] == 1.0
+
+
+def test_changed_equation_tag_number_is_a_body_conservation_failure():
+    original, candidate = _semantic_number_sources()
+    candidate = candidate.replace(r"\tag{1}", r"\tag{2}")
+
+    report = evaluate_tex_structure(original, candidate, manifest=_manifest())
+
+    assert report["passed"] is False
+    assert report["body_token_conservation"]["conserved"] is False
+    assert report["blockers"]["body_token_change"] is True
+
+
+def test_equation_number_moved_to_another_display_is_not_globally_cancelled():
+    original, candidate = _semantic_number_sources()
+    original = original.replace(
+        "Closing narrative also remains outside.",
+        "\\[\n\\text{(2)}\\qquad z = 2.\n\\]\n"
+        "Closing narrative also remains outside.",
+    )
+    candidate = candidate.replace("\\tag{1}\n", "", 1).replace(
+        "Closing narrative also remains outside.",
+        "\\begin{equation}\nz = 2.\n\\tag{1}\n\\tag{2}\n"
+        "\\end{equation}\nClosing narrative also remains outside.",
+    )
+
+    report = evaluate_tex_structure(original, candidate, manifest=_manifest())
+
+    assert report["passed"] is False
+    assert report["body_token_conservation"]["conserved"] is False
+    assert report["blockers"]["body_token_change"] is True
+
+
+def test_swapped_bibitem_numbers_are_not_deleted_by_normalization():
+    original, candidate = _semantic_number_sources()
+    candidate = candidate.replace("{ref1}", "{temporary}", 1)
+    candidate = candidate.replace("{ref2}", "{ref1}", 1)
+    candidate = candidate.replace("{temporary}", "{ref2}", 1)
+
+    report = evaluate_tex_structure(original, candidate, manifest=_manifest())
+
+    assert report["passed"] is False
+    assert report["body_token_conservation"]["conserved"] is False
+    # A swap preserves the multiset, so ordered common-number tokens—not mere
+    # token counts—must be what closes this hole.
+    assert report["body_token_conservation"]["missing_token_count"] == 0
+    assert report["body_token_conservation"]["excess_token_count"] == 0
+    assert report["body_token_conservation"]["first_difference_index"] is not None
+
+
+@pytest.mark.parametrize("display", ["7", "Author2020", "01"])
+def test_conflicting_optional_bibitem_label_fails_closed(display):
+    original, candidate = _semantic_number_sources()
+    candidate = candidate.replace(
+        r"\bibitem{ref1}", rf"\bibitem[{display}]{{ref1}}",
+    )
+
+    report = evaluate_tex_structure(original, candidate, manifest=_manifest())
+
+    assert report["passed"] is False
+    assert report["body_token_conservation"]["conserved"] is False
+
+
+def test_matching_numeric_optional_bibitem_label_is_the_same_representation():
+    original, candidate = _semantic_number_sources()
+    candidate = candidate.replace(
+        r"\bibitem{ref1}", r"\bibitem[1]{ref1}",
+    )
+
+    report = evaluate_tex_structure(original, candidate, manifest=_manifest())
+
+    assert report["passed"] is True
+    assert report["body_token_conservation"]["conserved"] is True
+
+
 def test_missing_environment_and_residual_heading_fail_closed():
     candidate = PERFECT.replace(
         "\\begin{theorem*}[1.1]\n\\textit{Every widget works.}\n"

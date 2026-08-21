@@ -41,12 +41,20 @@ from ..core.pipeline import run_pipeline
 from ..core.prompts import PROMPT_VERSION
 from ..core.provenance import (
     PROVENANCE_MANIFEST_NAME,
+    RAW_ARTIFACT_PACKAGE_PATH,
     RAW_OCR_SCOPE,
     UNVERIFIED_SCOPE,
     VERIFIED_SCOPE,
     make_provenance_record,
     sha256_bytes,
+    sha256_lf_normalized_text,
     stamp_tex_provenance,
+)
+from ..core.runbundle import (
+    RUN_BUNDLE_NAMES,
+    append_run_bundle,
+    preview_state_from_verification,
+    validate_archive_namespace,
 )
 from ..providers import list_provider_presets
 from ..store import ProjectStore
@@ -260,23 +268,45 @@ OCR_PAGE_MARKER_RE = re.compile(r"(?m)^\s*%\s*Page\s+(?P<page>\d+)\s*$", re.I)
 
 
 def _runtime_provenance_identity(prompt_version: str) -> dict[str, str]:
-    """Read optional release identity; absent values remain explicitly unknown."""
+    """Return identity embedded in this executable, never mutable export-time env."""
     from .. import __version__
+    from .._build import BUILD_COMMIT, BUILD_ID
 
     return {
         "app_version": __version__,
-        "build_id": str(
-            os.environ.get("LATEXSTRUCT_BUILD_ID")
-            or os.environ.get("GITHUB_RUN_ID")
-            or "unknown"
-        ),
-        "commit": str(
-            os.environ.get("LATEXSTRUCT_BUILD_COMMIT")
-            or os.environ.get("GITHUB_SHA")
-            or "unknown"
-        ),
+        "build_id": str(BUILD_ID or "unknown"),
+        "commit": str(BUILD_COMMIT or "unknown"),
         "prompt_version": prompt_version,
     }
+
+
+def _unknown_producer_identity() -> dict[str, str]:
+    """Identity for legacy/source artifacts that never recorded their producer."""
+    return {
+        "app_version": "unknown",
+        "build_id": "unknown",
+        "commit": "unknown",
+        "prompt_version": "unknown",
+    }
+
+
+def _stored_producer_identity(record: object) -> dict[str, str]:
+    """Read only a processing-time identity; never substitute the current build."""
+    if not isinstance(record, dict):
+        return _unknown_producer_identity()
+    stored = record.get("producer_identity")
+    if not isinstance(stored, dict):
+        return _unknown_producer_identity()
+    return {
+        key: str(stored.get(key) or "unknown")
+        for key in ("app_version", "build_id", "commit", "prompt_version")
+    }
+
+
+def _ocr_prompt_version() -> str:
+    from ..ocr import OCR_SYSTEM_PROMPT
+
+    return "ocr-sha256-" + sha256_bytes(OCR_SYSTEM_PROMPT.encode("utf-8"))
 
 
 def _provenance_json_bytes(record: dict[str, str]) -> bytes:
@@ -1146,21 +1176,25 @@ def _ocr_bundle_bytes(job: dict, raw_tex: str) -> tuple[bytes, dict]:
         source_sha256 = str(verified_job.get("_source_sha256") or "").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
             source_sha256 = ""
-        from ..ocr import OCR_SYSTEM_PROMPT
-
-        ocr_prompt_version = "ocr-sha256-" + sha256_bytes(
-            OCR_SYSTEM_PROMPT.encode("utf-8")
-        )
         raw_body = raw_tex.encode("utf-8")
+        producer_identity = _stored_producer_identity(verified_job)
+        exporter_identity = _runtime_provenance_identity("not-used")
         provenance = make_provenance_record(
             body=raw_body,
             verified=False,
             verification_scope=RAW_OCR_SCOPE,
             artifact_kind="raw-ocr-tex",
+            app_version="unknown",
             source_sha256=source_sha256,
             raw_sha256=sha256_bytes(raw_body),
             result_sha256="unknown",
-            **_runtime_provenance_identity(ocr_prompt_version),
+            producer_identity=producer_identity,
+            exporter_identity=exporter_identity,
+            raw_artifact_role="raw-ocr-tex",
+            raw_artifact_path=RAW_ARTIFACT_PACKAGE_PATH,
+            raw_bytes_sha256=sha256_bytes(raw_body),
+            raw_normalized_text_sha256=sha256_lf_normalized_text(raw_body),
+            raw_normalization_pipeline="decode-tex/newline-LF/encode-utf8",
         )
         stamped_raw = stamp_tex_provenance(raw_body, provenance)
         quality_report = assess_ocr_quality(verified_job, resources)
@@ -1196,6 +1230,7 @@ def _ocr_bundle_bytes(job: dict, raw_tex: str) -> tuple[bytes, dict]:
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("ocr.tex", stamped_raw)
+            archive.writestr(RAW_ARTIFACT_PACKAGE_PATH, raw_body)
             for item in [
                 *(resources.get("assets") or []),
                 *(resources.get("source_pages") or []),
@@ -1651,6 +1686,11 @@ def _snapshot_ocr_bundle_job(job: dict) -> dict:
         "backend": str(job.get("backend") or "unknown"),
         "model": str(job.get("model") or ""),
         "reasoning_effort": str(job.get("reasoning_effort") or ""),
+        "producer_identity": deepcopy(
+            job.get("producer_identity")
+            if isinstance(job.get("producer_identity"), dict)
+            else _unknown_producer_identity()
+        ),
         "dpi": int(job.get("dpi") or 0),
         "output_template": str(job.get("output_template") or "faithfulbook"),
         "selected_start": int(job.get("selected_start") or 1),
@@ -2438,7 +2478,13 @@ def create_app(updated_from: str = "") -> FastAPI:
     def health():
         from .. import __version__
 
-        return {"ok": True, "version": __version__}
+        identity = _runtime_provenance_identity("not-used")
+        return {
+            "ok": True,
+            "version": __version__,
+            "build_id": identity["build_id"],
+            "commit": identity["commit"],
+        }
 
     @app.get("/api/rulesets")
     def rulesets():
@@ -2626,6 +2672,7 @@ def create_app(updated_from: str = "") -> FastAPI:
             discover_main,
             flatten_project,
             process_project,
+            split_project,
         )
         from ..core.template import normalize_template_id
 
@@ -2646,14 +2693,19 @@ def create_app(updated_from: str = "") -> FastAPI:
                 flattened, graph_obj = flatten_project(Path(tmpdir), main_rel)
                 pr = None
                 per_file = None
+                producer_identity = None
             else:
                 cfg = get_config()
+                producer_identity = _runtime_provenance_identity(
+                    PROMPT_VERSION if mode == "ai" else "not-used"
+                )
                 res = process_project(
                     Path(tmpdir), mode=mode, template=template or None,
                     template_context={"title": name},
                     ai_config=cfg.to_ai_config() if mode == "ai" else None,
                     compile_check=True,
                     compile_files=files,
+                    capture_compile_artifact=True,
                     pack=pack or None,
                 )
                 flattened, graph_obj = res.flattened, res.graph
@@ -2682,20 +2734,49 @@ def create_app(updated_from: str = "") -> FastAPI:
                 for rel, content in files.items():
                     zf.writestr(rel, content)
             if pr is not None:
+                _persist_compile_preview(pid, pr)
                 decisions = [_decision_dict(d) for d in pr.decisions]
-                get_store().set_result(
-                    pid, pr.export_text, pr.report_md, decisions, {
-                        "verification": pr.verification,
-                        "ambiguous": pr.ambiguous,
-                        "applied": [],
-                        "rejected": [],
-                        "ai_notes": pr.ai_notes,
-                        "review": _persisted_review_summary(pr.review),
-                        "items": pr.decision_items,
-                        "per_file": per_file,
-                        "decision_cache": decisions,
-                    }
-                )
+                persisted = {
+                    "verification": pr.verification,
+                    "ambiguous": pr.ambiguous,
+                    "applied": [],
+                    "rejected": [],
+                    "ai_notes": pr.ai_notes,
+                    "review": _persisted_review_summary(pr.review),
+                    "items": pr.decision_items,
+                    "per_file": per_file,
+                    "decision_cache": decisions,
+                    "producer_identity": producer_identity,
+                }
+                if pr.ok:
+                    get_store().set_result(
+                        pid, pr.export_text, pr.report_md, decisions, persisted
+                    )
+                else:
+                    from ..core.report import reconcile_report_status
+                    from ..core.verify import verification_failures
+
+                    failures = verification_failures(pr.verification)
+                    pr.verification["failures"] = failures
+                    pr.report_md = reconcile_report_status(
+                        pr.report_md,
+                        pr.verification,
+                        terminal_status="UNVERIFIED",
+                    )
+                    failed_draft = (
+                        str(getattr(pr, "compiled_snapshot", "") or "")
+                        or pr.result
+                        or flattened
+                    )
+                    try:
+                        failed_per_file = split_project(failed_draft)
+                    except ValueError:
+                        failed_per_file = per_file
+                    persisted["failures"] = failures
+                    persisted["per_file"] = failed_per_file
+                    get_store().record_failed_attempt(
+                        pid, failed_draft, pr.report_md, persisted
+                    )
             return {
                 "id": pid,
                 "graph": meta["graph"],
@@ -2813,6 +2894,7 @@ def create_app(updated_from: str = "") -> FastAPI:
         attempt: str,
         result_sha256: str = "",
         artifact_kind: str = "project-tex",
+        producer_identity: object = None,
     ) -> dict[str, str]:
         """Bind a downloaded TEX body to its frozen project inputs."""
         directory = Path(get_store()._dir(pid))
@@ -2822,9 +2904,18 @@ def create_app(updated_from: str = "") -> FastAPI:
             meta = {}
         raw_path = directory / "source.tex"
         try:
-            raw_hash = sha256_bytes(raw_path.read_bytes())
+            raw_bytes = raw_path.read_bytes()
+            raw_hash = sha256_bytes(raw_bytes)
         except OSError:
             raw_hash = "unknown"
+            raw_normalized_hash = "unknown"
+        else:
+            try:
+                raw_normalized_hash = sha256_lf_normalized_text(raw_bytes)
+            except ValueError:
+                # Preserve the exact byte identity even when a malformed TEX
+                # encoding declaration makes canonical text unavailable.
+                raw_normalized_hash = "unknown"
 
         source_hash = "unknown"
         if meta.get("kind") == "ocr":
@@ -2843,20 +2934,33 @@ def create_app(updated_from: str = "") -> FastAPI:
             except OSError:
                 source_hash = "unknown"
 
-        mode = str(meta.get("mode") or "").lower()
-        prompt_version = PROMPT_VERSION if mode == "ai" else "not-used"
         result_hash = str(result_sha256 or "")
         if not result_hash and attempt != "source":
             result_hash = sha256_bytes(body)
+        raw_role = {
+            "ocr": "ocr-analysis-input-tex",
+            "folder": "flattened-project-analysis-input-tex",
+        }.get(str(meta.get("kind") or ""), "analysis-input-tex")
         return make_provenance_record(
             body=body,
             verified=verified,
             verification_scope=VERIFIED_SCOPE if verified else UNVERIFIED_SCOPE,
             artifact_kind=artifact_kind,
+            app_version="unknown",
             source_sha256=source_hash,
             raw_sha256=raw_hash,
             result_sha256=result_hash or "unknown",
-            **_runtime_provenance_identity(prompt_version),
+            producer_identity=(
+                producer_identity
+                if isinstance(producer_identity, dict)
+                else _unknown_producer_identity()
+            ),
+            exporter_identity=_runtime_provenance_identity("not-used"),
+            raw_artifact_role=raw_role,
+            raw_artifact_path=RAW_ARTIFACT_PACKAGE_PATH,
+            raw_bytes_sha256=raw_hash,
+            raw_normalized_text_sha256=raw_normalized_hash,
+            raw_normalization_pipeline="decode-tex/newline-LF/encode-utf8",
         )
 
     def _stamp_project_tex(
@@ -2867,6 +2971,7 @@ def create_app(updated_from: str = "") -> FastAPI:
         attempt: str,
         result_sha256: str = "",
         artifact_kind: str = "project-tex",
+        producer_identity: object = None,
     ) -> tuple[bytes, dict[str, str]]:
         record = _project_provenance_record(
             pid,
@@ -2875,8 +2980,166 @@ def create_app(updated_from: str = "") -> FastAPI:
             attempt=attempt,
             result_sha256=result_sha256,
             artifact_kind=artifact_kind,
+            producer_identity=producer_identity,
         )
         return stamp_tex_provenance(body, record), record
+
+    def _project_raw_artifact_bytes(pid: str) -> bytes:
+        """Return the exact internal analysis input named by provenance."""
+        path = Path(get_store()._dir(pid)) / "source.tex"
+        try:
+            return path.read_bytes()
+        except OSError:
+            raise HTTPException(
+                409, "内部原始分析输入缺失，无法生成可复算导出包"
+            ) from None
+
+    def _persist_compile_preview(pid: str, result) -> None:
+        """Persist only a PDF already validated by the compile-artifact layer."""
+        from ..core.preview import (
+            COMPILED,
+            PARTIAL_COMPILED,
+            preview_artifact_path,
+            preview_descriptor,
+            preview_storage_filename,
+        )
+
+        payload = getattr(result, "compiled_pdf", b"")
+        display_name = str(getattr(result, "compiled_pdf_name", "") or "")
+        if not isinstance(payload, (bytes, bytearray, memoryview)) or not payload:
+            return
+        allowed = {
+            preview_descriptor(COMPILED).filename,
+            preview_descriptor(PARTIAL_COMPILED).filename,
+        }
+        if display_name not in allowed or not bytes(payload).startswith(b"%PDF-"):
+            raise ValueError("编译预览工件格式无效，已阻止保存")
+        evidence = (getattr(result, "verification", {}) or {}).get(
+            "preview_artifact"
+        )
+        digest = sha256_bytes(bytes(payload))
+        status = str(evidence.get("status") or "") if isinstance(evidence, dict) else ""
+        if (
+            not isinstance(evidence, dict)
+            or evidence.get("sha256") != digest
+            or evidence.get("display_filename") != display_name
+            or evidence.get("filename") != preview_artifact_path(status, digest)
+        ):
+            raise ValueError("编译预览工件与验证记录不一致，已阻止保存")
+        compiled_tex = str(getattr(result, "compiled_tex", "") or "")
+        if evidence.get("tex_sha256") != sha256_bytes(compiled_tex.encode("utf-8")):
+            raise ValueError("编译预览工件与候选 TEX 不一致，已阻止保存")
+        from ..core.compilecheck import build_compile_input_manifest
+
+        compile_inputs = build_compile_input_manifest(
+            compiled_tex,
+            dict(getattr(result, "compiled_extra_files", {}) or {}),
+        )
+        if evidence.get("compile_inputs") != compile_inputs:
+            raise ValueError("编译预览工件与完整编译输入集不一致，已阻止保存")
+        storage_name = preview_storage_filename(status, digest)
+        get_store()._atomic_write_bytes(
+            get_store()._dir(pid), storage_name, bytes(payload)
+        )
+
+    def _compile_preview_package_entry(
+        pid: str,
+        info: dict,
+        result_bytes: bytes,
+    ) -> tuple[str, bytes] | None:
+        """Load a hash-bound compiled preview for inclusion in an export package."""
+        from ..core.preview import (
+            COMPILED,
+            PARTIAL_COMPILED,
+            preview_artifact_path,
+            preview_storage_filename,
+        )
+
+        verification = info.get("verification") if isinstance(info, dict) else None
+        evidence = (
+            verification.get("preview_artifact")
+            if isinstance(verification, dict)
+            else None
+        )
+        if not isinstance(evidence, dict):
+            return None
+        allowed = {COMPILED, PARTIAL_COMPILED}
+        status = str(evidence.get("status") or "")
+        name = str(evidence.get("filename") or "")
+        digest = str(evidence.get("sha256") or "")
+        if (
+            status not in allowed
+            or preview_state_from_verification(verification) != status
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or name != preview_artifact_path(status, digest)
+        ):
+            raise HTTPException(409, "编译预览证据记录无效，已阻止打包")
+        directory = Path(get_store()._dir(pid))
+        try:
+            meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            raise HTTPException(409, "项目元数据损坏，无法核对编译输入集") from None
+        per_file = info.get("per_file") if isinstance(info, dict) else None
+        compile_extra_files: dict[str, bytes] = {}
+        if meta.get("kind") == "folder":
+            if not isinstance(per_file, dict) or not isinstance(per_file.get(""), str):
+                raise HTTPException(409, "多文件项目缺少候选文件集，已阻止打包")
+            original_zip = directory / "original-files.zip"
+            if not original_zip.is_file():
+                raise HTTPException(409, "原始文件夹工程快照缺失，已阻止打包")
+            from ..core.project import project_compile_inputs
+
+            graph = meta.get("graph") if isinstance(meta.get("graph"), dict) else {}
+            try:
+                result_text, compile_extra_files = project_compile_inputs(
+                    _decode_zip_files(original_zip.read_bytes()),
+                    str(graph.get("main_rel") or ""),
+                    per_file,
+                )
+            except (OSError, ValueError) as exc:
+                raise HTTPException(409, f"无法重建编译输入集：{exc}") from None
+        else:
+            from ..core.project import decode_tex_bytes
+
+            try:
+                result_text = decode_tex_bytes(bytes(result_bytes)).text
+            except ValueError as exc:
+                raise HTTPException(
+                    409, f"编译预览对应 TEX 无法无损解码：{exc}"
+                ) from None
+            if meta.get("kind") == "ocr":
+                try:
+                    compile_extra_files = _verified_ocr_resource_bytes(
+                        directory, meta.get("ocr_resources") or {}
+                    )
+                except ValueError as exc:
+                    raise HTTPException(409, str(exc)) from None
+        normalized_result = result_text.replace("\r\n", "\n").replace("\r", "\n")
+        tex_digest = str(evidence.get("tex_lf_normalized_sha256") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", tex_digest) or not hmac.compare_digest(
+            sha256_bytes(normalized_result.encode("utf-8")), tex_digest
+        ):
+            raise HTTPException(409, "编译预览与当前 TEX 不匹配，已阻止打包")
+        from ..core.compilecheck import build_compile_input_manifest
+
+        # Pipeline candidates are compiled after newline normalization.  Keep
+        # package bytes in their original encoding/newline form, but rebuild
+        # the evidence manifest from the exact LF-normalized compile candidate.
+        compile_inputs = build_compile_input_manifest(
+            normalized_result, compile_extra_files
+        )
+        if evidence.get("compile_inputs") != compile_inputs:
+            raise HTTPException(409, "编译预览与完整编译输入集不匹配，已阻止打包")
+        path = Path(get_store()._dir(pid)) / preview_storage_filename(status, digest)
+        try:
+            payload = path.read_bytes()
+        except OSError:
+            raise HTTPException(409, "编译预览工件缺失，已阻止打包") from None
+        if not payload.startswith(b"%PDF-") or not hmac.compare_digest(
+            sha256_bytes(payload), digest
+        ):
+            raise HTTPException(409, "编译预览工件哈希不匹配，已阻止打包")
+        return name, payload
 
     def _current_record(pid: str) -> dict:
         """Return the newest hash-verified attempt, even when TEX validation failed."""
@@ -3021,6 +3284,74 @@ def create_app(updated_from: str = "") -> FastAPI:
             ).encode("utf-8"),
         )
 
+    def _validate_project_package_namespace(
+        pid: str,
+        meta: dict,
+        per_file: object,
+        reserved_paths: object,
+        *,
+        allow_identical_paths: object = (),
+    ) -> None:
+        """Fail closed before a user path can shadow package evidence files."""
+        from ..core.project import safe_project_relpath
+
+        project_paths: set[str] = set()
+        original_files: dict[str, bytes] = {}
+        if meta.get("kind") == "folder":
+            original_zip = Path(get_store()._dir(pid)) / "original-files.zip"
+            if not original_zip.is_file():
+                raise HTTPException(409, "原始文件夹工程快照缺失，已阻止打包")
+            try:
+                original_files = _decode_zip_files(original_zip.read_bytes())
+                project_paths.update(original_files)
+            except (OSError, ValueError) as exc:
+                raise HTTPException(409, f"原始工程命名空间无效：{exc}") from None
+            graph = meta.get("graph") if isinstance(meta.get("graph"), dict) else {}
+            project_paths.add(safe_project_relpath(str(graph.get("main_rel") or "")))
+            if isinstance(per_file, dict):
+                project_paths.update(
+                    safe_project_relpath(str(rel))
+                    for rel in per_file
+                    if rel
+                )
+        else:
+            project_paths.add("main.tex")
+
+        reserved_map = dict(reserved_paths) if isinstance(reserved_paths, dict) else {
+            str(path): b"" for path in reserved_paths
+        }
+        for path in allow_identical_paths:
+            name = str(path)
+            if (
+                name in project_paths
+                and name in original_files
+                and name in reserved_map
+                and original_files[name] == reserved_map[name]
+            ):
+                project_paths.remove(name)
+        reserved = set(reserved_map)
+        if meta.get("kind") == "ocr":
+            reserved.update({"OCR-RESOURCES.json", "OCR-QUALITY.json"})
+            source = meta.get("ocr_source")
+            if isinstance(source, dict) and source.get("available"):
+                project_paths.add(safe_project_relpath(str(source.get("path") or "")))
+            resources = meta.get("ocr_resources")
+            if isinstance(resources, dict):
+                for group in ("assets", "source_pages"):
+                    for item in resources.get(group) or []:
+                        if isinstance(item, dict):
+                            project_paths.add(
+                                safe_project_relpath(str(item.get("path") or ""))
+                            )
+        reserved.update(RUN_BUNDLE_NAMES)
+        try:
+            validate_archive_namespace(
+                [(path, False) for path in sorted(project_paths)],
+                additions=tuple(sorted(reserved)),
+            )
+        except ValueError as exc:
+            raise HTTPException(409, f"工程文件与导出保留路径冲突：{exc}") from None
+
     def _current_package_bytes(pid: str) -> tuple[bytes, bool]:
         """Build a portable package for the newest attempt without claiming it is valid."""
         from ..core.project import safe_project_relpath
@@ -3045,15 +3376,27 @@ def create_app(updated_from: str = "") -> FastAPI:
         template_assets = (
             elegantbook_bundle_assets() if uses_elegantbook_class(current_text) else {}
         )
+        info = current.get("info") or {}
+        preview_entry = _compile_preview_package_entry(pid, info, current["result"])
         reserved = {
             **template_assets,
             "LATEXSTRUCT-REPORT.md": current["report"],
             "LATEXSTRUCT-UNVERIFIED.txt": warning,
+            RAW_ARTIFACT_PACKAGE_PATH: _project_raw_artifact_bytes(pid),
             PROVENANCE_MANIFEST_NAME: b"",
         }
-        info = current.get("info") or {}
+        if preview_entry is not None:
+            reserved[preview_entry[0]] = preview_entry[1]
         per_file = info.get("per_file") if isinstance(info, dict) else None
+        _validate_project_package_namespace(
+            pid,
+            meta,
+            per_file,
+            reserved,
+            allow_identical_paths=template_assets,
+        )
         provenance = None
+        main_artifact = "main.tex"
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
             written = set()
@@ -3065,16 +3408,19 @@ def create_app(updated_from: str = "") -> FastAPI:
                     raise HTTPException(409, "原始文件夹工程快照缺失，已阻止保真导出")
                 graph = meta.get("graph") or {}
                 main_rel = safe_project_relpath(str(graph.get("main_rel") or "main.tex"))
+                main_artifact = main_rel
                 with zipfile.ZipFile(original_zip, "r") as source_zip:
                     for member in source_zip.infolist():
                         if member.is_dir():
                             continue
                         rel = safe_project_relpath(member.filename)
+                        data = source_zip.read(member)
                         if rel in reserved:
+                            if rel in template_assets and data == reserved[rel]:
+                                continue
                             raise HTTPException(
                                 409, f"原项目中的 {rel} 与导出说明文件冲突"
                             )
-                        data = source_zip.read(member)
                         if rel == main_rel:
                             data, provenance = _stamp_project_tex(
                                 pid,
@@ -3082,6 +3428,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                                 verified=False,
                                 attempt=current["attempt"],
                                 artifact_kind="unverified-project-main-tex",
+                                producer_identity=_stored_producer_identity(info),
                             )
                         zf.writestr(rel, data)
                         written.add(rel)
@@ -3090,6 +3437,7 @@ def create_app(updated_from: str = "") -> FastAPI:
 
                 graph = meta.get("graph") or {}
                 main_rel = safe_project_relpath(str(graph.get("main_rel") or "main.tex"))
+                main_artifact = main_rel
                 original_zip = Path(get_store()._dir(pid)) / "original-files.zip"
                 if not original_zip.is_file():
                     raise HTTPException(409, "原始文件夹工程快照缺失，已阻止保真导出")
@@ -3106,6 +3454,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                     verified=False,
                     attempt=current["attempt"],
                     artifact_kind="unverified-project-main-tex",
+                    producer_identity=_stored_producer_identity(info),
                 )
                 zf.writestr(main_rel, stamped_main)
                 written.add(main_rel)
@@ -3122,6 +3471,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                     verified=False,
                     attempt=current["attempt"],
                     artifact_kind="unverified-current-tex",
+                    producer_identity=_stored_producer_identity(info),
                 )
                 zf.writestr("main.tex", stamped_main)
                 written.add("main.tex")
@@ -3131,9 +3481,17 @@ def create_app(updated_from: str = "") -> FastAPI:
                 with zipfile.ZipFile(original_zip, "r") as source_zip:
                     for member in source_zip.infolist():
                         rel = safe_project_relpath(member.filename)
-                        if member.is_dir() or rel in written or rel in reserved:
+                        if member.is_dir() or rel in written:
                             continue
-                        zf.writestr(rel, source_zip.read(member))
+                        data = source_zip.read(member)
+                        if rel in reserved:
+                            if rel in template_assets and data == reserved[rel]:
+                                continue
+                            raise HTTPException(
+                                409,
+                                f"原项目中的 {rel} 与固定工程资源冲突，已阻止打包",
+                            )
+                        zf.writestr(rel, data)
                         written.add(rel)
             if meta.get("kind") == "ocr":
                 _write_ocr_package_resources(zf, pid, meta, reserved)
@@ -3144,7 +3502,18 @@ def create_app(updated_from: str = "") -> FastAPI:
             for rel, data in reserved.items():
                 if rel not in existing:
                     zf.writestr(rel, data)
-        return output.getvalue(), False
+        try:
+            bundled = append_run_bundle(
+                output.getvalue(),
+                info=info,
+                provenance=provenance,
+                terminal_status=current["attempt"],
+                attempt=current["attempt"],
+                main_path=main_artifact,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return bundled, False
 
     def _export_package_bytes(pid: str) -> bytes:
         """Build a portable project package from the same committed result marker."""
@@ -3161,13 +3530,25 @@ def create_app(updated_from: str = "") -> FastAPI:
         reserved = {
             **assets,
             "LATEXSTRUCT-REPORT.md": report_bytes,
+            RAW_ARTIFACT_PACKAGE_PATH: _project_raw_artifact_bytes(pid),
             PROVENANCE_MANIFEST_NAME: b"",
         }
+        preview_entry = _compile_preview_package_entry(pid, info, result_bytes)
+        if preview_entry is not None:
+            reserved[preview_entry[0]] = preview_entry[1]
         meta = json.loads(
             (Path(get_store()._dir(pid)) / "meta.json").read_text(encoding="utf-8")
         )
         per_file = info.get("per_file") if isinstance(info, dict) else None
+        _validate_project_package_namespace(
+            pid,
+            meta,
+            per_file,
+            reserved,
+            allow_identical_paths=assets,
+        )
         provenance = None
+        main_artifact = "main.tex"
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             if per_file:
@@ -3175,6 +3556,7 @@ def create_app(updated_from: str = "") -> FastAPI:
 
                 graph = meta.get("graph") or {}
                 main_rel = safe_project_relpath(graph.get("main_rel", ""))
+                main_artifact = main_rel
                 processed = {main_rel} | {
                     safe_project_relpath(rel) for rel in per_file if rel
                 }
@@ -3197,7 +3579,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                                 continue
                             data = source_zip.read(member)
                             if rel in reserved:
-                                if data != reserved[rel]:
+                                if rel not in assets or data != reserved[rel]:
                                     raise HTTPException(
                                         409,
                                         f"原项目中的 {rel} 与固定工程资源冲突，已阻止打包",
@@ -3212,6 +3594,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                     attempt="committed",
                     result_sha256=str(info.get("result_sha256") or ""),
                     artifact_kind="verified-project-main-tex",
+                    producer_identity=_stored_producer_identity(info),
                 )
                 zf.writestr(main_rel, stamped_main)
                 written.add(main_rel)
@@ -3235,6 +3618,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                     attempt="committed",
                     result_sha256=str(info.get("result_sha256") or ""),
                     artifact_kind="verified-structured-tex",
+                    producer_identity=_stored_producer_identity(info),
                 )
                 zf.writestr("main.tex", stamped_main)
                 if meta.get("kind") == "ocr":
@@ -3254,7 +3638,17 @@ def create_app(updated_from: str = "") -> FastAPI:
             for rel, data in reserved.items():
                 if rel not in existing:
                     zf.writestr(rel, data)
-        return buf.getvalue()
+        try:
+            return append_run_bundle(
+                buf.getvalue(),
+                info=info,
+                provenance=provenance,
+                terminal_status="success",
+                attempt="committed",
+                main_path=main_artifact,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
 
     @app.get("/api/projects/{pid}/export-package")
     def export_package(pid: str):
@@ -3354,6 +3748,7 @@ def create_app(updated_from: str = "") -> FastAPI:
             attempt="committed",
             result_sha256=str(info.get("result_sha256") or ""),
             artifact_kind="verified-structured-tex",
+            producer_identity=_stored_producer_identity(info),
         )
         return Response(
             content=stamped,
@@ -3376,6 +3771,7 @@ def create_app(updated_from: str = "") -> FastAPI:
             artifact_kind=(
                 "verified-structured-tex" if verified else "unverified-current-tex"
             ),
+            producer_identity=_stored_producer_identity(info),
         )
         return Response(
             content=stamped,
@@ -3427,6 +3823,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 attempt="committed",
                 result_sha256=str(info.get("result_sha256") or ""),
                 artifact_kind="verified-structured-tex",
+                producer_identity=_stored_producer_identity(info),
             )
             return stamped, f"{project_name}-structured.tex", True
         if artifact == "report":
@@ -3447,6 +3844,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 artifact_kind=(
                     "verified-structured-tex" if verified else "unverified-current-tex"
                 ),
+                producer_identity=_stored_producer_identity(info),
             )
             return stamped, f"{project_name}-current{marker}.tex", verified
         if artifact == "current-report":
@@ -3493,6 +3891,9 @@ def create_app(updated_from: str = "") -> FastAPI:
         # billing backend or their model halfway through the launch boundary.
         cfg = config_snapshot if config_snapshot is not None else get_config()
         mode = p["mode"]
+        producer_identity = _runtime_provenance_identity(
+            PROMPT_VERSION if mode == "ai" else "not-used"
+        )
         from ..core.template import normalize_template_id
 
         template = normalize_template_id(p.get("template") or "")
@@ -3548,6 +3949,7 @@ def create_app(updated_from: str = "") -> FastAPI:
             require_resources=is_ocr_project,
             compile_extra_files=compile_extra_files,
             compile_project_main_rel=compile_project_main_rel,
+            capture_compile_artifact=True,
         )
         extra_verification = {}
         encoding_error = ""
@@ -3653,7 +4055,30 @@ def create_app(updated_from: str = "") -> FastAPI:
         from ..core.verify import verification_failures
 
         failures = verification_failures(res.verification)
+        final_safe_to_export = bool(
+            res.ok
+            and res.verification.get("safe_to_export") is True
+            and not failures
+        )
+        res.verification["safe_to_export"] = final_safe_to_export
+        res.verification["export_blocked"] = not final_safe_to_export
+        res.ok = final_safe_to_export
         res.verification["failures"] = failures
+        # The core report is produced before host-only project/encoding gates.
+        # Reconcile its front-page claim only after those gates and their
+        # persisted failure list are final, so the Markdown shipped in the ZIP
+        # cannot say VERIFIED while verification.json blocks export.
+        from ..core.report import reconcile_report_status
+
+        final_terminal_status = (
+            "SUCCESS" if final_safe_to_export else "UNVERIFIED"
+        )
+        res.report_md = reconcile_report_status(
+            res.report_md,
+            res.verification,
+            terminal_status=final_terminal_status,
+        )
+        _persist_compile_preview(pid, res)
         if not res.ok:
             failed_checks = [item["id"] for item in failures]
             failure_summary = "；".join(item["summary"] for item in failures[:3])
@@ -3673,7 +4098,21 @@ def create_app(updated_from: str = "") -> FastAPI:
                     f"  - 下一步：{item['action']}",
                 ])
             res.report_md += "\n".join(report_lines)
-            failed_draft = latest_draft["text"] or res.result or text
+            failed_draft = (
+                str(getattr(res, "compiled_snapshot", "") or "")
+                or res.compiled_tex
+                or latest_draft["text"]
+                or res.result
+                or text
+            )
+            if p.get("kind") == "folder" and getattr(
+                res, "compiled_snapshot", ""
+            ):
+                from ..core.project import split_project
+
+                extra_verification["per_file"] = split_project(
+                    res.compiled_snapshot
+                )
             get_store().record_failed_attempt(
                 pid,
                 failed_draft,
@@ -3685,6 +4124,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                     "ambiguous": res.ambiguous,
                     "decision_cache": decision_cache,
                     "applied": applied,
+                    "producer_identity": producer_identity,
                     **extra_verification,
                 },
             )
@@ -3700,6 +4140,9 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "failure_summary": failure_summary,
                 "failures": failures,
                 "preview_preserved": True,
+                "preview_state": res.verification.get(
+                    "preview_state", "SOURCE_PREVIEW"
+                ),
             }
         if control_callback:
             control_callback()
@@ -3715,6 +4158,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "review": _persisted_review_summary(res.review),
                 "items": res.decision_items,
                 "decision_cache": decision_cache,
+                "producer_identity": producer_identity,
                 **extra_verification,
             }
         )
@@ -3725,6 +4169,9 @@ def create_app(updated_from: str = "") -> FastAPI:
             "ambiguous": len(res.ambiguous),
             "degraded": res.verification.get("ai_degraded", False),
             "usage": res.verification.get("ai_usage", {}),
+            "preview_state": res.verification.get(
+                "preview_state", "SOURCE_PREVIEW"
+            ),
         }
 
     def _run_project(pid: str, exclude: set, reuse_decisions: bool = False,
@@ -4469,15 +4916,27 @@ def create_app(updated_from: str = "") -> FastAPI:
             return message
 
         def _refresh_raw_preview(job):
-            from ..ocr import merge_book
+            from ..ocr import merge_book, verified_equation_tag_evidence
 
             with _ocr_jobs_lock:
-                chunks = [
-                    job["pages"][page_no]["tex"]
+                completed = [
+                    (page_no, job["pages"][page_no])
                     for page_no in job["selected_pages"]
                     if job["pages"][page_no]["status"] == "done"
                 ]
-                merged = merge_book(chunks, outline=job.get("source_outline"))
+                chunks = [page["tex"] for _page_no, page in completed]
+                evidence = verified_equation_tag_evidence([
+                    {
+                        "page": page_no,
+                        "quality_flags": deepcopy(page.get("quality_flags") or []),
+                    }
+                    for page_no, page in completed
+                ])
+                merged = merge_book(
+                    chunks,
+                    outline=job.get("source_outline"),
+                    equation_tag_evidence=evidence,
+                )
                 job["raw_tex"] = merged
                 job["raw_ready"] = bool(chunks)
                 job["raw_chars"] = len(merged)
@@ -4668,6 +5127,12 @@ def create_app(updated_from: str = "") -> FastAPI:
                 job["status"] = "starting"
                 _set_ocr_selection(job, page_nos)
                 job["output_template"] = output_template
+                # Freeze the build/prompt that will produce this OCR text.  A
+                # later application update may export the task, but must never
+                # rewrite its producer identity as the newer exporter.
+                job["producer_identity"] = _runtime_provenance_identity(
+                    _ocr_prompt_version()
+                )
                 job["status"] = "running"
                 _bump_ocr_state(job)
         _launch_ocr_job(

@@ -4311,7 +4311,11 @@ def transcribe_pdf(
         progress(len(rendered), len(rendered), None)
     with open(pdf_path, "rb") as pdf_file:
         info = pdf_document_info_bytes(pdf_file.read())
-    tex = merge_book(chunks, outline=info.get("outline"))
+    tex = merge_book(
+        chunks,
+        outline=info.get("outline"),
+        equation_tag_evidence=verified_equation_tag_evidence(page_records),
+    )
     return OcrResult(
         tex=tex,
         pages=[p for p, _ in rendered],
@@ -4529,7 +4533,37 @@ def _mark_obvious_page_continuation(chunk: str) -> str:
     return "\n".join(lines)
 
 
-def merge_book(chunks: List[str], outline: List[dict] = None) -> str:
+def verified_equation_tag_evidence(page_records: List[dict]) -> List[dict]:
+    """Flatten only equation evidence that passed geometry and visual checks."""
+    result = []
+    for record in page_records or []:
+        if not isinstance(record, dict):
+            continue
+        try:
+            page = int(record.get("page", 0))
+        except (TypeError, ValueError):
+            continue
+        if page <= 0:
+            continue
+        for flag in record.get("quality_flags") or []:
+            if not isinstance(flag, dict):
+                continue
+            if (
+                flag.get("type") != "equation_tag_integrity_evidence"
+                or flag.get("status") != "source_geometry_and_active_match"
+                or flag.get("verifier")
+                != "pdf_geometry_plus_full_page_visual_and_active_latex"
+            ):
+                continue
+            result.append({"page": page, **flag})
+    return result
+
+
+def merge_book(
+    chunks: List[str],
+    outline: List[dict] = None,
+    equation_tag_evidence: List[dict] = None,
+) -> str:
     """合并逐页片段，并携带不可执行的 PDF 大纲元数据。
 
     文档类仅由书签与明确 Chapter 标题决定；不再无条件套用 elegantbook，
@@ -4552,6 +4586,7 @@ def merge_book(chunks: List[str], outline: List[dict] = None) -> str:
         document_kind,
         selected_pages,
         _chunks_have_toc(chunks),
+        equation_tag_evidence=equation_tag_evidence,
     )
     parts = [preamble.rstrip(), metadata]
     for i, c in enumerate(chunks):

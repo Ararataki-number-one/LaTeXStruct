@@ -131,6 +131,40 @@ PLAIN_PROOF_PREFIX_RE = re.compile(
     r"(?=\s|$)",
     re.IGNORECASE,
 )
+EQUATION_NUMBER_PATTERNS = (
+    re.compile(
+        r"\\text[ \t]*\{[ \t]*\([ \t]*"
+        r"(?P<label>[0-9]{1,4}[A-Za-z]?)[ \t]*\)[ \t]*\}"
+        r"[ \t]*\\qquad(?![A-Za-z@])"
+    ),
+    re.compile(
+        r"\\qquad(?![A-Za-z@])[ \t]*\([ \t]*"
+        r"(?P<label>[0-9]{1,4}[A-Za-z]?)[ \t]*\)"
+    ),
+    re.compile(
+        r"\\tag[ \t]*\{[ \t]*"
+        r"(?P<label>[0-9]{1,4}[A-Za-z]?)[ \t]*\}"
+    ),
+)
+DISPLAY_EQUATION_BLOCK_PATTERNS = (
+    re.compile(r"\\\[(?P<body>.*?)\\\]", re.DOTALL),
+    re.compile(
+        r"\\begin\{(?P<environment>"
+        r"equation\*?|align\*?|alignat\*?|flalign\*?|gather\*?|multline\*?"
+        r")\}(?P<body>.*?)\\end\{(?P=environment)\}",
+        re.DOTALL,
+    ),
+)
+BIBITEM_NUMBER_RE = re.compile(
+    r"(?m)^[ \t]*\\bibitem(?![A-Za-z@])[ \t]*"
+    r"(?:\[(?P<display>[^\]\r\n]*)\][ \t]*)?"
+    r"\{ref(?P<number>[1-9][0-9]*)\}[ \t]*"
+)
+PRINTED_REFERENCE_NUMBER_RE = re.compile(
+    r"(?m)^[ \t]*(?:\\noindent[ \t]*)?"
+    r"\[(?P<number>[1-9][0-9]*)\][ \t]*"
+    r"(?:\\quad(?![A-Za-z@])[ \t]*)?"
+)
 
 PRESENTATION_ONE_ARG = {
     "emph",
@@ -502,6 +536,63 @@ def _normalise_fragment(text: str, *, document_scope: bool = False) -> tuple[str
         text = _document_body(text)
     text = _strip_comments(text)
     text = _remove_formal_markup(text)
+    # Evidence-gated semantic IR may move a printed equation number from the
+    # left or right edge of a display into an AMS ``\tag``.  Canonicalize the
+    # complete display and place a common numbered token at its end.  Binding
+    # that token to its own display catches not only wrong or swapped numbers,
+    # but also a label moved onto the wrong equation.
+    def replace_equation_block(match: re.Match[str]) -> str:
+        body = match.group("body")
+        body_source = body
+        hits = []
+        for pattern in EQUATION_NUMBER_PATTERNS:
+            hits.extend(
+                (number.start(), number.group("label"))
+                for number in pattern.finditer(body_source)
+            )
+            body = pattern.sub(" ", body)
+        markers = "".join(
+            rf" \LATEXSTRUCTSemanticEquationNumber{{{label}}} "
+            for _offset, label in sorted(hits)
+        )
+        return body + markers
+
+    for pattern in DISPLAY_EQUATION_BLOCK_PATTERNS:
+        text = pattern.sub(replace_equation_block, text)
+    text = re.sub(
+        r"\\(?:begin|end)\{equation\*?\}|\\\[|\\\]",
+        " ",
+        text,
+    )
+    text = re.sub(
+        r"\\begin\{thebibliography\}\s*\{[^{}\r\n]*\}"
+        r"|\\end\{thebibliography\}",
+        " ",
+        text,
+    )
+    # Numbered reference prefixes and refN bibitems are likewise two renderings
+    # of one source label.  Retain their ordered numbers as common tokens.  A
+    # non-matching optional display label is deliberately left as an additional
+    # token so that the evaluator fails closed instead of blessing it.
+    def replace_bibitem(match: re.Match[str]) -> str:
+        number = match.group("number")
+        display = match.group("display")
+        if display is not None and display.strip() != number:
+            return (
+                rf" \LATEXSTRUCTSemanticReferenceNumber{{{number}}} "
+                f" LATEXSTRUCTINVALIDBIBLABEL {display} "
+            )
+        return rf" \LATEXSTRUCTSemanticReferenceNumber{{{number}}} "
+
+    text = BIBITEM_NUMBER_RE.sub(replace_bibitem, text)
+
+    def replace_printed_reference(match: re.Match[str]) -> str:
+        return (
+            rf" \LATEXSTRUCTSemanticReferenceNumber"
+            rf"{{{match.group('number')}}} "
+        )
+
+    text = PRINTED_REFERENCE_NUMBER_RE.sub(replace_printed_reference, text)
     text = INLINE_OUTLINE_RE.sub(" ", text)
     text = PLAIN_OUTLINE_STRUCTURAL_RE.sub(" ", text)
     text = _remove_balanced_commands(text, STRUCTURAL_COMMAND_RE)
@@ -819,6 +910,13 @@ def extract_outline(text: str) -> list[dict[str, object]]:
         title = _outline_title(title_text)
         if title:
             nodes.append({"level": 0, "title": title, "line": line})
+    bibliography = re.search(r"\\begin\{thebibliography\}\s*\{", body)
+    if bibliography and not any(item["title"] == "references" for item in nodes):
+        nodes.append({
+            "level": 0,
+            "title": "references",
+            "line": _line_number(body, bibliography.start()),
+        })
     nodes.sort(key=lambda item: int(item["line"]))
     return nodes
 
@@ -1070,8 +1168,12 @@ def evaluate_tex_structure(
     candidate_counter = Counter(candidate_tokens)
     missing_token_count = sum((original_counter - candidate_counter).values())
     excess_token_count = sum((candidate_counter - original_counter).values())
-    missing_lines, excess_lines = _line_token_deficits(original_body_source, candidate)
     token_conserved = original_tokens == candidate_tokens
+    missing_lines, excess_lines = (
+        ([], [])
+        if token_conserved
+        else _line_token_deficits(original_body_source, candidate)
+    )
 
     if reviewed_headings is None:
         expected_outline = extract_outline(original)

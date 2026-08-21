@@ -82,6 +82,9 @@ class ProcessJobManager:
                 "preview": source_preview,
                 "preview_revision": 1 if source_preview else 0,
                 "preview_label": "原始内容（尚未生成草稿）",
+                # This endpoint serves TeX source text.  Never let the UI infer
+                # that a source snapshot is a rendered/compiled PDF preview.
+                "preview_state": "SOURCE_PREVIEW",
                 "usage": {},
                 "cost": summarize_ai_usage({}),
                 "analysis_backend": (
@@ -167,7 +170,7 @@ class ProcessJobManager:
             for key in (
                 "candidate_total", "processed_candidates", "decision_total",
                 "completed_candidates", "ambiguous", "applied", "rejected",
-                "review_findings", "safe_to_export",
+                "review_findings", "safe_to_export", "preview_state",
             ):
                 if key in data:
                     job[key] = data[key]
@@ -263,6 +266,12 @@ class ProcessJobManager:
             )
             job["progress"] = 1.0
             job["result"] = result
+            preview_state = str(result.get("preview_state") or "SOURCE_PREVIEW")
+            job["preview_state"] = (
+                preview_state
+                if preview_state in {"COMPILED", "PARTIAL_COMPILED", "SOURCE_PREVIEW"}
+                else "SOURCE_PREVIEW"
+            )
             if isinstance(result.get("usage"), dict):
                 job["usage"] = result["usage"]
                 job["cost"] = summarize_ai_usage(result["usage"])

@@ -23,6 +23,11 @@ const KINDS = [
 
 const ACTIVE_TASKS = new Set(["running", "pausing", "paused", "cancelling", "committing"]);
 const TERMINAL_TASKS = new Set(["done", "blocked", "error", "cancelled"]);
+const PREVIEW_STATE_LABELS = {
+  COMPILED: "编译校验通过（当前仍显示 TeX 源码）",
+  PARTIAL_COMPILED: "编译未完成（仅识别到部分 PDF）",
+  SOURCE_PREVIEW: "仅 TeX 源码，未建立 PDF 预览",
+};
 // @monaco-editor/react 4.7 disposes DiffEditor models before its widget during
 // unmount unless keepCurrent* is enabled. Reuse one stable pair across the sole
 // Workspace instance so route switches dispose the widget first without leaking
@@ -953,6 +958,7 @@ export default function Workspace({ pid, onOpenSettings }) {
               <span>Token：{tokenTotal.toLocaleString()}</span>
               <span>费用：{priceText}</span>
               <span>实时预览：{job.preview_label || "等待草稿"}</span>
+              <span>预览状态：{PREVIEW_STATE_LABELS[job.preview_state] || PREVIEW_STATE_LABELS.SOURCE_PREVIEW}</span>
               {candidateTotal > 0 && (
                 <span>候选进度：{Math.min(processedCandidateCount, candidateTotal)}/{candidateTotal}</span>
               )}

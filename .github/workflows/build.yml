@@ -132,6 +132,8 @@ jobs:
         run: |
           python packaging/generate_icon.py
           python packaging/sync_version.py --version $env:APP_VERSION
+          python packaging/sync_build_identity.py --commit "$env:GITHUB_SHA" --build-id "$env:GITHUB_RUN_ID"
+          python -c "import os; from latexstruct._build import BUILD_COMMIT, BUILD_ID; assert BUILD_COMMIT == os.environ['GITHUB_SHA'].lower(); assert BUILD_ID == os.environ['GITHUB_RUN_ID']"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -183,13 +185,18 @@ jobs:
           $proc = Start-Process -FilePath "$dir\LaTeXStruct.exe" -ArgumentList "--server","--port","8099" -PassThru
           $ok = $false
           $observedVersion = "<未响应>"
+          $expectedCommit = $env:GITHUB_SHA.ToLowerInvariant()
           foreach ($i in 1..30) {
             Start-Sleep -Seconds 2
             try {
               $h = Invoke-RestMethod "http://127.0.0.1:8099/api/health" -TimeoutSec 3
               if ($h.ok) {
                 $observedVersion = [string]$h.version
-                if ($observedVersion -eq $env:APP_VERSION) {
+                if (
+                  $observedVersion -eq $env:APP_VERSION -and
+                  [string]$h.commit -eq $expectedCommit -and
+                  [string]$h.build_id -eq $env:GITHUB_RUN_ID
+                ) {
                   $pageResponse = Invoke-WebRequest "http://127.0.0.1:8099/" -UseBasicParsing -TimeoutSec 5
                   if ($pageResponse.Content -notmatch '<div\s+id=["'']root["'']') {
                     Write-Error "安装版没有提供 React 工作台，疑似错误回退到旧前端"
@@ -221,7 +228,7 @@ jobs:
                   $ok = $true
                   Write-Host "安装版运行正常（React 工作台与静态资源完整）: v$observedVersion"
                 } else {
-                  Write-Host "安装版版本不匹配: expected=$env:APP_VERSION actual=$observedVersion"
+                  Write-Host "安装版身份不匹配: expected=$env:APP_VERSION/$expectedCommit/$env:GITHUB_RUN_ID actual=$observedVersion/$($h.commit)/$($h.build_id)"
                 }
                 break
               }
@@ -250,7 +257,7 @@ jobs:
         run: |
           # 只需在发布时更换这一处基线。测试下面的完整链路：
           # schedule_installer_after_exit -> 旧应用退出 -> 安装 -> 新应用重启。
-          $previousVersion = '1.2.3'
+          $previousVersion = '1.2.4'
           $previousTag = "v$previousVersion"
           $headers = @{
             'User-Agent' = 'latexstruct-upgrade-smoke'
@@ -350,7 +357,11 @@ jobs:
                 $health = Invoke-RestMethod 'http://127.0.0.1:8765/api/health' -TimeoutSec 3
                 if ($health.ok) {
                   $observed = [string]$health.version
-                  if ($observed -eq $env:APP_VERSION) {
+                  if (
+                    $observed -eq $env:APP_VERSION -and
+                    [string]$health.commit -eq $env:GITHUB_SHA.ToLowerInvariant() -and
+                    [string]$health.build_id -eq $env:GITHUB_RUN_ID
+                  ) {
                     $consecutiveHealthy += 1
                     if ($consecutiveHealthy -ge 4) { $newHealthy = $true; break }
                   } else {

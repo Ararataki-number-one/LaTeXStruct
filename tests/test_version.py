@@ -319,6 +319,9 @@ def test_release_build_safety_guards():
     with open(os.path.join(root, ".github", "workflows", "build.yml"), encoding="utf-8") as f:
         workflow = f.read()
     assert "$observedVersion -eq $env:APP_VERSION" in workflow
+    assert "[string]$h.commit -eq $expectedCommit" in workflow
+    assert "[string]$h.build_id -eq $env:GITHUB_RUN_ID" in workflow
+    assert "[string]$health.commit -eq $env:GITHUB_SHA.ToLowerInvariant()" in workflow
     assert 'pyinstaller "Pillow>=10,<12"' in workflow
     assert "安装版没有提供 React 工作台" in workflow
     assert "React 资源名未带内容哈希" in workflow
@@ -330,7 +333,7 @@ def test_release_build_safety_guards():
     assert "v1.1.4" not in workflow
     assert "name: LaTeXStruct-v${{ env.APP_VERSION }}" in workflow
     assert "name: LaTeXStruct-${{ github.ref_name }}" not in workflow
-    assert "$previousVersion = '1.2.3'" in workflow
+    assert "$previousVersion = '1.2.4'" in workflow
     assert "$env:LATEXSTRUCT_SMOKE_PREVIOUS_VERSION = $previousVersion" in workflow
     assert "previous_version=os.environ['LATEXSTRUCT_SMOKE_PREVIOUS_VERSION']" in workflow
     assert "previous_version='1.2.2'" not in workflow

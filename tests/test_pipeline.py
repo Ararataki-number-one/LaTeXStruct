@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """流水线端到端测试（规则模式 / 无 Key 降级）。"""
 
+import hashlib
 import os
 import sys
 from unittest.mock import patch
@@ -89,6 +90,127 @@ def test_compile_checks_receive_preserved_ocr_resources():
     assert all(
         call.kwargs.get("extra_files") == extra_files
         for call in compile_latex.call_args_list
+    )
+
+
+def test_pipeline_separates_captured_pdf_from_json_verification():
+    before = {
+        "available": True,
+        "ok": True,
+        "pages": 1,
+        "errors": [],
+        "log": "before",
+        "preview_status": "COMPILED",
+    }
+    after = {
+        **before,
+        "log": "after",
+        "pdf_bytes": b"%PDF-captured-preview",
+    }
+    with patch(
+        "latexstruct.core.compilecheck.compile_latex",
+        side_effect=[before, after],
+    ) as compile_latex:
+        result = run_pipeline(
+            read_sample("basic_book.tex"),
+            mode="rule",
+            compile_check=True,
+            capture_compile_artifact=True,
+        )
+
+    assert result.compiled_pdf == b"%PDF-captured-preview"
+    assert result.compiled_pdf_name == "compiled.pdf"
+    assert result.compiled_tex == result.result
+    assert result.compiled_snapshot == result.result
+    assert "pdf_bytes" not in result.verification["compile_after"]
+    artifact = result.verification["preview_artifact"]
+    assert artifact["sha256"] == hashlib.sha256(
+        result.compiled_pdf
+    ).hexdigest()
+    assert artifact["filename"].startswith("LATEXSTRUCT-ARTIFACTS/compiled-")
+    assert artifact["tex_lf_normalized_sha256"] == hashlib.sha256(
+        result.compiled_tex.encode("utf-8")
+    ).hexdigest()
+    assert "include_pdf" not in compile_latex.call_args_list[0].kwargs
+    assert compile_latex.call_args_list[1].kwargs["include_pdf"] is True
+
+
+def test_folder_compile_cannot_overwrite_selected_candidate_with_unrelated_main_tex():
+    selected_main = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "Selected candidate.\n"
+        "\\input{chapter}\n"
+        "\\end{document}\n"
+    )
+    selected = (
+        selected_main.replace(
+            "\\input{chapter}\n",
+            "\\input{chapter}\n"
+            "% === LATEXSTRUCT-FILE-START: chapter.tex ===\n"
+            "Child body.\n"
+            "% === LATEXSTRUCT-FILE-END: chapter.tex ===\n",
+        )
+    )
+    unrelated = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\nUNRELATED MAIN.\n\\end{document}\n"
+    ).encode("utf-8")
+    observed = []
+
+    def fake_compile(text, *, extra_files=None, include_pdf=False):
+        folded = {str(name).casefold() for name in (extra_files or {})}
+        assert text == selected_main
+        assert "book.tex" not in folded
+        assert "main.tex" not in folded
+        assert "main.pdf" not in folded
+        observed.append((text, dict(extra_files or {})))
+        result = {
+            "available": True,
+            "ok": True,
+            "pages": 1,
+            "errors": [],
+            "log": "selected candidate compiled",
+            "preview_status": "COMPILED",
+        }
+        if include_pdf:
+            result["pdf_bytes"] = b"%PDF-selected-candidate"
+        return result
+
+    with patch(
+        "latexstruct.core.compilecheck.compile_latex",
+        side_effect=fake_compile,
+    ):
+        result = run_pipeline(
+            selected,
+            mode="rule",
+            compile_check=True,
+            compile_project_main_rel="book.tex",
+            compile_extra_files={
+                "book.tex": selected.encode("utf-8"),
+                "MAIN.TEX": unrelated,
+                "main.pdf": b"%PDF-stale-project-output",
+                "main.log": b"stale project log",
+                "main.aux": b"stale project aux",
+                "figures/keep.bin": b"resource",
+            },
+            capture_compile_artifact=True,
+        )
+
+    assert result.ok is True
+    assert result.result == selected
+    assert result.compiled_tex == selected_main
+    assert result.compiled_pdf == b"%PDF-selected-candidate"
+    assert result.verification["preview_artifact"]["tex_sha256"] == hashlib.sha256(
+        selected_main.encode("utf-8")
+    ).hexdigest()
+    assert len(observed) == 2
+    assert all(
+        files == {
+            "chapter.tex": b"Child body.",
+            "figures/keep.bin": b"resource",
+        }
+        for _text, files in observed
     )
 
 

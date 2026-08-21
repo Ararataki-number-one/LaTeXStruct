@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import difflib
 import json
+import math
 import re
 import unicodedata
 from collections import Counter
@@ -22,6 +23,9 @@ from .patch import PendingOp
 
 META_PREFIX = "% LaTeXStruct-OCR-Metadata: "
 META_RE = re.compile(r"^% LaTeXStruct-OCR-Metadata:\s*([A-Za-z0-9_=-]+)\s*$", re.M)
+EQUATION_TAG_LABEL_RE = re.compile(r"^[0-9]{1,4}[A-Za-z]?$")
+EQUATION_TAG_EVIDENCE_STATUS = "source_geometry_and_active_match"
+EQUATION_TAG_EVIDENCE_VERIFIER = "pdf_geometry_plus_full_page_visual_and_active_latex"
 PAGE_RE = re.compile(r"^\s*%\s*Page\s+(\d+)\s*$", re.I)
 PAGE_BREAK_RE = re.compile(r"^\s*%===\s*PAGE BREAK\s*===", re.I)
 DOCUMENTCLASS_RE = re.compile(
@@ -118,6 +122,8 @@ def encode_ocr_metadata(
     document_kind: str,
     selected_pages: Iterable[int],
     source_has_toc: bool,
+    *,
+    equation_tag_evidence: Iterable[dict] | None = None,
 ) -> str:
     """生成单行、不会被 LaTeX 执行的 OCR 元数据注释。"""
     cleaned = []
@@ -132,15 +138,84 @@ def encode_ocr_metadata(
             cleaned.append({"level": level, "title": title, "page": page})
     cleaned = _normalize_book_outline_levels(cleaned, document_kind)
     payload = {
-        "version": 1,
+        "version": 2 if equation_tag_evidence is not None else 1,
         "kind": "book" if document_kind == "book" else "article",
         "pages": sorted({int(p) for p in selected_pages if int(p) > 0})[:1000],
         "source_has_toc": bool(source_has_toc),
         "outline": cleaned,
     }
+    if equation_tag_evidence is not None:
+        payload["equation_tags"] = _clean_equation_tag_evidence(
+            equation_tag_evidence,
+            allowed_pages=set(payload["pages"]),
+        )
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     token = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     return META_PREFIX + token
+
+
+def _clean_equation_tag_evidence(
+    values: Iterable[dict] | None,
+    *,
+    allowed_pages: set[int] | None = None,
+) -> List[dict]:
+    """Keep only bounded, independently verified PDF equation-tag evidence.
+
+    A label alone is not source evidence.  Version-2 metadata therefore retains
+    only records produced by the page-geometry plus full-page transcription
+    integrity check, including a normalized source bounding box and a unique
+    evidence id.  Invalid or duplicate records are discarded; the semantic
+    stage treats any resulting inventory mismatch as a hard, no-edit failure.
+    """
+    cleaned: List[dict] = []
+    seen_ids = set()
+    for item in list(values or [])[:1000]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            page = int(item.get("page", 0))
+        except (TypeError, ValueError):
+            continue
+        if page <= 0 or (allowed_pages and page not in allowed_pages):
+            continue
+        label = re.sub(
+            r"\s+", "", str(item.get("label") or item.get("label_hint") or "")
+        )
+        if label.startswith("(") and label.endswith(")"):
+            label = label[1:-1]
+        evidence_id = str(item.get("evidence_id") or "").strip()[:100]
+        bbox = item.get("bbox_normalized")
+        if (
+            not EQUATION_TAG_LABEL_RE.fullmatch(label)
+            or not evidence_id
+            or evidence_id in seen_ids
+            or item.get("status") != EQUATION_TAG_EVIDENCE_STATUS
+            or item.get("verifier") != EQUATION_TAG_EVIDENCE_VERIFIER
+            or not isinstance(bbox, (list, tuple))
+            or len(bbox) != 4
+        ):
+            continue
+        try:
+            coords = [float(value) for value in bbox]
+        except (TypeError, ValueError):
+            continue
+        x0, y0, x1, y1 = coords
+        if (
+            not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in coords)
+            or not (x0 < x1 and y0 < y1)
+        ):
+            continue
+        seen_ids.add(evidence_id)
+        cleaned.append({
+            "page": page,
+            "label": label,
+            "evidence_id": evidence_id,
+            "bbox_normalized": [round(value, 6) for value in coords],
+            "source": str(item.get("source") or "")[:80],
+            "status": EQUATION_TAG_EVIDENCE_STATUS,
+            "verifier": EQUATION_TAG_EVIDENCE_VERIFIER,
+        })
+    return cleaned
 
 
 def _outline_title_key(value: str) -> str:
@@ -266,7 +341,7 @@ def parse_ocr_metadata(text: str) -> dict:
         payload = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeError, json.JSONDecodeError):
         return {}
-    if not isinstance(payload, dict) or payload.get("version") != 1:
+    if not isinstance(payload, dict) or payload.get("version") not in (1, 2):
         return {}
     kind = payload.get("kind")
     if kind not in ("article", "book"):
@@ -284,13 +359,22 @@ def parse_ocr_metadata(text: str) -> dict:
         if 0 <= level <= 5 and page > 0 and title:
             outline.append({"level": level, "title": title[:300], "page": page})
     outline = _normalize_book_outline_levels(outline, kind)
-    return {
-        "version": 1,
+    version = int(payload["version"])
+    result = {
+        "version": version,
         "kind": kind,
         "pages": [int(p) for p in payload.get("pages", []) if isinstance(p, int) and p > 0],
         "source_has_toc": bool(payload.get("source_has_toc")),
         "outline": outline,
     }
+    result["equation_tags"] = (
+        _clean_equation_tag_evidence(
+            payload.get("equation_tags", []),
+            allowed_pages=set(result["pages"]),
+        )
+        if version >= 2 else []
+    )
+    return result
 
 
 def is_ocr_document(text: str) -> bool:
@@ -1697,6 +1781,18 @@ def _actual_headings(text: str) -> List[dict]:
     pages = _page_map(lines)
     result = []
     for line_no, line in enumerate(lines, start=1):
+        if re.fullmatch(
+            r"\s*\\begin\{thebibliography\}\{[^{}\r\n]+\}\s*", line,
+        ):
+            result.append({
+                "line": line_no,
+                "page": pages[line_no],
+                "cmd": "thebibliography",
+                "starred": True,
+                "title": "",
+                "normalized": "thebibliography",
+            })
+            continue
         hit = _candidate_from_line(line, line_no, pages[line_no])
         if hit is None or hit.kind != "command":
             continue
@@ -1792,14 +1888,25 @@ def check_ocr_structure(text: str) -> dict:
             expected_cmd = _command_for(int(entry["level"]), metadata["kind"])
         found = None
         for index in range(cursor, len(actual)):
-            if _outline_title_is_exact(expected, actual[index]["normalized"]):
+            virtual_bibliography = (
+                expected in {"references", "bibliography"}
+                and actual[index]["cmd"] == "thebibliography"
+            )
+            if (
+                virtual_bibliography
+                or _outline_title_is_exact(expected, actual[index]["normalized"])
+            ):
                 found = index
                 break
         if found is None:
             issues.append({"reason": f"缺少 PDF 大纲标题：{entry['title']}"})
             continue
         item = actual[found]
-        if item["cmd"] != expected_cmd:
+        virtual_bibliography = (
+            expected in {"references", "bibliography"}
+            and item["cmd"] == "thebibliography"
+        )
+        if item["cmd"] != expected_cmd and not virtual_bibliography:
             issues.append({
                 "line": item["line"],
                 "reason": f"标题层级错误：{entry['title']} 应为 \\{expected_cmd}，实际为 \\{item['cmd']}",

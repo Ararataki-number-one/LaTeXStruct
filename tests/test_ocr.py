@@ -39,6 +39,7 @@ from latexstruct.ocr import (  # noqa: E402
     pdf_page_italic_terms,
     pdf_page_relation_regions,
     pdf_page_count_bytes,
+    verified_equation_tag_evidence,
     pdf_page_divider_regions,
     select_page_interval,
     transcribe_page,
@@ -1615,6 +1616,40 @@ def test_merge_book():
     assert tex.rstrip().endswith("\\end{document}")
     assert "%=== PAGE BREAK ===" in tex
     assert "\\clearpage" in tex
+
+
+def test_merge_book_embeds_only_fully_verified_equation_evidence():
+    from latexstruct.core.ocrstruct import parse_ocr_metadata
+
+    valid = {
+        "type": "equation_tag_integrity_evidence",
+        "status": "source_geometry_and_active_match",
+        "verifier": "pdf_geometry_plus_full_page_visual_and_active_latex",
+        "evidence_id": "p2-equation-tag-1",
+        "label": "1",
+        "bbox_normalized": [0.05, 0.4, 0.08, 0.43],
+        "source": "pdf_text_geometry",
+    }
+    rejected = {**valid, "evidence_id": "unverified", "verifier": "model_guess"}
+    evidence = verified_equation_tag_evidence([
+        {"page": 2, "quality_flags": [valid, rejected]},
+    ])
+    tex = merge_book(
+        ["% Page 2\n\\begin{equation}\nx=y\\tag{1}\n\\end{equation}"],
+        equation_tag_evidence=evidence,
+    )
+
+    metadata = parse_ocr_metadata(tex)
+    assert metadata["version"] == 2
+    assert metadata["equation_tags"] == [{
+        "page": 2,
+        "label": "1",
+        "evidence_id": "p2-equation-tag-1",
+        "bbox_normalized": [0.05, 0.4, 0.08, 0.43],
+        "source": "pdf_text_geometry",
+        "status": "source_geometry_and_active_match",
+        "verifier": "pdf_geometry_plus_full_page_visual_and_active_latex",
+    }]
 
 
 def test_merge_book_marks_only_obvious_lowercase_page_continuation_noindent():

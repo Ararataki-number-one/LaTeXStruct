@@ -17,6 +17,8 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 SAMPLE = (
@@ -70,6 +72,21 @@ def _client(tmp):
     srv._store = srv.ProjectStore(root=os.path.join(tmp, "projects"))
     srv._config = None
     return TestClient(srv.create_app())
+
+
+def _run_bundle_snapshot(archive: zipfile.ZipFile) -> tuple[dict, dict]:
+    """Assert that every packaged artifact is covered by a recomputable digest."""
+    run = json.loads(archive.read("LATEXSTRUCT-RUN.json"))
+    report = json.loads(archive.read("LATEXSTRUCT-REPORT.json"))
+    sums = {}
+    for line in archive.read("SHA256SUMS").decode("ascii").splitlines():
+        digest, name = line.split("  ", 1)
+        sums[name] = digest
+    assert "SHA256SUMS" not in sums
+    assert set(sums) == set(archive.namelist()) - {"SHA256SUMS"}
+    for name, digest in sums.items():
+        assert hashlib.sha256(archive.read(name)).hexdigest() == digest
+    return run, report
 
 
 def test_build_ocr_client_uses_codex_for_vision_without_api_fallback():
@@ -165,7 +182,9 @@ def _inspect_and_start_image(c, filename, image, media_type, data=None):
 def test_health_and_project_flow():
     with WorkspaceTmp() as tmp:
         c = _client(tmp)
-        assert c.get("/api/health").json()["ok"] is True
+        health = c.get("/api/health").json()
+        assert health["ok"] is True
+        assert set(("version", "build_id", "commit")).issubset(health)
         r = c.post("/api/projects", json={"text": SAMPLE, "name": "demo", "mode": "rule"})
         assert r.status_code == 200
         pid = r.json()["id"]
@@ -195,6 +214,9 @@ def test_health_and_project_flow():
             assert "ELEGANTBOOK-LICENSE.txt" not in zf.namelist()
             assert "ELEGANTBOOK-BUNDLE-README.md" not in zf.namelist()
             assert zf.read("LATEXSTRUCT-REPORT.md") == c.get(f"/api/projects/{pid}/report").content
+            run, machine_report = _run_bundle_snapshot(zf)
+            assert run["terminal_status"] == "SUCCESS"
+            assert machine_report["verification_status"] == "VERIFIED"
         # 删除
         c.delete(f"/api/projects/{pid}")
         assert c.get(f"/api/projects/{pid}").status_code == 404
@@ -203,7 +225,10 @@ def test_health_and_project_flow():
 def test_verified_tex_and_zip_share_exact_provenance_record():
     from latexstruct.core.provenance import (
         PROVENANCE_MANIFEST_NAME,
+        RAW_ARTIFACT_PACKAGE_PATH,
         parse_tex_provenance,
+        sha256_bytes,
+        sha256_lf_normalized_text,
         strip_tex_provenance,
     )
 
@@ -213,33 +238,570 @@ def test_verified_tex_and_zip_share_exact_provenance_record():
             "/api/projects",
             json={"text": SAMPLE, "name": "provenance", "mode": "rule"},
         ).json()["id"]
-        assert c.post(f"/api/projects/{pid}/process").json()["ok"] is True
+        producer = {
+            "app_version": "1.2.4",
+            "build_id": "1001",
+            "commit": "a" * 40,
+            "prompt_version": "not-used",
+        }
+        exporter = {
+            "app_version": "1.2.5",
+            "build_id": "1002",
+            "commit": "b" * 40,
+            "prompt_version": "not-used",
+        }
+        with patch.object(srv, "_runtime_provenance_identity", return_value=producer):
+            assert c.post(f"/api/projects/{pid}/process").json()["ok"] is True
+        project_dir = Path(srv.get_store()._dir(pid))
+        marker = json.loads((project_dir / "verification.json").read_text(encoding="utf-8"))
+        assert marker["producer_identity"] == producer
 
-        exported = c.get(f"/api/projects/{pid}/export")
+        with patch.object(srv, "_runtime_provenance_identity", return_value=exporter):
+            exported = c.get(f"/api/projects/{pid}/export")
+            package = c.get(f"/api/projects/{pid}/export-package")
         record = parse_tex_provenance(exported.content)
         assert record["verification_status"] == "VERIFIED"
         assert "not_ocr_text_math_or_semantic_accuracy" in record["verification_scope"]
-        assert record["app_version"] != "unknown"
+        assert record["app_version"] == producer["app_version"]
         assert record["prompt_version"] == "not-used"
-        assert record["build_id"] == (
-            os.environ.get("LATEXSTRUCT_BUILD_ID")
-            or os.environ.get("GITHUB_RUN_ID")
-            or "unknown"
-        )
-        assert record["commit"] == (
-            os.environ.get("LATEXSTRUCT_BUILD_COMMIT")
-            or os.environ.get("GITHUB_SHA")
-            or "unknown"
-        )
+        assert record["build_id"] == producer["build_id"]
+        assert record["commit"] == producer["commit"]
+        assert record["producer_commit"] == producer["commit"]
+        assert record["exporter_commit"] == exporter["commit"]
         assert strip_tex_provenance(exported.content) == c.get(
             f"/api/projects/{pid}/result"
         ).content
 
-        package = c.get(f"/api/projects/{pid}/export-package")
         with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
             package_record = json.loads(archive.read(PROVENANCE_MANIFEST_NAME))
             assert package_record == parse_tex_provenance(archive.read("main.tex"))
             assert package_record == record
+            raw = archive.read(RAW_ARTIFACT_PACKAGE_PATH)
+            assert package_record["raw_artifact_role"] == "analysis-input-tex"
+            assert package_record["raw_artifact_path"] == RAW_ARTIFACT_PACKAGE_PATH
+            assert package_record["raw_bytes_sha256"] == sha256_bytes(raw)
+            assert package_record["raw_normalized_text_sha256"] == (
+                sha256_lf_normalized_text(raw)
+            )
+            run, machine_report = _run_bundle_snapshot(archive)
+            assert run["producer_identity"]["commit"] == producer["commit"]
+            assert run["exporter_identity"]["commit"] == exporter["commit"]
+            assert machine_report["terminal_status"] == "SUCCESS"
+
+
+def test_export_package_carries_hash_bound_compiled_preview():
+    preview_pdf = b"%PDF-validated-preview"
+
+    def fake_compile(_text, **kwargs):
+        result = {
+            "available": True,
+            "ok": True,
+            "pages": 1,
+            "errors": [],
+            "log": "complete compile log",
+            "preview_status": "COMPILED",
+            "process_status": "SUCCESS",
+            "return_code": 0,
+            "fatal_line": None,
+            "timed_out": False,
+            "passes_requested": 1,
+            "passes_completed": 1,
+        }
+        if kwargs.get("include_pdf"):
+            result["pdf_bytes"] = preview_pdf
+        return result
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        pid = c.post(
+            "/api/projects",
+            json={"text": SAMPLE, "name": "compiled-preview", "mode": "rule"},
+        ).json()["id"]
+        with patch("latexstruct.core.compilecheck.compile_latex", side_effect=fake_compile):
+            processed = c.post(f"/api/projects/{pid}/process")
+        assert processed.status_code == 200 and processed.json()["ok"] is True
+        assert processed.json()["preview_state"] == "COMPILED"
+
+        package = c.get(f"/api/projects/{pid}/export-package")
+        assert package.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
+            run, machine_report = _run_bundle_snapshot(archive)
+            assert run["preview"]["compiled_pdf_included"] is True
+            artifact = machine_report["compile"]["artifact"]
+            assert artifact["filename"].startswith(
+                "LATEXSTRUCT-ARTIFACTS/compiled-"
+            )
+            assert archive.read(artifact["filename"]) == preview_pdf
+            assert artifact["sha256"] == hashlib.sha256(preview_pdf).hexdigest()
+
+
+def test_export_package_rejects_preview_evidence_inconsistent_with_compile_status():
+    preview_pdf = b"%PDF-inconsistent-preview-status"
+
+    def fake_compile(_text, **kwargs):
+        result = {
+            "available": True,
+            "ok": True,
+            "pages": 1,
+            "errors": [],
+            "log": "complete compile log",
+            "preview_status": "COMPILED",
+            "process_status": "SUCCESS",
+            "return_code": 0,
+            "fatal_line": None,
+            "timed_out": False,
+            "passes_requested": 1,
+            "passes_completed": 1,
+        }
+        if kwargs.get("include_pdf"):
+            result["pdf_bytes"] = preview_pdf
+        return result
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        pid = c.post(
+            "/api/projects",
+            json={"text": SAMPLE, "name": "tampered-preview-state", "mode": "rule"},
+        ).json()["id"]
+        with patch("latexstruct.core.compilecheck.compile_latex", side_effect=fake_compile):
+            processed = c.post(f"/api/projects/{pid}/process")
+        assert processed.status_code == 200 and processed.json()["ok"] is True
+
+        directory = Path(srv.get_store()._dir(pid))
+        marker = json.loads(
+            (directory / "verification.json").read_text(encoding="utf-8")
+        )
+        marker["verification"]["compile_after"]["ok"] = False
+        srv.get_store()._write_json(str(directory), "verification.json", marker)
+
+        package = c.get(f"/api/projects/{pid}/export-package")
+        assert package.status_code == 409
+        assert "编译预览证据记录无效" in package.json()["detail"]
+
+
+def test_folder_preview_binds_split_main_tex_and_exports_with_multifile_result():
+    preview_pdf = b"%PDF-folder-main-preview"
+    main_tex = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n\\input{chapter}\n\\end{document}\n"
+    )
+
+    def fake_compile(text, **kwargs):
+        assert "% === LATEXSTRUCT-FILE-START:" not in text
+        result = {
+            "available": True,
+            "ok": True,
+            "pages": 1,
+            "errors": [],
+            "log": "folder main compiled",
+            "preview_status": "COMPILED",
+            "process_status": "SUCCESS",
+            "return_code": 0,
+            "fatal_line": None,
+            "timed_out": False,
+            "passes_requested": 1,
+            "passes_completed": 1,
+        }
+        if kwargs.get("include_pdf"):
+            result["pdf_bytes"] = preview_pdf
+        return result
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        created = c.post("/api/projects/folder", json={
+            "files": {
+                "main.tex": main_tex,
+                "chapter.tex": "Child body.\n",
+                "main.pdf": {"encoding": "base64", "data": "JVBERi1zdGFsZQ=="},
+            },
+            "name": "folder-preview-binding",
+            "mode": "rule",
+            "defer_process": True,
+        })
+        assert created.status_code == 200, created.text
+        pid = created.json()["id"]
+        with patch("latexstruct.core.compilecheck.compile_latex", side_effect=fake_compile):
+            processed = c.post(f"/api/projects/{pid}/process")
+        assert processed.status_code == 200 and processed.json()["ok"] is True
+
+        info = json.loads(
+            (Path(srv.get_store()._dir(pid)) / "verification.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        compiled_main = info["per_file"][""]
+        assert compiled_main == main_tex
+        assert info["verification"]["preview_artifact"]["tex_sha256"] == (
+            hashlib.sha256(compiled_main.encode("utf-8")).hexdigest()
+        )
+
+        package = c.get(f"/api/projects/{pid}/export-package")
+        assert package.status_code == 200, package.text
+        with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
+            _run, machine_report = _run_bundle_snapshot(archive)
+            artifact = machine_report["compile"]["artifact"]
+            assert archive.read(artifact["filename"]) == preview_pdf
+            assert archive.read("chapter.tex") == b"Child body.\n"
+
+
+@pytest.mark.parametrize("tamper_kind", ["child", "resource"])
+def test_folder_preview_rejects_changed_non_main_compile_input(tamper_kind):
+    preview_pdf = b"%PDF-full-input-closure"
+    files = {
+        "main.tex": (
+            "\\documentclass{article}\n"
+            "\\begin{document}\n\\input{chapter}\n\\end{document}\n"
+        ),
+        "chapter.tex": "Original child.\n",
+        "assets/data.bin": {"encoding": "base64", "data": "b3JpZ2luYWw="},
+    }
+
+    def fake_compile(_text, **kwargs):
+        result = {
+            "available": True,
+            "ok": True,
+            "pages": 1,
+            "errors": [],
+            "log": "full compile input closure",
+            "preview_status": "COMPILED",
+            "process_status": "SUCCESS",
+            "return_code": 0,
+            "fatal_line": None,
+            "timed_out": False,
+            "passes_requested": 1,
+            "passes_completed": 1,
+        }
+        if kwargs.get("include_pdf"):
+            result["pdf_bytes"] = preview_pdf
+        return result
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        created = c.post("/api/projects/folder", json={
+            "files": files,
+            "name": "full-input-preview",
+            "mode": "rule",
+            "defer_process": True,
+        })
+        assert created.status_code == 200, created.text
+        pid = created.json()["id"]
+        with patch("latexstruct.core.compilecheck.compile_latex", side_effect=fake_compile):
+            processed = c.post(f"/api/projects/{pid}/process")
+        assert processed.status_code == 200 and processed.json()["ok"] is True
+
+        project_dir = Path(srv.get_store()._dir(pid))
+        if tamper_kind == "child":
+            info = json.loads(
+                (project_dir / "verification.json").read_text(encoding="utf-8")
+            )
+            info["per_file"]["chapter.tex"] = "Changed child.\n"
+            srv.get_store()._write_json(
+                str(project_dir), "verification.json", info
+            )
+        else:
+            original_zip = project_dir / "original-files.zip"
+            with zipfile.ZipFile(original_zip, "r") as archive:
+                original = {
+                    member.filename: archive.read(member)
+                    for member in archive.infolist()
+                    if not member.is_dir()
+                }
+            original["assets/data.bin"] = b"changed"
+            with zipfile.ZipFile(original_zip, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name, data in original.items():
+                    archive.writestr(name, data)
+
+        blocked = c.get(f"/api/projects/{pid}/export-package")
+        assert blocked.status_code == 409
+        assert "完整编译输入集" in blocked.json()["detail"]
+
+
+@pytest.mark.parametrize("defer_process", [False, True])
+def test_failed_folder_attempt_keeps_preview_with_failed_candidate(defer_process):
+    preview_pdf = b"%PDF-failed-folder-candidate"
+    source = r"""\documentclass{article}
+\usepackage{amsmath}
+\begin{document}
+\textbf{Theorem 4.2. Every graph has a useful ordering.}
+
+\[
+x=y\tag{1}\tag{2}
+\]
+\end{document}
+"""
+
+    def fake_compile(_text, **kwargs):
+        result = {
+            "available": True,
+            "ok": True,
+            "pages": 1,
+            "errors": [],
+            "log": "candidate compiled before the post gate failed",
+            "preview_status": "COMPILED",
+            "process_status": "SUCCESS",
+            "return_code": 0,
+            "fatal_line": None,
+            "timed_out": False,
+            "passes_requested": 1,
+            "passes_completed": 1,
+        }
+        if kwargs.get("include_pdf"):
+            result["pdf_bytes"] = preview_pdf
+        return result
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        with patch("latexstruct.core.compilecheck.compile_latex", side_effect=fake_compile):
+            created = c.post("/api/projects/folder", json={
+                "files": {"main.tex": source},
+                "name": "failed-folder-preview",
+                "mode": "rule",
+                "defer_process": defer_process,
+            })
+            if defer_process:
+                assert created.status_code == 200, created.text
+                processed = c.post(f"/api/projects/{created.json()['id']}/process")
+            else:
+                processed = created
+        assert created.status_code == 200, created.text
+        assert processed.status_code == 200, processed.text
+        assert processed.json()["ok"] is False
+        pid = created.json()["id"]
+        assert srv.get_store().read_result(pid) is None
+
+        failed = srv.get_store().read_failed_attempt(pid)
+        assert failed is not None
+        assert r"\begin{theorem}[4.2]" in failed["draft"]
+        assert failed["details"]["per_file"][""] == failed["draft"]
+
+        package = c.get(f"/api/projects/{pid}/export-current-package")
+        assert package.status_code == 200, package.text
+        assert package.headers["x-latexstruct-verified"] == "false"
+        with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
+            _run, machine_report = _run_bundle_snapshot(archive)
+            artifact = machine_report["compile"]["artifact"]
+            assert archive.read(artifact["filename"]) == preview_pdf
+            from latexstruct.core.provenance import strip_tex_provenance
+
+            assert r"\begin{theorem}[4.2]" in strip_tex_provenance(
+                archive.read("main.tex")
+            ).decode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        {
+            "LATEXSTRUCT-RAW-SOURCE.tex": (
+                "\\documentclass{article}\n\\begin{document}x\\end{document}\n"
+            ),
+        },
+        {
+            "main.tex": (
+                "\\documentclass{article}\n\\begin{document}x\\end{document}\n"
+            ),
+            "latexstruct-raw-source.TEX": "user child\n",
+        },
+        {
+            "main.tex": (
+                "\\documentclass{article}\n\\begin{document}x\\end{document}\n"
+            ),
+            "LATEXSTRUCT-RAW-SOURCE.tex/child.txt": "user child\n",
+        },
+    ],
+)
+def test_folder_package_rejects_main_or_child_shadowing_raw_evidence(files):
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        created = c.post("/api/projects/folder", json={
+            "files": files,
+            "name": "reserved-raw-collision",
+            "mode": "rule",
+            "defer_process": True,
+        })
+        assert created.status_code == 200, created.text
+        pid = created.json()["id"]
+
+        blocked = c.get(f"/api/projects/{pid}/export-current-package")
+        assert blocked.status_code == 409
+        assert "导出保留路径冲突" in blocked.json()["detail"]
+
+
+def test_folder_package_allows_identical_bundled_template_asset():
+    from latexstruct.elegantbook import elegantbook_bundle_assets
+
+    bundled = elegantbook_bundle_assets()
+    class_bytes = bundled["elegantbook.cls"]
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        created = c.post("/api/projects/folder", json={
+            "files": {
+                "main.tex": (
+                    "\\documentclass{elegantbook}\n"
+                    "\\begin{document}x\\end{document}\n"
+                ),
+                "elegantbook.cls": {
+                    "encoding": "base64",
+                    "data": base64.b64encode(class_bytes).decode("ascii"),
+                },
+            },
+            "name": "identical-template-asset",
+            "mode": "rule",
+            "defer_process": True,
+        })
+        assert created.status_code == 200, created.text
+        package = c.get(
+            f"/api/projects/{created.json()['id']}/export-current-package"
+        )
+        assert package.status_code == 200, package.text
+        with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
+            assert archive.read("elegantbook.cls") == class_bytes
+
+
+@pytest.mark.parametrize("case_alias", [False, True])
+def test_folder_package_rejects_different_or_case_aliased_template_asset(case_alias):
+    from latexstruct.elegantbook import elegantbook_bundle_assets
+
+    class_bytes = elegantbook_bundle_assets()["elegantbook.cls"]
+    asset_name = "ElegantBook.cls" if case_alias else "elegantbook.cls"
+    asset_value = (
+        {
+            "encoding": "base64",
+            "data": base64.b64encode(class_bytes).decode("ascii"),
+        }
+        if case_alias
+        else "user class"
+    )
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        created = c.post("/api/projects/folder", json={
+            "files": {
+                "main.tex": (
+                    "\\documentclass{elegantbook}\n"
+                    "\\begin{document}x\\end{document}\n"
+                ),
+                asset_name: asset_value,
+            },
+            "name": "conflicting-template-asset",
+            "mode": "rule",
+            "defer_process": True,
+        })
+        assert created.status_code == 200, created.text
+        blocked = c.get(
+            f"/api/projects/{created.json()['id']}/export-current-package"
+        )
+        assert blocked.status_code == 409
+        assert "导出保留路径冲突" in blocked.json()["detail"]
+
+
+def test_failed_retry_cannot_replace_last_committed_compile_preview():
+    preview = {"pdf": b"%PDF-safe-commit-A"}
+
+    def fake_compile(_text, **kwargs):
+        result = {
+            "available": True,
+            "ok": True,
+            "pages": 1,
+            "errors": [],
+            "log": "complete compile log",
+            "preview_status": "COMPILED",
+            "process_status": "SUCCESS",
+            "return_code": 0,
+            "fatal_line": None,
+            "timed_out": False,
+            "passes_requested": 1,
+            "passes_completed": 1,
+        }
+        if kwargs.get("include_pdf"):
+            result["pdf_bytes"] = preview["pdf"]
+        return result
+
+    forced_failure = [{
+        "id": "forced-post-gate",
+        "label": "发布后置门禁",
+        "summary": "模拟后置门禁失败",
+        "action": "保留上一次安全结果",
+    }]
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        pid = c.post(
+            "/api/projects",
+            json={"text": SAMPLE, "name": "attempt-safe-preview", "mode": "rule"},
+        ).json()["id"]
+        with patch("latexstruct.core.compilecheck.compile_latex", side_effect=fake_compile):
+            first = c.post(f"/api/projects/{pid}/process")
+        assert first.status_code == 200 and first.json()["ok"] is True
+
+        preview["pdf"] = b"%PDF-failed-attempt-B"
+        with (
+            patch("latexstruct.core.compilecheck.compile_latex", side_effect=fake_compile),
+            patch(
+                "latexstruct.core.verify.verification_failures",
+                return_value=forced_failure,
+            ),
+        ):
+            second = c.post(f"/api/projects/{pid}/process")
+        assert second.status_code == 200 and second.json()["ok"] is False
+
+        committed = c.get(f"/api/projects/{pid}/export-package")
+        assert committed.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(committed.content)) as archive:
+            _run, machine_report = _run_bundle_snapshot(archive)
+            artifact = machine_report["compile"]["artifact"]
+            assert archive.read(artifact["filename"]) == b"%PDF-safe-commit-A"
+
+
+@pytest.mark.parametrize(
+    "source_bytes",
+    [
+        (
+            "\\documentclass{article}\r\n\\begin{document}\r\n"
+            "Caf\xe9.\r\n\\end{document}\r\n"
+        ).encode("latin-1"),
+        (
+            "\\documentclass{article}\r\n\\begin{document}\r\n"
+            "Unicode text.\r\n\\end{document}\r\n"
+        ).encode("utf-16"),
+    ],
+)
+def test_compiled_preview_binding_survives_original_encoding_and_crlf(source_bytes):
+    preview_pdf = b"%PDF-original-encoding-preview"
+
+    def fake_compile(_text, **kwargs):
+        result = {
+            "available": True,
+            "ok": True,
+            "pages": 1,
+            "errors": [],
+            "log": "complete compile log",
+            "preview_status": "COMPILED",
+        }
+        if kwargs.get("include_pdf"):
+            result["pdf_bytes"] = preview_pdf
+        return result
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        created = c.post("/api/projects", json={
+            "text": "browser preview is not authoritative",
+            "name": "encoded-preview",
+            "mode": "rule",
+            "source_file": {
+                "encoding": "base64",
+                "data": base64.b64encode(source_bytes).decode("ascii"),
+            },
+        })
+        assert created.status_code == 200, created.text
+        pid = created.json()["id"]
+        with patch("latexstruct.core.compilecheck.compile_latex", side_effect=fake_compile):
+            processed = c.post(f"/api/projects/{pid}/process")
+        assert processed.status_code == 200 and processed.json()["ok"] is True
+        package = c.get(f"/api/projects/{pid}/export-package")
+        assert package.status_code == 200, package.text
+        with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
+            _run, machine_report = _run_bundle_snapshot(archive)
+            artifact = machine_report["compile"]["artifact"]
+            assert archive.read(artifact["filename"]) == preview_pdf
 
 
 def test_unprocessed_current_tex_and_zip_are_self_describing_unverified_snapshots():
@@ -261,7 +823,11 @@ def test_unprocessed_current_tex_and_zip_are_self_describing_unverified_snapshot
         assert current.headers["x-latexstruct-verified"] == "false"
         assert record["verification_status"] == "UNVERIFIED"
         assert record["result_sha256"] == "unknown"
-        assert record["prompt_version"] == "3.6"
+        assert record["app_version"] == "unknown"
+        assert record["prompt_version"] == "unknown"
+        assert record["producer_app_version"] == "unknown"
+        assert record["producer_commit"] == "unknown"
+        assert record["exporter_app_version"] != "unknown"
         assert strip_tex_provenance(current.content) == SAMPLE.encode("utf-8")
 
         package = c.get(f"/api/projects/{pid}/export-current-package")
@@ -269,6 +835,50 @@ def test_unprocessed_current_tex_and_zip_are_self_describing_unverified_snapshot
             package_record = json.loads(archive.read(PROVENANCE_MANIFEST_NAME))
             assert package_record == parse_tex_provenance(archive.read("main.tex"))
             assert package_record == record
+            assert archive.read(record["raw_artifact_path"]) == SAMPLE.encode("utf-8")
+            run, machine_report = _run_bundle_snapshot(archive)
+            assert run["terminal_status"] == "UNVERIFIED"
+            assert machine_report["verification_status"] == "UNVERIFIED"
+            assert machine_report["first_open"] == "LATEXSTRUCT-REPORT.md"
+            assert machine_report["blocker_count"] == 1
+
+
+def test_blocked_attempt_keeps_its_producer_when_exported_by_a_newer_build():
+    from latexstruct.core.provenance import parse_tex_provenance
+
+    unsafe = (
+        "\\documentclass{article}\n\\begin{document}\n"
+        "\\[x=y\\tag{1}\\tag{2}\\]\n\\end{document}\n"
+    )
+    producer = {
+        "app_version": "1.2.4",
+        "build_id": "2001",
+        "commit": "c" * 40,
+        "prompt_version": "not-used",
+    }
+    exporter = {
+        "app_version": "1.2.5",
+        "build_id": "2002",
+        "commit": "d" * 40,
+        "prompt_version": "not-used",
+    }
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        pid = c.post(
+            "/api/projects",
+            json={"text": unsafe, "name": "blocked-provenance", "mode": "rule"},
+        ).json()["id"]
+        with patch.object(srv, "_runtime_provenance_identity", return_value=producer):
+            assert c.post(f"/api/projects/{pid}/process").json()["ok"] is False
+        failure = srv.get_store().read_failed_attempt(pid)
+        assert failure["details"]["producer_identity"] == producer
+
+        with patch.object(srv, "_runtime_provenance_identity", return_value=exporter):
+            current = c.get(f"/api/projects/{pid}/export-current")
+        record = parse_tex_provenance(current.content)
+        assert record["verification_status"] == "UNVERIFIED"
+        assert record["producer_commit"] == producer["commit"]
+        assert record["exporter_commit"] == exporter["commit"]
 
 
 def test_single_file_binary_import_preserves_latin1_bytes_and_encodes_modifications():
@@ -370,6 +980,24 @@ def test_single_file_unrepresentable_change_is_blocked_as_unverified():
         verification = c.get(f"/api/projects/{pid}/decisions").json()["verification"]
         assert verification["source_encoding"]["ok"] is False
         assert "无法表示" in verification["source_encoding"]["error"]
+        report = c.get(f"/api/projects/{pid}/report").text
+        first_page = report.split("## 1、", 1)[0]
+        assert "- 状态：UNVERIFIED（禁止作为已验证成品）" in first_page
+        assert "- 运行终态：UNVERIFIED" in first_page
+        assert "VERIFIED（可安全导出）" not in first_page
+        assert "源文件编码、BOM 与换行可保真写回" in first_page
+        assert "- 导出门禁：未通过" in report
+
+        package = c.get(f"/api/projects/{pid}/export-current-package")
+        assert package.status_code == 200
+        assert package.headers["x-latexstruct-verified"] == "false"
+        with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
+            packaged_report = archive.read("LATEXSTRUCT-REPORT.md").decode("utf-8")
+            assert packaged_report == report
+            run, machine_report = _run_bundle_snapshot(archive)
+            assert run["terminal_status"] == "UNVERIFIED"
+            assert machine_report["safe_to_export"] is False
+            assert machine_report["verification_status"] == "UNVERIFIED"
 
 
 def test_folder_export_preserves_unchanged_gbk_and_encodes_modified_tex_as_gbk():
@@ -542,9 +1170,14 @@ def test_export_requires_current_committed_verification_hash():
         )
         legacy = c.get(f"/api/projects/{pid}/export")
         assert legacy.status_code == 200
-        from latexstruct.core.provenance import strip_tex_provenance
+        from latexstruct.core.provenance import parse_tex_provenance, strip_tex_provenance
 
         assert strip_tex_provenance(legacy.content).decode("utf-8") == legacy_text
+        legacy_provenance = parse_tex_provenance(legacy.content)
+        assert legacy_provenance["producer_app_version"] == "unknown"
+        assert legacy_provenance["producer_commit"] == "unknown"
+        assert legacy_provenance["app_version"] == "unknown"
+        assert legacy_provenance["exporter_app_version"] != "unknown"
 
         committed_text = COMMITTED_ELEGANT.replace("\n", "\r\n")
         store.set_result(

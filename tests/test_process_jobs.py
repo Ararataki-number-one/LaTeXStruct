@@ -49,6 +49,19 @@ def test_active_count_includes_paused_and_excludes_terminal_jobs():
     assert manager.active_count() == 0
 
 
+def test_preview_state_is_explicit_and_only_promoted_by_terminal_evidence():
+    manager = ProcessJobManager()
+    job = manager.create("project-preview", "source")
+    assert manager.public(job)["preview_state"] == "SOURCE_PREVIEW"
+
+    manager.complete(job["id"], {"ok": True, "preview_state": "COMPILED"})
+    assert manager.public(job)["preview_state"] == "COMPILED"
+
+    invalid = manager.create("project-invalid-preview", "source")
+    manager.complete(invalid["id"], {"ok": False, "preview_state": "made-up"})
+    assert manager.public(invalid)["preview_state"] == "SOURCE_PREVIEW"
+
+
 def test_job_snapshot_exposes_only_allowlisted_analysis_backend():
     manager = ProcessJobManager()
     codex = manager.create("project-codex", analysis_backend="codex_cli")

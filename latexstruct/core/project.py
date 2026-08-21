@@ -222,6 +222,51 @@ def safe_project_relpath(rel: str) -> str:
     return path.as_posix()
 
 
+def project_compile_inputs(
+    original_files: Dict[str, bytes],
+    main_rel: str,
+    per_file: Dict[str, str],
+) -> tuple[str, Dict[str, bytes]]:
+    """Reconstruct the exact main text and extra files passed to compilecheck."""
+    from .compilecheck import COMPILE_RESERVED_ROOT_FILENAMES
+
+    main_rel = safe_project_relpath(main_rel)
+    files: Dict[str, bytes] = {}
+    folded: Dict[str, str] = {}
+    for rel, data in original_files.items():
+        safe_rel = safe_project_relpath(rel)
+        if safe_rel.casefold() == main_rel.casefold() or (
+            "/" not in safe_rel
+            and safe_rel.casefold() in COMPILE_RESERVED_ROOT_FILENAMES
+        ):
+            continue
+        key = safe_rel.casefold()
+        previous = folded.get(key)
+        if previous is not None:
+            raise ValueError(f"项目编译输入路径大小写冲突：{previous}、{safe_rel}")
+        folded[key] = safe_rel
+        files[safe_rel] = bytes(data)
+
+    for rel, content in per_file.items():
+        if not rel:
+            continue
+        safe_rel = safe_project_relpath(rel)
+        if (
+            "/" not in safe_rel
+            and safe_rel.casefold() in COMPILE_RESERVED_ROOT_FILENAMES
+        ):
+            continue
+        key = safe_rel.casefold()
+        previous = folded.get(key)
+        if previous is not None and previous != safe_rel:
+            raise ValueError(f"项目编译输入路径大小写冲突：{previous}、{safe_rel}")
+        if previous is not None:
+            files.pop(previous, None)
+        folded[key] = safe_rel
+        files[safe_rel] = str(content).encode("utf-8")
+    return str(per_file.get("", "")), files
+
+
 def _resolve(root: Path, cur_rel: str, target: str) -> Optional[str]:
     # LaTeX 语义：\input/\include 路径相对主文件目录（编译工作目录）解析
     target = (target or "").strip()
@@ -421,6 +466,7 @@ def process_project(
     template_context: dict = None,
     compile_check: bool = False,
     compile_files: Dict[str, bytes] = None,
+    capture_compile_artifact: bool = False,
     pack=None,
 ) -> ProjectResult:
     """多文件项目处理：发现 → 展开 → 单文件流水线 → 拆分。"""
@@ -450,6 +496,7 @@ def process_project(
         template_context=template_context,
         compile_check=compile_check, compile_extra_files=compile_files,
         compile_project_main_rel=main_rel if compile_check else None, pack=pack,
+        capture_compile_artifact=capture_compile_artifact,
         known_structured_envs=known_structured_envs,
     )
     per_file = split_project(pr.result)

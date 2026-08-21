@@ -14,8 +14,9 @@ import re
 from collections.abc import Mapping
 
 
-PROVENANCE_SCHEMA_VERSION = "latexstruct-export-provenance-v1"
+PROVENANCE_SCHEMA_VERSION = "latexstruct-export-provenance-v2"
 PROVENANCE_MANIFEST_NAME = "LATEXSTRUCT-PROVENANCE.json"
+RAW_ARTIFACT_PACKAGE_PATH = "LATEXSTRUCT-RAW-SOURCE.tex"
 PROVENANCE_BEGIN = "% LaTeXStruct-Provenance-Begin"
 PROVENANCE_END = "% LaTeXStruct-Provenance-End"
 
@@ -42,12 +43,44 @@ _FIELD_ORDER = (
     "body_sha256",
     "raw_sha256",
     "result_sha256",
+    # The legacy identity fields above remain aliases for the producer.  The
+    # explicit fields below prevent a newer exporter from impersonating the
+    # build that actually produced a stored result.
+    "producer_app_version",
+    "producer_build_id",
+    "producer_commit",
+    "producer_prompt_version",
+    "exporter_app_version",
+    "exporter_build_id",
+    "exporter_commit",
+    # ``raw_sha256`` remains the byte-hash alias.  These fields state exactly
+    # which companion artifact it describes and how to recompute its canonical
+    # text hash without confusing CRLF/LF normalization with byte identity.
+    "raw_artifact_role",
+    "raw_artifact_path",
+    "raw_bytes_sha256",
+    "raw_normalized_text_sha256",
+    "raw_normalization_pipeline",
 )
 
 
 def sha256_bytes(data: bytes) -> str:
     """Return the lowercase SHA-256 of an immutable byte artifact."""
     return hashlib.sha256(bytes(data)).hexdigest()
+
+
+def sha256_lf_normalized_text(data: bytes) -> str:
+    """Hash decoded TEX text after newline normalization and UTF-8 encoding.
+
+    The byte hash remains authoritative for artifact identity.  This secondary
+    digest is deliberately narrow and reproducible: decode with LaTeXStruct's
+    existing TEX decoder, map CRLF/CR to LF, then encode as UTF-8 without a BOM.
+    """
+    from .project import decode_tex_bytes
+
+    text = decode_tex_bytes(bytes(data)).text
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return sha256_bytes(normalized.encode("utf-8"))
 
 
 def _identity(value: object, *, default: str = "unknown") -> str:
@@ -58,6 +91,21 @@ def _identity(value: object, *, default: str = "unknown") -> str:
 def _hash_or_unknown(value: object) -> str:
     text = str(value or "").strip().lower()
     return text if _SHA256_RE.fullmatch(text) else "unknown"
+
+
+def _identity_record(
+    value: Mapping[str, object] | None,
+    *,
+    fallback: Mapping[str, object] | None = None,
+) -> dict[str, str]:
+    """Return a bounded build identity without consulting ambient runtime state."""
+    source = value if isinstance(value, Mapping) else (fallback or {})
+    return {
+        "app_version": _identity(source.get("app_version")),
+        "build_id": _identity(source.get("build_id")),
+        "commit": _identity(source.get("commit")),
+        "prompt_version": _identity(source.get("prompt_version")),
+    }
 
 
 def make_provenance_record(
@@ -73,6 +121,13 @@ def make_provenance_record(
     source_sha256: str = "unknown",
     raw_sha256: str = "unknown",
     result_sha256: str = "unknown",
+    producer_identity: Mapping[str, object] | None = None,
+    exporter_identity: Mapping[str, object] | None = None,
+    raw_artifact_role: str = "unknown",
+    raw_artifact_path: str = "unknown",
+    raw_bytes_sha256: str = "unknown",
+    raw_normalized_text_sha256: str = "unknown",
+    raw_normalization_pipeline: str = "unknown",
 ) -> dict[str, str]:
     """Build one bounded, JSON-safe record without reading external state."""
     status = "VERIFIED" if verified else "UNVERIFIED"
@@ -85,19 +140,46 @@ def make_provenance_record(
         scope.encode("ascii")
     except UnicodeEncodeError:
         scope = VERIFIED_SCOPE if verified else UNVERIFIED_SCOPE
+    legacy_identity = {
+        "app_version": app_version,
+        "build_id": build_id,
+        "commit": commit,
+        "prompt_version": prompt_version,
+    }
+    producer = _identity_record(producer_identity, fallback=legacy_identity)
+    exporter = _identity_record(exporter_identity, fallback=legacy_identity)
+    raw_bytes = _hash_or_unknown(raw_bytes_sha256)
+    if raw_bytes == "unknown":
+        raw_bytes = _hash_or_unknown(raw_sha256)
     return {
         "schema_version": PROVENANCE_SCHEMA_VERSION,
         "artifact_kind": _identity(artifact_kind),
         "verification_status": status,
         "verification_scope": scope,
-        "app_version": _identity(app_version),
-        "build_id": _identity(build_id),
-        "commit": _identity(commit),
-        "prompt_version": _identity(prompt_version),
+        # Backward-compatible aliases.  Their meaning is now unambiguously the
+        # producer identity; a legacy stored result therefore stays unknown.
+        "app_version": producer["app_version"],
+        "build_id": producer["build_id"],
+        "commit": producer["commit"],
+        "prompt_version": producer["prompt_version"],
         "source_sha256": _hash_or_unknown(source_sha256),
         "body_sha256": sha256_bytes(body),
-        "raw_sha256": _hash_or_unknown(raw_sha256),
+        "raw_sha256": raw_bytes,
         "result_sha256": _hash_or_unknown(result_sha256),
+        "producer_app_version": producer["app_version"],
+        "producer_build_id": producer["build_id"],
+        "producer_commit": producer["commit"],
+        "producer_prompt_version": producer["prompt_version"],
+        "exporter_app_version": exporter["app_version"],
+        "exporter_build_id": exporter["build_id"],
+        "exporter_commit": exporter["commit"],
+        "raw_artifact_role": _identity(raw_artifact_role),
+        "raw_artifact_path": _identity(raw_artifact_path),
+        "raw_bytes_sha256": raw_bytes,
+        "raw_normalized_text_sha256": _hash_or_unknown(
+            raw_normalized_text_sha256
+        ),
+        "raw_normalization_pipeline": _identity(raw_normalization_pipeline),
     }
 
 

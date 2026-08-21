@@ -1,11 +1,123 @@
 # -*- coding: utf-8 -*-
-"""极简汇报生成（Markdown）。"""
+"""Human-readable audit report for one LaTeXStruct pipeline run."""
 
 from __future__ import annotations
 
 from typing import Dict, List
 
 from .patch import AppliedPatch
+
+
+def reconcile_report_status(
+    report_md: str,
+    verification: Dict,
+    *,
+    terminal_status: str,
+) -> str:
+    """Make an existing report reflect the final, post-pipeline export gates.
+
+    ``build_report`` runs inside the core pipeline.  Hosts may apply additional
+    fail-closed checks afterwards (for example, project-file completeness or
+    lossless source-encoding checks).  Rebuilding the entire report at that
+    point would discard pipeline-only explanatory sections, so this function
+    rewrites the conclusion and export-gate line in place after every host gate
+    has finished.
+
+    A report may claim ``VERIFIED`` only when both the persisted verification
+    record and the terminal state explicitly say that the run succeeded.
+    """
+    verification = verification if isinstance(verification, dict) else {}
+    requested_terminal = str(terminal_status or "").strip().upper()
+    safe = (
+        verification.get("safe_to_export") is True
+        and requested_terminal == "SUCCESS"
+    )
+    terminal = "SUCCESS" if safe else "UNVERIFIED"
+
+    failures = verification.get("failures")
+    reasons = []
+    if isinstance(failures, list):
+        for item in failures:
+            if not isinstance(item, dict):
+                continue
+            reason = str(item.get("label") or item.get("summary") or item.get("id") or "").strip()
+            if reason and reason not in reasons:
+                reasons.append(reason)
+    if not reasons:
+        for item in verification.get("checks", []):
+            if not isinstance(item, dict) or item.get("ok") is not False:
+                continue
+            reason = str(item.get("label") or item.get("id") or "未命名检查").strip()
+            if reason and reason not in reasons:
+                reasons.append(reason)
+    if not safe and not reasons:
+        reasons.append("最终导出门禁未明确通过")
+
+    lines = str(report_md or "").splitlines()
+    try:
+        conclusion_heading = lines.index("## 结论")
+    except ValueError:
+        conclusion_heading = -1
+
+    if conclusion_heading >= 0:
+        conclusion_end = len(lines)
+        for index in range(conclusion_heading + 1, len(lines)):
+            if lines[index].startswith("## "):
+                conclusion_end = index
+                break
+        conclusion = lines[conclusion_heading + 1:conclusion_end]
+        variable_prefixes = (
+            "- 状态：",
+            "- 运行终态：",
+            "- 未验证原因：",
+            "- 阻断项：",
+            "- 建议先打开：",
+        )
+        fixed = [
+            line for line in conclusion
+            if not line.startswith(variable_prefixes)
+        ]
+        while fixed and not fixed[0].strip():
+            fixed.pop(0)
+        while fixed and not fixed[-1].strip():
+            fixed.pop()
+        fixed.insert(
+            0,
+            "- 状态："
+            + ("VERIFIED（可安全导出）" if safe else "UNVERIFIED（禁止作为已验证成品）"),
+        )
+        fixed.insert(1, f"- 运行终态：{terminal}")
+        if safe:
+            fixed.extend([
+                "- 阻断项：0",
+                "- 建议先打开：项目主 TEX；交付时同时保留完整 ZIP 证据包",
+            ])
+        else:
+            fixed.extend([
+                "- 未验证原因：" + "、".join(reasons),
+                "- 建议先打开：`LATEXSTRUCT-REPORT.md`，按失败检查逐项修复",
+            ])
+        lines = (
+            lines[:conclusion_heading + 1]
+            + [""]
+            + fixed
+            + [""]
+            + lines[conclusion_end:]
+        )
+
+    gate_line = (
+        "- 导出门禁：通过"
+        if safe
+        else "- 导出门禁：未通过（结果已回退且禁止危险导出）"
+    )
+    replaced_gate = False
+    for index, line in enumerate(lines):
+        if line.startswith("- 导出门禁："):
+            lines[index] = gate_line
+            replaced_gate = True
+    if not replaced_gate:
+        lines.extend(["", gate_line])
+    return "\n".join(lines)
 
 
 def build_report(
@@ -25,9 +137,27 @@ def build_report(
     review = review or {}
     template_notes = template_notes or []
     ocr_structure_notes = ocr_structure_notes or []
-    L: List[str] = ["# LaTeXStruct 结构化整理汇报", ""]
+    safe_to_export = verification.get("safe_to_export") is True
+    failed_checks = [
+        str(item.get("label") or item.get("id") or "未命名检查")
+        for item in verification.get("checks", [])
+        if isinstance(item, dict) and item.get("ok") is False
+    ]
+    L: List[str] = ["# LaTeXStruct 结构化整理汇报", "", "## 结论", ""]
+    L.append(f"- 状态：{'VERIFIED（可安全导出）' if safe_to_export else 'UNVERIFIED（禁止作为已验证成品）'}")
+    L.append("- 输入：当前项目中冻结的原始 TEX / OCR 转写与其来源证据")
+    L.append("- 生成：结构化 TEX、机器校验记录和可复算的项目证据包")
     L.append(f"- 模式：{mode}")
-    L.append(f"- 应用补丁：{len(applied)}；被拒绝：{len(rejected)}；歧义保留：{len(ambiguous)}")
+    L.append(
+        f"- 修改统计：应用 {len(applied)}；被拒绝 {len(rejected)}；"
+        f"待人工核对 {len(ambiguous)}"
+    )
+    if failed_checks:
+        L.append("- 未验证原因：" + "、".join(failed_checks))
+        L.append("- 建议先打开：`LATEXSTRUCT-REPORT.md`，按失败检查逐项修复")
+    else:
+        L.append("- 阻断项：0")
+        L.append("- 建议先打开：项目主 TEX；交付时同时保留完整 ZIP 证据包")
     L.append("")
     n = 1
 
@@ -158,6 +288,7 @@ def build_report(
     display_tags = verification.get("display_tags", {})
     ocr_structure = verification.get("ocr_structure", {})
     resources = verification.get("resources", {})
+    structure = verification.get("structure_decisions", {})
     L.append(f"- 内容不变校验：{'通过（与原文逐字符一致）' if ci else '失败（已自动回退）'}")
     L.append(
         f"- 环境配平：{'通过' if eb.get('ok') else '失败（整理后异常：' + str(eb.get('after_unbalanced', [])) + '）'}"
@@ -214,6 +345,16 @@ def build_report(
                 L.append(f"  - 缺失：{path}")
             for path in resources.get("unsafe", [])[:10]:
                 L.append(f"  - 不安全路径：{path}")
+    if structure:
+        formal_total = int(structure.get("formal_total", 0) or 0)
+        formal_wrapped = int(structure.get("formal_wrapped", 0) or 0)
+        residual = list(structure.get("formal_residual_ids") or [])
+        L.append(
+            "- 显式 formal 结构库存："
+            f"{formal_wrapped}/{formal_total} 已完整结构化；残留 {len(residual)}"
+        )
+        for candidate_id in residual[:10]:
+            L.append(f"  - 未结构化：{candidate_id}")
     cb = verification.get("compile_before")
     ca = verification.get("compile_after")
     if cb and ca and cb.get("available"):
@@ -223,6 +364,16 @@ def build_report(
         )
         L.append(
             f"  - 整理后：{'成功 ' + str(ca.get('pages')) + ' 页' if ca.get('ok') else '失败 ' + '; '.join(ca.get('errors', [])[:2])}"
+        )
+        preview_artifact = verification.get("preview_artifact") or {}
+        L.append(
+            "  - 预览状态："
+            + str(verification.get("preview_state") or "SOURCE_PREVIEW")
+            + (
+                f"（工件：{preview_artifact.get('filename')}）"
+                if preview_artifact.get("filename")
+                else "（无编译 PDF 工件）"
+            )
         )
         if verification.get("compile", {}).get("unverified"):
             L.append(
