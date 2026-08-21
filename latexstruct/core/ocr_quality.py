@@ -48,7 +48,15 @@ def assess_ocr_quality(job: Mapping[str, Any], resources: Mapping[str, Any] | No
     missing_provenance_pages: list[int] = []
     quality_flag_count = 0
     local_evidence_pages: list[int] = []
+    equation_tag_expected = 0
+    equation_tag_verified = 0
+    equation_tag_mismatch_pages: list[int] = []
+    equation_tag_extractor_failed_pages: list[int] = []
+    footnote_expected = 0
+    footnote_verified = 0
+    footnote_mismatch_pages: list[int] = []
     source_sha256 = str(job.get("_source_sha256") or "").lower()
+    source_type = str(job.get("source_type") or "").strip().lower()
     source_provenance_recorded = re.fullmatch(r"[0-9a-f]{64}", source_sha256) is not None
 
     for page_no in selected:
@@ -67,6 +75,59 @@ def assess_ocr_quality(job: Mapping[str, Any], resources: Mapping[str, Any] | No
             local_evidence_pages.append(page_no)
         if bool(page.get("needs_review")) or any(bool(flag.get("needs_review")) for flag in flags):
             review_pages.append(page_no)
+        equation_regions = [
+            region for region in (page.get("equation_tag_regions") or [])
+            if isinstance(region, Mapping) and str(region.get("evidence_id") or "")
+        ]
+        equation_flags = [
+            flag for flag in flags
+            if flag.get("type") == "equation_tag_integrity_evidence"
+            and flag.get("status") in {
+                "source_geometry_and_active_match",
+                "corrected_after_local_visual_retry",
+            }
+        ]
+        equation_tag_expected += len(equation_regions)
+        equation_tag_verified += len(equation_flags)
+        if {
+            str(region.get("evidence_id") or "") for region in equation_regions
+        } != {
+            str(flag.get("evidence_id") or "") for flag in equation_flags
+        }:
+            equation_tag_mismatch_pages.append(page_no)
+        extraction_status = str(
+            page.get("equation_tag_extraction_status") or ""
+        ).strip().lower()
+        if (
+            extraction_status == "error"
+            or (
+                source_type == "pdf"
+                and status == "done"
+                and extraction_status != "ok"
+            )
+        ):
+            equation_tag_extractor_failed_pages.append(page_no)
+
+        footnote_regions = [
+            region for region in (page.get("footnote_regions") or [])
+            if isinstance(region, Mapping) and str(region.get("evidence_id") or "")
+        ]
+        footnote_flags = [
+            flag for flag in flags
+            if flag.get("type") == "footnote_structure_evidence"
+            and flag.get("status") in {
+                "source_geometry_and_active_match",
+                "corrected_after_local_visual_retry",
+            }
+        ]
+        footnote_expected += len(footnote_regions)
+        footnote_verified += len(footnote_flags)
+        if {
+            str(region.get("evidence_id") or "") for region in footnote_regions
+        } != {
+            str(flag.get("evidence_id") or "") for flag in footnote_flags
+        }:
+            footnote_mismatch_pages.append(page_no)
         if status == "done" and (
             int(page.get("attempts") or 0) < 1
             or len(page.get("image_size_pixels") or []) != 2
@@ -94,6 +155,29 @@ def assess_ocr_quality(job: Mapping[str, Any], resources: Mapping[str, Any] | No
         ("provenance_missing", "部分完成页缺少完整视觉来源记录", missing_provenance_pages),
     )
     for code, message, page_numbers in strict_findings:
+        if not page_numbers:
+            continue
+        target = blockers if profile == OCR_QUALITY_PUBLICATION else warnings
+        target.append({"code": code, "message": message, "pages": page_numbers[:100]})
+
+    inventory_findings = (
+        (
+            "equation_tag_extractor_failed",
+            "源 PDF 公式编号几何清点失败，不能把空清单视为已核验",
+            equation_tag_extractor_failed_pages,
+        ),
+        (
+            "equation_tag_inventory_mismatch",
+            "源 PDF 公式编号与活动 LaTeX 标签清单不一致",
+            equation_tag_mismatch_pages,
+        ),
+        (
+            "footnote_inventory_mismatch",
+            "源 PDF 脚注与活动 LaTeX 脚注清单不一致",
+            footnote_mismatch_pages,
+        ),
+    )
+    for code, message, page_numbers in inventory_findings:
         if not page_numbers:
             continue
         target = blockers if profile == OCR_QUALITY_PUBLICATION else warnings
@@ -180,12 +264,35 @@ def assess_ocr_quality(job: Mapping[str, Any], resources: Mapping[str, Any] | No
             "missing_provenance_pages": len(missing_provenance_pages),
             "quality_flags": quality_flag_count,
             "local_evidence_pages": len(set(local_evidence_pages)),
+            "equation_tags_expected": equation_tag_expected,
+            "equation_tags_verified": equation_tag_verified,
+            "equation_tag_extractor_failed_pages": len(
+                equation_tag_extractor_failed_pages
+            ),
+            "footnotes_expected": footnote_expected,
+            "footnotes_verified": footnote_verified,
         },
         "pages": {
             "failed_or_incomplete": error_pages[:100],
             "low_confidence": low_confidence_pages[:100],
             "needs_review": review_pages[:100],
             "missing_provenance": missing_provenance_pages[:100],
+            "equation_tag_inventory_mismatch": equation_tag_mismatch_pages[:100],
+            "equation_tag_extractor_failed": equation_tag_extractor_failed_pages[:100],
+            "footnote_inventory_mismatch": footnote_mismatch_pages[:100],
+        },
+        "document_inventory": {
+            "equation_tags": {
+                "expected": equation_tag_expected,
+                "verified": equation_tag_verified,
+                "matched": not equation_tag_mismatch_pages,
+                "extractor_ok": not equation_tag_extractor_failed_pages,
+            },
+            "footnotes": {
+                "expected": footnote_expected,
+                "verified": footnote_verified,
+                "matched": not footnote_mismatch_pages,
+            },
         },
         "resources": resource_summary,
         "blockers": blockers,

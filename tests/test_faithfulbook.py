@@ -123,7 +123,7 @@ def test_faithfulbook_default_geometry_headers_and_source_page_boundaries():
     # Only the chapter with real section descendants gets a local TOC.
     assert output.count("\n\\LSChapterContents\n") == 1
     assert r"\localtableofcontents" in output
-    assert any("完整保留 2 个源页" in item["reason"] for item in notes)
+    assert any("分页策略保留 2 个源分页命令" in item["reason"] for item in notes)
     assert any("不会把 OCR 页眉" in item["reason"] for item in notes)
     assert any("正文第 1 页" in item["reason"] for item in notes)
 

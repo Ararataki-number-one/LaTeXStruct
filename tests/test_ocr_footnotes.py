@@ -437,6 +437,7 @@ def test_direct_transcribe_pdf_forwards_footnote_source_evidence(tmp_path):
         patch("latexstruct.ocr.pdf_page_text_hint", return_value=""),
         patch("latexstruct.ocr.pdf_page_italic_terms", return_value=[]),
         patch("latexstruct.ocr.pdf_page_relation_regions", return_value=[]),
+        patch("latexstruct.ocr.pdf_page_equation_tag_regions", return_value=[]),
         patch("latexstruct.ocr.pdf_page_divider_regions", return_value=[]),
         patch("latexstruct.ocr.pdf_page_framed_insets", return_value=[]),
         patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[region]),

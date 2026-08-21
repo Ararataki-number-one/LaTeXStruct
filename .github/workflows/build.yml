@@ -250,7 +250,7 @@ jobs:
         run: |
           # 只需在发布时更换这一处基线。测试下面的完整链路：
           # schedule_installer_after_exit -> 旧应用退出 -> 安装 -> 新应用重启。
-          $previousVersion = '1.2.1'
+          $previousVersion = '1.2.2'
           $previousTag = "v$previousVersion"
           $headers = @{
             'User-Agent' = 'latexstruct-upgrade-smoke'
@@ -308,7 +308,7 @@ jobs:
             $env:LATEXSTRUCT_SMOKE_INSTALLER = $currentSetup.FullName
             $env:LATEXSTRUCT_SMOKE_OLD_PID = [string]$oldProc.Id
             $env:LATEXSTRUCT_SMOKE_TARGET = $installedExe
-            $helperOutput = python -c "import os; from latexstruct.updater import schedule_installer_after_exit; print(schedule_installer_after_exit(os.environ['LATEXSTRUCT_SMOKE_INSTALLER'], app_pid=int(os.environ['LATEXSTRUCT_SMOKE_OLD_PID']), target_executable=os.environ['LATEXSTRUCT_SMOKE_TARGET'], previous_version='1.2.1', expected_version=os.environ['APP_VERSION']).pid)"
+            $helperOutput = python -c "import os; from latexstruct.updater import schedule_installer_after_exit; print(schedule_installer_after_exit(os.environ['LATEXSTRUCT_SMOKE_INSTALLER'], app_pid=int(os.environ['LATEXSTRUCT_SMOKE_OLD_PID']), target_executable=os.environ['LATEXSTRUCT_SMOKE_TARGET'], previous_version='1.2.2', expected_version=os.environ['APP_VERSION']).pid)"
             if ($LASTEXITCODE -ne 0) {
               Write-Error '应用内更新 helper 调度失败'; exit 1
             }

@@ -12,12 +12,14 @@ from latexstruct.core.compilecheck import compile_latex  # noqa: E402
 from latexstruct.core.invariants import (  # noqa: E402
     check_image_resources,
     check_invariants,
+    body_text_tokens,
     cites,
     image_paths,
     labels,
     math_tokens,
     refs,
 )
+from latexstruct.core.ocrstruct import encode_ocr_metadata  # noqa: E402
 from latexstruct.core.pipeline import run_pipeline  # noqa: E402
 
 SAMPLES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
@@ -130,6 +132,148 @@ def test_invariants_detect_content_change():
     # label 新增也应检出
     out2 = check_invariants(SIMPLE, SIMPLE.replace("\\section{Intro}", "\\section{Intro}\\label{sec:x}"))
     assert out2["labels"]["equal"] is False
+
+
+def test_ordered_body_text_gate_ignores_wrappers_but_detects_plain_prose_loss():
+    before = r"""\documentclass{article}
+\begin{document}
+\textbf{Theorem 1.1.} Every widget works for sufficiently large inputs.
+\textit{Proof.} Apply the widget rule. \hfill $\square$
+\end{document}
+"""
+    wrapped = r"""\documentclass{article}
+\begin{document}
+\begin{theorem*}[1.1]
+Every widget works for sufficiently large inputs.
+\end{theorem*}
+\begin{proof}
+Apply the widget rule. \hfill $\square$
+\ifcsname qedsymbol\endcsname\let\qedsymbol\empty\fi
+\end{proof}
+\end{document}
+"""
+    deleted = wrapped.replace(" for sufficiently large inputs", "")
+
+    assert body_text_tokens(before) == body_text_tokens(wrapped)
+    assert check_invariants(
+        before, wrapped, check_body_text=True,
+    )["body_text"]["equal"] is True
+    assert check_invariants(
+        before, deleted, check_body_text=True,
+    )["body_text"]["equal"] is False
+
+
+def test_body_gate_preserves_statement_inside_formal_heading_group():
+    before = (
+        r"\begin{document}"
+        "\n"
+        r"\textbf{Theorem 1.1. Every widget works.}"
+        "\n"
+        r"\end{document}"
+    )
+    deleted = (
+        r"\begin{document}"
+        "\n"
+        r"\begin{theorem*}[1.1]\end{theorem*}"
+        "\n"
+        r"\end{document}"
+    )
+
+    check = check_invariants(before, deleted, check_body_text=True)
+
+    assert "Every" in body_text_tokens(before)
+    assert check["body_text"]["equal"] is False
+
+
+def test_body_gate_preserves_proof_body_inside_italic_heading_group():
+    before = (
+        r"\begin{document}"
+        "\n"
+        r"\textit{Proof. Apply the widget rule.}"
+        "\n"
+        r"\end{document}"
+    )
+    deleted = (
+        r"\begin{document}"
+        "\n"
+        r"\begin{proof}\end{proof}"
+        "\n"
+        r"\end{document}"
+    )
+
+    check = check_invariants(before, deleted, check_body_text=True)
+
+    assert "Apply" in body_text_tokens(before)
+    assert check["body_text"]["equal"] is False
+
+
+def test_real_ocr_pipeline_body_gate_accepts_inline_styled_heading_bodies():
+    metadata = encode_ocr_metadata(
+        [{"level": 0, "title": "Results", "page": 1}],
+        "article",
+        [1],
+        False,
+    )
+    source = "\n".join([
+        r"\documentclass{article}",
+        r"\usepackage{amsmath,amsthm}",
+        r"\begin{document}",
+        metadata,
+        r"% Page 1",
+        r"\section*{Results}",
+        r"\textbf{Theorem 1.1. Every widget works.}",
+        r"\textit{Proof. Apply the \emph{nested widget} rule.} \hfill $\square$",
+        r"\end{document}",
+    ])
+
+    result = run_pipeline(source, mode="rule")
+
+    assert result.ok is True, result.report_md
+    assert result.verification["invariants"]["body_text"]["equal"] is True
+    assert result.verification["invariants"]["body_text"]["checked"] is True
+    assert "Every widget works." in result.result
+    assert "nested widget" in result.result
+
+
+def test_real_ocr_pipeline_body_gate_matches_all_scanner_heading_forms():
+    metadata = encode_ocr_metadata(
+        [{"level": 0, "title": "Results", "page": 1}],
+        "article",
+        [1],
+        False,
+    )
+    cases = [
+        ("Exercise 1. Do the thing.", "Do the thing."),
+        ("定理 1. 所有对象成立。", "所有对象成立。"),
+        ("证明：由定义可得。", "由定义可得。"),
+        ("Theorem. Every widget works.", "Every widget works."),
+        ("Remark. This matters.", "This matters."),
+        (r"\noindent\textbf{Theorem 1.} Every widget works.", "Every widget works."),
+        (r"\noindent\textit{Proof.} Apply the rule.", "Apply the rule."),
+        (r"Proof.\quad Apply the rule.", "Apply the rule."),
+        ("Proof [Theorem 1]. Apply the rule.", "Apply the rule."),
+        ("Theorem (Ramsey). Every widget works.", "(Ramsey). Every widget works."),
+        ("Lemma [Key estimate]: The norm is bounded.", "[Key estimate]: The norm is bounded."),
+    ]
+
+    for heading, expected in cases:
+        source = "\n".join([
+            r"\documentclass{article}",
+            r"\usepackage{amsmath,amsthm}",
+            r"\begin{document}",
+            metadata,
+            r"% Page 1",
+            r"\section*{Results}",
+            heading,
+            r"\end{document}",
+        ])
+
+        result = run_pipeline(source, mode="rule")
+
+        assert result.ok is True, f"{heading}\n{result.report_md}"
+        body = result.verification["invariants"]["body_text"]
+        assert body["checked"] is True and body["equal"] is True
+        assert expected in result.result
 
 
 def test_invariants_preserve_duplicate_reference_counts():

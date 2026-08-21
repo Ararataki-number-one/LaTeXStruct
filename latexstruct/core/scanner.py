@@ -302,37 +302,7 @@ def scan(
         return c
 
     def match_title(source):
-        first, multiline = _title_probe(source)
-        semantic, wrapper = _semantic_view(first)
-        for env, pat in title_res:
-            m = pat.match(semantic)
-            if m:
-                num = m.group(1) if m.groups() else None
-                # A line-based patch cannot move an arbitrary multi-line title
-                # into an optional environment argument.  It can, however,
-                # safely remove the literal keyword on the first line and leave
-                # every parenthesis/macro/comment byte in place.  This avoids a
-                # duplicate ``Theorem`` label without risking a lossy rewrite.
-                if multiline:
-                    raw_prefix = ""
-                    title_line_old, replacement = _multiline_title_line_rewrite(source)
-                else:
-                    raw_prefix = _raw_semantic_prefix(
-                        first, semantic, m.end(), wrapper
-                    )
-                    replacement = _styled_semantic_replacement(
-                        first, m.end(), wrapper
-                    )
-                    title_line_old = first if replacement else ""
-                return (
-                    env,
-                    num,
-                    raw_prefix,
-                    semantic[m.end():].strip(),
-                    title_line_old,
-                    replacement,
-                )
-        return None
+        return _title_metadata(source, title_res)
 
     def match_proof(first):
         semantic, _wrapper = _semantic_view(first)
@@ -826,6 +796,58 @@ def _styled_semantic_replacement(
     return first[: opening + 1] + remainder + "}" + str(wrapper["trailing"])
 
 
+def _structural_title_match_end(match: re.Match) -> int:
+    """Return the safely removable part of a matched title heading.
+
+    A parenthesized/bracketed *name* is statement content, not disposable
+    syntax.  The title regex deliberately consumes it to distinguish a real
+    heading from prose such as ``Theorem (X) has ...``; patching must still
+    remove only the keyword that LaTeX's environment will recreate.  Numbered
+    headings remain unchanged because their source number is copied into the
+    environment's optional argument.
+    """
+    number = match.group(1) if match.groups() else None
+    if number:
+        return match.end()
+    matched = match.group(0)
+    openings = [pos for pos in (matched.find("("), matched.find("[")) if pos >= 0]
+    if not openings:
+        return match.end()
+    return match.start() + min(openings)
+
+
+def _title_metadata(source: str, title_res) -> Optional[tuple]:
+    """Return the exact metadata used to patch a production title candidate."""
+    first, multiline = _title_probe(source)
+    semantic, wrapper = _semantic_view(first)
+    for env, pattern in title_res:
+        match = pattern.match(semantic)
+        if not match:
+            continue
+        number = match.group(1) if match.groups() else None
+        structural_end = _structural_title_match_end(match)
+        if multiline:
+            raw_prefix = ""
+            title_line_old, replacement = _multiline_title_line_rewrite(source)
+        else:
+            raw_prefix = _raw_semantic_prefix(
+                first, semantic, structural_end, wrapper
+            )
+            replacement = _styled_semantic_replacement(
+                first, structural_end, wrapper
+            )
+            title_line_old = first if replacement else ""
+        return (
+            env,
+            number,
+            raw_prefix,
+            semantic[structural_end:].strip(),
+            title_line_old,
+            replacement,
+        )
+    return None
+
+
 def _match_title(first: str):
     """返回 (关键词, 编号, 可剥离前缀)；无匹配返回 None。"""
     source = first
@@ -833,13 +855,16 @@ def _match_title(first: str):
     semantic, wrapper = _semantic_view(first)
     m = EN_TITLE_RE.match(semantic)
     if m:
+        structural_end = _structural_title_match_end(m)
         return (
             m.group(1),
             m.group(2),
             (
                 _multiline_title_keyword_prefix(source)
                 if multiline
-                else _raw_semantic_prefix(first, semantic, m.end(), wrapper)
+                else _raw_semantic_prefix(
+                    first, semantic, structural_end, wrapper
+                )
             ),
         )
     m = CN_NUM_PREFIX_RE.match(semantic)

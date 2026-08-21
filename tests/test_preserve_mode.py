@@ -233,14 +233,19 @@ def test_preserved_verified_result_exports_without_elegantbook_bundle_assets():
         pid = _create_and_process(client, ARTICLE)
         exported = client.get(f"/api/projects/{pid}/export")
         assert exported.status_code == 200, exported.text
-        assert exported.content == ARTICLE.encode("utf-8")
+        from latexstruct.core.provenance import strip_tex_provenance
+
+        assert strip_tex_provenance(exported.content) == ARTICLE.encode("utf-8")
 
         package = client.get(f"/api/projects/{pid}/export-package")
         assert package.status_code == 200, package.text
         with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
             names = set(archive.namelist())
-            assert archive.read("main.tex") == ARTICLE.encode("utf-8")
+            assert strip_tex_provenance(archive.read("main.tex")) == ARTICLE.encode(
+                "utf-8"
+            )
             assert "LATEXSTRUCT-REPORT.md" in names
+            assert "LATEXSTRUCT-PROVENANCE.json" in names
             assert names.isdisjoint(ELEGANT_ASSETS)
 
 

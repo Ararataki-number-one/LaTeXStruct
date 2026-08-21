@@ -38,6 +38,16 @@ from ..core.ocr_quality import (
 )
 from ..core.parser import parse_latex
 from ..core.pipeline import run_pipeline
+from ..core.prompts import PROMPT_VERSION
+from ..core.provenance import (
+    PROVENANCE_MANIFEST_NAME,
+    RAW_OCR_SCOPE,
+    UNVERIFIED_SCOPE,
+    VERIFIED_SCOPE,
+    make_provenance_record,
+    sha256_bytes,
+    stamp_tex_provenance,
+)
 from ..providers import list_provider_presets
 from ..store import ProjectStore
 from .process_jobs import ProcessJobManager, ProcessingCancelled
@@ -247,6 +257,30 @@ MAX_PRESERVED_OCR_ASSET_BYTES = 100 * 1024 * 1024
 MAX_PRESERVED_SOURCE_PAGE_PREVIEWS = 8
 OCR_PAGE_BREAK_RE = re.compile(r"(?m)^\s*%===\s*PAGE BREAK\s*===.*$")
 OCR_PAGE_MARKER_RE = re.compile(r"(?m)^\s*%\s*Page\s+(?P<page>\d+)\s*$", re.I)
+
+
+def _runtime_provenance_identity(prompt_version: str) -> dict[str, str]:
+    """Read optional release identity; absent values remain explicitly unknown."""
+    from .. import __version__
+
+    return {
+        "app_version": __version__,
+        "build_id": str(
+            os.environ.get("LATEXSTRUCT_BUILD_ID")
+            or os.environ.get("GITHUB_RUN_ID")
+            or "unknown"
+        ),
+        "commit": str(
+            os.environ.get("LATEXSTRUCT_BUILD_COMMIT")
+            or os.environ.get("GITHUB_SHA")
+            or "unknown"
+        ),
+        "prompt_version": prompt_version,
+    }
+
+
+def _provenance_json_bytes(record: dict[str, str]) -> bytes:
+    return json.dumps(record, ensure_ascii=True, indent=2).encode("ascii")
 
 
 def _canonical_image_extension(extension: str) -> str:
@@ -1112,6 +1146,23 @@ def _ocr_bundle_bytes(job: dict, raw_tex: str) -> tuple[bytes, dict]:
         source_sha256 = str(verified_job.get("_source_sha256") or "").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
             source_sha256 = ""
+        from ..ocr import OCR_SYSTEM_PROMPT
+
+        ocr_prompt_version = "ocr-sha256-" + sha256_bytes(
+            OCR_SYSTEM_PROMPT.encode("utf-8")
+        )
+        raw_body = raw_tex.encode("utf-8")
+        provenance = make_provenance_record(
+            body=raw_body,
+            verified=False,
+            verification_scope=RAW_OCR_SCOPE,
+            artifact_kind="raw-ocr-tex",
+            source_sha256=source_sha256,
+            raw_sha256=sha256_bytes(raw_body),
+            result_sha256="unknown",
+            **_runtime_provenance_identity(ocr_prompt_version),
+        )
+        stamped_raw = stamp_tex_provenance(raw_body, provenance)
         quality_report = assess_ocr_quality(verified_job, resources)
         manifest = {
             "format": "latexstruct-ocr-bundle-v1",
@@ -1140,10 +1191,11 @@ def _ocr_bundle_bytes(job: dict, raw_tex: str) -> tuple[bytes, dict]:
                 ),
             },
             "quality_report": quality_report,
+            "provenance": provenance,
         }
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("ocr.tex", raw_tex.encode("utf-8"))
+            archive.writestr("ocr.tex", stamped_raw)
             for item in [
                 *(resources.get("assets") or []),
                 *(resources.get("source_pages") or []),
@@ -1159,6 +1211,10 @@ def _ocr_bundle_bytes(job: dict, raw_tex: str) -> tuple[bytes, dict]:
             archive.writestr(
                 "OCR-MANIFEST.json",
                 json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+            )
+            archive.writestr(
+                PROVENANCE_MANIFEST_NAME,
+                _provenance_json_bytes(provenance),
             )
         return output.getvalue(), manifest
 
@@ -1388,6 +1444,11 @@ def _ocr_manifest_page_records(job: dict) -> list[dict]:
                 )[:4]
             if "source" in flag:
                 quality_record["source"] = str(flag.get("source") or "")[:80]
+            if flag.get("type") == "equation_tag_integrity_evidence":
+                quality_record["label"] = str(flag.get("label") or "")[:16]
+                normalized = _bounded_ocr_bbox(flag.get("bbox_normalized"))
+                if normalized:
+                    quality_record["bbox_normalized"] = normalized
             if flag.get("type") == "framed_inset_vector_evidence":
                 quality_record.update({
                     "title": str(flag.get("title") or "")[:160],
@@ -1477,6 +1538,20 @@ def _ocr_manifest_page_records(job: dict) -> list[dict]:
                 if re.fullmatch(r"[0-9a-f]{64}", body_hash):
                     quality_record["body_sha256"] = body_hash
             quality_flags.append(quality_record)
+        equation_tag_source_evidence = []
+        for region in (page.get("equation_tag_regions") or [])[:32]:
+            if not isinstance(region, dict):
+                continue
+            label = str(region.get("label_hint") or "")[:16]
+            bbox = _bounded_ocr_bbox(region.get("bbox_normalized"))
+            if not re.fullmatch(r"[0-9]{1,4}[A-Za-z]?", label) or not bbox:
+                continue
+            equation_tag_source_evidence.append({
+                "evidence_id": str(region.get("evidence_id") or "")[:100],
+                "label_hint": label,
+                "bbox_normalized": bbox,
+                "source": str(region.get("source") or "")[:80],
+            })
         footnote_source_evidence = []
         for region in (page.get("footnote_regions") or [])[:8]:
             if not isinstance(region, dict):
@@ -1551,6 +1626,10 @@ def _ocr_manifest_page_records(job: dict) -> list[dict]:
             "formula_visual_evidence": _bounded_formula_evidence(
                 page.get("formula_evidence") or []
             ),
+            "equation_tag_source_evidence": equation_tag_source_evidence,
+            "equation_tag_extraction_status": str(
+                page.get("equation_tag_extraction_status") or "unknown"
+            )[:32],
             "footnote_source_evidence": footnote_source_evidence,
             "quality_flags": quality_flags,
             "needs_review": bool(
@@ -1591,6 +1670,12 @@ def _snapshot_ocr_bundle_job(job: dict) -> dict:
                 ),
                 "text_hint_chars": int(page.get("text_hint_chars") or 0),
                 "text_hint_sha256": str(page.get("text_hint_sha256") or ""),
+                "equation_tag_regions": deepcopy(
+                    page.get("equation_tag_regions") or []
+                ),
+                "equation_tag_extraction_status": str(
+                    page.get("equation_tag_extraction_status") or "unknown"
+                ),
                 "footnote_regions": deepcopy(page.get("footnote_regions") or []),
                 "quality_flags": deepcopy(page.get("quality_flags") or []),
                 "needs_review": bool(page.get("needs_review")),
@@ -2720,6 +2805,79 @@ def create_app(updated_from: str = "") -> FastAPI:
                 raise HTTPException(409, "汇报与安全检查记录不一致，请重新处理项目")
         return report_bytes
 
+    def _project_provenance_record(
+        pid: str,
+        body: bytes,
+        *,
+        verified: bool,
+        attempt: str,
+        result_sha256: str = "",
+        artifact_kind: str = "project-tex",
+    ) -> dict[str, str]:
+        """Bind a downloaded TEX body to its frozen project inputs."""
+        directory = Path(get_store()._dir(pid))
+        try:
+            meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            meta = {}
+        raw_path = directory / "source.tex"
+        try:
+            raw_hash = sha256_bytes(raw_path.read_bytes())
+        except OSError:
+            raw_hash = "unknown"
+
+        source_hash = "unknown"
+        if meta.get("kind") == "ocr":
+            source_info = meta.get("ocr_source")
+            if isinstance(source_info, dict):
+                source_hash = str(source_info.get("sha256") or "unknown")
+        elif meta.get("kind") == "folder":
+            source_archive = directory / "original-files.zip"
+            if source_archive.is_file():
+                source_hash = sha256_bytes(source_archive.read_bytes())
+        else:
+            original_source = directory / "original-source.tex"
+            source_path = original_source if original_source.is_file() else raw_path
+            try:
+                source_hash = sha256_bytes(source_path.read_bytes())
+            except OSError:
+                source_hash = "unknown"
+
+        mode = str(meta.get("mode") or "").lower()
+        prompt_version = PROMPT_VERSION if mode == "ai" else "not-used"
+        result_hash = str(result_sha256 or "")
+        if not result_hash and attempt != "source":
+            result_hash = sha256_bytes(body)
+        return make_provenance_record(
+            body=body,
+            verified=verified,
+            verification_scope=VERIFIED_SCOPE if verified else UNVERIFIED_SCOPE,
+            artifact_kind=artifact_kind,
+            source_sha256=source_hash,
+            raw_sha256=raw_hash,
+            result_sha256=result_hash or "unknown",
+            **_runtime_provenance_identity(prompt_version),
+        )
+
+    def _stamp_project_tex(
+        pid: str,
+        body: bytes,
+        *,
+        verified: bool,
+        attempt: str,
+        result_sha256: str = "",
+        artifact_kind: str = "project-tex",
+    ) -> tuple[bytes, dict[str, str]]:
+        record = _project_provenance_record(
+            pid,
+            body,
+            verified=verified,
+            attempt=attempt,
+            result_sha256=result_sha256,
+            artifact_kind=artifact_kind,
+        )
+        return stamp_tex_provenance(body, record), record
+
     def _current_record(pid: str) -> dict:
         """Return the newest hash-verified attempt, even when TEX validation failed."""
         _ensure(pid)
@@ -2891,9 +3049,11 @@ def create_app(updated_from: str = "") -> FastAPI:
             **template_assets,
             "LATEXSTRUCT-REPORT.md": current["report"],
             "LATEXSTRUCT-UNVERIFIED.txt": warning,
+            PROVENANCE_MANIFEST_NAME: b"",
         }
         info = current.get("info") or {}
         per_file = info.get("per_file") if isinstance(info, dict) else None
+        provenance = None
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
             written = set()
@@ -2903,6 +3063,8 @@ def create_app(updated_from: str = "") -> FastAPI:
                 original_zip = Path(get_store()._dir(pid)) / "original-files.zip"
                 if not original_zip.is_file():
                     raise HTTPException(409, "原始文件夹工程快照缺失，已阻止保真导出")
+                graph = meta.get("graph") or {}
+                main_rel = safe_project_relpath(str(graph.get("main_rel") or "main.tex"))
                 with zipfile.ZipFile(original_zip, "r") as source_zip:
                     for member in source_zip.infolist():
                         if member.is_dir():
@@ -2912,7 +3074,16 @@ def create_app(updated_from: str = "") -> FastAPI:
                             raise HTTPException(
                                 409, f"原项目中的 {rel} 与导出说明文件冲突"
                             )
-                        zf.writestr(rel, source_zip.read(member))
+                        data = source_zip.read(member)
+                        if rel == main_rel:
+                            data, provenance = _stamp_project_tex(
+                                pid,
+                                data,
+                                verified=False,
+                                attempt=current["attempt"],
+                                artifact_kind="unverified-project-main-tex",
+                            )
+                        zf.writestr(rel, data)
                         written.add(rel)
             elif meta.get("kind") == "folder":
                 from ..core.project import encode_project_files
@@ -2929,7 +3100,14 @@ def create_app(updated_from: str = "") -> FastAPI:
                     )
                 except ValueError as exc:
                     raise HTTPException(409, str(exc)) from None
-                zf.writestr(main_rel, encoded_files[main_rel])
+                stamped_main, provenance = _stamp_project_tex(
+                    pid,
+                    encoded_files[main_rel],
+                    verified=False,
+                    attempt=current["attempt"],
+                    artifact_kind="unverified-project-main-tex",
+                )
+                zf.writestr(main_rel, stamped_main)
                 written.add(main_rel)
                 for rel, _content in per_file.items():
                     if not rel:
@@ -2938,7 +3116,14 @@ def create_app(updated_from: str = "") -> FastAPI:
                     zf.writestr(safe_rel, encoded_files[safe_rel])
                     written.add(safe_rel)
             else:
-                zf.writestr("main.tex", current["result"])
+                stamped_main, provenance = _stamp_project_tex(
+                    pid,
+                    current["result"],
+                    verified=False,
+                    attempt=current["attempt"],
+                    artifact_kind="unverified-current-tex",
+                )
+                zf.writestr("main.tex", stamped_main)
                 written.add("main.tex")
 
             original_zip = Path(get_store()._dir(pid)) / "original-files.zip"
@@ -2952,6 +3137,9 @@ def create_app(updated_from: str = "") -> FastAPI:
                         written.add(rel)
             if meta.get("kind") == "ocr":
                 _write_ocr_package_resources(zf, pid, meta, reserved)
+            if provenance is None:
+                raise HTTPException(409, "项目主 TEX 缺失，无法生成可核验导出清单")
+            reserved[PROVENANCE_MANIFEST_NAME] = _provenance_json_bytes(provenance)
             existing = set(zf.namelist())
             for rel, data in reserved.items():
                 if rel not in existing:
@@ -2970,11 +3158,16 @@ def create_app(updated_from: str = "") -> FastAPI:
 
         result_text = decode_tex_bytes(result_bytes).text
         assets = elegantbook_bundle_assets() if uses_elegantbook_class(result_text) else {}
-        reserved = {**assets, "LATEXSTRUCT-REPORT.md": report_bytes}
+        reserved = {
+            **assets,
+            "LATEXSTRUCT-REPORT.md": report_bytes,
+            PROVENANCE_MANIFEST_NAME: b"",
+        }
         meta = json.loads(
             (Path(get_store()._dir(pid)) / "meta.json").read_text(encoding="utf-8")
         )
         per_file = info.get("per_file") if isinstance(info, dict) else None
+        provenance = None
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             if per_file:
@@ -3012,7 +3205,15 @@ def create_app(updated_from: str = "") -> FastAPI:
                             else:
                                 zf.writestr(rel, data)
                             written.add(rel)
-                zf.writestr(main_rel, encoded_files[main_rel])
+                stamped_main, provenance = _stamp_project_tex(
+                    pid,
+                    encoded_files[main_rel],
+                    verified=True,
+                    attempt="committed",
+                    result_sha256=str(info.get("result_sha256") or ""),
+                    artifact_kind="verified-project-main-tex",
+                )
+                zf.writestr(main_rel, stamped_main)
                 written.add(main_rel)
                 for rel, _content in per_file.items():
                     if not rel:
@@ -3027,7 +3228,15 @@ def create_app(updated_from: str = "") -> FastAPI:
                         f"文件数量安全检查未通过（原始 {expected}，导出 {len(written)}），已阻止导出。",
                     )
             else:
-                zf.writestr("main.tex", result_bytes)
+                stamped_main, provenance = _stamp_project_tex(
+                    pid,
+                    result_bytes,
+                    verified=True,
+                    attempt="committed",
+                    result_sha256=str(info.get("result_sha256") or ""),
+                    artifact_kind="verified-structured-tex",
+                )
+                zf.writestr("main.tex", stamped_main)
                 if meta.get("kind") == "ocr":
                     resource_info = meta.get("ocr_resources") or {}
                     unresolved = list(resource_info.get("unresolved") or [])
@@ -3038,6 +3247,9 @@ def create_app(updated_from: str = "") -> FastAPI:
                             + "、".join(str(item) for item in unresolved[:5]),
                         )
                     _write_ocr_package_resources(zf, pid, meta, reserved)
+            if provenance is None:
+                raise HTTPException(409, "项目主 TEX 缺失，无法生成可核验导出清单")
+            reserved[PROVENANCE_MANIFEST_NAME] = _provenance_json_bytes(provenance)
             existing = set(zf.namelist())
             for rel, data in reserved.items():
                 if rel not in existing:
@@ -3134,9 +3346,17 @@ def create_app(updated_from: str = "") -> FastAPI:
 
     @app.get("/api/projects/{pid}/export")
     def export(pid: str):
-        _info, result_bytes = _committed_export(pid)
+        info, result_bytes = _committed_export(pid)
+        stamped, _provenance = _stamp_project_tex(
+            pid,
+            result_bytes,
+            verified=True,
+            attempt="committed",
+            result_sha256=str(info.get("result_sha256") or ""),
+            artifact_kind="verified-structured-tex",
+        )
         return Response(
-            content=result_bytes,
+            content=stamped,
             media_type="application/x-tex",
             headers={"Content-Disposition": f'attachment; filename="{pid}-structured.tex"'},
         )
@@ -3146,8 +3366,19 @@ def create_app(updated_from: str = "") -> FastAPI:
         current = _current_record(pid)
         verified = bool(current["verified"])
         suffix = "" if verified else "-UNVERIFIED"
+        info = current.get("info") or {}
+        stamped, _provenance = _stamp_project_tex(
+            pid,
+            current["result"],
+            verified=verified,
+            attempt=str(current.get("attempt") or "source"),
+            result_sha256=str(info.get("result_sha256") or ""),
+            artifact_kind=(
+                "verified-structured-tex" if verified else "unverified-current-tex"
+            ),
+        )
         return Response(
-            content=current["result"],
+            content=stamped,
             media_type="application/x-tex",
             headers={
                 "Content-Disposition": f'attachment; filename="{pid}-current{suffix}.tex"',
@@ -3188,8 +3419,16 @@ def create_app(updated_from: str = "") -> FastAPI:
             raise HTTPException(404, "项目不存在")
         project_name = str(project.get("name") or "LaTeXStruct")
         if artifact == "result":
-            _info, data = _committed_export(pid)
-            return data, f"{project_name}-structured.tex", True
+            info, data = _committed_export(pid)
+            stamped, _provenance = _stamp_project_tex(
+                pid,
+                data,
+                verified=True,
+                attempt="committed",
+                result_sha256=str(info.get("result_sha256") or ""),
+                artifact_kind="verified-structured-tex",
+            )
+            return stamped, f"{project_name}-structured.tex", True
         if artifact == "report":
             return _committed_report(pid), f"{project_name}-report.md", True
         if artifact in {"package", "folder"}:
@@ -3198,7 +3437,18 @@ def create_app(updated_from: str = "") -> FastAPI:
             current = _current_record(pid)
             verified = bool(current["verified"])
             marker = "" if verified else "-UNVERIFIED"
-            return current["result"], f"{project_name}-current{marker}.tex", verified
+            info = current.get("info") or {}
+            stamped, _provenance = _stamp_project_tex(
+                pid,
+                current["result"],
+                verified=verified,
+                attempt=str(current.get("attempt") or "source"),
+                result_sha256=str(info.get("result_sha256") or ""),
+                artifact_kind=(
+                    "verified-structured-tex" if verified else "unverified-current-tex"
+                ),
+            )
+            return stamped, f"{project_name}-current{marker}.tex", verified
         if artifact == "current-report":
             current = _current_record(pid)
             verified = bool(current["verified"])
@@ -3909,6 +4159,8 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "relation_regions": [],
                 "divider_regions": [],
                 "framed_inset_regions": [],
+                "equation_tag_regions": [],
+                "equation_tag_extraction_status": "pending",
                 "footnote_regions": [],
                 "quality_flags": [],
             }
@@ -3988,6 +4240,9 @@ def create_app(updated_from: str = "") -> FastAPI:
                         ),
                         reference_framed_insets=deepcopy(
                             page.get("framed_inset_regions") or []
+                        ),
+                        reference_equation_tag_regions=deepcopy(
+                            page.get("equation_tag_regions") or []
                         ),
                         reference_footnote_regions=deepcopy(
                             page.get("footnote_regions") or []
@@ -4074,6 +4329,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 iter_pdf_pages,
                 pdf_page_italic_terms,
                 pdf_page_divider_regions,
+                pdf_page_equation_tag_regions,
                 pdf_page_framed_insets,
                 pdf_page_footnote_regions,
                 pdf_page_relation_regions,
@@ -4114,6 +4370,14 @@ def create_app(updated_from: str = "") -> FastAPI:
                 except Exception:  # noqa: BLE001
                     divider_regions = []
                 try:
+                    equation_tag_regions = pdf_page_equation_tag_regions(
+                        job["target"], page_no,
+                    )
+                    equation_tag_extraction_status = "ok"
+                except Exception:  # noqa: BLE001 - optional born-digital geometry
+                    equation_tag_regions = []
+                    equation_tag_extraction_status = "error"
+                try:
                     framed_inset_regions = pdf_page_framed_insets(
                         job["target"], page_no,
                     )
@@ -4137,6 +4401,8 @@ def create_app(updated_from: str = "") -> FastAPI:
                 italic_terms = []
                 relation_regions = []
                 divider_regions = []
+                equation_tag_regions = []
+                equation_tag_extraction_status = "not_applicable"
                 framed_inset_regions = []
                 footnote_regions = []
                 formula_evidence_inputs = []
@@ -4169,6 +4435,10 @@ def create_app(updated_from: str = "") -> FastAPI:
                 page["italic_terms"] = list(italic_terms)
                 page["relation_regions"] = deepcopy(relation_regions)
                 page["divider_regions"] = deepcopy(divider_regions)
+                page["equation_tag_regions"] = deepcopy(equation_tag_regions)
+                page["equation_tag_extraction_status"] = (
+                    equation_tag_extraction_status
+                )
                 page["framed_inset_regions"] = deepcopy(framed_inset_regions)
                 page["footnote_regions"] = deepcopy(footnote_regions)
                 page["image_size_pixels"] = list(pixel_size)

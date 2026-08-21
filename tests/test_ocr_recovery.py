@@ -1115,7 +1115,9 @@ def test_missing_figure_keeps_source_preview_but_never_uses_whole_page_as_asset(
 
         bundle, manifest = _ocr_bundle_bytes(job, raw)
         with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
-            assert archive.read("ocr.tex").decode("utf-8") == raw
+            from latexstruct.core.provenance import strip_tex_provenance
+
+            assert strip_tex_provenance(archive.read("ocr.tex")).decode("utf-8") == raw
             assert "images/page_99_1.png" not in archive.namelist()
             assert archive.read("source-pages/page_0003.png") == page.read_bytes()
             disk_manifest = json.loads(archive.read("OCR-MANIFEST.json"))
@@ -1212,7 +1214,9 @@ def test_vector_only_pdf_uses_structured_bbox_high_dpi_crop_and_manifest():
         }
         assert manifest["resources"]["assets"][0]["kind"] == "bbox_crop"
         with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
-            assert archive.read("ocr.tex").decode("utf-8") == raw
+            from latexstruct.core.provenance import strip_tex_provenance
+
+            assert strip_tex_provenance(archive.read("ocr.tex")).decode("utf-8") == raw
             packaged = archive.read(manifest["resources"]["assets"][0]["path"])
             assert image_pixel_size(packaged) == image_pixel_size(crop_bytes)
 
@@ -1494,12 +1498,24 @@ def test_failed_draft_endpoint_survives_restart_but_never_replaces_export():
         assert client.get(f"/api/projects/{pid}/result").text == verified_result
         exported = client.get(f"/api/projects/{pid}/export")
         assert exported.status_code == 200
-        assert exported.text == verified_result
+        from latexstruct.core.provenance import (
+            parse_tex_provenance,
+            strip_tex_provenance,
+        )
+
+        assert strip_tex_provenance(exported.content).decode("utf-8") == verified_result
 
         current_tex = client.get(f"/api/projects/{pid}/export-current")
         assert current_tex.status_code == 200
         assert current_tex.headers["x-latexstruct-verified"] == "false"
-        assert current_tex.text == "latest unsafe draft"
+        current_provenance = parse_tex_provenance(current_tex.content)
+        assert current_provenance["verification_status"] == "UNVERIFIED"
+        assert current_provenance["result_sha256"] == hashlib.sha256(
+            b"latest unsafe draft"
+        ).hexdigest()
+        assert strip_tex_provenance(current_tex.content).decode("utf-8") == (
+            "latest unsafe draft"
+        )
         current_report = client.get(f"/api/projects/{pid}/export-current-report")
         assert current_report.status_code == 200
         assert current_report.headers["x-latexstruct-verified"] == "false"
@@ -1508,7 +1524,10 @@ def test_failed_draft_endpoint_survives_restart_but_never_replaces_export():
         assert current_package.status_code == 200
         assert current_package.headers["x-latexstruct-verified"] == "false"
         with zipfile.ZipFile(io.BytesIO(current_package.content)) as archive:
-            assert archive.read("main.tex") == b"latest unsafe draft"
+            assert strip_tex_provenance(archive.read("main.tex")) == b"latest unsafe draft"
+            assert json.loads(archive.read("LATEXSTRUCT-PROVENANCE.json")) == (
+                current_provenance
+            )
             assert archive.read("LATEXSTRUCT-REPORT.md") == b"actionable failure report"
             assert "LATEXSTRUCT-UNVERIFIED.txt" in archive.namelist()
 

@@ -100,6 +100,37 @@ def test_perfect_structure_passes_every_independent_gate():
     assert not any(report["blockers"].values())
 
 
+def test_faithfulbook_layout_controls_do_not_count_as_added_body_text():
+    candidate = PERFECT.replace(
+        "\\tableofcontents\n",
+        "\\LSFirstPageEmpty\n\\tableofcontents\n\\LSMainMatter\n",
+    ).replace(
+        "\\chapter{Results}\n",
+        "\\chapter{Results}\n\\LSChapterContents\n",
+    )
+
+    report = evaluate_tex_structure(ORIGINAL, candidate, manifest=_manifest())
+
+    assert report["passed"] is True
+    assert report["body_token_conservation"]["conserved"] is True
+    assert report["body_token_conservation"]["excess_token_count"] == 0
+
+
+def test_page_break_normalization_does_not_consume_next_line_bracket_text():
+    original = ORIGINAL.replace(
+        "Final words.",
+        "\\clearpage\n[28] Reference entry.\nFinal words.",
+    )
+    candidate = PERFECT.replace(
+        "Final words.",
+        "[28] Reference entry.\nFinal words.",
+    )
+    report = evaluate_tex_structure(original, candidate, manifest=_manifest())
+
+    assert report["passed"] is True
+    assert report["body_token_conservation"]["conserved"] is True
+
+
 def test_missing_environment_and_residual_heading_fail_closed():
     candidate = PERFECT.replace(
         "\\begin{theorem*}[1.1]\n\\textit{Every widget works.}\n"

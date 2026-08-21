@@ -49,6 +49,7 @@ def _terminal_job(job_id: str, *, low_conf: bool = False) -> dict:
                 "needs_review": low_conf,
                 "quality_flags": [],
                 "figures": [],
+                "equation_tag_extraction_status": "ok",
                 "text_hint_chars": 10,
                 "text_hint_sha256": "a" * 64,
             },
@@ -128,7 +129,16 @@ def test_bundle_manifest_binds_source_processing_and_resource_quality(tmp_path):
     assert manifest["quality_report"]["resource_gate_passed"] is True
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         stored = json.loads(archive.read("OCR-MANIFEST.json"))
+        provenance = json.loads(archive.read("LATEXSTRUCT-PROVENANCE.json"))
+        from latexstruct.core.provenance import parse_tex_provenance
+
+        assert provenance == parse_tex_provenance(archive.read("ocr.tex"))
+        assert provenance["verification_status"] == "UNVERIFIED"
+        assert provenance["raw_sha256"] == hashlib.sha256(
+            job["raw_tex"].encode("utf-8")
+        ).hexdigest()
     assert stored == manifest
+    assert stored["provenance"] == provenance
 
 
 def test_original_ocr_pdf_is_preserved_as_hash_bound_project_evidence(tmp_path):

@@ -228,8 +228,17 @@ def _normalise_fragment(text: str, *, document_scope: bool = False) -> tuple[str
         " ",
         text,
     )
+    # FaithfulBook inserts these zero-argument layout controls in the document
+    # body.  They affect navigation/pagination only and must not be counted as
+    # source prose added by the structural transformation.
     text = re.sub(
-        r"\\(?:clearpage|cleardoublepage|newpage|pagebreak)\b(?:\s*\[[^\]\n]*\])?",
+        r"\\(?:LSFirstPageEmpty|LSMainMatter|LSChapterContents)\b",
+        " ",
+        text,
+    )
+    text = re.sub(
+        r"\\(?:clearpage|cleardoublepage|newpage|pagebreak)\b"
+        r"(?:[ \t]*\[[^\]\r\n]*\])?",
         " ",
         text,
     )

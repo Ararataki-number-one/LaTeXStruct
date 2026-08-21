@@ -200,6 +200,77 @@ def test_health_and_project_flow():
         assert c.get(f"/api/projects/{pid}").status_code == 404
 
 
+def test_verified_tex_and_zip_share_exact_provenance_record():
+    from latexstruct.core.provenance import (
+        PROVENANCE_MANIFEST_NAME,
+        parse_tex_provenance,
+        strip_tex_provenance,
+    )
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        pid = c.post(
+            "/api/projects",
+            json={"text": SAMPLE, "name": "provenance", "mode": "rule"},
+        ).json()["id"]
+        assert c.post(f"/api/projects/{pid}/process").json()["ok"] is True
+
+        exported = c.get(f"/api/projects/{pid}/export")
+        record = parse_tex_provenance(exported.content)
+        assert record["verification_status"] == "VERIFIED"
+        assert "not_ocr_text_math_or_semantic_accuracy" in record["verification_scope"]
+        assert record["app_version"] != "unknown"
+        assert record["prompt_version"] == "not-used"
+        assert record["build_id"] == (
+            os.environ.get("LATEXSTRUCT_BUILD_ID")
+            or os.environ.get("GITHUB_RUN_ID")
+            or "unknown"
+        )
+        assert record["commit"] == (
+            os.environ.get("LATEXSTRUCT_BUILD_COMMIT")
+            or os.environ.get("GITHUB_SHA")
+            or "unknown"
+        )
+        assert strip_tex_provenance(exported.content) == c.get(
+            f"/api/projects/{pid}/result"
+        ).content
+
+        package = c.get(f"/api/projects/{pid}/export-package")
+        with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
+            package_record = json.loads(archive.read(PROVENANCE_MANIFEST_NAME))
+            assert package_record == parse_tex_provenance(archive.read("main.tex"))
+            assert package_record == record
+
+
+def test_unprocessed_current_tex_and_zip_are_self_describing_unverified_snapshots():
+    from latexstruct.core.provenance import (
+        PROVENANCE_MANIFEST_NAME,
+        parse_tex_provenance,
+        strip_tex_provenance,
+    )
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        pid = c.post(
+            "/api/projects",
+            json={"text": SAMPLE, "name": "raw-provenance", "mode": "ai"},
+        ).json()["id"]
+
+        current = c.get(f"/api/projects/{pid}/export-current")
+        record = parse_tex_provenance(current.content)
+        assert current.headers["x-latexstruct-verified"] == "false"
+        assert record["verification_status"] == "UNVERIFIED"
+        assert record["result_sha256"] == "unknown"
+        assert record["prompt_version"] == "3.6"
+        assert strip_tex_provenance(current.content) == SAMPLE.encode("utf-8")
+
+        package = c.get(f"/api/projects/{pid}/export-current-package")
+        with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
+            package_record = json.loads(archive.read(PROVENANCE_MANIFEST_NAME))
+            assert package_record == parse_tex_provenance(archive.read("main.tex"))
+            assert package_record == record
+
+
 def test_single_file_binary_import_preserves_latin1_bytes_and_encodes_modifications():
     unavailable = {
         "available": False, "ok": None, "pages": 0, "errors": [], "log": "",
@@ -230,7 +301,11 @@ def test_single_file_binary_import_preserves_latin1_bytes_and_encodes_modificati
             unchanged_pid = unchanged.json()["id"]
             processed = c.post(f"/api/projects/{unchanged_pid}/process")
             assert processed.status_code == 200 and processed.json()["ok"] is True
-            assert c.get(f"/api/projects/{unchanged_pid}/export").content == unchanged_raw
+            from latexstruct.core.provenance import strip_tex_provenance
+
+            assert strip_tex_provenance(
+                c.get(f"/api/projects/{unchanged_pid}/export").content
+            ) == unchanged_raw
 
             modified = c.post("/api/projects", json={
                 "text": "",
@@ -329,7 +404,9 @@ def test_folder_export_preserves_unchanged_gbk_and_encodes_modified_tex_as_gbk()
         assert current.status_code == 200
         assert current.headers["x-latexstruct-verified"] == "false"
         with zipfile.ZipFile(io.BytesIO(current.content)) as archive:
-            assert archive.read("main.tex") == main_raw
+            from latexstruct.core.provenance import strip_tex_provenance
+
+            assert strip_tex_provenance(archive.read("main.tex")) == main_raw
             assert archive.read("chapter.tex") == chapter_raw
         with patch("latexstruct.core.compilecheck.compile_latex", return_value=unavailable):
             processed = c.post(f"/api/projects/{pid}/process")
@@ -340,7 +417,7 @@ def test_folder_export_preserves_unchanged_gbk_and_encodes_modified_tex_as_gbk()
             exported_main = archive.read("main.tex")
             exported_chapter = archive.read("chapter.tex")
 
-        assert exported_main == main_raw
+        assert strip_tex_provenance(exported_main) == main_raw
         chapter_text = exported_chapter.decode("gbk")
         assert "\\begin{theorem}" in chapter_text
         assert "\u4e2d\u6587\u5b9a\u7406" in chapter_text
@@ -438,7 +515,9 @@ def test_incompatible_elegantbook_conversion_is_not_committed_as_verified():
         current = c.get(f"/api/projects/{pid}/export-current")
         assert current.status_code == 200
         assert current.headers["x-latexstruct-verified"] == "false"
-        assert current.text == text
+        from latexstruct.core.provenance import strip_tex_provenance
+
+        assert strip_tex_provenance(current.content).decode("utf-8") == text
 
 
 def test_export_requires_current_committed_verification_hash():
@@ -463,7 +542,9 @@ def test_export_requires_current_committed_verification_hash():
         )
         legacy = c.get(f"/api/projects/{pid}/export")
         assert legacy.status_code == 200
-        assert legacy.text == legacy_text
+        from latexstruct.core.provenance import strip_tex_provenance
+
+        assert strip_tex_provenance(legacy.content).decode("utf-8") == legacy_text
 
         committed_text = COMMITTED_ELEGANT.replace("\n", "\r\n")
         store.set_result(
@@ -525,7 +606,9 @@ def test_partial_result_write_restores_previous_complete_commit():
         assert store.read_report(pid) == "# old report"
         restored = c.get(f"/api/projects/{pid}/export")
         assert restored.status_code == 200
-        assert restored.text == COMMITTED_ELEGANT
+        from latexstruct.core.provenance import strip_tex_provenance
+
+        assert strip_tex_provenance(restored.content).decode("utf-8") == COMMITTED_ELEGANT
 
 
 def test_config_masked():
@@ -3234,7 +3317,9 @@ def test_update_install_preserves_completed_paid_ocr_until_downloaded_or_discard
             assert browser_package.status_code == 200
             assert browser_package.headers["x-latexstruct-ocr-complete"] == "true"
             with zipfile.ZipFile(io.BytesIO(browser_package.content)) as archive:
-                assert archive.read("ocr.tex") == b"paid OCR result"
+                from latexstruct.core.provenance import strip_tex_provenance
+
+                assert strip_tex_provenance(archive.read("ocr.tex")) == b"paid OCR result"
                 assert "OCR-MANIFEST.json" in archive.namelist()
             with srv._ocr_jobs_lock:
                 assert srv._ocr_jobs["paid-ocr"]["downloaded_revision"] == 0
@@ -3247,7 +3332,9 @@ def test_update_install_preserves_completed_paid_ocr_until_downloaded_or_discard
             assert downloaded.json()["filename"].endswith(".zip")
             saved_package = Path(tmp, "ocr-downloads", downloaded.json()["filename"])
             with zipfile.ZipFile(saved_package) as archive:
-                assert archive.read("ocr.tex") == b"paid OCR result"
+                from latexstruct.core.provenance import strip_tex_provenance
+
+                assert strip_tex_provenance(archive.read("ocr.tex")) == b"paid OCR result"
                 assert "OCR-MANIFEST.json" in archive.namelist()
             with srv._ocr_jobs_lock:
                 assert srv._ocr_jobs["paid-ocr"]["downloaded_revision"] == 1

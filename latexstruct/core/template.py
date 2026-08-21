@@ -27,6 +27,8 @@ DOC_CLASS_CAPTURE_RE = re.compile(
 BEGIN_DOCUMENT_RE = re.compile(r"^\s*\\begin\s*\{document\}\s*$")
 TABLEOFCONTENTS_RE = re.compile(r"^\s*\\tableofcontents\s*(?:%.*)?$")
 PAGE_BREAK_COMMAND_RE = re.compile(r"^\s*\\(?:clearpage|newpage)\s*$")
+OCR_PAGE_RE = re.compile(r"^\s*%\s*Page\s+\d+\s*$", re.I)
+OCR_PAGE_BREAK_RE = re.compile(r"^\s*%===\s*PAGE BREAK\s*===", re.I)
 FRONTMATTER_RE = re.compile(r"^\s*\\frontmatter\s*$")
 MAINMATTER_RE = re.compile(r"^\s*\\mainmatter\s*$")
 USEPACKAGE_RE = re.compile(r"\\usepackage(?:\[[^\]]*\])?\s*\{([^{}]+)\}")
@@ -108,7 +110,7 @@ TEMPLATE_PRESETS = (
     {
         "id": FAITHFULBOOK,
         "label": "出版书籍（接近原稿）",
-        "description": "适合 OCR 图书的双面书籍版式；保持源页分隔并生成结构化页眉和章内目录，不代表逐页复刻或出版质量保证。",
+        "description": "适合 OCR 图书的双面书籍版式；默认移除可证明由 OCR 合并生成的硬分页，并生成结构化页眉和章内目录，不代表逐页复刻或出版质量保证。",
         "recommended_for": "ocr",
         "layout_change": True,
         "qa_profile": "publication",
@@ -168,6 +170,63 @@ def _escape_latex_text(value: str) -> str:
     }
     cleaned = "".join(char for char in str(value or "") if char >= " " and char != "\x7f")
     return "".join(mapping.get(char, char) for char in cleaned.strip()[:160])
+
+
+def _project_title_requested(context: Dict[str, str] | None) -> bool:
+    """Only an explicit policy may turn a project label into document content."""
+    return str((context or {}).get("title_policy") or "source").strip().lower() == "project"
+
+
+def _pagination_policy(text: str, context: Dict[str, str] | None) -> str:
+    """Resolve page-boundary handling without changing ordinary TeX defaults."""
+    requested = str((context or {}).get("pagination_policy") or "").strip().lower()
+    if requested == "reflow":
+        requested = "semantic"
+    if requested in {"preserve", "semantic"}:
+        return requested
+    if requested:
+        return "preserve"
+
+    from .ocrstruct import is_ocr_document
+
+    return "semantic" if is_ocr_document(text) else "preserve"
+
+
+def _source_pagination_ops(
+    text: str,
+    context: Dict[str, str] | None,
+) -> Tuple[List[PendingOp], List[dict]]:
+    """Remove only source-page breaks carrying adjacent OCR merge evidence.
+
+    The page merger emits either ``\\clearpage`` + ``% Page N`` (legacy) or
+    ``\\clearpage`` + its explicit ``%=== PAGE BREAK ===`` marker. Requiring
+    one of those exact adjacent provenance lines protects author-written
+    pagination and also means that later template-owned TOC/main-matter breaks
+    are outside this edit plan.
+    """
+    if _pagination_policy(text, context) != "semantic":
+        return [], []
+
+    lines = text.split("\n")
+    ops: List[PendingOp] = []
+    for index, line in enumerate(lines):
+        if not PAGE_BREAK_COMMAND_RE.match(line) or index + 1 >= len(lines):
+            continue
+        following = lines[index + 1]
+        direct_page = OCR_PAGE_RE.match(following) is not None
+        merged_boundary = OCR_PAGE_BREAK_RE.match(following) is not None
+        if direct_page or merged_boundary:
+            ops.append(PendingOp("delete_line", index + 1, old=line))
+
+    if not ops:
+        return [], []
+    return ops, [{
+        "line": ops[0].line,
+        "reason": (
+            f"语义重排已移除 {len(ops)} 个带相邻 OCR 页码证据的源页硬分页；"
+            "普通正文分页与模板目录分页保持不变"
+        ),
+    }]
 
 
 def _has_custom_environment(text: str, env: str) -> bool:
@@ -391,6 +450,9 @@ def _build_professional_handout_ops(
         "line": begin_index + 1,
         "reason": "已应用固定 A4 讲义版式、标题层级与页眉页码",
     }]
+    pagination_ops, pagination_notes = _source_pagination_ops(text, context)
+    ops.extend(pagination_ops)
+    notes.extend(pagination_notes)
     if safe_box_envs:
         notes.append({
             "line": begin_index + 1,
@@ -414,14 +476,24 @@ def _build_professional_handout_ops(
         notes.append({"line": begin_index + 1, "reason": "已将原有标题页换为专业讲义样式"})
     else:
         raw_title = str((context or {}).get("title") or "").strip()
-        if raw_title and raw_title != "未命名项目":
+        if (
+            _project_title_requested(context)
+            and raw_title
+            and raw_title != "未命名项目"
+        ):
             escaped_title = _escape_latex_text(raw_title)
             chinese = bool(re.search(r"[\u3400-\u9fff]", raw_title + text[:4000]))
             cover = _direct_cover_lines(escaped_title, chinese)
             ops.extend(PendingOp("insert_line", begin_index + 1, new=line) for line in cover)
-            notes.append({"line": begin_index + 1, "reason": "已使用项目名称生成专业标题页"})
+            notes.append({
+                "line": begin_index + 1,
+                "reason": "title_policy=project：已使用项目名称生成专业标题页",
+            })
         else:
-            notes.append({"line": begin_index + 1, "reason": "项目没有可用标题，未臆造标题页"})
+            notes.append({
+                "line": begin_index + 1,
+                "reason": "source-first 标题策略：未用项目名称臆造或重复标题页",
+            })
 
     toc_index = next((index for index, line in enumerate(lines) if TABLEOFCONTENTS_RE.match(line)), None)
     if toc_index is not None:
@@ -583,6 +655,9 @@ def _build_elegantbook_ops(
     """把已确认的结构适配为固定 ElegantBook，而不猜测标题或目录边界。"""
     ops: List[PendingOp] = []
     notes: List[dict] = []
+    pagination_ops, pagination_notes = _source_pagination_ops(text, context)
+    ops.extend(pagination_ops)
+    notes.extend(pagination_notes)
     doc = parse_latex(text)
     lines = text.split("\n")
     class_item = next(
@@ -613,7 +688,12 @@ def _build_elegantbook_ops(
     has_title = bool(re.search(r"\\title\s*\{", active))
     has_maketitle = bool(re.search(r"\\maketitle\b", active))
     raw_title = str((context or {}).get("title") or "").strip()
-    will_have_title = has_title or bool(raw_title and raw_title != "未命名项目")
+    project_title = bool(
+        _project_title_requested(context)
+        and raw_title
+        and raw_title != "未命名项目"
+    )
+    will_have_title = has_title or project_title
     has_cover = bool(re.search(r"\\cover\s*\{", active))
     has_custom_maketitle = bool(re.search(
         r"\\(?:re)?newcommand\*?\s*\{?\\maketitle\}?",
@@ -717,13 +797,21 @@ def _build_elegantbook_ops(
             "reason": "已补齐固定的 ElegantBook 定理色块定义；原书编号仍按原文显示",
         })
 
-    if not has_title and raw_title and raw_title != "未命名项目":
+    if not has_title and project_title:
         ops.append(PendingOp(
             "insert_line", begin_index,
             new=rf"\title{{{_escape_latex_text(raw_title)}}}",
         ))
         has_title = True
-        notes.append({"line": begin_index + 1, "reason": "已使用项目名称生成 ElegantBook 标题页"})
+        notes.append({
+            "line": begin_index + 1,
+            "reason": "title_policy=project：已使用项目名称生成 ElegantBook 标题页",
+        })
+    elif not has_title:
+        notes.append({
+            "line": begin_index + 1,
+            "reason": "source-first 标题策略：已保留原始封面，未用项目名称重复生成标题页",
+        })
     if has_title and not has_maketitle:
         ops.append(PendingOp("insert_line", begin_index + 1, new=r"\maketitle"))
 
@@ -795,9 +883,10 @@ def _build_faithfulbook_ops(
 ) -> Tuple[List[PendingOp], List[dict]]:
     """Apply a compact, two-sided OCR book style without rewriting source text.
 
-    The source-page ``\\clearpage`` commands and ``% Page`` markers are not
-    edited.  Running heads are generated from chapter/section marks, never by
-    copying OCR body lines into the preamble.
+    With semantic pagination, only hard page breaks carrying adjacent OCR
+    merge evidence are removed; inert ``% Page`` provenance markers and
+    author-written page breaks remain.  Running heads are generated from
+    chapter/section marks, never by copying OCR body lines into the preamble.
     """
     if uses_faithfulbook_style(text):
         duplicate_ops, _toc_lines, duplicate_notes = _deduplicate_global_toc_ops(text)
@@ -857,6 +946,9 @@ def _build_faithfulbook_ops(
     class_line = rf"\documentclass[{class_options}]{{{target_class}}}"
     ops: List[PendingOp] = []
     notes: List[dict] = []
+    pagination_ops, pagination_notes = _source_pagination_ops(text, context)
+    ops.extend(pagination_ops)
+    notes.extend(pagination_notes)
     toc_dedupe_ops, global_toc_lines, toc_notes = _deduplicate_global_toc_ops(text)
     ops.extend(toc_dedupe_ops)
     notes.extend(toc_notes)
@@ -1042,7 +1134,7 @@ def _build_faithfulbook_ops(
 
     source_clearpages = sum(
         1 for line in mask_comments(text).split("\n")
-        if line.strip() == r"\clearpage"
+        if PAGE_BREAK_COMMAND_RE.match(line)
     )
     notes.extend([
         {
@@ -1060,11 +1152,12 @@ def _build_faithfulbook_ops(
                 "不会把 OCR 页眉或印刷页码复制到页眉"
             ),
         },
-        {
-            "line": begin_index + 1,
-            "reason": f"完整保留 {source_clearpages} 个源页 \\clearpage 分界",
-        },
     ])
+    if not pagination_ops:
+        notes.append({
+            "line": begin_index + 1,
+            "reason": f"分页策略保留 {source_clearpages} 个源分页命令",
+        })
     if shifted:
         notes.append({
             "line": 1,

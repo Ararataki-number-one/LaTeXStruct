@@ -330,8 +330,8 @@ def test_release_build_safety_guards():
     assert "v1.1.4" not in workflow
     assert "name: LaTeXStruct-v${{ env.APP_VERSION }}" in workflow
     assert "name: LaTeXStruct-${{ github.ref_name }}" not in workflow
-    assert "$previousVersion = '1.2.1'" in workflow
-    assert "previous_version='1.2.1'" in workflow
+    assert "$previousVersion = '1.2.2'" in workflow
+    assert "previous_version='1.2.2'" in workflow
     assert "[string]$health.version -eq $previousVersion" in workflow
     assert "            if (-not $oldHealthy)" in workflow
     # 升级冒烟必须走应用内真实的独立 helper，不能绕过第一阶段

@@ -8,6 +8,8 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from latexstruct.core.pipeline import run_pipeline  # noqa: E402
+from latexstruct.core.ocrstruct import encode_ocr_metadata  # noqa: E402
+from latexstruct.core.patch import Decision, apply_patches, validate_ops  # noqa: E402
 from latexstruct.core.template import (  # noqa: E402
     ELEGANTBOOK,
     FAITHFULBOOK,
@@ -217,13 +219,38 @@ Body stays byte-for-byte.
         text,
         mode="rule",
         template=PROFESSIONAL_HANDOUT,
-        template_context={"title": "Graphs & Proofs_100%"},
+        template_context={
+            "title": "Graphs & Proofs_100%",
+            "title_policy": "project",
+        },
     )
     assert res.ok, res.report_md
     assert r"Graphs \& Proofs\_100\%" in res.result
     assert "Professional Lecture Notes" in res.result
     assert "Body stays byte-for-byte." in res.result
     assert res.verification["content_invariant"] is True
+
+
+def test_professional_handout_is_source_first_unless_project_title_is_explicit():
+    text = """\\documentclass{article}
+\\begin{document}
+\\begin{center}
+\\textbf{THE SOURCE TITLE}
+\\end{center}
+Body.
+\\end{document}
+"""
+    ops, notes = build_template_ops(
+        text,
+        template=PROFESSIONAL_HANDOUT,
+        context={"title": "OCR"},
+    )
+    inserted = "\n".join(op.new for op in ops)
+
+    assert r"\\title{OCR}" not in inserted
+    assert r"\\maketitle" not in inserted
+    assert not any("OCR" in op.new for op in ops)
+    assert any("source-first" in item["reason"] for item in notes)
 
 
 def test_professional_handout_skips_unsupported_class_and_custom_boxes():
@@ -248,11 +275,145 @@ Text
     ops, _ = build_template_ops(
         ctex,
         template=PROFESSIONAL_HANDOUT,
-        context={"title": "图论专题讲义"},
+        context={"title": "图论专题讲义", "title_policy": "project"},
     )
     inserted = "\n".join(op.new for op in ops)
     assert "专业讲义" in inserted
     assert r"\usepackage{titlesec}" not in inserted
+
+
+def test_ocr_publication_is_source_first_and_reflows_37_page_merge_boundaries():
+    metadata = encode_ocr_metadata(
+        [
+            {"level": 0, "title": "1. Introduction", "page": 1},
+            {"level": 0, "title": "2. Upper bounds", "page": 19},
+        ],
+        "article",
+        range(1, 38),
+        False,
+    )
+    lines = [
+        r"\documentclass[11pt]{article}",
+        r"\usepackage{amsmath}",
+        r"\begin{document}",
+        metadata,
+        r"% Page 1",
+        r"\begin{center}",
+        r"\textbf{SOME RECENT RESULTS IN RAMSEY THEORY}",
+        r"\end{center}",
+        r"\begin{center}",
+        r"ROBERT MORRIS",
+        r"\end{center}",
+        r"\section{1. Introduction}",
+        "Source body page 1.",
+    ]
+    for page in range(2, 38):
+        lines.extend([
+            r"\clearpage",
+            f"%=== PAGE BREAK === 第 {page} 段",
+            f"% Page {page}",
+        ])
+        if page == 19:
+            lines.append(r"\section{2. Upper bounds}")
+        lines.append(f"Source body page {page}.")
+    lines.extend([r"\end{document}", ""])
+    source = "\n".join(lines)
+
+    ops, notes = build_template_ops(
+        source,
+        template=ELEGANTBOOK,
+        context={"title": "OCR"},
+    )
+    planned, rejected = validate_ops(
+        source.split("\n"),
+        [(Decision(candidate_id="template", action="none"), ops)],
+    )
+    assert not rejected, rejected[0].error if rejected else ""
+    output_lines, _, patch_rejected = apply_patches(source.split("\n"), planned)
+    assert not patch_rejected
+    output = "\n".join(output_lines)
+
+    # The visible source cover is authoritative; a project label such as
+    # "OCR" cannot silently become a second title page.
+    assert r"\title{OCR}" not in output
+    assert r"\maketitle" not in output
+    assert output.count("SOME RECENT RESULTS IN RAMSEY THEORY") == 1
+    assert output.count("ROBERT MORRIS") == 1
+
+    # All 36 merger-owned hard breaks are removed.  The sole remaining break
+    # is the template-owned global-TOC/main-matter transition.
+    assert source.count(r"\clearpage") == 36
+    assert output.count(r"\clearpage") == 1
+    assert output.count("% Page ") == 37
+    assert output.count("%=== PAGE BREAK ===") == 36
+    assert output.count(r"\tableofcontents") == 1
+    assert any("移除 36 个" in item["reason"] for item in notes)
+    assert any("source-first" in item["reason"] for item in notes)
+
+    preserve_ops, _ = build_template_ops(
+        source,
+        template=ELEGANTBOOK,
+        context={"title": "OCR", "pagination_policy": "preserve"},
+    )
+    preserve_planned, preserve_rejected = validate_ops(
+        source.split("\n"),
+        [(Decision(candidate_id="template", action="none"), preserve_ops)],
+    )
+    assert not preserve_rejected
+    preserve_lines, _, preserve_patch_rejected = apply_patches(
+        source.split("\n"), preserve_planned,
+    )
+    assert not preserve_patch_rejected
+    preserve_output = "\n".join(preserve_lines)
+    assert preserve_output.count(r"\clearpage") == 37
+
+    # The same provenance rule is shared by both other publication renderers;
+    # no template gets a separate, looser definition of an OCR page break.
+    for related_template in (PROFESSIONAL_HANDOUT, FAITHFULBOOK):
+        related_ops, _ = build_template_ops(
+            source,
+            template=related_template,
+            context={"title": "OCR"},
+        )
+        deleted_boundaries = [
+            op for op in related_ops
+            if op.kind == "delete_line" and op.old == r"\clearpage"
+        ]
+        assert len(deleted_boundaries) == 36
+        assert not any(op.new == r"\title{OCR}" for op in related_ops)
+
+
+def test_ordinary_tex_preserves_author_page_breaks_by_default():
+    source = """\\documentclass{article}
+\\begin{document}
+\\section{One}
+Text.
+\\clearpage
+% Page 2
+\\section{Two}
+More text.
+\\end{document}
+"""
+    ops, _ = build_template_ops(source, template=ELEGANTBOOK)
+
+    assert not any(
+        op.kind == "delete_line" and op.old == r"\clearpage"
+        for op in ops
+    )
+
+    marker_only = source.replace(
+        "% Page 2",
+        "%=== PAGE BREAK === legacy merger evidence",
+    )
+    semantic_ops, _ = build_template_ops(
+        marker_only,
+        template=ELEGANTBOOK,
+        context={"pagination_policy": "semantic"},
+    )
+    assert sum(
+        op.kind == "delete_line" and op.old == r"\clearpage"
+        for op in semantic_ops
+    ) == 1
 
 
 def test_elegantbook_rejects_incompatible_document_classes_fail_closed():

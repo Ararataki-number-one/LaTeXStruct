@@ -132,3 +132,106 @@ def test_incomplete_job_is_never_ready_and_profile_is_allowlisted():
     assert report["pages"]["failed_or_incomplete"] == [4]
     with pytest.raises(ValueError, match="standard.*publication"):
         normalize_ocr_quality_profile("publication; rm")
+
+
+def test_publication_document_inventory_requires_matching_equation_and_footnote_evidence():
+    job = _job()
+    job["pages"][3].update({
+        "equation_tag_regions": [
+            {"evidence_id": "p3-equation-tag-1", "label_hint": "3"},
+        ],
+        "footnote_regions": [
+            {"evidence_id": "p3-footnote-1", "marker_hint": "1"},
+        ],
+        "quality_flags": [
+            {
+                "type": "equation_tag_integrity_evidence",
+                "status": "source_geometry_and_active_match",
+                "evidence_id": "p3-equation-tag-1",
+                "needs_review": False,
+            },
+            {
+                "type": "footnote_structure_evidence",
+                "status": "source_geometry_and_active_match",
+                "evidence_id": "p3-footnote-1",
+                "needs_review": False,
+            },
+        ],
+    })
+
+    report = assess_ocr_quality(job)
+
+    assert report["page_gate_passed"] is True
+    assert report["document_inventory"] == {
+        "equation_tags": {
+            "expected": 1,
+            "verified": 1,
+            "matched": True,
+            "extractor_ok": True,
+        },
+        "footnotes": {"expected": 1, "verified": 1, "matched": True},
+    }
+    assert report["counts"]["equation_tags_verified"] == 1
+    assert report["counts"]["footnotes_verified"] == 1
+
+
+def test_publication_blocks_but_standard_warns_on_document_inventory_mismatch():
+    publication = _job()
+    publication["pages"][3]["equation_tag_regions"] = [
+        {"evidence_id": "p3-equation-tag-1", "label_hint": "3"},
+    ]
+    publication["pages"][4]["footnote_regions"] = [
+        {"evidence_id": "p4-footnote-1", "marker_hint": "2"},
+    ]
+    standard = _job("standard")
+    standard["pages"][3]["equation_tag_regions"] = list(
+        publication["pages"][3]["equation_tag_regions"]
+    )
+    standard["pages"][4]["footnote_regions"] = list(
+        publication["pages"][4]["footnote_regions"]
+    )
+
+    strict_report = assess_ocr_quality(publication)
+    compatibility_report = assess_ocr_quality(standard)
+
+    assert strict_report["page_gate_passed"] is False
+    assert {item["code"] for item in strict_report["blockers"]} == {
+        "equation_tag_inventory_mismatch",
+        "footnote_inventory_mismatch",
+    }
+    assert compatibility_report["page_gate_passed"] is True
+    assert {item["code"] for item in compatibility_report["warnings"]} == {
+        "equation_tag_inventory_mismatch",
+        "footnote_inventory_mismatch",
+    }
+
+
+def test_publication_blocks_when_equation_tag_extractor_failed_before_empty_inventory():
+    publication = _job()
+    publication["pages"][3]["equation_tag_extraction_status"] = "error"
+    standard = _job("standard")
+    standard["pages"][3]["equation_tag_extraction_status"] = "error"
+
+    strict_report = assess_ocr_quality(publication)
+    compatibility_report = assess_ocr_quality(standard)
+
+    assert strict_report["page_gate_passed"] is False
+    assert {item["code"] for item in strict_report["blockers"]} == {
+        "equation_tag_extractor_failed",
+    }
+    assert compatibility_report["page_gate_passed"] is True
+    assert {item["code"] for item in compatibility_report["warnings"]} == {
+        "equation_tag_extractor_failed",
+    }
+
+
+def test_publication_pdf_requires_successful_equation_inventory_status_on_done_pages():
+    publication = _job()
+    publication["source_type"] = "pdf"
+    publication["pages"][3]["equation_tag_extraction_status"] = "ok"
+    publication["pages"][4]["equation_tag_extraction_status"] = "pending"
+
+    report = assess_ocr_quality(publication)
+
+    assert report["page_gate_passed"] is False
+    assert report["pages"]["equation_tag_extractor_failed"] == [4]
