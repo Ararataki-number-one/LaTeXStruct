@@ -26,11 +26,13 @@ jobs:
       - name: 校验发布版本
         id: version
         shell: bash
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           set -euo pipefail
           VERSION="$(python -c 'from latexstruct._version import __version__; print(__version__)')"
           EXPECTED_PREFIX="release: v${VERSION}"
-          MESSAGE="${{ github.event.head_commit.message }}"
+          MESSAGE="$COMMIT_MESSAGE"
           if [[ "$MESSAGE" != "$EXPECTED_PREFIX"* ]]; then
             echo "发布提交与版本文件不一致: expected prefix=$EXPECTED_PREFIX" >&2
             exit 1
