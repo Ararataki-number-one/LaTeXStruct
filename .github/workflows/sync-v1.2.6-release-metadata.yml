@@ -1,0 +1,80 @@
+name: sync-v1.2.6-release-metadata
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/sync-v1.2.6-release-metadata.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.head_ref == 'release/v1.2.6'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/v1.2.6
+          fetch-depth: 0
+
+      - name: Synchronize all v1.2.6 release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          version_info = Path('packaging/version_info.txt')
+          text = version_info.read_text(encoding='utf-8')
+          text = text.replace('(1, 2, 5, 0)', '(1, 2, 6, 0)')
+          text = text.replace("u'1.2.5'", "u'1.2.6'")
+          version_info.write_text(text, encoding='utf-8')
+
+          readme = Path('README.md')
+          text = readme.read_text(encoding='utf-8')
+          text = text.replace('## 当前状态（v1.2.5）', '## 当前状态（v1.2.6）')
+          marker = '## 当前状态（v1.2.6）\n'
+          bullet = ('\n- 工作台新增“一键生成 AI 审计提交包”：自动冻结当前 RunSnapshot、整理真实源文件、'
+                    '阶段 TeX、编译预览、验证与决策记录，生成可直接提交给 ChatGPT/Codex 的 ZIP 和提示词；'
+                    '文件角色、状态、哈希与血缘全部由宿主程序确定。\n')
+          if marker in text and '工作台新增“一键生成 AI 审计提交包”' not in text:
+              text = text.replace(marker, marker + bullet, 1)
+          readme.write_text(text, encoding='utf-8')
+
+          changelog = Path('CHANGELOG.md')
+          text = changelog.read_text(encoding='utf-8')
+          heading = '## v1.2.6（2026-08-22）'
+          if heading not in text:
+              marker = '## Unreleased\n'
+              if marker not in text:
+                  raise SystemExit('CHANGELOG Unreleased marker missing')
+              section = '''
+## v1.2.6（2026-08-22）
+
+- 新增“一键生成 AI 审计提交包”：宿主程序基于不可变 RunSnapshot 收集 OCR、分析、审阅、模板转换和多文件项目的真实阶段工件，确定文件角色、终态、SHA-256 与父子关系；
+- 支持 quick、standard、full 三档以及 SUCCESS、UNVERIFIED、FAILED、PARTIAL、CANCELLED 全部终态，失败任务同样保留已有 TeX、错误日志和诚实预览；
+- 自动生成 README、短提示词、完整提示词、manifest、diff、问题 CSV、verification、decisions、编译日志与 SHA256SUMS；提示词只引用实际存在的工件，不能自行把 UNVERIFIED 提升为 VERIFIED；
+- 严格区分 COMPILED、PARTIAL_COMPILED 与 SOURCE_PREVIEW；默认清理 API Key、Authorization、GitHub token 和本机绝对路径，并按 bytes SHA-256 去重、记录 aliases；
+- 新增审计包 API、生成弹窗、复制提交话术、下载、打开目录与 stale 检测；原有导出 TEX 和工程 ZIP 行为保持不变。
+'''
+              text = text.replace(marker, marker + section, 1)
+          changelog.write_text(text, encoding='utf-8')
+
+          build = Path('.github/workflows/build.yml')
+          text = build.read_text(encoding='utf-8')
+          text = text.replace("$previousVersion = '1.2.4'", "$previousVersion = '1.2.5'")
+          build.write_text(text, encoding='utf-8')
+          PY
+          rm -f .github/workflows/sync-v1.2.6-release-metadata.yml
+
+      - name: Commit synchronized release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packaging/version_info.txt README.md CHANGELOG.md .github/workflows/build.yml .github/workflows/sync-v1.2.6-release-metadata.yml
+          git commit -m "chore: synchronize all v1.2.6 release metadata"
+          git push origin HEAD:release/v1.2.6
