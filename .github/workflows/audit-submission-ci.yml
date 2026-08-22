@@ -1,0 +1,35 @@
+name: audit-submission-ci
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 安装 Python 依赖
+        run: python -m pip install -r requirements.txt ruff
+      - name: 静态检查
+        run: python -m ruff check latexstruct tests tools packaging benchmark
+      - name: 全量 Python 测试与 benchmark
+        shell: pwsh
+        run: |
+          python -m pytest -q
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python tools/benchmark.py | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: 构建 React 前端
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
