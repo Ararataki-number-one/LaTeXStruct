@@ -53,9 +53,11 @@ def main():
     import uvicorn
 
     from latexstruct.server.app import create_app
+    from latexstruct.server.audit_submission_routes import register_audit_submission_routes
 
     try:
         app = create_app(updated_from=args.updated_from)
+        register_audit_submission_routes(app)
     except Exception as exc:  # noqa: BLE001
         if args.server:
             print(f"LaTeXStruct 启动失败: {exc}", file=sys.stderr)
