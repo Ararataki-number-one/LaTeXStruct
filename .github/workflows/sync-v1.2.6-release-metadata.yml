@@ -1,17 +1,20 @@
 name: sync-v1.2.6-release-metadata
 
 on:
-  pull_request:
-    branches: [main]
+  push:
+    branches: ["release/v1.2.6"]
     paths:
       - ".github/workflows/sync-v1.2.6-release-metadata.yml"
 
 permissions:
   contents: write
 
+concurrency:
+  group: sync-v1.2.6-release-metadata
+  cancel-in-progress: false
+
 jobs:
   sync:
-    if: github.head_ref == 'release/v1.2.6'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,18 +22,12 @@ jobs:
           ref: release/v1.2.6
           fetch-depth: 0
 
-      - name: Synchronize all v1.2.6 release metadata
+      - name: Synchronize remaining v1.2.6 release metadata
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
-
-          version_info = Path('packaging/version_info.txt')
-          text = version_info.read_text(encoding='utf-8')
-          text = text.replace('(1, 2, 5, 0)', '(1, 2, 6, 0)')
-          text = text.replace("u'1.2.5'", "u'1.2.6'")
-          version_info.write_text(text, encoding='utf-8')
 
           readme = Path('README.md')
           text = readme.read_text(encoding='utf-8')
@@ -75,6 +72,6 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add packaging/version_info.txt README.md CHANGELOG.md .github/workflows/build.yml .github/workflows/sync-v1.2.6-release-metadata.yml
-          git commit -m "chore: synchronize all v1.2.6 release metadata"
+          git add README.md CHANGELOG.md .github/workflows/build.yml .github/workflows/sync-v1.2.6-release-metadata.yml
+          git commit -m "chore: synchronize remaining v1.2.6 release metadata"
           git push origin HEAD:release/v1.2.6
