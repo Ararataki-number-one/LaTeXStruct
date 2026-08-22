@@ -1,0 +1,231 @@
+name: publish-ai-audit-v1.2.6
+
+on:
+  push:
+    branches: [feature/ai-audit-submission]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: publish-ai-audit-v1.2.6
+  cancel-in-progress: true
+
+jobs:
+  validate-merge-build-release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: 1.2.6
+      RELEASE_TITLE: "release: v1.2.6 add one-click AI audit submission bundles"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 应用发布前确定性修正
+        id: fixups
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          schema = Path("latexstruct/core/audit_schema.py")
+          text = schema.read_text(encoding="utf-8")
+          old = '''        return {
+                      "schema_version": self.schema_version,
+                      "submission_id": self.submission_id,
+                      "profile": self.profile.value,
+                      "package_filename": self.package_filename,
+                      "control_files": {key: dict(value) for key, value in self.control_files.items()},
+                      "warnings": list(self.warnings),
+                      **self.snapshot.to_dict(),
+                  }
+          '''
+          new = '''        return {
+                      **self.snapshot.to_dict(),
+                      "schema_version": self.schema_version,
+                      "submission_id": self.submission_id,
+                      "profile": self.profile.value,
+                      "package_filename": self.package_filename,
+                      "control_files": {key: dict(value) for key, value in self.control_files.items()},
+                      "warnings": list(self.warnings),
+                  }
+          '''
+          if old in text:
+              schema.write_text(text.replace(old, new), encoding="utf-8")
+          elif '"schema_version": self.schema_version' not in text:
+              raise SystemExit("AuditSubmissionManifest schema contract is missing")
+
+          workflow = Path(".github/workflows/release-from-main.yml")
+          if workflow.exists():
+              value = workflow.read_text(encoding="utf-8")
+              unsafe = '''      - name: 校验发布版本
+                      id: version
+                      shell: bash
+                      run: |
+          '''
+              safe = '''      - name: 校验发布版本
+                      id: version
+                      shell: bash
+                      env:
+                        COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+                      run: |
+          '''
+              value = value.replace(unsafe, safe)
+              value = value.replace('MESSAGE="${{ github.event.head_commit.message }}"', 'MESSAGE="$COMMIT_MESSAGE"')
+              workflow.write_text(value, encoding="utf-8")
+          PY
+
+          if ! git diff --quiet; then
+            git config user.name "LaTeXStruct Release Bot"
+            git config user.email "Ararataki-number-one@users.noreply.github.com"
+            git add latexstruct/core/audit_schema.py .github/workflows/release-from-main.yml
+            git commit -m "fix: harden audit manifest and release workflow"
+            git push origin HEAD:feature/ai-audit-submission
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 等待新提交重新触发发布流程
+        if: steps.fixups.outputs.changed == 'true'
+        run: echo "已推送发布前修正；本次运行结束，由最新提交重新执行全部门禁。"
+
+      - name: 定位当前 Pull Request
+        if: steps.fixups.outputs.changed != 'true'
+        id: pr
+        shell: bash
+        run: |
+          set -euo pipefail
+          PR_NUMBER="$(gh pr list --repo "$GITHUB_REPOSITORY" --head feature/ai-audit-submission --base main --state open --json number --jq '.[0].number')"
+          if [[ -z "$PR_NUMBER" || "$PR_NUMBER" == "null" ]]; then
+            echo "没有找到 feature/ai-audit-submission -> main 的开放 PR" >&2
+            exit 1
+          fi
+          HEAD_SHA="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq '.headRefOid')"
+          if [[ "$HEAD_SHA" != "$GITHUB_SHA" ]]; then
+            echo "PR 头提交已移动: expected=$GITHUB_SHA actual=$HEAD_SHA" >&2
+            exit 1
+          fi
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: 等待 PR 全量测试与前端构建
+        if: steps.fixups.outputs.changed != 'true'
+        id: ci
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID=""
+          for attempt in $(seq 1 80); do
+            RUN_ID="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow audit-submission-ci.yml --event pull_request --branch feature/ai-audit-submission --limit 30 --json databaseId,headSha --jq ".[] | select(.headSha == \"$GITHUB_SHA\") | .databaseId" | head -n 1)"
+            if [[ -n "$RUN_ID" ]]; then break; fi
+            sleep 5
+          done
+          if [[ -z "$RUN_ID" ]]; then
+            echo "未找到当前提交对应的 audit-submission-ci 运行" >&2
+            exit 1
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          gh run watch "$RUN_ID" --repo "$GITHUB_REPOSITORY" --exit-status
+
+      - name: 以发布提交合并到 main
+        if: steps.fixups.outputs.changed != 'true'
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ steps.pr.outputs.number }}"
+          BODY="$(gh api --method PUT "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/merge" \
+            -f merge_method=squash \
+            -f sha="$GITHUB_SHA" \
+            -f commit_title="$RELEASE_TITLE" \
+            -f commit_message='Validated one-click AI audit submission bundles, immutable snapshots, privacy sanitization, stale detection, API/UI integration, and release automation.')"
+          MERGED="$(jq -r '.merged' <<<"$BODY")"
+          MERGE_SHA="$(jq -r '.sha' <<<"$BODY")"
+          if [[ "$MERGED" != "true" || ! "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "$BODY" >&2
+            exit 1
+          fi
+          echo "sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: 检查 main 推送是否已启动正式发布编排
+        if: steps.fixups.outputs.changed != 'true'
+        id: main_release
+        shell: bash
+        run: |
+          set -euo pipefail
+          MERGE_SHA="${{ steps.merge.outputs.sha }}"
+          RUN_ID=""
+          for attempt in $(seq 1 20); do
+            RUN_ID="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release-from-main.yml --branch main --limit 20 --json databaseId,headSha --jq ".[] | select(.headSha == \"$MERGE_SHA\") | .databaseId" 2>/dev/null | head -n 1 || true)"
+            if [[ -n "$RUN_ID" ]]; then break; fi
+            sleep 3
+          done
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: 等待 main 正式发布编排
+        if: steps.fixups.outputs.changed != 'true' && steps.main_release.outputs.run_id != ''
+        shell: bash
+        run: gh run watch "${{ steps.main_release.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" --exit-status
+
+      - name: 主动调度 Windows 正式构建
+        if: steps.fixups.outputs.changed != 'true' && steps.main_release.outputs.run_id == ''
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          MERGE_SHA="${{ steps.merge.outputs.sha }}"
+          gh workflow run build.yml --repo "$GITHUB_REPOSITORY" --ref main -f version="$RELEASE_VERSION"
+          RUN_ID=""
+          for attempt in $(seq 1 60); do
+            RUN_ID="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build.yml --event workflow_dispatch --branch main --limit 30 --json databaseId,headSha --jq ".[] | select(.headSha == \"$MERGE_SHA\") | .databaseId" | head -n 1)"
+            if [[ -n "$RUN_ID" ]]; then break; fi
+            sleep 5
+          done
+          if [[ -z "$RUN_ID" ]]; then
+            echo "未找到刚刚调度的正式构建" >&2
+            exit 1
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          gh run watch "$RUN_ID" --repo "$GITHUB_REPOSITORY" --exit-status
+
+      - name: 下载并发布正式工件
+        if: steps.fixups.outputs.changed != 'true' && steps.main_release.outputs.run_id == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          MERGE_SHA="${{ steps.merge.outputs.sha }}"
+          if gh release view "v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v$RELEASE_VERSION 已由另一发布编排创建"
+            exit 0
+          fi
+          mkdir -p release-artifacts
+          gh run download "${{ steps.build.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" \
+            --name "LaTeXStruct-v$RELEASE_VERSION" --dir release-artifacts
+          test -f "release-artifacts/LaTeXStruct-portable-$RELEASE_VERSION.zip"
+          test -f "release-artifacts/LaTeXStruct-setup-$RELEASE_VERSION.exe"
+          test -s "docs/releases/v$RELEASE_VERSION.md"
+          sha256sum release-artifacts/* | tee release-artifacts/SHA256SUMS.txt
+          gh release create "v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" \
+            "release-artifacts/LaTeXStruct-portable-$RELEASE_VERSION.zip" \
+            "release-artifacts/LaTeXStruct-setup-$RELEASE_VERSION.exe" \
+            "release-artifacts/SHA256SUMS.txt" \
+            --target "$MERGE_SHA" \
+            --title "LaTeXStruct v$RELEASE_VERSION" \
+            --notes-file "docs/releases/v$RELEASE_VERSION.md" \
+            --latest
+
+      - name: 验证公开 Release 与资产
+        if: steps.fixups.outputs.changed != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSETS="$(gh release view "v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          grep -Fx "LaTeXStruct-portable-$RELEASE_VERSION.zip" <<<"$ASSETS"
+          grep -Fx "LaTeXStruct-setup-$RELEASE_VERSION.exe" <<<"$ASSETS"
+          grep -Fx "SHA256SUMS.txt" <<<"$ASSETS"
+          gh release view "v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --json url,tagName,publishedAt
