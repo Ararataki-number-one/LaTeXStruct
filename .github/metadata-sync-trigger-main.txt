@@ -1,1 +1,1 @@
-trigger trusted v1.2.6 release metadata synchronization
+trigger trusted v1.2.6 release metadata synchronization - second event
