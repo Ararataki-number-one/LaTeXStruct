@@ -1,6 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { api } from "./api";
-import AuditSubmissionPanel from "./AuditSubmissionPanel";
 import Projects from "./Projects";
 import Settings from "./Settings";
 
@@ -304,6 +303,7 @@ export default function App() {
 
   const startUpdate = async () => {
     setUpdateDialogOpen(true);
+    // 重试前停止旧任务轮询，避免旧的 error/cancelled 快照覆盖新请求状态。
     setUpdateJobId(null);
     setUpdateJob({ status: "checking", progress: 0, message: "正在确认新版安装包" });
     try {
@@ -387,8 +387,6 @@ export default function App() {
         )}
         {tab === "settings" && <Settings />}
       </main>
-
-      <AuditSubmissionPanel pid={tab === "workspace" ? currentPid : null} />
 
       {updateDialogOpen && updateInfo && !updateSuccess && (
         <UpdateAvailableDialog

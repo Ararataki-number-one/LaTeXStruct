@@ -8,6 +8,7 @@ import zipfile
 
 import pytest
 
+import latexstruct.core.audit_submission as audit_submission_module
 from latexstruct.core.audit_schema import (
     ArtifactRole,
     AuditArtifact,
@@ -20,6 +21,7 @@ from latexstruct.core.audit_schema import (
 from latexstruct.core.audit_submission import (
     FULL_PROMPT_PATH,
     MANIFEST_PATH,
+    MAX_AUDIT_ZIP_BYTES,
     README_PATH,
     SHA256SUMS_PATH,
     SHORT_PROMPT_PATH,
@@ -404,6 +406,105 @@ def test_disabling_payload_secret_cleanup_still_never_leaks_paths_in_manifest():
     assert result.manifest.privacy["payload_sensitive_data_sanitized"] is False
 
 
+def test_default_privacy_excludes_credential_like_multifile_project_files():
+    safe = make_audit_artifact(
+        ArtifactRole.PROJECT_FILE,
+        b"safe project content",
+        filename="chapters/main.tex",
+    )
+    filenames = (
+        ".env",
+        ".ENV.production",
+        "keys/server.PEM",
+        "keys/client.Key",
+        "keys/signing.P12",
+        "keys/windows.PfX",
+    )
+    sensitive = tuple(
+        make_audit_artifact(
+            ArtifactRole.PROJECT_FILE,
+            f"secret-{index}".encode(),
+            filename=filename,
+        )
+        for index, filename in enumerate(filenames, start=1)
+    )
+    result = build_audit_submission(
+        _snapshot(
+            workflow=AuditWorkflow.MULTIFILE_PROJECT,
+            artifacts=(safe, *sensitive),
+        )
+    )
+
+    assert result.files["project/chapters/main.tex"] == b"safe project content"
+    for index, item in enumerate(sensitive, start=1):
+        assert item.path not in result.files
+        assert f"secret-{index}".encode() not in result.zip_bytes
+    payload_ids = {
+        item.artifact_id
+        for item in result.manifest.artifacts
+    }
+    assert payload_ids.isdisjoint(item.artifact_id for item in sensitive)
+    privacy = json.loads(result.files[MANIFEST_PATH])["privacy"]
+    assert privacy["sensitive_project_file_policy"] == (
+        "exclude_credential_like_filenames"
+    )
+    assert privacy["skipped_sensitive_project_file_count"] == len(sensitive)
+    skipped = privacy["skipped_sensitive_project_files"]
+    assert {item["artifact_id"] for item in skipped} == {
+        item.artifact_id for item in sensitive
+    }
+    assert {item["path"] for item in skipped} == {item.path for item in sensitive}
+    assert all(item["artifact_role"] == ArtifactRole.PROJECT_FILE for item in skipped)
+    assert all("credential-like" in item["reason"] for item in skipped)
+
+
+def test_explicit_privacy_opt_out_includes_credential_like_project_file_bytes():
+    credential = make_audit_artifact(
+        ArtifactRole.PROJECT_FILE,
+        b"private-key-bytes",
+        filename="credentials/CLIENT.PeM",
+    )
+    result = build_audit_submission(
+        _snapshot(
+            workflow=AuditWorkflow.MULTIFILE_PROJECT,
+            artifacts=(credential,),
+        ),
+        AuditSubmissionRequest(sanitize_sensitive=False),
+    )
+
+    assert result.files[credential.path] == b"private-key-bytes"
+    privacy = json.loads(result.files[MANIFEST_PATH])["privacy"]
+    assert privacy["sensitive_project_file_policy"] == (
+        "disabled_by_explicit_opt_out"
+    )
+    assert privacy["skipped_sensitive_project_file_count"] == 0
+    assert privacy["skipped_sensitive_project_files"] == []
+
+
+def test_sensitive_project_file_cannot_survive_as_a_deduplicated_alias():
+    safe = make_audit_artifact(
+        ArtifactRole.PROJECT_FILE,
+        b"same bytes",
+        filename="main.tex",
+    )
+    credential = make_audit_artifact(
+        ArtifactRole.PROJECT_FILE,
+        b"same bytes",
+        filename=".env",
+    )
+    result = build_audit_submission(
+        _snapshot(
+            workflow=AuditWorkflow.MULTIFILE_PROJECT,
+            artifacts=(safe, credential),
+        )
+    )
+
+    record = next(item for item in result.manifest.artifacts if item.path == safe.path)
+    assert record.aliases == ()
+    assert credential.path not in result.files
+    assert result.manifest.privacy["skipped_sensitive_project_file_count"] == 1
+
+
 def test_partial_compiled_pdf_keeps_truthful_status_and_filename():
     partial = _artifact(
         ArtifactRole.CURRENT_PREVIEW,
@@ -599,6 +700,48 @@ def test_zip_write_is_atomic_and_has_no_temporary_residue(tmp_path):
     with zipfile.ZipFile(target) as archive:
         assert archive.testzip() is None
         assert MANIFEST_PATH in archive.namelist()
+    assert list(tmp_path.glob("*.tmp")) == []
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_entire_zip_limit_is_500_mib_and_overflow_leaves_no_partial_file(
+    tmp_path,
+    monkeypatch,
+):
+    assert MAX_AUDIT_ZIP_BYTES == 500 * 1024 * 1024
+    snapshot = _snapshot()
+    baseline = build_audit_submission(
+        snapshot,
+        submission_id="zip-size-limit",
+        generated_at="2026-08-22T00:00:01Z",
+    )
+    exact_size = len(baseline.zip_bytes)
+    monkeypatch.setattr(
+        audit_submission_module,
+        "MAX_AUDIT_ZIP_BYTES",
+        exact_size,
+    )
+    assert len(build_audit_submission(
+        snapshot,
+        submission_id="zip-size-limit",
+        generated_at="2026-08-22T00:00:01Z",
+    ).zip_bytes) == exact_size
+
+    monkeypatch.setattr(
+        audit_submission_module,
+        "MAX_AUDIT_ZIP_BYTES",
+        exact_size - 1,
+    )
+    target = tmp_path / "bounded-audit.zip"
+    target.write_bytes(b"existing complete archive")
+    with pytest.raises(ValueError, match="audit ZIP exceeds configured maximum"):
+        write_audit_submission_atomic(
+            snapshot,
+            target,
+            submission_id="zip-size-limit",
+            generated_at="2026-08-22T00:00:01Z",
+        )
+    assert target.read_bytes() == b"existing complete archive"
     assert list(tmp_path.glob("*.tmp")) == []
     assert list(tmp_path.glob(".*.tmp")) == []
 

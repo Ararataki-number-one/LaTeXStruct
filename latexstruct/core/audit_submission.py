@@ -39,6 +39,7 @@ SHORT_PROMPT_PATH = "01_PROMPT_SHORT.txt"
 FULL_PROMPT_PATH = "02_PROMPT_FULL.md"
 MANIFEST_PATH = "submission_manifest.json"
 SHA256SUMS_PATH = "audit/SHA256SUMS"
+MAX_AUDIT_ZIP_BYTES = 500 * 1024 * 1024
 
 CONTROL_PATHS = frozenset({
     README_PATH,
@@ -177,6 +178,30 @@ _SECRET_PATTERNS = (
 _TEXT_SUFFIXES = frozenset({
     ".tex", ".txt", ".md", ".json", ".csv", ".log", ".diff", ".patch",
     ".yaml", ".yml", ".xml", ".sty", ".cls", ".bib",
+})
+_SENSITIVE_PROJECT_FILE_SUFFIXES = frozenset({
+    ".env",
+    ".key",
+    ".p12",
+    ".pem",
+    ".pfx",
+})
+_SENSITIVE_PROJECT_FILE_BASENAMES = frozenset({
+    ".env",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "_netrc",
+    "auth.json",
+    "credentials",
+    "credentials.json",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_rsa",
+    "secret.json",
+    "secrets.json",
+    "service-account.json",
 })
 _SOURCE_NOTICE = "SOURCE_PREVIEW: NOT A LATEX COMPILED RESULT."
 _SUBMISSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -353,6 +378,20 @@ def _role_is_included(role: str, request: AuditSubmissionRequest) -> bool:
     return True
 
 
+def _sensitive_project_file_reason(path: str) -> str:
+    """Return a host policy reason for credential-like project filenames."""
+    portable = _safe_bundle_path(path)
+    basename = PurePosixPath(portable).name.casefold()
+    suffix = PurePosixPath(basename).suffix.casefold()
+    if basename == ".env" or basename.startswith(".env."):
+        return "credential-like project-file basename"
+    if basename in _SENSITIVE_PROJECT_FILE_BASENAMES:
+        return "credential-like project-file basename"
+    if suffix in _SENSITIVE_PROJECT_FILE_SUFFIXES:
+        return "credential-like project-file suffix"
+    return ""
+
+
 def _redact_local_paths(text: str) -> tuple[str, int]:
     count = 0
     text, changed = _WINDOWS_PATH_RE.subn("<LOCAL_PATH>", str(text))
@@ -524,7 +563,12 @@ class _MutablePackagedArtifact:
 def _select_and_package_artifacts(
     snapshot: RunSnapshot,
     request: AuditSubmissionRequest,
-) -> tuple[list[_MutablePackagedArtifact], dict[str, bytes], int]:
+) -> tuple[
+    list[_MutablePackagedArtifact],
+    dict[str, bytes],
+    int,
+    list[dict[str, object]],
+]:
     selected = [
         item for item in snapshot.artifacts if _role_is_included(item.artifact_role, request)
     ]
@@ -533,9 +577,21 @@ def _select_and_package_artifacts(
     packaged: list[_MutablePackagedArtifact] = []
     by_digest: dict[str, _MutablePackagedArtifact] = {}
     redaction_count = 0
+    skipped_sensitive_project_files: list[dict[str, object]] = []
 
     transformed: list[tuple[AuditArtifact, bytes, int, str, str]] = []
     for item in selected:
+        if request.sanitize_sensitive and item.artifact_role == ArtifactRole.PROJECT_FILE:
+            portable_path = _safe_bundle_path(item.path)
+            reason = _sensitive_project_file_reason(portable_path)
+            if reason:
+                skipped_sensitive_project_files.append({
+                    "artifact_id": item.artifact_id,
+                    "artifact_role": item.artifact_role,
+                    "path": portable_path,
+                    "reason": reason,
+                })
+                continue
         data = item.data
         changes = 0
         packaged_media_type = item.media_type
@@ -607,7 +663,7 @@ def _select_and_package_artifacts(
         )
         packaged.append(record)
         by_digest[digest] = record
-    return packaged, files, redaction_count
+    return packaged, files, redaction_count, skipped_sensitive_project_files
 
 
 def _manifest_records(
@@ -658,6 +714,7 @@ def _build_manifest(
     generated_at: str,
     audit_focus: str,
     redaction_count: int,
+    skipped_sensitive_project_files: Iterable[Mapping[str, object]] = (),
 ) -> AuditSubmissionManifest:
     available_roles = {item.artifact_role for item in snapshot.artifacts}
     expected = {
@@ -702,6 +759,10 @@ def _build_manifest(
     template = cleaner(str(snapshot.template))[0]
     page_range = cleaner(str(snapshot.page_range))[0]
     blockers = tuple(cleaner(item)[0] for item in snapshot.blockers)
+    skipped_project_files = tuple(
+        _sanitize_jsonish(item, redact_sensitive=request.sanitize_sensitive)
+        for item in skipped_sensitive_project_files
+    )
     return AuditSubmissionManifest(
         submission_id=submission_id,
         snapshot_id=snapshot.snapshot_id,
@@ -725,6 +786,13 @@ def _build_manifest(
         privacy={
             "payload_sensitive_data_sanitized": request.sanitize_sensitive,
             "payload_replacement_count": redaction_count,
+            "sensitive_project_file_policy": (
+                "exclude_credential_like_filenames"
+                if request.sanitize_sensitive
+                else "disabled_by_explicit_opt_out"
+            ),
+            "skipped_sensitive_project_file_count": len(skipped_project_files),
+            "skipped_sensitive_project_files": skipped_project_files,
             "manifest_local_paths_sanitized": True,
             "local_absolute_paths_in_manifest": False,
             "binary_payloads": "preserved; package paths never expose source locations",
@@ -732,16 +800,53 @@ def _build_manifest(
     )
 
 
-def _fixed_zip(files: Mapping[str, bytes]) -> bytes:
-    output = io.BytesIO()
-    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        for name, data in sorted(files.items()):
-            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o100644 << 16
-            info.create_system = 3
-            archive.writestr(info, data)
-    return output.getvalue()
+class _AuditZipSizeLimitExceeded(ValueError):
+    pass
+
+
+class _SizeLimitedBytesIO(io.BytesIO):
+    def __init__(self, maximum_bytes: int):
+        super().__init__()
+        self.maximum_bytes = int(maximum_bytes)
+
+    def write(self, data: bytes) -> int:
+        if self.tell() + len(data) > self.maximum_bytes:
+            raise _AuditZipSizeLimitExceeded
+        return super().write(data)
+
+
+def _fixed_zip(
+    files: Mapping[str, bytes],
+    *,
+    maximum_bytes: int,
+) -> bytes:
+    maximum_bytes = int(maximum_bytes)
+    if maximum_bytes <= 0:
+        raise ValueError("audit ZIP maximum size must be positive")
+    output = _SizeLimitedBytesIO(maximum_bytes)
+    try:
+        with zipfile.ZipFile(
+            output,
+            "w",
+            zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+        ) as archive:
+            for name, data in sorted(files.items()):
+                info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o100644 << 16
+                info.create_system = 3
+                archive.writestr(info, data)
+    except _AuditZipSizeLimitExceeded as exc:
+        raise ValueError(
+            f"audit ZIP exceeds configured maximum of {maximum_bytes} bytes"
+        ) from exc
+    payload = output.getvalue()
+    if len(payload) > maximum_bytes:  # pragma: no cover - defensive invariant
+        raise ValueError(
+            f"audit ZIP exceeds configured maximum of {maximum_bytes} bytes"
+        )
+    return payload
 
 
 def build_audit_submission(
@@ -773,7 +878,12 @@ def build_audit_submission(
     else:
         audit_focus = _redact_local_paths(audit_focus)[0]
 
-    packaged, files, redaction_count = _select_and_package_artifacts(snapshot, request)
+    (
+        packaged,
+        files,
+        redaction_count,
+        skipped_sensitive_project_files,
+    ) = _select_and_package_artifacts(snapshot, request)
     payload_records = _manifest_records(packaged)
     placeholder_controls = [
         _control_record(ArtifactRole.README, README_PATH),
@@ -794,6 +904,7 @@ def build_audit_submission(
         generated_at=generated_at,
         audit_focus=audit_focus,
         redaction_count=redaction_count,
+        skipped_sensitive_project_files=skipped_sensitive_project_files,
     )
     full_bytes = render_full_prompt(provisional).encode("utf-8")
     short_bytes = (render_short_prompt(provisional) + "\n").encode("utf-8")
@@ -822,6 +933,7 @@ def build_audit_submission(
         generated_at=generated_at,
         audit_focus=audit_focus,
         redaction_count=redaction_count,
+        skipped_sensitive_project_files=skipped_sensitive_project_files,
     )
     manifest_bytes = _json_bytes(manifest.to_dict())
     files[MANIFEST_PATH] = manifest_bytes
@@ -831,7 +943,11 @@ def build_audit_submission(
         for name, data in sorted(files.items())
     ).encode("utf-8")
     files[SHA256SUMS_PATH] = sums
-    zip_bytes = _fixed_zip(files) if include_zip else b""
+    zip_bytes = (
+        _fixed_zip(files, maximum_bytes=MAX_AUDIT_ZIP_BYTES)
+        if include_zip
+        else b""
+    )
     return AuditSubmissionResult(
         submission_id=submission_id,
         snapshot_id=snapshot.snapshot_id,

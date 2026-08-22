@@ -333,7 +333,7 @@ def test_release_build_safety_guards():
     assert "v1.1.4" not in workflow
     assert "name: LaTeXStruct-v${{ env.APP_VERSION }}" in workflow
     assert "name: LaTeXStruct-${{ github.ref_name }}" not in workflow
-    assert "$previousVersion = '1.2.4'" in workflow
+    assert "$previousVersion = '1.2.5'" in workflow
     assert "$env:LATEXSTRUCT_SMOKE_PREVIOUS_VERSION = $previousVersion" in workflow
     assert "previous_version=os.environ['LATEXSTRUCT_SMOKE_PREVIOUS_VERSION']" in workflow
     assert "previous_version='1.2.2'" not in workflow

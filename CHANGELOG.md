@@ -6,6 +6,18 @@
 
 ## Unreleased
 
+## v1.2.6（2026-08-22）
+
+- 新增“一键生成 AI 审计提交包”：从宿主冻结的不可变运行快照整理 README、短/完整提示词、
+  manifest、输入、阶段产物、预览、报告、验证、决策、日志与证据；支持五种工作流和
+  SUCCESS、UNVERIFIED、FAILED、PARTIAL、CANCELLED 全部终态，失败与取消任务也保留已生成阶段；
+- 文件角色、状态、SHA-256、父子关系与 VERIFIED 结论只读取宿主和现有机器验证结果；按字节摘要
+  去重并记录 aliases，同名文件不覆盖，ZIP 原子落盘，提示词不会引用缺失材料或自行提升验证状态；
+- 默认清理 API Key、Authorization、Codex/OpenAI/GitHub 凭据与本机绝对路径；严格区分
+  COMPILED、PARTIAL_COMPILED 和 SOURCE_PREVIEW，源码预览明确声明不是 LaTeX 编译结果；
+- 审阅工作台新增生成、复制话术、下载、打开文件夹和重新生成入口；TeX、PDF、验证结果或审阅状态
+  改变后旧包立即标记 stale。现有“导出 TEX”和“导出工程 ZIP”行为保持不变。
+
 ## v1.2.5（2026-08-21）
 
 - 来源记录升级为 v2，并显式区分真正生成结果的 producer 与本次下载工件的 exporter；旧工程缺少
