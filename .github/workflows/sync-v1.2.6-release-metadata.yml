@@ -1,10 +1,10 @@
 name: sync-v1.2.6-release-metadata
 
 on:
-  push:
+  pull_request:
     branches: ["release/v1.2.6"]
     paths:
-      - ".github/workflows/sync-v1.2.6-release-metadata.yml"
+      - ".github/metadata-sync-trigger.txt"
 
 permissions:
   contents: write
