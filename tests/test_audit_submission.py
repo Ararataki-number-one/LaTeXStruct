@@ -1,434 +1,641 @@
-# -*- coding: utf-8 -*-
-
 from __future__ import annotations
 
-import base64
 import hashlib
 import io
 import json
-import os
-import time
+import re
 import zipfile
-from pathlib import Path
 
 import pytest
 
-from latexstruct.core.audit_schema import AuditSubmissionRequest
+from latexstruct.core.audit_schema import (
+    ArtifactRole,
+    AuditArtifact,
+    AuditDepth,
+    AuditSubmissionRequest,
+    AuditWorkflow,
+    RunSnapshot,
+    TerminalStatus,
+)
 from latexstruct.core.audit_submission import (
+    FULL_PROMPT_PATH,
+    MANIFEST_PATH,
+    README_PATH,
+    SHA256SUMS_PATH,
+    SHORT_PROMPT_PATH,
     build_audit_submission,
-    load_submission_summary,
-    project_fingerprint,
-    submission_package_path,
+    build_lightweight_audit_files,
+    canonical_artifact_path,
+    make_audit_artifact,
+    snapshot_fingerprint_from_hashes,
+    write_audit_submission_atomic,
 )
-from latexstruct.core.preview import preview_storage_filename
+from latexstruct.core.preview import COMPILED, PARTIAL_COMPILED, SOURCE_PREVIEW
 
 
-class FakeStore:
-    def __init__(self, root: Path):
-        self.root = root
-
-    def _dir(self, pid: str) -> str:
-        return str(self.root / pid)
-
-    def get(self, pid: str):
-        path = self.root / pid
-        if not path.is_dir():
-            return None
-        meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
-        meta["has_result"] = (path / "result.tex").is_file()
-        return meta
-
-    def read_source(self, pid: str) -> str:
-        return (self.root / pid / "source.tex").read_text(encoding="utf-8")
-
-    def read_failed_attempt(self, pid: str):
-        path = self.root / pid
-        marker = path / "last-failure.json"
-        draft = path / "last-failed-draft.tex"
-        report = path / "last-failure-report.md"
-        if not all(item.is_file() for item in (marker, draft, report)):
-            return None
-        data = json.loads(marker.read_text(encoding="utf-8"))
-        return {
-            **data,
-            "draft": draft.read_text(encoding="utf-8"),
-            "report": report.read_text(encoding="utf-8"),
-        }
-
-
-def write_json(path: Path, value) -> None:
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def make_project(
-    tmp_path: Path,
+def _artifact(
+    role: str,
+    data: bytes,
     *,
-    pid: str = "abc123def456",
-    kind: str = "",
-    mode: str = "ai",
-    template: str = "",
-    source: str = "\\documentclass{article}\n\\begin{document}\nHello\n\\end{document}\n",
-) -> tuple[FakeStore, str, Path]:
-    root = tmp_path / "projects"
-    project = root / pid
-    project.mkdir(parents=True)
-    meta = {
-        "id": pid,
-        "name": "中文 审计项目",
-        "mode": mode,
-        "template": template,
-        "created": "2026-08-21 12:00:00",
-    }
-    if kind:
-        meta["kind"] = kind
-    write_json(project / "meta.json", meta)
-    (project / "source.tex").write_text(source, encoding="utf-8")
-    return FakeStore(root), pid, project
-
-
-def add_success(project: Path, result: str | None = None, *, preview_status: str = "") -> None:
-    source = (project / "source.tex").read_text(encoding="utf-8")
-    result = result or source.replace("Hello", "\\section{Hello}\nHello")
-    result_bytes = result.encode("utf-8")
-    verification = {
-        "safe_to_export": True,
-        "compile_before": {"available": True, "ok": True, "engine": "xelatex", "log": "before"},
-        "compile_after": {"available": True, "ok": True, "engine": "xelatex", "log": "after"},
-        "failures": [],
-    }
-    if preview_status:
-        payload = b"%PDF-1.4\n% test preview\n"
-        digest = hashlib.sha256(payload).hexdigest()
-        verification["compile_after"]["preview_status"] = preview_status
-        verification["preview_artifact"] = {"status": preview_status, "sha256": digest}
-        (project / preview_storage_filename(preview_status, digest)).write_bytes(payload)
-    info = {
-        "result_sha256": hashlib.sha256(result_bytes).hexdigest(),
-        "verification": verification,
-        "items": [],
-        "producer_identity": {
-            "app_version": "1.2.6",
-            "commit": "a" * 40,
-            "build_id": "42",
-            "prompt_version": "3.6",
-        },
-    }
-    (project / "result.tex").write_bytes(result_bytes)
-    (project / "report.md").write_text("# Report\n\nVerified.\n", encoding="utf-8")
-    (project / "decisions.json").write_text("[]", encoding="utf-8")
-    write_json(project / "verification.json", info)
-
-
-def add_failure(project: Path, draft: str | None = None) -> None:
-    source = (project / "source.tex").read_text(encoding="utf-8")
-    draft = draft or source.replace("Hello", "\\textbf{Theorem 1.} Hello")
-    report = "# Report\n\nUNVERIFIED.\n"
-    details = {
-        "verification": {
-            "safe_to_export": False,
-            "compile_before": {"available": True, "ok": False, "log": "! raw error"},
-            "compile_after": {"available": True, "ok": False, "log": "! current error"},
-            "failures": [{"id": "structure", "summary": "formal residual", "action": "fix"}],
-        },
-        "failures": [{"id": "structure", "summary": "formal residual", "action": "fix"}],
-        "items": [{"candidate_id": "thm-1", "status": "ambiguous"}],
-        "ambiguous": [{"candidate_id": "thm-1", "reason": "boundary unknown"}],
-    }
-    (project / "last-failed-draft.tex").write_text(draft, encoding="utf-8")
-    (project / "last-failure-report.md").write_text(report, encoding="utf-8")
-    write_json(project / "last-failure.json", {"created": "2026-08-21", "details": details})
-    now = time.time() + 1
-    for name in ("last-failure.json", "last-failed-draft.tex", "last-failure-report.md"):
-        os.utime(project / name, (now, now))
-
-
-def ocr_source_with_metadata() -> str:
-    metadata = {
-        "version": 1,
-        "kind": "article",
-        "pages": [1, 2],
-        "outline": [{"level": 0, "title": "1. Introduction", "page": 1}],
-    }
-    encoded = base64.b64encode(json.dumps(metadata).encode("utf-8")).decode("ascii")
-    return (
-        "\\documentclass{article}\n\\begin{document}\n"
-        f"% LaTeXStruct-OCR-Metadata: {encoded}\n"
-        "OCR body\n\\end{document}\n"
+    path: str | None = None,
+    preview_status: str | None = None,
+    parents=(),
+) -> AuditArtifact:
+    return make_audit_artifact(
+        role,
+        data,
+        path=path,
+        preview_status=preview_status,
+        parent_artifact_ids=parents,
+        media_type="application/pdf" if role.endswith("PREVIEW") else "text/plain",
     )
 
 
-def read_zip(path: Path) -> dict[str, bytes]:
-    with zipfile.ZipFile(path, "r") as archive:
-        return {name: archive.read(name) for name in archive.namelist()}
+def _snapshot(
+    *,
+    workflow: AuditWorkflow = AuditWorkflow.ANALYSIS_REVIEW_ONLY,
+    terminal: TerminalStatus = TerminalStatus.SUCCESS,
+    verified: bool = False,
+    artifacts: tuple[AuditArtifact, ...] | None = None,
+) -> RunSnapshot:
+    source = _artifact(ArtifactRole.SOURCE_TEX, b"source\n")
+    current = _artifact(
+        ArtifactRole.CURRENT_TEX,
+        b"current\n",
+        parents=(source.artifact_id,),
+    )
+    return RunSnapshot(
+        project_id="中文项目",
+        run_id="run-1",
+        workflow=workflow,
+        terminal_status=terminal,
+        captured_at="2026-08-22T00:00:00Z",
+        artifacts=artifacts or (source, current),
+        machine_verification={"safe_to_export": verified},
+        blockers=() if verified else ("机器验证尚未通过",),
+        model="gpt-test",
+        app_version="1.2.6",
+        template="elegantbook",
+        page_range="1-17",
+    )
 
 
-def assert_sums(files: dict[str, bytes]) -> None:
-    sums = files["audit/SHA256SUMS"].decode("utf-8").splitlines()
-    for line in sums:
-        digest, name = line.split("  ", 1)
-        assert hashlib.sha256(files[name]).hexdigest() == digest
-
-
-def test_analysis_review_bundle_contains_prompts_and_recomputable_hashes(tmp_path):
-    store, pid, project = make_project(tmp_path)
-    add_success(project)
+@pytest.mark.parametrize("workflow", list(AuditWorkflow))
+@pytest.mark.parametrize("terminal", list(TerminalStatus))
+def test_all_workflows_and_terminal_states_can_build(workflow, terminal):
     result = build_audit_submission(
-        store=store,
-        pid=pid,
-        request=AuditSubmissionRequest(),
-        runtime_identity={"app_version": "1.2.6", "commit": "b" * 40, "build_id": "99"},
-        latest_job={"status": "done"},
+        _snapshot(workflow=workflow, terminal=terminal),
+        submission_id=f"test-{workflow.value}-{terminal.value}",
+        generated_at="2026-08-22T00:00:01Z",
     )
-    path = Path(result.package_path)
-    assert path.is_file()
-    files = read_zip(path)
-    for name in (
-        "00_README_FIRST.md",
-        "01_PROMPT_SHORT.txt",
-        "02_PROMPT_FULL.md",
-        "submission_manifest.json",
-        "stages/00_source.tex",
-        "stages/30_current.tex",
-        "audit/report.md",
-        "audit/raw_to_current.diff",
-        "audit/SHA256SUMS",
+    with zipfile.ZipFile(io.BytesIO(result.zip_bytes)) as archive:
+        manifest = json.loads(archive.read(MANIFEST_PATH))
+        assert manifest["workflow"] == workflow.value
+        assert manifest["terminal_status"] == terminal.value
+        assert manifest["verification_status"] == "UNVERIFIED"
+        assert {README_PATH, SHORT_PROMPT_PATH, FULL_PROMPT_PATH, MANIFEST_PATH}.issubset(
+            archive.namelist()
+        )
+
+
+def test_snapshot_is_byte_immutable_and_success_does_not_promote_verification():
+    source = bytearray(b"before")
+    artifact = AuditArtifact(ArtifactRole.SOURCE_TEX, "inputs/source.tex", source)
+    snapshot = _snapshot(artifacts=(artifact,), verified=False)
+    source[:] = b"after!"
+    assert snapshot.artifacts[0].data == b"before"
+    assert snapshot.verification_status == "UNVERIFIED"
+    result = build_audit_submission(snapshot)
+    assert result.manifest.verification_status == "UNVERIFIED"
+
+
+def test_verified_is_copied_only_from_existing_machine_result():
+    snapshot = _snapshot(terminal=TerminalStatus.FAILED, verified=True)
+    assert snapshot.verification_status == "VERIFIED"
+    assert build_audit_submission(snapshot).manifest.verification_status == "VERIFIED"
+
+
+def test_missing_files_are_reported_and_prompt_does_not_claim_paths_for_them():
+    result = build_audit_submission(_snapshot())
+    missing = set(result.manifest.missing_expected_roles)
+    assert ArtifactRole.REPORT in missing
+    prompt = result.files[FULL_PROMPT_PATH].decode("utf-8")
+    assert "audit/report.md" not in prompt
+    assert "`REPORT`" in prompt
+    actual_paths = {item.path for item in result.manifest.artifacts}
+    table_paths = {
+        match.group(1)
+        for match in re.finditer(r"\| [A-Z][A-Z0-9_]+ \| ([^|]+?) \|", prompt)
+    }
+    assert {path.strip() for path in table_paths}.issubset(actual_paths)
+
+
+def test_byte_sha256_deduplication_records_role_and_path_aliases():
+    source = _artifact(ArtifactRole.SOURCE_TEX, b"same bytes")
+    stage = _artifact(
+        ArtifactRole.STAGE_SOURCE_TEX,
+        b"same bytes",
+        parents=(source.artifact_id,),
+    )
+    assert source.artifact_id != stage.artifact_id
+    result = build_audit_submission(_snapshot(artifacts=(source, stage)))
+    data_records = [
+        item for item in result.manifest.artifacts if item.artifact_role == ArtifactRole.SOURCE_TEX
+    ]
+    assert len(data_records) == 1
+    assert data_records[0].path == "inputs/source.tex"
+    assert data_records[0].aliases[0]["path"] == "stages/00_source.tex"
+    assert data_records[0].aliases[0]["artifact_role"] == ArtifactRole.STAGE_SOURCE_TEX
+    assert data_records[0].aliases[0]["artifact_id"] == stage.artifact_id
+    assert data_records[0].aliases[0]["parent_artifact_ids"] == (source.artifact_id,)
+    assert data_records[0].artifact_id == source.artifact_id
+    assert "stages/00_source.tex" not in result.files
+    authority = json.loads(result.files[MANIFEST_PATH])["authority"]
+    assert "submission_manifest.json.artifacts[].aliases[].artifact_role" in authority[
+        "artifact_roles"
+    ]
+    prompt = result.files[FULL_PROMPT_PATH].decode("utf-8")
+    assert ArtifactRole.STAGE_SOURCE_TEX in prompt
+    assert "stages/00_source.tex" not in prompt
+
+
+def test_same_name_different_bytes_never_overwrites():
+    one = _artifact(ArtifactRole.EVIDENCE, b"one", path="evidence/证据.txt")
+    two = _artifact(ArtifactRole.EVIDENCE, b"two", path="evidence/证据.txt")
+    result = build_audit_submission(_snapshot(artifacts=(one, two)))
+    assert result.files["evidence/证据.txt"] == b"one"
+    assert result.files["evidence/证据-2.txt"] == b"two"
+
+
+def test_deduplicated_alias_cannot_collide_with_file_or_control_namespace():
+    first = _artifact(ArtifactRole.EVIDENCE, b"same", path="evidence/a.txt")
+    second = _artifact(ArtifactRole.EVIDENCE, b"different", path="evidence/a.txt")
+    alias = _artifact(ArtifactRole.PROJECT_FILE, b"same", path="evidence/a-2.txt")
+    control_alias = _artifact(
+        ArtifactRole.STAGE_SOURCE_TEX,
+        b"same",
+        path=MANIFEST_PATH,
+    )
+    result = build_audit_submission(_snapshot(artifacts=(first, second, alias, control_alias)))
+    record = next(item for item in result.manifest.artifacts if item.path == "evidence/a.txt")
+    alias_paths = [item["path"] for item in record.aliases]
+    assert "evidence/a-2.txt" not in alias_paths
+    assert MANIFEST_PATH not in alias_paths
+    assert len(alias_paths) == len(set(alias_paths))
+    assert not set(alias_paths).intersection(result.files)
+    assert any(item.get("requested_path") == "evidence/a-2.txt" for item in record.aliases)
+    assert any(item.get("requested_path") == MANIFEST_PATH for item in record.aliases)
+
+
+def test_chinese_paths_are_portable_and_absolute_paths_are_rejected():
+    item = _artifact(ArtifactRole.EVIDENCE, "中文".encode(), path="evidence/中文/证据.txt")
+    result = build_audit_submission(_snapshot(artifacts=(item,)))
+    assert "evidence/中文/证据.txt" in result.files
+    bad = _artifact(ArtifactRole.EVIDENCE, b"bad", path=r"C:\Users\ZQY\secret.txt")
+    with pytest.raises(ValueError, match="non-portable"):
+        build_audit_submission(_snapshot(artifacts=(bad,)))
+
+
+def test_default_privacy_cleanup_removes_credentials_and_local_paths():
+    secret = (
+        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz\n"
+        "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz\n"
+        "ANTHROPIC_API_KEY=anthropic-secret-value\n"
+        "GOOGLE_API_KEY=google-secret-value\n"
+        '{"codex_login":"login-secret-value","Authorization":"Bearer json-secret-value"}\n'
+        '{"id_token":"identity-secret-value","account_id":"account-secret-value",'
+        '"email":"codex-user@example.test"}\n'
+        r"log=C:\Users\ZQY\private\main.tex" + "\n"
+        "cache=/home/zqy/.codex/auth.json\n"
+        "workspace=/workspace/private/project/main.tex\n"
+        "mac=/Applications/Codex/auth.json\n"
+        "volume=/Volumes/Private/auth.json\n"
+        "media=/media/user/auth.json\n"
+    ).encode()
+    item = _artifact(ArtifactRole.ERROR_LOG, secret)
+    result = build_audit_submission(
+        _snapshot(terminal=TerminalStatus.FAILED, artifacts=(item,))
+    )
+    payload = result.files["audit/error.log"].decode()
+    whole_bundle = b"\n".join(result.files.values())
+    assert "<REDACTED>" in payload
+    assert "<LOCAL_PATH>" in payload
+    assert b"sk-abcdefghijklmnopqrstuvwxyz" not in whole_bundle
+    assert b"login-secret-value" not in whole_bundle
+    assert b"json-secret-value" not in whole_bundle
+    assert b"identity-secret-value" not in whole_bundle
+    assert b"account-secret-value" not in whole_bundle
+    assert b"anthropic-secret-value" not in whole_bundle
+    assert b"google-secret-value" not in whole_bundle
+    assert b"codex-user@example.test" not in whole_bundle
+    assert b"C:\\Users\\ZQY" not in whole_bundle
+    assert b"/home/zqy" not in whole_bundle
+    assert b"/workspace/private" not in whole_bundle
+    assert b"/Applications/Codex" not in whole_bundle
+    assert b"/Volumes/Private" not in whole_bundle
+    assert b"/media/user" not in whole_bundle
+
+
+def test_json_privacy_cleanup_decodes_values_without_destroying_latex():
+    latex = r"\documentclass{article}\begin{document}Text\end{document}"
+    record = {
+        "tex": latex,
+        "codex_login_token": "login-token-secret",
+        "codex_login_email": "user@example.test",
+        "chatgpt_account_email": "chatgpt@example.test",
+        "codex_account_id": "account-secret",
+        "nested": {"path": r"C:\Users\ZQY\private\main.tex"},
+    }
+    artifact = make_audit_artifact(
+        ArtifactRole.VERIFICATION,
+        json.dumps(record).encode("utf-8"),
+        media_type="application/json",
+    )
+    result = build_audit_submission(_snapshot(artifacts=(artifact,)))
+    cleaned = json.loads(result.files["audit/verification.json"])
+    assert cleaned["tex"] == latex
+    assert cleaned["codex_login_token"] == "<REDACTED>"
+    assert cleaned["codex_login_email"] == "<REDACTED>"
+    assert cleaned["chatgpt_account_email"] == "<REDACTED>"
+    assert cleaned["codex_account_id"] == "<REDACTED>"
+    assert cleaned["nested"]["path"] == "<LOCAL_PATH>"
+
+
+def test_composite_codex_login_fields_are_redacted_in_plain_logs():
+    artifact = _artifact(
+        ArtifactRole.ERROR_LOG,
+        (
+            "codex_login_token=login-token-secret\n"
+            "codex_login_email=user@example.test\n"
+            "chatgpt_account_email=chatgpt@example.test\n"
+            "codex_account_id=account-secret\n"
+        ).encode(),
+    )
+    result = build_audit_submission(
+        _snapshot(terminal=TerminalStatus.FAILED, artifacts=(artifact,))
+    )
+    payload = result.files["audit/error.log"].decode()
+    assert "login-token-secret" not in payload
+    assert "user@example.test" not in payload
+    assert "chatgpt@example.test" not in payload
+    assert "account-secret" not in payload
+
+
+def test_privacy_cleanup_preserves_tex_delimiters_around_paths_and_secrets():
+    tex = "\n".join([
+        r"\documentclass{article}",
+        r"\usepackage{graphicx}",
+        r"\newcommand{\auth}{Authorization: Bearer abcdefghijklmnopqrstuvwxyz}",
+        r"\newcommand{\apikey}{OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz}",
+        r"\newcommand{\login}{codex_login_token=codex-secret-value}",
+        r"\begin{document}",
+        r"\includegraphics[width=.4\textwidth]{C:\Users\ZQY\secret\figure.png}",
+        r"\includegraphics{/home/zqy/private/second-figure.png}",
+        r"\end{document}",
+    ])
+    artifact = make_audit_artifact(
+        ArtifactRole.SOURCE_TEX,
+        tex.encode("utf-8"),
+        media_type="application/x-tex; charset=utf-8",
+    )
+    result = build_audit_submission(_snapshot(artifacts=(artifact,)))
+    cleaned = result.files["inputs/source.tex"].decode("utf-8")
+
+    assert r"\includegraphics[width=.4\textwidth]{<LOCAL_PATH>}" in cleaned
+    assert r"\includegraphics{<LOCAL_PATH>}" in cleaned
+    assert r"\newcommand{\auth}{Authorization: Bearer <REDACTED>}" in cleaned
+    assert r"\newcommand{\apikey}{OPENAI_API_KEY=<REDACTED>}" in cleaned
+    assert r"\newcommand{\login}{codex_login_token=<REDACTED>}" in cleaned
+    assert cleaned.count("{") == tex.count("{")
+    assert cleaned.count("}") == tex.count("}")
+    assert cleaned.count("[") == tex.count("[")
+    assert cleaned.count("]") == tex.count("]")
+    assert r"C:\Users\ZQY" not in cleaned
+    assert "/home/zqy" not in cleaned
+    assert "abcdefghijklmnopqrstuvwxyz" not in cleaned
+    assert "codex-secret-value" not in cleaned
+
+
+def test_privacy_cleanup_preserves_json_and_log_assignment_delimiters():
+    record = {
+        "source_path": r"C:\Users\ZQY\private\main.tex",
+        "nested": {
+            "preview": "/workspace/private/current.pdf",
+            "Authorization": "Bearer json-secret-value",
+            "codex_login_email": "user@example.test",
+        },
+        "tex": r"\includegraphics{/home/zqy/private/figure.png}",
+    }
+    json_artifact = make_audit_artifact(
+        ArtifactRole.VERIFICATION,
+        json.dumps(record).encode("utf-8"),
+        media_type="application/json",
+    )
+    log_artifact = make_audit_artifact(
+        ArtifactRole.ERROR_LOG,
+        (
+            r"path=C:\Users\ZQY\private\main.tex, status=failed; "
+            "Authorization: Bearer log-secret-value; "
+            "OPENAI_API_KEY=api-secret-value, "
+            "codex_login_email=user@example.test (account)"
+        ).encode("utf-8"),
+        media_type="text/plain; charset=utf-8",
+    )
+    result = build_audit_submission(
+        _snapshot(artifacts=(json_artifact, log_artifact)),
+    )
+
+    cleaned_json = json.loads(result.files["audit/verification.json"])
+    assert cleaned_json["source_path"] == "<LOCAL_PATH>"
+    assert cleaned_json["nested"]["preview"] == "<LOCAL_PATH>"
+    assert cleaned_json["nested"]["Authorization"] == "<REDACTED>"
+    assert cleaned_json["nested"]["codex_login_email"] == "<REDACTED>"
+    assert cleaned_json["tex"] == r"\includegraphics{<LOCAL_PATH>}"
+
+    cleaned_log = result.files["audit/error.log"].decode("utf-8")
+    assert "path=<LOCAL_PATH>, status=failed;" in cleaned_log
+    assert "Authorization: Bearer <REDACTED>;" in cleaned_log
+    assert "OPENAI_API_KEY=<REDACTED>," in cleaned_log
+    assert "codex_login_email=<REDACTED> (account)" in cleaned_log
+    whole_bundle = b"\n".join(result.files.values()).decode(
+        "utf-8", errors="ignore"
+    )
+    for leaked in (
+        r"C:\Users\ZQY",
+        "/workspace/private",
+        "/home/zqy",
+        "json-secret-value",
+        "log-secret-value",
+        "api-secret-value",
+        "user@example.test",
     ):
-        assert name in files
-    manifest = json.loads(files["submission_manifest.json"])
-    assert manifest["workflow"]["type"] == "ANALYSIS_REVIEW_ONLY"
-    assert manifest["workflow"]["verification_status"] == "VERIFIED"
-    assert_sums(files)
+        assert leaked not in whole_bundle
 
 
-def test_ocr_analysis_review_includes_source_pdf_outline_and_source_previews(tmp_path):
-    store, pid, project = make_project(tmp_path, kind="ocr", source=ocr_source_with_metadata())
-    pdf = b"%PDF-1.4\nsource\n"
-    (project / "ocr-source.pdf").write_bytes(pdf)
-    meta = json.loads((project / "meta.json").read_text(encoding="utf-8"))
-    meta["ocr_source"] = {
-        "available": True,
-        "path": "ocr-source.pdf",
-        "sha256": hashlib.sha256(pdf).hexdigest(),
-        "bytes": len(pdf),
-        "source_type": "pdf",
-        "selected_start": 1,
-        "selected_end": 2,
-    }
-    write_json(project / "meta.json", meta)
-    add_failure(project)
-    result = build_audit_submission(store=store, pid=pid, latest_job={"status": "blocked"})
-    files = read_zip(Path(result.package_path))
-    manifest = json.loads(files["submission_manifest.json"])
-    assert manifest["workflow"]["type"] == "OCR_ANALYSIS_REVIEW"
-    assert manifest["workflow"]["verification_status"] == "UNVERIFIED"
-    assert "inputs/source.pdf" in files
-    assert "stages/00_raw_ocr.tex" in files
-    assert "evidence/outline.json" in files
-    assert any(name.endswith("SOURCE_PREVIEW.pdf") for name in files)
-    import pymupdf
-    preview_bytes = files["previews/current_SOURCE_PREVIEW.pdf"]
-    with pymupdf.open(stream=preview_bytes, filetype="pdf") as document:
-        assert "NOT A LATEX COMPILED RESULT" in document[0].get_text()
-
-
-@pytest.mark.parametrize(
-    "kind,mode,template,job_status,expected",
-    [
-        ("", "ai", "", "error", "FAILED"),
-        ("", "ai", "", "cancelled", "CANCELLED"),
-        ("ocr", "ai", "", "done", "UNVERIFIED"),
-        ("", "rule", "faithfulbook", "done", "UNVERIFIED"),
-    ],
-)
-def test_terminal_statuses_and_workflows(tmp_path, kind, mode, template, job_status, expected):
-    store, pid, _project = make_project(tmp_path, kind=kind, mode=mode, template=template)
+def test_disabling_payload_secret_cleanup_still_never_leaks_paths_in_manifest():
+    item = make_audit_artifact(
+        ArtifactRole.EVIDENCE,
+        b"OPENAI_API_KEY=kept-by-explicit-opt-out",
+        filename="evidence.txt",
+        metadata={"workspace": "/root/private/project"},
+    )
+    snapshot = RunSnapshot(
+        project_id=r"C:\Users\ZQY\project",
+        run_id="run-opt-out",
+        workflow=AuditWorkflow.ANALYSIS_REVIEW_ONLY,
+        terminal_status=TerminalStatus.UNVERIFIED,
+        captured_at="2026-08-22T00:00:00Z",
+        artifacts=(item,),
+        machine_verification={"safe_to_export": False},
+        blockers=("inspect /mnt/private/log",),
+        model="model /opt/local/model",
+    )
     result = build_audit_submission(
-        store=store,
-        pid=pid,
-        latest_job={"status": job_status},
-        create_package=False,
+        snapshot,
+        AuditSubmissionRequest(
+            sanitize_sensitive=False,
+            audit_focus="check /workspace/private/source.tex",
+        ),
     )
-    assert result.manifest.snapshot.terminal_status.value == expected
-    assert result.manifest.snapshot.verification_status == "UNVERIFIED"
+    manifest_text = result.files[MANIFEST_PATH].decode("utf-8")
+    assert "kept-by-explicit-opt-out" in result.files["evidence/evidence.txt"].decode()
+    for leaked in (r"C:\Users\ZQY", "/root/private", "/mnt/private", "/opt/local", "/workspace/private"):
+        assert leaked not in manifest_text
+    assert result.manifest.privacy["payload_sensitive_data_sanitized"] is False
 
 
-def test_multifile_project_is_sanitized_and_preserves_chinese_paths(tmp_path):
-    store, pid, project = make_project(tmp_path, kind="folder")
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("章节/主文件.tex", "API_KEY=secret-value\n\\input{子.tex}\n")
-        archive.writestr(".env", "TOKEN=should-not-leak")
-    (project / "original-files.zip").write_bytes(buffer.getvalue())
-    result = build_audit_submission(store=store, pid=pid)
-    files = read_zip(Path(result.package_path))
-    nested = zipfile.ZipFile(io.BytesIO(files["inputs/original-project.zip"]), "r")
-    names = nested.namelist()
-    assert "章节/主文件.tex" in names
-    assert ".env" not in names
-    assert b"<REDACTED>" in nested.read("章节/主文件.tex")
-    manifest = json.loads(files["submission_manifest.json"])
-    assert manifest["workflow"]["type"] == "MULTIFILE_PROJECT"
+def test_partial_compiled_pdf_keeps_truthful_status_and_filename():
+    partial = _artifact(
+        ArtifactRole.CURRENT_PREVIEW,
+        b"%PDF-1.7\npartial",
+        preview_status=PARTIAL_COMPILED,
+    )
+    result = build_audit_submission(_snapshot(artifacts=(partial,)))
+    record = next(item for item in result.manifest.artifacts if item.preview_status)
+    assert record.preview_status == PARTIAL_COMPILED
+    assert record.path == "previews/current-partial-compiled.pdf"
 
 
-def test_dedup_records_aliases_instead_of_duplicate_bytes(tmp_path):
-    source = "same content\n"
-    store, pid, _project = make_project(tmp_path, source=source)
-    result = build_audit_submission(store=store, pid=pid)
-    files = read_zip(Path(result.package_path))
-    manifest = json.loads(files["submission_manifest.json"])
-    records = manifest["artifacts"]
-    matching = [item for item in records if "stages/30_current.tex" in item.get("aliases", [])]
-    assert matching
-    assert "stages/30_current.tex" not in files
+def test_source_preview_gets_first_page_notice_and_noncompiled_filename():
+    preview = _artifact(
+        ArtifactRole.RAW_OCR_PREVIEW,
+        b"plain degraded source preview",
+        path="previews/misleading-compiled.pdf",
+        preview_status=SOURCE_PREVIEW,
+    )
+    result = build_audit_submission(_snapshot(artifacts=(preview,)))
+    record = next(item for item in result.manifest.artifacts if item.preview_status)
+    assert record.path == "previews/raw-ocr-source-preview.txt"
+    assert "compiled" not in record.path.casefold()
+    assert record.media_type == "text/plain; charset=utf-8"
+    assert result.files[record.path].startswith(
+        b"SOURCE_PREVIEW: NOT A LATEX COMPILED RESULT."
+    )
 
 
-def test_partial_compiled_pdf_is_honest(tmp_path):
-    store, pid, project = make_project(tmp_path)
-    add_success(project, preview_status="PARTIAL_COMPILED")
-    info = json.loads((project / "verification.json").read_text(encoding="utf-8"))
-    info["verification"]["safe_to_export"] = False
-    write_json(project / "verification.json", info)
-    result = build_audit_submission(store=store, pid=pid)
-    files = read_zip(Path(result.package_path))
-    assert "previews/current_PARTIAL_COMPILED.pdf" in files
-    manifest = json.loads(files["submission_manifest.json"])
-    preview = next(item for item in manifest["artifacts"] if item["artifact_role"] == "partial_compiled_pdf")
-    assert preview["preview_status"] == "PARTIAL_COMPILED"
+def test_source_preview_notice_later_in_text_does_not_satisfy_first_page_rule():
+    preview = _artifact(
+        ArtifactRole.CURRENT_PREVIEW,
+        b"source body\nNOT A LATEX COMPILED RESULT\n",
+        path="previews/current-source-preview.txt",
+        preview_status=SOURCE_PREVIEW,
+    )
+    result = build_audit_submission(_snapshot(artifacts=(preview,)))
+    assert result.files["previews/current-source-preview.txt"].startswith(
+        b"SOURCE_PREVIEW: NOT A LATEX COMPILED RESULT."
+    )
 
 
-def test_stale_detection_after_project_or_review_state_changes(tmp_path):
-    store, pid, project = make_project(tmp_path)
-    add_success(project)
+def test_pdf_notice_on_later_page_does_not_satisfy_first_page_rule():
+    fitz = pytest.importorskip("fitz")
+    document = fitz.open()
+    document.new_page()
+    second = document.new_page()
+    second.insert_text((72, 72), "NOT A LATEX COMPILED RESULT")
+    payload = document.tobytes()
+    document.close()
+    preview = _artifact(
+        ArtifactRole.CURRENT_PREVIEW,
+        payload,
+        path="previews/current-source-preview.pdf",
+        preview_status=SOURCE_PREVIEW,
+    )
+    result = build_audit_submission(_snapshot(artifacts=(preview,)))
+    rendered = fitz.open(stream=result.files["previews/current-source-preview.pdf"], filetype="pdf")
+    try:
+        assert rendered.page_count == 3
+        assert "NOT A LATEX COMPILED RESULT" in rendered[0].get_text().upper()
+    finally:
+        rendered.close()
+
+
+def test_compiled_preview_preserves_compiled_status():
+    preview = _artifact(
+        ArtifactRole.CURRENT_PREVIEW,
+        b"%PDF-1.7\ncompiled",
+        preview_status=COMPILED,
+    )
+    record = next(
+        item
+        for item in build_audit_submission(_snapshot(artifacts=(preview,))).manifest.artifacts
+        if item.preview_status
+    )
+    assert record.preview_status == COMPILED
+    assert record.path == "previews/current.pdf"
+
+
+def test_compiled_preview_status_rejects_non_pdf_payload():
+    preview = _artifact(
+        ArtifactRole.CURRENT_PREVIEW,
+        b"source text only",
+        preview_status=COMPILED,
+    )
+    with pytest.raises(ValueError, match="real PDF"):
+        build_audit_submission(_snapshot(artifacts=(preview,)))
+
+
+def test_depth_and_explicit_heavy_evidence_controls():
+    page = make_audit_artifact(
+        ArtifactRole.PAGE_IMAGE, b"png", index=2, filename="page.png"
+    )
+    snapshot = _snapshot(artifacts=(page,))
+    standard = build_audit_submission(snapshot)
+    full = build_audit_submission(snapshot, AuditSubmissionRequest(depth=AuditDepth.FULL))
+    explicit = build_audit_submission(
+        snapshot,
+        AuditSubmissionRequest(depth=AuditDepth.STANDARD, include_page_images=True),
+    )
+    assert not any(path.startswith("evidence/page-images/") for path in standard.files)
+    assert "evidence/page-images/page-0002.png" in full.files
+    assert "evidence/page-images/page-0002.png" in explicit.files
+
+
+def test_filtered_parent_is_explicitly_reported_instead_of_left_silently_dangling():
+    source = _artifact(ArtifactRole.SOURCE_TEX, b"source")
+    current = _artifact(
+        ArtifactRole.CURRENT_TEX,
+        b"current",
+        parents=(source.artifact_id,),
+    )
     result = build_audit_submission(
-        store=store,
-        pid=pid,
-        request={"reviewed_candidate_ids": ["a", "b"]},
+        _snapshot(artifacts=(source, current)),
+        AuditSubmissionRequest(include_source_files=False),
     )
-    current = load_submission_summary(
-        store=store,
-        pid=pid,
-        reviewed_candidate_ids=("a", "b"),
+    assert result.manifest.unavailable_parent_artifact_ids == (source.artifact_id,)
+    prompt = result.files[FULL_PROMPT_PATH].decode("utf-8")
+    assert source.artifact_id in prompt
+    assert "不得猜测" in prompt
+
+
+def test_stale_fingerprint_covers_current_tex_pdf_decisions_and_verification():
+    current = _artifact(ArtifactRole.CURRENT_TEX, b"tex")
+    pdf = _artifact(ArtifactRole.CURRENT_PREVIEW, b"%PDF-1.7\npdf", preview_status=COMPILED)
+    decisions = _artifact(ArtifactRole.DECISIONS, b"decisions")
+    verification = _artifact(ArtifactRole.VERIFICATION, b"verification")
+    snapshot = _snapshot(artifacts=(current, pdf, decisions, verification))
+    result = build_audit_submission(snapshot)
+    same = snapshot_fingerprint_from_hashes(
+        current_tex_sha256=current.bytes_sha256,
+        current_pdf_sha256=pdf.bytes_sha256,
+        decisions_sha256=decisions.bytes_sha256,
+        verification_sha256=verification.bytes_sha256,
     )
-    assert current and current["stale"] is False
-    changed_review = load_submission_summary(
-        store=store,
-        pid=pid,
-        reviewed_candidate_ids=("a",),
-    )
-    assert changed_review and changed_review["stale"] is True
-    (project / "source.tex").write_text("changed\n", encoding="utf-8")
-    changed_source = load_submission_summary(
-        store=store,
-        pid=pid,
-        reviewed_candidate_ids=("a", "b"),
-    )
-    assert changed_source and changed_source["stale"] is True
-    assert submission_package_path(store, pid, result.submission_id).is_file()
+    assert same == snapshot.current_fingerprint
+    assert not result.is_stale(same)
+    changed = snapshot_fingerprint_from_hashes(current_tex_sha256="f" * 64)
+    assert result.is_stale(changed)
 
 
-def test_prompt_only_references_actual_canonical_paths(tmp_path):
-    store, pid, project = make_project(tmp_path)
-    add_failure(project)
-    result = build_audit_submission(store=store, pid=pid)
-    files = read_zip(Path(result.package_path))
-    manifest = json.loads(files["submission_manifest.json"])
-    prompt = files["02_PROMPT_FULL.md"].decode("utf-8")
-    for artifact in manifest["artifacts"]:
-        assert artifact["path"] in files
-        assert artifact["path"] in prompt
-    assert "stages/10_ai_analyzed.tex" not in prompt
+def test_short_prompt_is_exactly_one_sentence_and_points_to_real_control_files():
+    result = build_audit_submission(_snapshot())
+    short = result.files[SHORT_PROMPT_PATH].decode().strip()
+    assert short.count("。") == 1
+    assert "\n" not in short
+    for path in (README_PATH, MANIFEST_PATH, FULL_PROMPT_PATH):
+        assert path in short
+        assert path in result.files
 
 
-def test_atomic_write_leaves_no_temporary_entries(tmp_path):
-    store, pid, project = make_project(tmp_path)
-    add_success(project)
-    result = build_audit_submission(store=store, pid=pid)
-    root = project / "audit-submissions"
-    assert not [path for path in root.iterdir() if path.name.startswith(".tmp-")]
-    assert Path(result.package_path).is_file()
-
-
-def test_project_fingerprint_is_deterministic(tmp_path):
-    _store, _pid, project = make_project(tmp_path)
-    first = project_fingerprint(project, ("b", "a"))
-    second = project_fingerprint(project, ("a", "b"))
-    assert first == second
-    (project / "source.tex").write_text("changed", encoding="utf-8")
-    assert project_fingerprint(project, ("a", "b")) != first
-
-
-def test_fastapi_routes_precede_static_mount_and_download(tmp_path, monkeypatch):
-    import sys
-    import types
-    from contextlib import nullcontext
-
-    from fastapi import FastAPI
-    from fastapi.staticfiles import StaticFiles
-    from fastapi.testclient import TestClient
-
-    store, pid, project = make_project(tmp_path)
-    add_success(project)
-
-    class Manager:
-        def __init__(self):
-            self.jobs = {}
-
-        def active(self, _pid):
-            return None
-
-        def latest(self, _pid):
-            return None
-
-        def public(self, job):
-            return dict(job)
-
-        def get(self, jid):
-            return self.jobs.get(jid)
-
-        def complete(self, _jid, _result):
-            return None
-
-        def cancelled(self, _jid):
-            return None
-
-        def fail(self, _jid, _message):
-            return None
-
-    manager = Manager()
-    stub = types.ModuleType("latexstruct.server.app")
-    stub.get_store = lambda: store
-    stub._process_jobs = manager
-    stub._project_lock = lambda _pid: nullcontext()
-    stub._runtime_provenance_identity = lambda _prompt: {
-        "app_version": "1.2.6", "commit": "c" * 40, "build_id": "test",
-        "prompt_version": "audit-submission-v1",
+def test_lightweight_controls_never_claim_omitted_payload_or_hash_manifest_exists():
+    result = build_lightweight_audit_files(_snapshot())
+    assert set(result.files) == {
+        README_PATH,
+        SHORT_PROMPT_PATH,
+        FULL_PROMPT_PATH,
+        MANIFEST_PATH,
     }
-    monkeypatch.setitem(sys.modules, "latexstruct.server.app", stub)
-    import latexstruct.server as server_package
-    monkeypatch.setattr(server_package, "app", stub, raising=False)
+    assert {item.path for item in result.manifest.artifacts} == set(result.files)
+    readme = result.files[README_PATH].decode("utf-8")
+    prompt = result.files[FULL_PROMPT_PATH].decode("utf-8")
+    assert SHA256SUMS_PATH not in readme
+    assert SHA256SUMS_PATH not in prompt
+    assert "inputs/source.tex" not in prompt
+    assert "轻量控制" in readme
+    assert "不得作内容审计结论" in prompt
 
-    from latexstruct.server.audit_submission_routes import register_audit_submission_routes
 
-    static = tmp_path / "static"
-    static.mkdir()
-    (static / "index.html").write_text("static", encoding="utf-8")
-    app = FastAPI()
-    app.mount("/", StaticFiles(directory=static, html=True), name="static")
-    register_audit_submission_routes(app)
+def test_sha256sums_is_recomputable_and_excludes_itself():
+    result = build_audit_submission(_snapshot())
+    sums = {}
+    for line in result.files[SHA256SUMS_PATH].decode("utf-8").splitlines():
+        digest, path = line.split("  ", 1)
+        sums[path] = digest
+    assert SHA256SUMS_PATH not in sums
+    assert set(sums) == set(result.files) - {SHA256SUMS_PATH}
+    for path, digest in sums.items():
+        assert hashlib.sha256(result.files[path]).hexdigest() == digest
 
-    client = TestClient(app)
-    created = client.post(
-        f"/api/projects/{pid}/audit-submission",
-        json={"profile": "standard", "reviewed_candidate_ids": ["a"]},
+
+def test_zip_write_is_atomic_and_has_no_temporary_residue(tmp_path):
+    target = tmp_path / "中文审计包.zip"
+    target.write_bytes(b"old")
+    result = write_audit_submission_atomic(
+        _snapshot(),
+        target,
+        submission_id="atomic-test",
+        generated_at="2026-08-22T00:00:01Z",
     )
-    assert created.status_code == 200, created.text
-    value = created.json()
-    assert value["download_url"].startswith(f"/api/projects/{pid}/audit-submission/")
-    latest = client.get(
-        f"/api/projects/{pid}/audit-submission/latest?reviewed_candidate_id=a"
+    assert target.read_bytes() == result.zip_bytes
+    with zipfile.ZipFile(target) as archive:
+        assert archive.testzip() is None
+        assert MANIFEST_PATH in archive.namelist()
+    assert list(tmp_path.glob("*.tmp")) == []
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_canonical_paths_cover_ocr_analysis_review_tree():
+    assert canonical_artifact_path(ArtifactRole.SOURCE_PDF) == "inputs/source.pdf"
+    assert canonical_artifact_path(
+        ArtifactRole.SOURCE_IMAGE, filename="ocr-source.jpeg"
+    ) == "inputs/source-image.jpg"
+    assert canonical_artifact_path(ArtifactRole.RAW_OCR_TEX) == "stages/00_raw_ocr.tex"
+    assert canonical_artifact_path(ArtifactRole.AI_ANALYZED_TEX) == "stages/10_ai_analyzed.tex"
+    assert canonical_artifact_path(
+        ArtifactRole.RULE_ANALYZED_TEX
+    ) == "stages/10_rule_analyzed.tex"
+    assert canonical_artifact_path(ArtifactRole.AI_REVIEWED_TEX) == "stages/20_ai_reviewed.tex"
+    assert canonical_artifact_path(ArtifactRole.CURRENT_TEX) == "stages/30_current.tex"
+
+
+def test_ocr_source_image_is_authoritative_and_does_not_claim_missing_pdf():
+    source = make_audit_artifact(
+        ArtifactRole.SOURCE_IMAGE,
+        b"\x89PNG\r\n\x1a\nimage",
+        filename="ocr-source.png",
+        media_type="image/png",
     )
-    assert latest.status_code == 200
-    assert latest.json()["stale"] is False
-    downloaded = client.get(value["download_url"])
-    assert downloaded.status_code == 200
-    assert downloaded.content.startswith(b"PK")
+    raw = make_audit_artifact(
+        ArtifactRole.RAW_OCR_TEX,
+        b"raw OCR",
+        parent_artifact_ids=(source.artifact_id,),
+    )
+    result = build_audit_submission(
+        _snapshot(
+            workflow=AuditWorkflow.OCR_ONLY,
+            artifacts=(source, raw),
+        )
+    )
+    assert result.files["inputs/source-image.png"].startswith(b"\x89PNG")
+    roles = {item.artifact_role for item in result.manifest.artifacts}
+    assert ArtifactRole.SOURCE_IMAGE in roles
+    assert ArtifactRole.SOURCE_PDF not in result.manifest.missing_expected_roles

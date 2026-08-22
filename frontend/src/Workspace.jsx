@@ -3,6 +3,19 @@ import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import { DiffEditor, Editor, loader } from "@monaco-editor/react";
 import { api } from "./api";
+import AuditSubmissionPanel from "./AuditSubmissionPanel";
+import {
+  blockAuditForPendingTask,
+  clearAuditClientStale,
+  forceAuditSubmissionStale,
+  isHistoricalAuditSubmission,
+  isAuditSubmissionStale,
+  normalizeLatestAuditResponse,
+  readAuditClientStale,
+  reconcileAuditMutationFailure,
+  rememberAuditClientStale,
+  reviewAcceptanceRoute,
+} from "./auditSubmission";
 
 // 本地 Monaco（无 CDN）。本模块由 App 按页加载，因此导入/OCR/设置页无需先解析编辑器。
 self.MonacoEnvironment = {
@@ -39,7 +52,7 @@ const EDITOR_HEIGHT = "clamp(560px, 68vh, 900px)";
 function processIssueGuidance(job) {
   const detail = String(job?.error || job?.message || "");
   if (job?.status === "cancelled" || /取消|cancel/i.test(detail)) {
-    return "任务已安全取消，未验证草稿没有保存；需要时可点击“开始分析”重新开始。";
+    return "任务已安全取消；原项目保持不变，取消前已有阶段已保存到 AI 审计快照。";
   }
   if (/codex|\bcli\b|login|登录|subscription|订阅|额度|rate\s*limit/i.test(detail)) {
     return "请打开顶部“设置”，检查 Codex CLI 的安装、ChatGPT 登录和订阅额度，刷新状态后再重试；系统不会自动切回 API 计费。";
@@ -186,6 +199,17 @@ export default function Workspace({ pid, onOpenSettings }) {
   const [livePreview, setLivePreview] = useState("");
   const [failedAttempt, setFailedAttempt] = useState(null);
   const [pollGeneration, setPollGeneration] = useState(0);
+  const [auditLatest, setAuditLatest] = useState(null);
+  const [auditHistory, setAuditHistory] = useState([]);
+  const [auditHistoricalResult, setAuditHistoricalResult] = useState(null);
+  const [auditAvailability, setAuditAvailability] = useState({
+    available: false,
+    canGenerate: false,
+    reason: "NO_TERMINAL_RUN",
+  });
+  const [auditBusy, setAuditBusy] = useState(false);
+  const [auditError, setAuditError] = useState("");
+  const [reviewStateBusy, setReviewStateBusy] = useState(false);
   const [decisions, setDecisions] = useState([]);
   const [verification, setVerification] = useState(null);
   const [graph, setGraph] = useState(null);
@@ -211,6 +235,48 @@ export default function Workspace({ pid, onOpenSettings }) {
   const activePidRef = useRef(pid);
   const loadGenerationRef = useRef(0);
   const loadAbortRef = useRef(null);
+  const reviewStateSavingRef = useRef(false);
+
+  const loadAuditLatest = async (targetPid = pid, options = {}) => {
+    try {
+      const response = await api(`/api/projects/${targetPid}/audit-submission/latest`, {
+        signal: options.signal,
+      });
+      const normalized = normalizeLatestAuditResponse(await response.json());
+      if (activePidRef.current !== targetPid) return false;
+      const guarded = readAuditClientStale(window.localStorage, targetPid, normalized.latest);
+      setAuditLatest(guarded);
+      setAuditHistory(normalized.history);
+      setAuditAvailability({
+        available: normalized.available,
+        canGenerate: normalized.canGenerate,
+        reason: normalized.reason,
+      });
+      if (!options.preserveError) setAuditError("");
+      return true;
+    } catch (error) {
+      if (activePidRef.current !== targetPid) return false;
+      if (error.status === 404) {
+        setAuditLatest(null);
+        setAuditHistory([]);
+        setAuditAvailability({
+          available: false,
+          canGenerate: false,
+          reason: "NO_TERMINAL_RUN",
+        });
+      } else {
+        setAuditAvailability({
+          available: false,
+          canGenerate: false,
+          reason: "AUDIT_STATUS_UNAVAILABLE",
+        });
+        if (!options.silent) {
+          setAuditError(`读取最近审计提交包失败：${error.message}`);
+        }
+      }
+      return false;
+    }
+  };
 
   const load = async (targetPid = pid) => {
     if (!targetPid || activePidRef.current !== targetPid) return false;
@@ -235,6 +301,11 @@ export default function Workspace({ pid, onOpenSettings }) {
       }
       if (!isCurrent()) return false;
       setInfo(project);
+      if (Array.isArray(project?.accepted_decision_ids)) {
+        setReviewed(new Set(
+          project.accepted_decision_ids.filter((cid) => typeof cid === "string"),
+        ));
+      }
 
       try {
         const nextSource = await readText(`/api/projects/${targetPid}/source`);
@@ -274,6 +345,9 @@ export default function Workspace({ pid, onOpenSettings }) {
         decisionsResponse = d;
         const items = d.items || [];
         setDecisions(items);
+        if (Array.isArray(d.accepted_ids)) {
+          setReviewed(new Set(d.accepted_ids.filter((cid) => typeof cid === "string")));
+        }
         setSelected((previous) =>
           previous ? items.find((item) => item.candidate_id === previous.candidate_id) || null : null);
         setVerification(d.verification || null);
@@ -313,6 +387,8 @@ export default function Workspace({ pid, onOpenSettings }) {
         if (!isCurrent()) return false;
         setGraph(null);
       }
+      await loadAuditLatest(targetPid, { signal: controller.signal, silent: true });
+      if (!isCurrent()) return false;
       const loaded = isCurrent();
       if (loaded) setProjectLoaded(true);
       return loaded;
@@ -344,6 +420,14 @@ export default function Workspace({ pid, onOpenSettings }) {
     setJob(null);
     setLivePreview("");
     setFailedAttempt(null);
+    setAuditLatest(null);
+    setAuditHistory([]);
+    setAuditHistoricalResult(null);
+    setAuditAvailability({ available: false, canGenerate: false, reason: "NO_TERMINAL_RUN" });
+    setAuditBusy(false);
+    setAuditError("");
+    setReviewStateBusy(false);
+    reviewStateSavingRef.current = false;
     setFileAction("");
     setSavedExport(null);
     setFocusPreview(false);
@@ -421,7 +505,7 @@ export default function Workspace({ pid, onOpenSettings }) {
             setStatus(`安全检查未通过，失败草稿已保留供检查：${summary.failure_summary || state.message || "原项目保持不变"}`);
             setFocusPreview(true);
           } else if (state.status === "cancelled") {
-            setStatus("任务已取消；未验证草稿未保存，原项目保持不变");
+      setStatus("任务已取消；原项目保持不变，已有阶段已保存到 AI 审计快照");
           } else {
             setStatus("处理未完成：" + (state.error || state.message || "原项目保持不变，可重新分析"));
           }
@@ -449,8 +533,18 @@ export default function Workspace({ pid, onOpenSettings }) {
     } catch {}
   }, [reviewed, pid]);
 
-  const rerun = async (path, opts) => {
+  const rerun = async (path, opts, auditStaleReason = "") => {
     const actionPid = pid;
+    const auditAtStart = auditLatest;
+    if (auditStaleReason && reviewStateSavingRef.current) {
+      setStatus("上一项审阅操作仍在保存，请稍候");
+      return false;
+    }
+    if (auditStaleReason) {
+      reviewStateSavingRef.current = true;
+      markCurrentAuditStale(auditStaleReason);
+      setReviewStateBusy(true);
+    }
     setStatus("重新整理并校验中……");
     try {
       await api(path, opts);
@@ -460,15 +554,31 @@ export default function Workspace({ pid, onOpenSettings }) {
       setStatus("已完成并重新校验");
       return true;
     } catch (e) {
+      if (auditStaleReason) {
+        await reconcileFailedReviewMutation(actionPid, auditAtStart);
+      }
       if (activePidRef.current === actionPid) setStatus("失败：" + e.message);
       return false;
+    } finally {
+      if (auditStaleReason && activePidRef.current === actionPid) {
+        reviewStateSavingRef.current = false;
+        setReviewStateBusy(false);
+      }
     }
   };
 
   const runProcess = async () => {
+    const actionPid = pid;
+    // Until the host returns the new run's authoritative availability, fail closed.
+    // The stale marker is intentionally transient here: an active OCR_ONLY/PARTIAL
+    // snapshot may be re-enabled only by an explicit can_generate response.
+    markCurrentAuditStale("新的处理任务正在启动，旧审计提交包等待刷新", { persist: false });
+    setAuditHistory([]);
+    setAuditAvailability((previous) => blockAuditForPendingTask(previous));
     setStatus("正在启动可暂停的后台任务……");
     try {
-      const state = await (await api(`/api/projects/${pid}/process/start`, { method: "POST" })).json();
+      const state = await (await api(`/api/projects/${actionPid}/process/start`, { method: "POST" })).json();
+      if (activePidRef.current !== actionPid) return;
       setReviewed(new Set());
       setFailedAttempt(null);
       setJob(state);
@@ -480,10 +590,15 @@ export default function Workspace({ pid, onOpenSettings }) {
         revision: Number.isFinite(Number(state.preview_revision)) ? Number(state.preview_revision) : null,
       };
       pollFailuresRef.current = 0;
+      await loadAuditLatest(actionPid, { silent: true, preserveError: true });
+      if (activePidRef.current !== actionPid) return;
       setStatus("后台处理已开始，可随时暂停或取消");
       setPollGeneration((value) => value + 1);
     } catch (e) {
-      setStatus("失败：" + e.message);
+      if (activePidRef.current === actionPid) {
+        await loadAuditLatest(actionPid, { silent: true, preserveError: true });
+        if (activePidRef.current === actionPid) setStatus("失败：" + e.message);
+      }
     }
   };
 
@@ -590,6 +705,174 @@ export default function Workspace({ pid, onOpenSettings }) {
     }
   };
 
+  const markCurrentAuditStale = (reason, { persist = true } = {}) => {
+    // Persist against the render's authoritative card synchronously. Keeping
+    // storage writes outside the state updater prevents a fast rejected API
+    // response from clearing the marker before React has written it.
+    if (persist && auditLatest) {
+      rememberAuditClientStale(window.localStorage, pid, auditLatest, reason);
+    }
+    setAuditLatest((previous) => {
+      if (!previous) return previous;
+      return forceAuditSubmissionStale(previous, reason);
+    });
+  };
+
+  const reconcileFailedReviewMutation = async (targetPid, submission) => {
+    const guarded = reconcileAuditMutationFailure(
+      window.localStorage,
+      targetPid,
+      submission,
+    );
+    if (activePidRef.current !== targetPid) return false;
+    if (guarded) {
+      setAuditLatest((previous) => (
+        previous?.submission_id === guarded.submission_id ? guarded : previous
+      ));
+    }
+    return loadAuditLatest(targetPid, { silent: true, preserveError: true });
+  };
+
+  const persistReviewState = async (nextReviewed, previousReviewed) => {
+    if (reviewStateSavingRef.current) {
+      setStatus("上一项审阅确认仍在保存，请稍候");
+      return false;
+    }
+    const actionPid = pid;
+    const auditAtStart = auditLatest;
+    reviewStateSavingRef.current = true;
+    markCurrentAuditStale("审阅确认状态正在改变");
+    setReviewStateBusy(true);
+    setReviewed(nextReviewed);
+    try {
+      const response = await api(`/api/projects/${actionPid}/decisions/review-state`, {
+        method: "POST",
+        body: JSON.stringify({ accepted_ids: [...nextReviewed].sort() }),
+      });
+      const saved = await response.json();
+      if (saved?.ok !== true) throw new Error("服务未确认审阅状态已经保存");
+      if (activePidRef.current !== actionPid) return false;
+      const acceptedIds = Array.isArray(saved.accepted_ids)
+        ? saved.accepted_ids.filter((cid) => typeof cid === "string")
+        : [...nextReviewed];
+      setReviewed(new Set(acceptedIds));
+      await loadAuditLatest(actionPid, { silent: true, preserveError: true });
+      return true;
+    } catch (error) {
+      await reconcileFailedReviewMutation(actionPid, auditAtStart);
+      if (activePidRef.current === actionPid) {
+        setReviewed(previousReviewed);
+        setStatus(`审阅确认未保存：${error.message}。本次操作已撤销，请重试。`);
+      }
+      return false;
+    } finally {
+      if (activePidRef.current === actionPid) {
+        reviewStateSavingRef.current = false;
+        setReviewStateBusy(false);
+      }
+    }
+  };
+
+  const generateAuditSubmission = async (request) => {
+    const actionPid = pid;
+    setAuditBusy(true);
+    setAuditError("");
+    setSavedExport(null);
+    setFileAction("正在根据不可变运行快照生成 AI 审计提交包……");
+    try {
+      const response = await api(`/api/projects/${actionPid}/audit-submission`, {
+        method: "POST",
+        body: JSON.stringify(request),
+      });
+      const payload = await response.json();
+      const submission = payload?.submission;
+      if (payload?.ok !== true || !submission || typeof submission !== "object") {
+        throw new Error("服务返回的审计提交包记录无效");
+      }
+      if (activePidRef.current !== actionPid) return false;
+      const historical = Boolean(request?.snapshot_id) || isHistoricalAuditSubmission(submission);
+      if (historical) {
+        setAuditHistoricalResult({ ...submission, historical: true, is_latest: false });
+      } else {
+        clearAuditClientStale(window.localStorage, actionPid, auditLatest);
+        clearAuditClientStale(window.localStorage, actionPid, submission);
+      }
+      // POST can race with a child task reaching a newer terminal state even
+      // after the ZIP itself was committed.  Never let its response replace
+      // the host-authoritative latest card without one final GET reconciliation.
+      const refreshed = await loadAuditLatest(actionPid, {
+        silent: true,
+        preserveError: true,
+      });
+      if (!refreshed && !historical && activePidRef.current === actionPid) {
+        setAuditLatest(forceAuditSubmissionStale(
+          submission,
+          "生成后暂时无法确认最新运行；重新读取成功前不使用此材料",
+        ));
+        setAuditAvailability({
+          available: false,
+          canGenerate: false,
+          reason: "AUDIT_STATUS_UNAVAILABLE",
+        });
+      }
+      if (submission.filename && submission.folder) {
+        setSavedExport({ filename: submission.filename, folder: submission.folder });
+        setFileAction(`${historical ? "历史材料已生成" : "已生成"} ${submission.filename}，保存在 ${submission.folder}`);
+      } else {
+        setFileAction(historical
+          ? "历史材料已生成；它不会替换当前审计提交包"
+          : "AI 审计提交包已生成，可在最近材料卡片中复制话术或备用下载");
+      }
+      return true;
+    } catch (error) {
+      if (activePidRef.current === actionPid) {
+        setAuditError(`生成失败：${error.message}`);
+        setFileAction(`生成 AI 审计提交包失败：${error.message}`);
+      }
+      return false;
+    } finally {
+      if (activePidRef.current === actionPid) setAuditBusy(false);
+    }
+  };
+
+  const copyAuditSubmissionPrompt = async (submission) => {
+    if (isAuditSubmissionStale(submission)) {
+      setFileAction("该审计提交包已过期，请重新生成后再复制提交话术");
+      return;
+    }
+    await copyText("AI 审计提交话术", submission?.short_prompt || "");
+  };
+
+  const openAuditSubmissionFolder = async (submission) => {
+    if (isAuditSubmissionStale(submission)) {
+      setFileAction("该审计提交包已过期，请重新生成当前材料");
+      return;
+    }
+    try {
+      await api("/api/exports/open-folder", { method: "POST" });
+      setFileAction(`已打开 ${submission?.folder || "下载/LaTeXStruct"}`);
+    } catch (error) {
+      setFileAction(`打开审计包所在文件夹失败：${error.message}`);
+    }
+  };
+
+  const downloadAuditSubmission = async (submission) => {
+    if (isAuditSubmissionStale(submission) && !isHistoricalAuditSubmission(submission)) {
+      setFileAction("该审计提交包已过期，请重新生成后再下载");
+      return;
+    }
+    const submissionId = String(submission?.submission_id || "");
+    if (!submissionId) {
+      setFileAction("审计提交包编号缺失，无法下载");
+      return;
+    }
+    const filename = submission?.filename || `LaTeXStruct-AI-audit-${submissionId}.zip`;
+    await downloadFromApi(
+      `/api/projects/${pid}/audit-submission/${encodeURIComponent(submissionId)}/download`,
+      filename,
+    );
+  };
+
   const visible = useMemo(() => {
     let items = decisions;
     if (filter === "theorem") items = items.filter((d) => d.kind === "theorem-like");
@@ -649,7 +932,7 @@ export default function Workspace({ pid, onOpenSettings }) {
     ? `/api/projects/${pid}/export-report`
     : `/api/projects/${pid}/export-current-report`;
   const reportReady = projectStateReady && Boolean(exportSnapshot) && !taskActive;
-  const reviewLocked = taskActive || showingFailedDraft;
+  const reviewLocked = taskActive || showingFailedDraft || reviewStateBusy;
   const displayResult = (taskActive || showingFailedDraft) && livePreview ? livePreview : result;
   const largeDiff = source.length + displayResult.length > 1_000_000;
   const showDiffEditor = view === "side" && !largeDiff;
@@ -692,31 +975,70 @@ export default function Workspace({ pid, onOpenSettings }) {
     select(next);
   };
 
-  const accept = (d) => {
-    if (reviewLocked) return;
-    setReviewed((prev) => new Set(prev).add(d.candidate_id));
+  const unrejectCandidate = async (candidateId, successMessage = "已撤销拒绝；如需确认保留，请再次按 A 或点击确认保留") => {
+    const ok = await rerun(
+      `/api/projects/${pid}/decisions/${candidateId}/unreject`,
+      { method: "POST" },
+      "用户正在撤销审阅项的拒绝状态",
+    );
+    if (ok) setStatus(successMessage);
+    return ok;
   };
 
-  const acceptSimilar = (d) => {
+  const accept = async (d) => {
     if (reviewLocked) return;
-    setReviewed((prev) => {
-      const next = new Set(prev);
-      applied.filter((x) => x.kind === d.kind && x.env === d.env)
-        .forEach((x) => next.add(x.candidate_id));
-      return next;
-    });
+    const route = reviewAcceptanceRoute(d?.status);
+    if (route === "unreject") {
+      await unrejectCandidate(d.candidate_id);
+      return;
+    }
+    if (route !== "accept") {
+      setStatus("该审阅项当前不能确认保留，请先恢复为可应用状态");
+      return;
+    }
+    if (reviewed.has(d.candidate_id)) return;
+    const previous = new Set(reviewed);
+    const next = new Set(reviewed);
+    next.add(d.candidate_id);
+    if (await persistReviewState(next, previous)) {
+      setStatus("审阅确认已保存；旧审计提交包已标记为过期");
+    }
   };
 
-  const acceptAll = () => {
+  const unaccept = async (d) => {
+    if (reviewLocked || !reviewed.has(d.candidate_id)) return;
+    const previous = new Set(reviewed);
+    const next = new Set(reviewed);
+    next.delete(d.candidate_id);
+    if (await persistReviewState(next, previous)) {
+      setStatus("已撤销确认保留；旧审计提交包已标记为过期");
+    }
+  };
+
+  const acceptSimilar = async (d) => {
+    if (reviewLocked) return;
+    const previous = new Set(reviewed);
+    const next = new Set(reviewed);
+    applied.filter((x) => x.kind === d.kind && x.env === d.env)
+      .forEach((x) => next.add(x.candidate_id));
+    if (next.size === previous.size) return;
+    if (await persistReviewState(next, previous)) {
+      setStatus("同类审阅确认已保存；旧审计提交包已标记为过期");
+    }
+  };
+
+  const acceptAll = async () => {
     if (reviewLocked) return;
     if (lowConfidenceCount > 0 && !confirm(`其中有 ${lowConfidenceCount} 条低置信修改，仍要全部确认保留吗？`)) {
       return;
     }
-    setReviewed((prev) => {
-      const next = new Set(prev);
-      applied.forEach((x) => next.add(x.candidate_id));
-      return next;
-    });
+    const previous = new Set(reviewed);
+    const next = new Set(reviewed);
+    applied.forEach((x) => next.add(x.candidate_id));
+    if (next.size === previous.size) return;
+    if (await persistReviewState(next, previous)) {
+      setStatus("全部审阅确认已保存；旧审计提交包已标记为过期");
+    }
   };
 
   const reject = async (d) => {
@@ -726,7 +1048,11 @@ export default function Workspace({ pid, onOpenSettings }) {
         : "请等待当前处理完成或先取消任务，再修改审阅结论");
       return;
     }
-    const ok = await rerun(`/api/projects/${pid}/decisions/${d.candidate_id}/reject`, { method: "POST" });
+    const ok = await rerun(
+      `/api/projects/${pid}/decisions/${d.candidate_id}/reject`,
+      { method: "POST" },
+      "用户正在拒绝审阅项",
+    );
     if (ok) undoStack.current.push(d.candidate_id);
   };
 
@@ -742,7 +1068,8 @@ export default function Workspace({ pid, onOpenSettings }) {
       setStatus("没有可撤销的拒绝");
       return;
     }
-    await rerun(`/api/projects/${pid}/decisions/${cid}/unreject`, { method: "POST" });
+    const ok = await unrejectCandidate(cid, "已撤销上一次拒绝；如需确认保留，请再次按 A");
+    if (!ok) undoStack.current.push(cid);
   };
 
   // 全局快捷键：↑↓ 切换 · A 确认保留 · R 拒绝 · Ctrl+Z 撤销上次拒绝
@@ -764,7 +1091,7 @@ export default function Workspace({ pid, onOpenSettings }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, flat, view, job?.status, showingFailedDraft]);
+  }, [selected, flat, view, job?.status, showingFailedDraft, reviewed]);
 
   if (!pid) return <section className="card">请在「项目」页选择或创建一个项目。</section>;
 
@@ -787,11 +1114,27 @@ export default function Workspace({ pid, onOpenSettings }) {
           <button
             className="danger-button"
             disabled={job?.status === "cancelling"}
-            onClick={() => { if (confirm("取消本次处理？上一次通过机器检查的结果会保留，当前草稿不会保存。")) controlTask("cancel"); }}
+                  onClick={() => { if (confirm("取消本次处理？上一次通过机器检查的结果会保留；取消前已有阶段和错误记录将保存到 AI 审计快照。")) controlTask("cancel"); }}
           >
             取消
           </button>
         )}
+        <AuditSubmissionPanel
+          key={`audit-submission-${pid}`}
+          latest={auditLatest}
+          history={auditHistory}
+          historicalResult={auditHistoricalResult}
+          available={auditAvailability.available}
+          canGenerate={projectStateReady && !reviewStateBusy && auditAvailability.canGenerate}
+          reason={auditAvailability.reason}
+          busy={auditBusy}
+          error={auditError}
+          onClearError={() => setAuditError("")}
+          onGenerate={generateAuditSubmission}
+          onCopy={copyAuditSubmissionPrompt}
+          onOpenFolder={openAuditSubmissionFolder}
+          onDownload={downloadAuditSubmission}
+        />
         <button
           disabled={!canExport}
           className={verifiedExportReady ? "primary" : "warning-button"}
@@ -868,7 +1211,7 @@ export default function Workspace({ pid, onOpenSettings }) {
             )}
           </div>
         </details>
-        <button disabled={reviewLocked} onClick={() => { if (confirm("撤销全部拒绝并重新应用所有修改？")) rerun(`/api/projects/${pid}/decisions/reset`, { method: "POST" }); }}>
+        <button disabled={reviewLocked} onClick={() => { if (confirm("撤销全部拒绝并重新应用所有修改？")) rerun(`/api/projects/${pid}/decisions/reset`, { method: "POST" }, "用户正在撤销全部拒绝状态"); }}>
           撤销全部拒绝
         </button>
         <span className="progress">
@@ -1126,6 +1469,9 @@ export default function Workspace({ pid, onOpenSettings }) {
                 {selApplied && !selReviewed && (
                   <button className="primary" disabled={reviewLocked} onClick={() => accept(selected)}>A 确认保留</button>
                 )}
+                {selApplied && selReviewed && (
+                  <button disabled={reviewLocked} onClick={() => unaccept(selected)}>撤销确认保留</button>
+                )}
                 {selApplied && (
                   <button disabled={reviewLocked} onClick={() => reject(selected)}>R 拒绝此修改</button>
                 )}
@@ -1133,7 +1479,7 @@ export default function Workspace({ pid, onOpenSettings }) {
                   <button disabled={reviewLocked} onClick={() => acceptSimilar(selected)}>同类全部保留</button>
                 )}
                 {selected.status === "rejected" && (
-                  <button disabled={reviewLocked} onClick={() => rerun(`/api/projects/${pid}/decisions/${selected.candidate_id}/unreject`, { method: "POST" })}>
+                  <button disabled={reviewLocked} onClick={() => unrejectCandidate(selected.candidate_id)}>
                     撤销拒绝（恢复此修改）
                   </button>
                 )}

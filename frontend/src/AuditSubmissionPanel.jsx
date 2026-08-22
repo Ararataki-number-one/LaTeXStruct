@@ -1,263 +1,360 @@
-import { useEffect, useMemo, useState } from "react";
-import { api } from "./api";
+import { useEffect, useId, useState } from "react";
+import {
+  AUDIT_PROFILES,
+  DEFAULT_AUDIT_FORM,
+  auditProfileLabel,
+  auditRunStatusLabel,
+  auditSubmissionActionState,
+  auditUnavailableReason,
+  auditVerificationStatusLabel,
+  auditWorkflowLabel,
+  buildAuditSubmissionRequest,
+  canOpenAuditSubmissionDialog,
+  formatAuditCreatedAt,
+  normalizeAuditForm,
+  selectableAuditHistory,
+} from "./auditSubmission";
 
-const PROFILE_OPTIONS = [
-  ["quick", "快速诊断", "当前结果、关键源文件、diff 与报告"],
-  ["standard", "标准审计", "完整阶段、编译预览、验证与决策（推荐）"],
-  ["full", "完整取证", "再加入页图、公式裁片和项目证据"],
+const CHECKBOXES = [
+  ["include_source_files", "包含源文件"],
+  ["include_compile_logs", "包含编译日志"],
+  ["include_verification_records", "包含验证和决策记录"],
+  ["include_page_images", "包含页图"],
+  ["include_formula_crops", "包含公式裁片"],
+  ["sanitize_sensitive", "自动清理敏感信息"],
 ];
 
-function readReviewedIds(pid) {
-  if (!pid) return [];
-  try {
-    const value = JSON.parse(localStorage.getItem(`ls-reviewed-${pid}`) || "[]");
-    return Array.isArray(value) ? value.map(String).filter(Boolean).sort() : [];
-  } catch {
-    return [];
-  }
-}
+function AuditSubmissionDialog({ busy, canGenerateCurrent, error, history, initialValue, onClose, onGenerate }) {
+  const titleId = useId();
+  const [form, setForm] = useState(() => normalizeAuditForm(initialValue || DEFAULT_AUDIT_FORM));
+  const [snapshotId, setSnapshotId] = useState("");
+  const selectableHistory = selectableAuditHistory(history);
+  const selectedRunReady = snapshotId
+    ? selectableHistory.some((item) => item.snapshot_id === snapshotId)
+    : canGenerateCurrent;
 
-function latestPath(pid) {
-  const params = new URLSearchParams();
-  readReviewedIds(pid).forEach((id) => params.append("reviewed_candidate_id", id));
-  const query = params.toString();
-  return `/api/projects/${pid}/audit-submission/latest${query ? `?${query}` : ""}`;
-}
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onClose]);
 
-async function copyText(text) {
-  if (!text) throw new Error("当前没有可复制的提交话术");
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-  const input = document.createElement("textarea");
-  input.value = text;
-  input.style.position = "fixed";
-  input.style.opacity = "0";
-  document.body.appendChild(input);
-  input.select();
-  document.execCommand("copy");
-  input.remove();
-}
+  const update = (name, value) => setForm((previous) => ({ ...previous, [name]: value }));
+  const selectProfile = (profile) => setForm((previous) => ({
+    ...previous,
+    profile,
+    include_page_images: profile === "full",
+    include_formula_crops: profile === "full",
+  }));
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!selectedRunReady) return;
+    if (!form.sanitize_sensitive && !window.confirm(
+      "关闭敏感信息清理可能把密钥、Authorization 或本机路径写入材料包。仍要继续吗？",
+    )) return;
+    await onGenerate(buildAuditSubmissionRequest({ ...form, snapshot_id: snapshotId }));
+  };
 
-function StatusBadge({ item }) {
-  if (!item) return null;
-  const stale = Boolean(item.stale);
   return (
-    <span className={`audit-status ${stale ? "stale" : ""}`}>
-      {stale ? "材料已过期" : (item.verification_status || item.status || "已准备")}
-    </span>
-  );
-}
-
-function AuditDialog({ options, busy, error, onChange, onClose, onSubmit }) {
-  return (
-    <div className="audit-overlay" role="presentation">
-      <section className="audit-dialog" role="dialog" aria-modal="true" aria-labelledby="audit-dialog-title">
-        <header>
+    <div className="update-overlay audit-submission-overlay" role="presentation">
+      <section
+        className="update-dialog audit-submission-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+      >
+        <header className="update-dialog-header audit-submission-dialog-header">
+          <span className="audit-submission-icon" aria-hidden="true">AI</span>
           <div>
-            <span className="audit-kicker">EXTERNAL REVIEW PACKAGE</span>
-            <h2 id="audit-dialog-title">生成 AI 审计提交包</h2>
-            <p>整理真实源文件、阶段结果、编译证据、验证记录和可直接复制的提示词。</p>
+            <h2 id={titleId}>生成 AI 审计提交包</h2>
+            <p>文件角色和组成由 LaTeXStruct 根据不可变运行快照确定。</p>
           </div>
-          <button type="button" className="audit-close" aria-label="关闭" disabled={busy} onClick={onClose}>×</button>
-        </header>
-
-        <div className="audit-dialog-body">
-          <fieldset>
-            <legend>审计深度</legend>
-            <div className="audit-profile-grid">
-              {PROFILE_OPTIONS.map(([value, label, description]) => (
-                <label key={value} className={options.profile === value ? "selected" : ""}>
-                  <input
-                    type="radio"
-                    name="audit-profile"
-                    value={value}
-                    checked={options.profile === value}
-                    onChange={() => onChange({ profile: value, include_evidence: value === "full" })}
-                  />
-                  <strong>{label}</strong>
-                  <small>{description}</small>
-                </label>
-              ))}
-            </div>
-          </fieldset>
-
-          <label className="audit-focus-field">
-            <span>重点关注（可选）</span>
-            <textarea
-              value={options.audit_focus}
-              maxLength={4000}
-              rows={4}
-              placeholder="例如：重点检查定理环境覆盖、公式编号和跨页盒排版。"
-              onChange={(event) => onChange({ audit_focus: event.target.value })}
-            />
-          </label>
-
-          <div className="audit-checks">
-            <label><input type="checkbox" checked={options.include_source} onChange={(event) => onChange({ include_source: event.target.checked })} />包含源文件</label>
-            <label><input type="checkbox" checked={options.include_compile_logs} onChange={(event) => onChange({ include_compile_logs: event.target.checked })} />包含编译日志</label>
-            <label><input type="checkbox" checked={options.include_verification} onChange={(event) => onChange({ include_verification: event.target.checked })} />包含验证与决策记录</label>
-            <label><input type="checkbox" checked={options.include_evidence} onChange={(event) => onChange({ include_evidence: event.target.checked })} />包含页图和公式裁片</label>
-            <label><input type="checkbox" checked={options.sanitize} onChange={(event) => onChange({ sanitize: event.target.checked })} />自动清理密钥和本机路径</label>
-          </div>
-
-          <p className="audit-privacy-note">
-            源 PDF 可能包含个人或受版权保护的内容。提交到第三方 AI 前，请确认你有权上传。
-          </p>
-          {error && <div className="audit-error" role="alert">{error}</div>}
-        </div>
-
-        <footer>
-          <button type="button" disabled={busy} onClick={onClose}>取消</button>
-          <button type="button" className="primary" disabled={busy} onClick={onSubmit}>
-            {busy ? "正在建立不可变快照…" : "生成并复制提交话术"}
+          <button
+            className="update-dialog-close"
+            type="button"
+            aria-label="关闭"
+            disabled={busy}
+            onClick={onClose}
+          >
+            ×
           </button>
-        </footer>
+        </header>
+        <form onSubmit={submit} className="audit-submission-form">
+          <div className="update-dialog-body">
+            <label className="audit-run-field">
+              <span>审计运行</span>
+              <select
+                value={snapshotId}
+                disabled={busy}
+                onChange={(event) => setSnapshotId(event.target.value)}
+              >
+                <option value="" disabled={!canGenerateCurrent}>
+                  当前运行{canGenerateCurrent ? "（默认）" : "（暂不可生成）"}
+                </option>
+                {selectableHistory.map((item) => (
+                  <option key={item.snapshot_id} value={item.snapshot_id}>
+                    历史材料 · {auditWorkflowLabel(item.workflow)} · {auditRunStatusLabel(item.status || item.run_terminal_status)} · {formatAuditCreatedAt(item.captured_at)}
+                  </option>
+                ))}
+              </select>
+              <small>
+                选择历史运行只会打包该不可变快照，不会替换或伪装成当前材料。
+              </small>
+            </label>
+
+            <fieldset className="audit-depth-fieldset">
+              <legend>审计深度</legend>
+              <div className="audit-depth-grid">
+                {AUDIT_PROFILES.map((item) => (
+                  <label key={item.value} className={form.profile === item.value ? "selected" : ""}>
+                    <input
+                      type="radio"
+                      name="audit-profile"
+                      value={item.value}
+                      checked={form.profile === item.value}
+                      disabled={busy}
+                      onChange={() => selectProfile(item.value)}
+                    />
+                    <b>{item.label}</b>
+                    <small>{item.hint}</small>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+
+            <label className="audit-focus-field">
+              <span>重点关注 <small>（可选，只影响审计表达，不决定包内文件）</small></span>
+              <textarea
+                value={form.audit_focus}
+                disabled={busy}
+                rows={4}
+                maxLength={4000}
+                placeholder="例如：重点检查定理环境边界、目录完整性和公式编号。"
+                onChange={(event) => update("audit_focus", event.target.value)}
+              />
+            </label>
+
+            <fieldset className="audit-options-fieldset">
+              <legend>材料选项</legend>
+              <div className="audit-options-grid">
+                {CHECKBOXES.map(([name, label]) => (
+                  <label key={name} className={name === "sanitize_sensitive" ? "privacy-option" : ""}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(form[name])}
+                      disabled={busy}
+                      onChange={(event) => update(name, event.target.checked)}
+                    />
+                    <span>{label}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+            <p className="audit-safety-note">
+              ZIP 内不会写入本机绝对路径；实际文件清单、角色、哈希、别名和验证状态以 manifest 为准。
+            </p>
+            {error && <p className="audit-submission-error" role="alert">{error}</p>}
+          </div>
+          <footer className="update-dialog-footer">
+            <button type="button" disabled={busy} onClick={onClose}>取消</button>
+            <button type="submit" className="primary update-primary" disabled={busy || !selectedRunReady}>
+              {busy ? "正在生成……" : "生成完整 ZIP"}
+            </button>
+          </footer>
+        </form>
       </section>
     </div>
   );
 }
 
-export default function AuditSubmissionPanel({ pid }) {
-  const [latest, setLatest] = useState(null);
-  const [loading, setLoading] = useState(false);
+function HistoricalAuditSubmissionCard({ submission, busy, onDownload }) {
+  const zipReady = String(submission?.bundle_state || "").toUpperCase() === "ZIP_READY"
+    || Boolean(submission?.filename && submission?.submission_id);
+  const canDownload = !busy && zipReady && Boolean(submission?.submission_id);
+  return (
+    <section className="audit-submission-card historical" aria-label="刚生成的历史 AI 审计材料">
+      <div className="audit-submission-card-heading">
+        <div>
+          <b>刚生成的历史审计包</b>
+          <span>独立历史快照，不会替换当前材料</span>
+        </div>
+        <span className="audit-freshness-chip historical">历史材料</span>
+      </div>
+      <dl className="audit-submission-meta">
+        <div><dt>工作流</dt><dd>{auditWorkflowLabel(submission?.workflow)}</dd></div>
+        <div><dt>运行状态</dt><dd>{auditRunStatusLabel(submission?.run_terminal_status)}</dd></div>
+        <div><dt>快照时间</dt><dd>{formatAuditCreatedAt(submission?.captured_at)}</dd></div>
+        <div><dt>快照编号</dt><dd title={submission?.snapshot_id || ""}>{submission?.snapshot_id || "未知"}</dd></div>
+        <div><dt>生成时间</dt><dd>{formatAuditCreatedAt(submission?.created_at || submission?.generated_at)}</dd></div>
+        <div><dt>文件</dt><dd title={submission?.filename || ""}>{submission?.filename || "尚未生成完整 ZIP"}</dd></div>
+      </dl>
+      <div className="audit-stale-warning historical-note">
+        <b>这是显式选择的历史材料，不代表当前 TEX、PDF 或审阅状态。</b>
+      </div>
+      <div className="audit-submission-actions">
+        <button
+          type="button"
+          disabled={!canDownload}
+          title={zipReady ? "下载所选历史快照的完整 ZIP" : "该历史运行尚无完整 ZIP"}
+          onClick={() => onDownload(submission)}
+        >
+          下载历史材料 ZIP
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function AuditSubmissionCard({ latest, busy, canRegenerate, onCopy, onOpenFolder, onDownload, onRegenerate }) {
+  const actions = auditSubmissionActionState(latest, busy);
+  const { stale, zipReady } = actions;
+  const reasons = Array.isArray(latest?.stale_reasons) ? latest.stale_reasons.filter(Boolean) : [];
+  return (
+    <section className={`audit-submission-card ${stale ? "stale" : "current"}`} aria-label="最近一次 AI 审计提交包">
+      <div className="audit-submission-card-heading">
+        <div>
+          <b>{stale ? "上一次提交包（已过期）" : "最近一次 AI 审计提交包"}</b>
+          <span>{zipReady ? "完整 ZIP 已生成" : "轻量审计材料已准备"}</span>
+        </div>
+        <span className={`audit-freshness-chip ${stale ? "stale" : "current"}`}>
+          {stale ? "已过期" : "当前材料"}
+        </span>
+      </div>
+      <dl className="audit-submission-meta">
+        <div><dt>工作流</dt><dd>{auditWorkflowLabel(latest?.workflow)}</dd></div>
+        <div><dt>运行状态</dt><dd>{auditRunStatusLabel(latest?.run_terminal_status)}</dd></div>
+        <div><dt>验证</dt><dd>{auditVerificationStatusLabel(latest?.verification_status)}</dd></div>
+        <div><dt>审计深度</dt><dd>{auditProfileLabel(latest?.profile)}</dd></div>
+        <div><dt>生成时间</dt><dd>{formatAuditCreatedAt(latest?.created_at || latest?.generated_at)}</dd></div>
+        <div><dt>文件</dt><dd title={latest?.filename || ""}>{latest?.filename || "尚未生成完整 ZIP"}</dd></div>
+      </dl>
+      {stale && (
+        <div className="audit-stale-warning" role="alert">
+          <b>当前 TEX、PDF 或审阅状态已改变，请重新生成后再提交。</b>
+          {reasons.slice(0, 2).map((reason, index) => <span key={`${reason}-${index}`}>{reason}</span>)}
+        </div>
+      )}
+      <div className="audit-submission-actions">
+        <button
+          type="button"
+          className={!stale && latest?.short_prompt ? "primary" : ""}
+          disabled={!actions.canCopy}
+          title={stale ? "材料已过期，请先重新生成" : "复制一句可直接发给 ChatGPT/Codex 的话术"}
+          onClick={() => onCopy(latest)}
+        >
+          复制提交话术
+        </button>
+        <button
+          type="button"
+          disabled={!actions.canOpenFolder}
+          title={stale ? "材料已过期，请先重新生成" : "打开 LaTeXStruct 固定下载文件夹"}
+          onClick={() => onOpenFolder(latest)}
+        >
+          打开所在文件夹
+        </button>
+        <button type="button" disabled={!actions.canRegenerate || !canRegenerate} onClick={onRegenerate}>重新生成</button>
+        {zipReady && (
+          <details className="audit-download-fallback">
+            <summary>备用下载</summary>
+            <button
+              type="button"
+              disabled={!actions.canDownload}
+              title={stale ? "材料已过期，请先重新生成" : "使用浏览器下载完整 ZIP"}
+              onClick={() => onDownload(latest)}
+            >
+              浏览器下载 ZIP
+            </button>
+          </details>
+        )}
+      </div>
+    </section>
+  );
+}
+
+export default function AuditSubmissionPanel({
+  latest,
+  history = [],
+  historicalResult,
+  available,
+  canGenerate,
+  reason,
+  busy,
+  error,
+  onClearError,
+  onGenerate,
+  onCopy,
+  onOpenFolder,
+  onDownload,
+}) {
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-  const [options, setOptions] = useState({
-    profile: "standard",
-    audit_focus: "",
-    include_source: true,
-    include_compile_logs: true,
-    include_verification: true,
-    include_evidence: false,
-    sanitize: true,
-  });
-
-  const reviewedIds = useMemo(() => readReviewedIds(pid), [pid, dialogOpen, latest?.submission_id]);
-
-  useEffect(() => {
-    if (!pid) {
-      setLatest(null);
+  const [lastRequest, setLastRequest] = useState(null);
+  const selectableHistory = selectableAuditHistory(history);
+  const canOpenDialog = canOpenAuditSubmissionDialog(canGenerate, selectableHistory);
+  const openDialog = () => {
+    onClearError();
+    setDialogOpen(true);
+  };
+  const closeDialog = () => {
+    if (!busy) setDialogOpen(false);
+  };
+  const generate = async (request) => {
+    const completed = await onGenerate(request);
+    if (completed) {
+      setLastRequest(request);
       setDialogOpen(false);
-      return undefined;
-    }
-    let stopped = false;
-    let timer = null;
-    const load = async () => {
-      try {
-        const response = await api(latestPath(pid));
-        const value = await response.json();
-        if (!stopped) setLatest(value);
-      } catch (requestError) {
-        if (!stopped && requestError.status !== 404) setMessage(`审计材料状态读取失败：${requestError.message}`);
-      }
-      if (!stopped) timer = window.setTimeout(load, 6000);
-    };
-    load();
-    return () => {
-      stopped = true;
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [pid]);
-
-  if (!pid) return null;
-
-  const updateOptions = (patch) => setOptions((value) => ({ ...value, ...patch }));
-
-  const generate = async () => {
-    setLoading(true);
-    setError("");
-    setMessage("");
-    try {
-      const response = await api(`/api/projects/${pid}/audit-submission`, {
-        method: "POST",
-        body: JSON.stringify({
-          ...options,
-          force: true,
-          reviewed_candidate_ids: reviewedIds,
-        }),
-      });
-      const value = await response.json();
-      setLatest(value);
-      await copyText(value.prompt_short);
-      setDialogOpen(false);
-      setMessage("审计提交包已生成，提交话术已复制。ZIP 下载已开始。");
-      if (value.download_url) window.location.assign(value.download_url);
-    } catch (requestError) {
-      setError(requestError.message || "审计提交包生成失败");
-    } finally {
-      setLoading(false);
     }
   };
-
-  const copyPrompt = async () => {
-    try {
-      await copyText(latest?.prompt_short);
-      setMessage("提交话术已复制。上传 ZIP 后直接粘贴即可。 ");
-    } catch (copyError) {
-      setMessage(copyError.message);
-    }
-  };
-
-  const openFolder = async () => {
-    try {
-      await api(`/api/projects/${pid}/audit-submission/open-folder`, { method: "POST" });
-      setMessage("已打开审计提交包所在文件夹。 ");
-    } catch (requestError) {
-      setMessage(requestError.message);
-    }
-  };
-
-  const download = () => {
-    if (latest?.download_url) window.location.assign(latest.download_url);
-  };
+  const initialValue = lastRequest
+    || latest?.effective_options
+    || latest?.request
+    || DEFAULT_AUDIT_FORM;
 
   return (
     <>
-      <aside className="audit-panel" aria-label="AI 审计提交包">
-        <div className="audit-panel-head">
-          <div>
-            <span className="audit-kicker">AI AUDIT</span>
-            <strong>外部独立审计</strong>
-          </div>
-          <StatusBadge item={latest} />
-        </div>
-        <p>
-          {latest
-            ? (latest.stale ? "项目或审阅状态已变化，请重新生成。" : "材料、提示词与 SHA-256 已按本次运行整理。")
-            : "一键整理源文件、阶段 TeX、PDF、日志和提示词。"}
-        </p>
-        <div className="audit-panel-actions">
-          <button type="button" className="primary" onClick={() => { setError(""); setDialogOpen(true); }}>
-            {latest ? "重新生成" : "生成 AI 审计提交包"}
-          </button>
-          {latest?.package_ready && !latest.stale && <button type="button" onClick={download}>下载 ZIP</button>}
-          {latest?.prompt_short && <button type="button" onClick={copyPrompt}>复制提交话术</button>}
-          <button type="button" onClick={openFolder}>打开所在文件夹</button>
-        </div>
-        {latest?.generated_at_utc && <small>最近生成：{latest.generated_at_utc}</small>}
-        {message && <div className="audit-message" role="status">{message}</div>}
-      </aside>
-
-      {dialogOpen && (
-        <AuditDialog
-          options={options}
-          busy={loading}
-          error={error}
-          onChange={updateOptions}
-          onClose={() => !loading && setDialogOpen(false)}
-          onSubmit={generate}
+      <button
+        type="button"
+        className="audit-generate-button"
+        disabled={busy || !canOpenDialog}
+        title={!canOpenDialog ? auditUnavailableReason(reason) : "生成可直接提交给 ChatGPT/Codex 的标准审计材料包"}
+        onClick={openDialog}
+      >
+        {busy ? "正在生成审计包" : "生成 AI 审计提交包"}
+      </button>
+      {!canGenerate && !available && !latest && reason && (
+        <span className="audit-unavailable-hint">{auditUnavailableReason(reason)}</span>
+      )}
+      {latest && (
+        <AuditSubmissionCard
+          latest={latest}
+          busy={busy}
+          canRegenerate={canOpenDialog}
+          onCopy={onCopy}
+          onOpenFolder={onOpenFolder}
+          onDownload={onDownload}
+          onRegenerate={openDialog}
         />
       )}
-
-      <style>{`
-        .audit-panel{position:fixed;right:22px;bottom:22px;z-index:70;width:min(390px,calc(100vw - 44px));padding:16px;border:1px solid rgba(15,23,42,.16);border-radius:18px;background:rgba(255,255,255,.94);box-shadow:0 18px 48px rgba(15,23,42,.18);backdrop-filter:blur(18px)}
-        .audit-panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.audit-panel-head>div{display:grid;gap:2px}.audit-kicker{font-size:10px;font-weight:800;letter-spacing:.14em;color:#64748b}.audit-panel strong{font-size:15px}.audit-panel p{margin:9px 0 12px;color:#475569;font-size:12px;line-height:1.55}.audit-panel-actions{display:flex;flex-wrap:wrap;gap:8px}.audit-panel button,.audit-dialog button{border:1px solid rgba(15,23,42,.16);border-radius:10px;padding:8px 11px;background:#fff;color:#0f172a;font:inherit;font-size:12px;cursor:pointer}.audit-panel button.primary,.audit-dialog button.primary{border-color:#111827;background:#111827;color:#fff}.audit-panel button:disabled,.audit-dialog button:disabled{opacity:.55;cursor:not-allowed}.audit-panel small{display:block;margin-top:10px;color:#64748b}.audit-status{padding:4px 8px;border-radius:999px;background:#ecfdf5;color:#047857;font-size:10px;font-weight:800}.audit-status.stale{background:#fff7ed;color:#c2410c}.audit-message{margin-top:10px;padding:8px 10px;border-radius:10px;background:#f8fafc;color:#334155;font-size:11px;line-height:1.45}
-        .audit-overlay{position:fixed;inset:0;z-index:120;display:grid;place-items:center;padding:24px;background:rgba(15,23,42,.45);backdrop-filter:blur(8px)}.audit-dialog{width:min(720px,100%);max-height:min(860px,calc(100vh - 48px));overflow:auto;border:1px solid rgba(255,255,255,.45);border-radius:22px;background:#fff;box-shadow:0 28px 90px rgba(15,23,42,.35)}.audit-dialog>header{display:flex;justify-content:space-between;gap:18px;padding:22px 24px 16px;border-bottom:1px solid #e2e8f0}.audit-dialog h2{margin:3px 0 5px;font-size:22px}.audit-dialog header p{margin:0;color:#64748b;font-size:13px}.audit-close{width:34px;height:34px;padding:0!important;border-radius:999px!important;font-size:22px!important}.audit-dialog-body{display:grid;gap:20px;padding:20px 24px}.audit-dialog fieldset{margin:0;padding:0;border:0}.audit-dialog legend,.audit-focus-field>span{display:block;margin-bottom:9px;font-size:12px;font-weight:800;color:#334155}.audit-profile-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.audit-profile-grid label{display:grid;gap:5px;padding:13px;border:1px solid #dbe3ee;border-radius:14px;cursor:pointer}.audit-profile-grid label.selected{border-color:#111827;box-shadow:0 0 0 1px #111827}.audit-profile-grid input{position:absolute;opacity:0}.audit-profile-grid strong{font-size:13px}.audit-profile-grid small{color:#64748b;line-height:1.45}.audit-focus-field textarea{box-sizing:border-box;width:100%;resize:vertical;border:1px solid #cbd5e1;border-radius:12px;padding:11px 12px;font:inherit;line-height:1.5}.audit-checks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px 14px}.audit-checks label{display:flex;align-items:center;gap:8px;font-size:12px;color:#334155}.audit-privacy-note{margin:0;padding:10px 12px;border-radius:11px;background:#fff7ed;color:#9a3412;font-size:11px;line-height:1.5}.audit-error{padding:10px 12px;border-radius:11px;background:#fef2f2;color:#b91c1c;font-size:12px}.audit-dialog>footer{display:flex;justify-content:flex-end;gap:9px;padding:15px 24px 20px;border-top:1px solid #e2e8f0}
-        @media (max-width:720px){.audit-profile-grid{grid-template-columns:1fr}.audit-checks{grid-template-columns:1fr}.audit-panel{right:12px;bottom:12px;width:calc(100vw - 24px)}}
-      `}</style>
+      {historicalResult && (
+        <HistoricalAuditSubmissionCard
+          submission={historicalResult}
+          busy={busy}
+          onDownload={onDownload}
+        />
+      )}
+      {dialogOpen && (
+        <AuditSubmissionDialog
+          key={`${latest?.submission_id || "new"}-${latest?.created_at || latest?.generated_at || ""}`}
+          busy={busy}
+          canGenerateCurrent={canGenerate}
+          error={error}
+          history={selectableHistory}
+          initialValue={initialValue}
+          onClose={closeDialog}
+          onGenerate={generate}
+        />
+      )}
     </>
   );
 }

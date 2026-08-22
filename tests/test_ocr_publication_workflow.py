@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from latexstruct.server import app as server
+from latexstruct.server.audit_store import AuditSubmissionStore
 
 
 _ONE_PIXEL_PNG = base64.b64decode(
@@ -210,7 +211,7 @@ def test_publication_bundle_revalidates_page_pixels_instead_of_trusting_job_fiel
     assert missing["quality_report"]["workflow_gate_passed"] is False
 
 
-def test_ocr_import_failure_is_atomic_and_second_attempt_really_starts(
+def test_ocr_import_launch_failure_is_durable_and_second_attempt_really_starts(
     tmp_path, monkeypatch,
 ):
     source = tmp_path / "source.png"
@@ -249,7 +250,17 @@ def test_ocr_import_failure_is_atomic_and_second_attempt_really_starts(
                     params={"mode": "rule"},
                 )
         assert failed.status_code == 500
-        assert server._store.list() == []
+        # A launch failure is now a durable FAILED run: its OCR source,
+        # lightweight audit controls and error evidence must remain available.
+        failed_projects = server._store.list()
+        assert len(failed_projects) == 1
+        failed_pid = failed_projects[0]["id"]
+        failed_submission = AuditSubmissionStore(
+            server._store._dir(failed_pid)
+        ).latest()
+        assert failed_submission is not None
+        assert failed_submission.terminal_status == "FAILED"
+        assert job.get("failed_import_project_ids") == [failed_pid]
         assert not job.get("imported_project_id")
         assert job.get("importing") is False
 
@@ -273,7 +284,20 @@ def test_ocr_import_failure_is_atomic_and_second_attempt_really_starts(
                 )
         assert retried.status_code == 200
         assert retried.json().get("reused") is not True
+        assert retried.json()["id"] != failed_pid
         assert retried.json()["process"]["pid"] == retried.json()["id"]
+        retried_pid = retried.json()["id"]
+        active = server._process_jobs.active(retried_pid)
+        assert active is not None
+        audit_store = AuditSubmissionStore(server._store._dir(retried_pid))
+        ocr_parent = audit_store.latest()
+        assert ocr_parent is not None
+        assert audit_store.load_snapshot(ocr_parent.snapshot_id).workflow.value == "OCR_ONLY"
+        assert (
+            server._process_jobs.audit_parent_snapshot_id(active)
+            == ocr_parent.snapshot_id
+        )
+        assert "_audit_parent_snapshot_id" not in server._process_jobs.public(active)
     finally:
         server._process_jobs.clear()
         server._ocr_jobs.pop(job_id, None)

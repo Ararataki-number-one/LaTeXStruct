@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import threading
 import time
 import uuid
@@ -14,6 +15,7 @@ from ..pricing import summarize_ai_usage
 
 TERMINAL_STATUSES = {"done", "blocked", "error", "cancelled"}
 ACTIVE_STATUSES = {"running", "pausing", "paused", "cancelling", "committing"}
+_AUDIT_PARENT_SNAPSHOT_FIELD = "_audit_parent_snapshot_id"
 
 
 class ProcessingCancelled(Exception):
@@ -93,6 +95,14 @@ class ProcessJobManager:
                 "events": [{"at": now, "phase": "queued", "message": "任务已创建"}],
                 "result": None,
                 "error": "",
+                # Host-produced immutable stage snapshots.  They are kept out
+                # of public polling payloads and are consumed only by the audit
+                # submission builder after the task reaches a terminal state.
+                "audit_stages": {},
+                # Host-private lineage.  Only an OCR-import child is bound to
+                # the immutable OCR_ONLY snapshot that existed at its launch.
+                # Never expose this identifier through polling payloads.
+                _AUDIT_PARENT_SNAPSHOT_FIELD: "",
             }
             self._jobs[jid] = job
             self._latest_by_pid[pid] = jid
@@ -107,9 +117,54 @@ class ProcessJobManager:
             jid = self._latest_by_pid.get(pid)
             return self._jobs.get(jid) if jid else None
 
+    def audit_snapshot(self, job: dict) -> dict:
+        """Return the private, host-captured evidence for one running task.
+
+        Public polling deliberately omits stage bodies.  The audit finalizer
+        uses this bounded copy after an exception/cancellation so the evidence
+        can be persisted before the terminal state becomes visible to the UI.
+        """
+        with self._lock:
+            return copy.deepcopy({
+                "id": job.get("id"),
+                "pid": job.get("pid"),
+                "created": job.get("created"),
+                "updated": job.get("updated"),
+                "preview": job.get("preview") or "",
+                "preview_state": job.get("preview_state") or "SOURCE_PREVIEW",
+                "audit_stages": job.get("audit_stages") or {},
+                "events": job.get("events") or [],
+                "usage": job.get("usage") or {},
+                "error": job.get("error") or "",
+            })
+
     def active(self, pid: str) -> Optional[dict]:
         with self._lock:
             return self._active_locked(pid)
+
+    def bind_audit_parent_snapshot(self, jid: str, snapshot_id: str) -> None:
+        """Bind one job once to its host-frozen parent audit snapshot."""
+        snapshot_id = str(snapshot_id or "").strip()
+        if not snapshot_id or len(snapshot_id) > 128:
+            raise ValueError("audit parent snapshot ID must be 1-128 characters")
+        with self._changed:
+            job = self._jobs.get(str(jid or ""))
+            if job is None:
+                raise KeyError("processing job no longer exists")
+            existing = str(job.get(_AUDIT_PARENT_SNAPSHOT_FIELD) or "")
+            if existing and existing != snapshot_id:
+                raise ValueError("processing job audit parent snapshot is immutable")
+            job[_AUDIT_PARENT_SNAPSHOT_FIELD] = snapshot_id
+            self._changed.notify_all()
+
+    def audit_parent_snapshot_id(self, job: dict) -> str:
+        """Read private lineage from the manager-owned job, never its payload."""
+        with self._lock:
+            jid = str((job or {}).get("id") or "")
+            stored = self._jobs.get(jid)
+            if stored is None:
+                return ""
+            return str(stored.get(_AUDIT_PARENT_SNAPSHOT_FIELD) or "")
 
     def active_count(self) -> int:
         """返回所有项目的活动任务数，供更新/退出安全门使用。"""
@@ -128,7 +183,10 @@ class ProcessJobManager:
         with self._lock:
             payload = {
                 key: value for key, value in job.items()
-                if key not in {"preview", "pause_requested", "cancel_requested"}
+                if key not in {
+                    "preview", "pause_requested", "cancel_requested", "audit_stages",
+                    _AUDIT_PARENT_SNAPSHOT_FIELD,
+                }
             } | {
                 "preview_ready": bool(job.get("preview")),
                 "preview_lines": (job.get("preview") or "").count("\n") + 1,
@@ -167,6 +225,23 @@ class ProcessJobManager:
             if isinstance(data.get("usage"), dict):
                 job["usage"] = data["usage"]
                 job["cost"] = summarize_ai_usage(data["usage"])
+            audit_stage = data.get("audit_stage")
+            if isinstance(audit_stage, dict):
+                role = str(audit_stage.get("role") or "")
+                text = audit_stage.get("text")
+                allowed_roles = {
+                    "ai_analyzed", "ai_reviewed", "rule_analyzed", "analyzed_current",
+                }
+                if role in allowed_roles and isinstance(text, str) and text:
+                    stages = job.setdefault("audit_stages", {})
+                    # A stage name is write-once inside one job.  This prevents
+                    # a later progress callback from silently changing the
+                    # evidence that a terminal RunSnapshot will freeze.
+                    stages.setdefault(role, {
+                        "text": text,
+                        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                        "captured_at": time.time(),
+                    })
             for key in (
                 "candidate_total", "processed_candidates", "decision_total",
                 "completed_candidates", "ambiguous", "applied", "rejected",

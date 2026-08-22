@@ -77,6 +77,11 @@ class PipelineResult:
     compiled_tex: str = ""
     compiled_snapshot: str = ""
     compiled_extra_files: Dict[str, bytes] = field(default_factory=dict)
+    # Immutable, host-produced stage snapshots for the external audit bundle.
+    # They are descriptive evidence only and never participate in patching or
+    # verification decisions.
+    analyzed_tex: str = ""
+    reviewed_tex: str = ""
 
 
 def _build_context(doc, structured_envs=None) -> PatchContext:
@@ -869,6 +874,10 @@ def run_pipeline(
         rejected=len(rejected),
         ambiguous=len(ambiguous),
         completed_candidates=[d.candidate_id for d in decisions],
+        audit_stage={
+            "role": "ai_analyzed" if mode == "ai" else "rule_analyzed",
+            "text": initial_draft,
+        },
     )
 
     active_semantic_anchors = [
@@ -1107,6 +1116,10 @@ def run_pipeline(
         rejected=len(rejected),
         ambiguous=len(ambiguous),
         usage=ai_usage,
+        audit_stage={
+            "role": "ai_reviewed" if review_executed else "analyzed_current",
+            "text": result_text,
+        },
     )
     from .invariants import check_image_resources, check_invariants
 
@@ -1198,18 +1211,50 @@ def run_pipeline(
                 compiled = compile_latex(compiled_candidate, extra_files=files)
             return compiled, compiled_candidate, files
 
-        # The baseline must precede template conversion.  Using the converted
-        # draft for both snapshots hides class/template regressions as a no-op.
+        # For OCR, compile the exact imported raw transcription so
+        # COMPILE_RAW_LOG really corresponds to stages/00_raw_ocr.tex.  Other
+        # workflows keep the pre-template baseline used by template comparison.
+        compile_before_text = source_text if ocr_semantic_lock_enabled else pre_template_text
+        compile_impl_is_parallel_safe = (
+            getattr(compile_latex, "__module__", "")
+            == "latexstruct.core.compilecheck"
+            and getattr(compile_latex, "__name__", "") == "compile_latex"
+        )
+        if compile_impl_is_parallel_safe:
+            # Both snapshots use isolated temporary directories and immutable
+            # inputs, so running the real compiler processes together removes
+            # a full compile latency from the interactive critical path.
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                before_future = executor.submit(
+                    compile_snapshot,
+                    compile_before_text,
+                )
+                after_future = executor.submit(
+                    compile_snapshot,
+                    result_text,
+                    capture_pdf=capture_compile_artifact,
+                )
+                before_result = before_future.result()
+                after_result = after_future.result()
+        else:
+            # Patched/custom compiler callables are not assumed thread-safe.
+            before_result = compile_snapshot(compile_before_text)
+            after_result = compile_snapshot(
+                result_text,
+                capture_pdf=capture_compile_artifact,
+            )
         (
             verification["compile_before"],
             _compiled_before_tex,
             _compiled_before_extra_files,
-        ) = compile_snapshot(pre_template_text)
+        ) = before_result
         (
             verification["compile_after"],
             compiled_candidate_tex,
             compiled_candidate_extra_files,
-        ) = compile_snapshot(result_text, capture_pdf=capture_compile_artifact)
+        ) = after_result
         captured = verification["compile_after"].pop("pdf_bytes", b"")
         if isinstance(captured, (bytes, bytearray, memoryview)) and captured:
             from .preview import preview_descriptor
@@ -1263,7 +1308,7 @@ def run_pipeline(
         elif require_compile_when_available and ca.get("available"):
             compile_safe = bool(ca.get("ok"))
         elif cb.get("available") and ca.get("available"):
-            has_compile_delta = result_text != pre_template_text
+            has_compile_delta = result_text != compile_before_text
             if ca.get("ok"):
                 compile_safe = True
             elif not cb.get("ok") and not has_compile_delta:
@@ -1582,6 +1627,8 @@ def run_pipeline(
         compiled_extra_files=(
             compiled_candidate_extra_files if compiled_pdf else {}
         ),
+        analyzed_tex=initial_draft if mode == "ai" else "",
+        reviewed_tex=result_text if review_executed else "",
     )
     # The pipeline result is complete in memory, but the server still has to
     # atomically commit result/report/decisions/verification.  Only the job

@@ -1,267 +1,302 @@
 # -*- coding: utf-8 -*-
-"""Deterministic README and prompt generation for audit submission bundles."""
+"""Deterministic prompts for a LaTeXStruct AI audit submission.
+
+This module has no model client.  It renders only facts already recorded in an
+``AuditSubmissionManifest`` and therefore cannot select files or promote a
+verification status.
+"""
 
 from __future__ import annotations
 
-from .audit_schema import AuditSubmissionManifest
+from .audit_schema import (
+    ArtifactRole,
+    AuditSubmissionManifest,
+    AuditWorkflow,
+)
 
-ROLE_LABELS = {
-    "source_pdf": "源 PDF",
-    "source_image": "源图片",
-    "source_tex": "输入 TeX",
-    "original_source_tex": "原始输入 TeX（字节保留）",
-    "raw_ocr_tex": "OCR 原始 TeX",
-    "preflight_tex": "语法预检后 TeX",
-    "ai_analyzed_tex": "AI 分析后 TeX",
-    "ai_reviewed_tex": "AI 独立审阅后 TeX",
-    "current_reviewed_tex": "当前审阅结果 TeX",
-    "current_unverified_tex": "当前未验证 TeX",
-    "pre_template_tex": "模板转换前 TeX",
-    "post_template_tex": "模板转换后 TeX",
-    "compiled_preview_pdf": "真实完整编译 PDF",
-    "partial_compiled_pdf": "真实部分编译 PDF",
-    "source_preview_pdf": "源码预览 PDF（不是 LaTeX 编译结果）",
-    "report_markdown": "审计/处理报告",
-    "verification_json": "机器验证记录",
-    "decisions_json": "结构决策与审阅记录",
-    "issues_csv": "问题清单",
-    "compile_raw_log": "原始/OCR TeX 编译日志",
-    "compile_current_log": "当前 TeX 编译日志",
-    "diff_raw_to_current": "原始到当前的完整差异",
-    "outline_json": "PDF/OCR 大纲证据",
-    "ocr_quality_json": "OCR 质量与证据记录",
-    "source_project_zip": "原始多文件项目",
-    "reviewed_project_zip": "当前审阅后多文件项目",
-    "page_image": "源页图像证据",
-    "formula_crop": "公式裁片证据",
-    "metadata_json": "项目元数据（已清理）",
+
+_ROLE_LABELS = {
+    ArtifactRole.SOURCE_TEX: "原始 TeX 输入",
+    ArtifactRole.SOURCE_PDF: "原始 PDF 输入",
+    ArtifactRole.SOURCE_IMAGE: "原始图片输入",
+    ArtifactRole.STAGE_SOURCE_TEX: "源文本阶段快照",
+    ArtifactRole.RAW_OCR_TEX: "原始 OCR TeX",
+    ArtifactRole.AI_ANALYZED_TEX: "AI 分析阶段 TeX",
+    ArtifactRole.RULE_ANALYZED_TEX: "规则分析阶段 TeX",
+    ArtifactRole.AI_REVIEWED_TEX: "AI 审阅阶段 TeX",
+    ArtifactRole.CURRENT_TEX: "当前 TeX",
+    ArtifactRole.CURRENT_PREVIEW: "当前预览",
+    ArtifactRole.RAW_OCR_PREVIEW: "原始 OCR 预览",
+    ArtifactRole.REPORT: "运行报告",
+    ArtifactRole.VERIFICATION: "机器验证记录",
+    ArtifactRole.DECISIONS: "审阅决策记录",
+    ArtifactRole.RAW_TO_CURRENT_DIFF: "原始内容到当前内容的差异",
+    ArtifactRole.COMPILE_CURRENT_LOG: "当前 TeX 编译日志",
+    ArtifactRole.COMPILE_RAW_LOG: "原始 OCR 编译日志",
+    ArtifactRole.ERROR_LOG: "错误日志",
+    ArtifactRole.OUTLINE: "页面与结构提纲证据",
+    ArtifactRole.PAGE_IMAGE: "源页面图像证据",
+    ArtifactRole.FORMULA_CROP: "公式裁片证据",
+    ArtifactRole.PROJECT_FILE: "多文件工程成员",
+    ArtifactRole.EVIDENCE: "补充证据",
+    ArtifactRole.README: "首先阅读的说明",
+    ArtifactRole.PROMPT_SHORT: "简短提交话术",
+    ArtifactRole.PROMPT_FULL: "完整审计提示词",
+    ArtifactRole.SUBMISSION_MANIFEST: "权威提交清单",
+    ArtifactRole.SHA256SUMS: "可重算哈希清单",
 }
 
 
-def role_label(role: str) -> str:
-    return ROLE_LABELS.get(role, role)
+_WORKFLOW_CHECKS = {
+    AuditWorkflow.ANALYSIS_REVIEW_ONLY: (
+        "逐项比较源 TeX、各可用中间阶段与当前 TeX，检查内容守恒和结构环境边界。",
+        "核对分析与审阅决策是否有证据支撑，特别留意漏套、误套和过度修改。",
+    ),
+    AuditWorkflow.OCR_ONLY: (
+        "把源 PDF/图片/页面证据与原始 OCR TeX 对照，检查文字、数学符号、公式编号和页序。",
+        "区分 OCR 转写错误、预览降级和真实 LaTeX 编译错误。",
+    ),
+    AuditWorkflow.OCR_ANALYSIS_REVIEW: (
+        "沿源 PDF/图片 → 原始 OCR → 分析/审阅阶段 → 当前 TeX 的父子链逐阶段核对。",
+        "分别报告 OCR 忠实度、结构识别、公式与引用、编译预览和审阅决策问题。",
+    ),
+    AuditWorkflow.TEMPLATE_CONVERSION: (
+        "检查模板转换前后正文、公式、引用和结构是否守恒，并区分内容变化与版式变化。",
+        "核对模板资源、编译证据及降级预览声明。",
+    ),
+    AuditWorkflow.MULTIFILE_PROJECT: (
+        "按清单中的父子关系检查主文件、子文件和资源依赖，不根据文件名猜测角色。",
+        "检查工程文件集合、引用关系、编译日志和当前成品是否互相一致。",
+    ),
+}
+
+_CONTROL_ROLES = {
+    ArtifactRole.README,
+    ArtifactRole.PROMPT_SHORT,
+    ArtifactRole.PROMPT_FULL,
+    ArtifactRole.SUBMISSION_MANIFEST,
+    ArtifactRole.SHA256SUMS,
+}
 
 
-def _artifact_lines(manifest: AuditSubmissionManifest) -> list[str]:
-    lines: list[str] = []
-    for artifact in manifest.snapshot.artifacts:
-        suffix = ""
-        if artifact.preview_status is not None:
-            suffix += f"；preview={artifact.preview_status.value}"
-        if artifact.aliases:
-            suffix += f"；aliases={', '.join(artifact.aliases)}"
-        if artifact.alias_roles:
-            suffix += f"；alias_roles={', '.join(artifact.alias_roles)}"
-        lines.append(
-            f"- `{artifact.path}` — {role_label(artifact.artifact_role)}；"
-            f"SHA-256 `{artifact.bytes_sha256}`{suffix}"
-        )
-    return lines
+def _path_for_role(manifest: AuditSubmissionManifest, role: str) -> str:
+    for item in manifest.artifacts:
+        if item.artifact_role == role:
+            return item.path
+    raise ValueError(f"manifest has no required control artifact role {role}")
 
 
-def build_short_prompt(_manifest: AuditSubmissionManifest) -> str:
+def _optional_path_for_role(manifest: AuditSubmissionManifest, role: str) -> str:
+    for item in manifest.artifacts:
+        if item.artifact_role == role:
+            return item.path
+    return ""
+
+
+def _escape_table(value: object) -> str:
+    return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
+def render_short_prompt(manifest: AuditSubmissionManifest) -> str:
+    """Return exactly one copy-ready sentence using only manifest paths."""
+    readme = _path_for_role(manifest, ArtifactRole.README)
+    manifest_path = _path_for_role(manifest, ArtifactRole.SUBMISSION_MANIFEST)
+    full = _path_for_role(manifest, ArtifactRole.PROMPT_FULL)
     return (
-        "请按本审计提交包执行 LaTeXStruct 全链路审计。先读取 "
-        "00_README_FIRST.md、submission_manifest.json 和 02_PROMPT_FULL.md；"
-        "文件角色一律以 manifest 中的 artifact_role 为准，不要根据文件名猜测。"
+        f"请审计我上传的 LaTeXStruct 材料包，先读取 {readme}、{manifest_path} "
+        f"和 {full}，以 manifest 中的文件角色、状态、哈希与父子关系为唯一依据完成审计。"
     )
 
 
-def build_readme(manifest: AuditSubmissionManifest) -> str:
-    snapshot = manifest.snapshot
-    blockers = "\n".join(
-        f"- [{item.get('severity', 'P0')}] {item.get('summary') or item.get('id') or '未说明'}"
-        for item in snapshot.blockers
-    ) or "- 未记录 blocker；仍须由外部审计独立核对。"
-    missing = "\n".join(
-        f"- `{item.get('role', 'unknown')}`：{item.get('reason', '本次运行未产生')}"
-        for item in snapshot.missing_artifacts
-    ) or "- 无"
-    warnings = "\n".join(f"- {item}" for item in manifest.warnings) or "- 无"
-    artifacts = "\n".join(_artifact_lines(manifest)) or "- 未发现可打包材料"
-    first = next(
-        (
-            item.path
-            for item in snapshot.artifacts
-            if item.artifact_role in {"current_reviewed_tex", "current_unverified_tex"}
-        ),
-        "submission_manifest.json",
-    )
-    return f"""# LaTeXStruct AI 审计提交包
-
-本包由宿主程序根据真实文件、机器验证记录和 SHA-256 自动生成。文件角色、状态和父子关系没有交给语言模型猜测。
-
-## 建议阅读顺序
-
-1. `submission_manifest.json`
-2. `02_PROMPT_FULL.md`
-3. `{first}`
-4. `audit/report.md`、`audit/verification.json`、`audit/issues.csv`
-
-## 本次运行
-
-- 项目：{snapshot.project_name}
-- 工作流：{snapshot.workflow_type.value}
-- 任务终态：**{snapshot.terminal_status.value}**
-- 机器验证状态：**{snapshot.verification_status}**
-- 审计档位：{manifest.profile.value}
-- 生成时间：{snapshot.generated_at_utc}
-- 项目快照：`{snapshot.project_fingerprint}`
-
-## 已知阻断项
-
-{blockers}
-
-## 实际包含的材料
-
-{artifacts}
-
-## 本次未产生的材料
-
-{missing}
-
-## 警告
-
-{warnings}
-
-## 预览状态说明
-
-- `COMPILED`：真实完整 LaTeX 编译 PDF。
-- `PARTIAL_COMPILED`：编译失败前真实产生的部分 PDF。
-- `SOURCE_PREVIEW`：带行号的源码预览，不是 LaTeX 编译结果。
-
-任何非 `SUCCESS/VERIFIED` 状态都不得被外部模型自行提升为已验证成品。
-"""
-
-
-def _comparison_requirements(roles: set[str]) -> list[str]:
-    requirements: list[str] = []
-    if "source_pdf" in roles and "raw_ocr_tex" in roles:
-        requirements.append(
-            "源 PDF → OCR 原始 TeX：逐页核对标题、正文、公式、编号、脚注、图表、图注与参考文献。"
-        )
-    if "raw_ocr_tex" in roles and roles.intersection({"current_reviewed_tex", "current_unverified_tex"}):
-        requirements.append(
-            "OCR 原始 TeX → 当前 TeX：执行全文 diff，区分纯结构改动、确定性修复、正文增删、数学变化与模板变化。"
-        )
-    if "source_tex" in roles and roles.intersection({"current_reviewed_tex", "current_unverified_tex"}):
-        requirements.append(
-            "输入 TeX → 当前 TeX：检查正文有序守恒、数学 token、环境边界、模板与依赖变化。"
-        )
-    if roles.intersection({"compiled_preview_pdf", "partial_compiled_pdf"}):
-        requirements.append(
-            "检查真实编译 PDF 的首页、目录、章首页、formal/proof 环境、跨页盒、References 与异常页面。"
-        )
-    elif "source_preview_pdf" in roles:
-        requirements.append(
-            "当前只有 SOURCE_PREVIEW；不得据此声称编译成功，须结合 TeX 与编译日志分析。"
-        )
-    if "source_project_zip" in roles:
-        requirements.append(
-            "核对多文件依赖图、主文件、子文件、图片、bib、cls/sty 和相对路径是否完整。"
-        )
-    return requirements or [
-        "依据实际存在的材料检查结构、内容守恒、可编译性与 provenance；明确说明无法核对的范围。"
+def render_full_prompt(manifest: AuditSubmissionManifest) -> str:
+    """Render the full external-audit prompt from recorded manifest facts."""
+    lines = [
+        "# LaTeXStruct 外部 AI 审计任务",
+        "",
+        "请对本提交包做独立、可复核的审计。不得根据文件名猜测文件角色；"
+        "`submission_manifest.json` 中的 `artifact_role`、状态、哈希和父子关系是唯一权威来源。",
+        "",
+        "## 已由宿主程序冻结的运行事实",
+        "",
+        f"- 工作流：`{manifest.workflow.value}`",
+        f"- 任务终态：`{manifest.terminal_status.value}`",
+        f"- 机器验证状态：`{manifest.verification_status}`",
+        f"- 审计深度：`{manifest.depth.value}`",
+        f"- 模型：`{manifest.model}`",
+        f"- LaTeXStruct 版本：`{manifest.app_version}`",
+        f"- 模板：`{manifest.template}`",
+        f"- 页范围：`{manifest.page_range}`",
+        f"- 不可变快照：`{manifest.snapshot_id}`",
+        "",
+        "> `VERIFIED` 仅代表包内已有机器验证记录；不得因为任务为 SUCCESS、能够打开 PDF，"
+        "或提示词的表述而自行提升验证状态。",
+        "",
     ]
+    if manifest.audit_focus:
+        lines.extend([
+            "## 用户希望重点关注",
+            "",
+            manifest.audit_focus,
+            "",
+        ])
+
+    lines.extend([
+        "## 实际可用审计工件",
+        "",
+        "下表只列出本包中实际存在的文件。重复字节只保存一次；逻辑别名记录在 manifest 的 "
+        "`aliases` 中。",
+        "",
+        "| artifact_role | 路径 | SHA-256 | 预览状态 | 说明 |",
+        "|---|---|---|---|---|",
+    ])
+    for item in manifest.artifacts:
+        # Control documents would create a self-referential hash cycle: the full
+        # prompt cannot truthfully print its own final digest.  They are named in
+        # README/short prompt instead; this table is the audited evidence set.
+        if item.artifact_role in _CONTROL_ROLES:
+            continue
+        digest = item.bytes_sha256 or "由 SHA256SUMS/文件本身校验"
+        preview = item.preview_status or "—"
+        label = _ROLE_LABELS.get(item.artifact_role, "宿主程序分类的补充工件")
+        lines.append(
+            "| "
+            + " | ".join(
+                _escape_table(value)
+                for value in (item.artifact_role, item.path, digest, preview, label)
+            )
+            + " |"
+        )
+        for alias in item.aliases:
+            alias_role = str(alias.get("artifact_role") or "UNKNOWN")
+            alias_preview = str(alias.get("preview_status") or "—")
+            alias_description = (
+                f"逻辑节点 {alias.get('artifact_id') or 'unknown'}；"
+                f"物理字节复用本行实际路径"
+            )
+            lines.append(
+                "| "
+                + " | ".join(
+                    _escape_table(value)
+                    for value in (
+                        alias_role,
+                        item.path,
+                        digest,
+                        alias_preview,
+                        alias_description,
+                    )
+                )
+                + " |"
+            )
+
+    lines.extend(["", "## 已记录的 blockers", ""])
+    if manifest.blockers:
+        lines.extend(f"- {item}" for item in manifest.blockers)
+    else:
+        lines.append("- 无已记录 blocker；这不等于外部审计已通过。")
+    if manifest.missing_expected_roles:
+        lines.extend([
+            "",
+            "## 缺失的预期角色",
+            "",
+            "以下角色在快照中不存在，因此不要假装已检查对应文件：",
+            "",
+        ])
+        lines.extend(f"- `{role}`" for role in manifest.missing_expected_roles)
+    if manifest.unavailable_parent_artifact_ids:
+        lines.extend([
+            "",
+            "## 本档位未包含的父节点",
+            "",
+            "以下父节点 ID 由宿主快照记录，但对应工件因导出档位或用户选项未进入本包；"
+            "不得猜测其内容或假装已完成跨阶段比较：",
+            "",
+        ])
+        lines.extend(
+            f"- `{artifact_id}`"
+            for artifact_id in manifest.unavailable_parent_artifact_ids
+        )
+
+    lines.extend([
+        "",
+        "## 本工作流审计重点",
+        "",
+    ])
+    lines.extend(f"- {item}" for item in _WORKFLOW_CHECKS[manifest.workflow])
+    sums_path = _optional_path_for_role(manifest, ArtifactRole.SHA256SUMS)
+    lines.extend([
+        "",
+        "## 必须执行的审计要求",
+        "",
+    ])
+    if sums_path:
+        lines.append(
+            f"1. 先校验 `{sums_path}`；如有不一致，立即报告，不继续把材料当作同一快照。"
+        )
+    else:
+        lines.append(
+            "1. 当前只有轻量控制文件，没有哈希清单或审计工件；不得作内容审计结论，"
+            "请先在 LaTeXStruct 中生成完整 ZIP。"
+        )
+    lines.extend([
+        "2. 对包内可解析的节点严格沿 manifest 的 `parent_artifact_ids` 比较阶段差异；"
+        "列入 `unavailable_parent_artifact_ids` 的父节点只能报告为证据缺失，不得猜测。",
+        "3. 对公式、编号、定理环境、目录、引用、图片和多文件依赖，只在实际证据存在时给出结论。",
+        "4. 把 `COMPILED`、`PARTIAL_COMPILED`、`SOURCE_PREVIEW` 严格区分；"
+        "SOURCE_PREVIEW 不是 LaTeX 编译结果。",
+        "5. 将问题按 blocker / major / minor 分类，每项给出证据文件、定位、预期、实际和修复建议。",
+        "6. 最终分别报告：可确认结论、无法确认事项、缺失材料、风险和建议的下一步验证。",
+        "7. 不要修改包内文件，也不要声称不存在的文件已被检查。",
+        "",
+        "## 建议输出结构",
+        "",
+        "- 总体结论及可信范围",
+        "- 哈希与材料完整性",
+        "- 按严重度排列的问题清单",
+        "- 内容与结构准确性",
+        "- 编译/预览与视觉质量",
+        "- 决策记录一致性",
+        "- 缺失证据与后续建议",
+        "",
+    ])
+    return "\n".join(lines)
 
 
-def build_full_prompt(manifest: AuditSubmissionManifest, audit_focus: str = "") -> str:
-    snapshot = manifest.snapshot
-    runtime = snapshot.runtime
-    roles = {artifact.artifact_role for artifact in snapshot.artifacts}
-    for artifact in snapshot.artifacts:
-        roles.update(artifact.alias_roles)
-    comparisons = "\n".join(
-        f"{index}. {item}"
-        for index, item in enumerate(_comparison_requirements(roles), start=1)
-    )
-    artifacts = "\n".join(_artifact_lines(manifest)) or "- 无"
-    blockers = "\n".join(
-        f"- `{item.get('id', 'blocker')}`：{item.get('summary', '未说明')}"
-        for item in snapshot.blockers
-    ) or "- 无已记录 blocker；仍需独立检查。"
-    missing = "\n".join(
-        f"- `{item.get('role', 'unknown')}`：{item.get('reason', '本次未产生')}"
-        for item in snapshot.missing_artifacts
-    ) or "- 无"
-    focus = audit_focus.strip() or (
-        "优先核对 manifest 中的 blockers、缺失材料和残留 formal/proof；不要补造不存在的阶段产物。"
-    )
-    page_range = ", ".join(map(str, snapshot.page_range)) if snapshot.page_range else "未知/不适用"
-    return f"""# LaTeXStruct 全链路外部审计任务
-
-你收到的是 LaTeXStruct 自动生成的标准审计提交包。请先读取 `submission_manifest.json`，再执行本提示词。
-
-## 一、读取与真实性规则
-
-1. `artifact_role` 是文件角色的唯一权威来源；不要根据文件名、内容相似度或时间自行重分配角色。
-2. manifest 声明缺失的文件就是缺失，不得用其他文件静默替代。
-3. `COMPILED`、`PARTIAL_COMPILED`、`SOURCE_PREVIEW` 必须严格区分；SOURCE_PREVIEW 不是编译结果。
-4. 不得把“编译成功”等同于“内容正确”或“出版就绪”。
-5. 不得自动纠正源论文可能存在的数学错误；只列为 `semantic-risk`。
-6. VERIFIED 只能来自宿主机器验证；外部审计可以降级结论，但不能无证据升级。
-7. 无法由材料支持的结论必须明确写为未知或无法核对。
-
-## 二、本次任务上下文
-
-- 项目：{snapshot.project_name}
-- 工作流：{snapshot.workflow_type.value}
-- 任务终态：{snapshot.terminal_status.value}
-- 机器验证状态：{snapshot.verification_status}
-- 模板：{snapshot.template or '未指定/保持原版'}
-- 页范围：{page_range}
-- LaTeXStruct：{runtime.get('app_version', 'unknown')}
-- Git commit：{runtime.get('git_commit', 'unknown')}
-- build_id：{runtime.get('build_id', 'unknown')}
-- decide model：{runtime.get('decide_model', 'unknown')}
-- review model：{runtime.get('review_model', 'unknown')}
-- OCR model：{runtime.get('ocr_model', 'unknown')}
-- prompt version：{runtime.get('prompt_version', 'unknown')}
-- 项目快照 SHA-256：{snapshot.project_fingerprint}
-
-## 三、本次重点
-
-{focus}
-
-## 四、实际可用材料
-
-{artifacts}
-
-## 五、已知 blocker
-
-{blockers}
-
-## 六、缺失材料
-
-{missing}
-
-## 七、必须执行的比较
-
-{comparisons}
-
-## 八、必须量化
-
-- 源 PDF 页数和处理页范围；
-- 章节节点总数、精确覆盖数和 residual；
-- theorem/lemma/problem/conjecture/definition/remark 总数、环境化数和 residual；
-- proof 总数、环境化数和 residual；
-- 公式编号集合、活动 `equation/tag` 数和交叉引用完整性；
-- 脚注、图片、表格、图注数量；
-- 参考文献条目数、`bibitem` 数和跨页连续性；
-- hard page break 数；
-- 编译状态、页数、返回码和首个 fatal error；
-- BODY_TEXT ordered recall 与数学 token 守恒；
-- manifest、文件 SHA-256、版本和父子关系是否可复算。
-
-## 九、问题归因
-
-分别判断问题属于：PDF 对象层/OCR、确定性 scanner/parser、AI decision、AI review、template renderer、内容安全门、编译器、visual QA、provenance/packaging。不要把所有问题笼统归因于“模型不够强”。
-
-## 十、输出要求
-
-1. 给出 `VERIFIED / UNVERIFIED / FAILED / PARTIAL` 结论，并说明是否能覆盖原始 OCR、是否能直接发布；
-2. 输出详细报告、量化指标和完整问题清单；
-3. 按 P0/P1/P2 给出每项问题的证据、根因、具体代码/数据结构修改、回归测试和验收条件；
-4. 列出无法核对的范围，不补造事实；
-5. 优先引用包内文件路径、行号、页码和 hash。
-"""
+def render_readme(manifest: AuditSubmissionManifest) -> str:
+    """Render a human first-open guide without inventing file paths."""
+    short = _path_for_role(manifest, ArtifactRole.PROMPT_SHORT)
+    full = _path_for_role(manifest, ArtifactRole.PROMPT_FULL)
+    manifest_path = _path_for_role(manifest, ArtifactRole.SUBMISSION_MANIFEST)
+    sums = _optional_path_for_role(manifest, ArtifactRole.SHA256SUMS)
+    steps = []
+    if sums:
+        steps.append(f"1. 使用 `{sums}` 校验文件完整性；")
+        next_number = 2
+    else:
+        steps.extend([
+            "1. 这是自动保存的轻量控制集，并不包含源文件、阶段工件或哈希清单；",
+            "2. 请先在 LaTeXStruct 中点击“生成 AI 审计提交包”，再上传生成的完整 ZIP；",
+        ])
+        next_number = 3
+    steps.extend([
+        f"{next_number}. 读取 `{manifest_path}`，只以其中的 `artifact_role` 判定文件角色；",
+        f"{next_number + 1}. 将 `{short}` 的一句话连同完整 ZIP 提交给 ChatGPT/Codex；",
+        f"{next_number + 2}. 审计方按 `{full}` 执行完整审计。",
+    ])
+    return "\n".join([
+        "# 请先阅读：LaTeXStruct AI 审计提交包",
+        "",
+        f"这是运行 `{manifest.run_id}` 的不可变快照 `{manifest.snapshot_id}`。",
+        f"任务终态为 **{manifest.terminal_status.value}**，机器验证状态为 "
+        f"**{manifest.verification_status}**。两者不是同一概念。",
+        "",
+        "建议顺序：",
+        "",
+        *steps,
+        "",
+        "重复字节文件已经按 bytes SHA-256 去重，逻辑原路径保存在 manifest 的 "
+        "`aliases` 中。ZIP 不保存用户机器绝对路径；开启清理时，文本中的凭据与本机路径已被替换。",
+        "",
+        "预览状态只能是 `COMPILED`、`PARTIAL_COMPILED` 或 `SOURCE_PREVIEW`。"
+        "任何 SOURCE_PREVIEW 都不是 LaTeX 编译结果。",
+        "",
+    ])

@@ -20,6 +20,7 @@ import time
 import uuid
 import zipfile
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
 from weakref import WeakValueDictionary
@@ -30,6 +31,15 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..config import AppConfig, load_config, save_config
+from ..core.audit_schema import (
+    ArtifactRole,
+    AuditDepth,
+    AuditSubmissionRequest,
+    AuditWorkflow,
+    RunSnapshot,
+    TerminalStatus,
+)
+from ..core.audit_submission import make_audit_artifact
 from ..core.invariants import IMG_RE
 from ..core.ocr_quality import (
     OCR_QUALITY_PUBLICATION,
@@ -412,6 +422,74 @@ def _preserve_source_page_previews(
         })
         used += len(data)
     return previews, used
+
+
+def _preserve_formula_crops(
+    job: dict,
+    project_dir: Path,
+    remaining_bytes: int,
+) -> tuple[list[dict], int]:
+    """Freeze already-rendered formula crops; never re-run vision at export."""
+    records = []
+    used = 0
+    for raw_page, page in sorted(
+        (job.get("pages") or {}).items(), key=lambda item: int(item[0])
+    ):
+        try:
+            page_no = int(raw_page)
+        except (TypeError, ValueError):
+            continue
+        for evidence in page.get("formula_evidence") or []:
+            if not isinstance(evidence, dict):
+                continue
+            public = _bounded_formula_evidence([evidence])
+            source = Path(str(evidence.get("crop_path") or ""))
+            if not public or source.is_symlink() or not source.is_file():
+                continue
+            try:
+                data = source.read_bytes()
+            except OSError:
+                continue
+            extension = _raster_extension(data)
+            expected_hash = str(public[0].get("crop_sha256") or "")
+            if (
+                extension not in {".png", ".jpg"}
+                or hashlib.sha256(data).hexdigest() != expected_hash
+                or len(data) > MAX_PRESERVED_OCR_IMAGE_BYTES
+                or used + len(data) > remaining_bytes
+            ):
+                continue
+            evidence_id = str(public[0]["id"])
+            relative = (
+                f"formula-crops/page_{page_no:04d}-"
+                f"{len(records) + 1:04d}{extension}"
+            )
+            target = (project_dir / Path(relative)).resolve()
+            try:
+                target.relative_to(project_dir)
+            except ValueError:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                with temporary.open("xb") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, target)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+            records.append({
+                "path": relative,
+                "bytes": len(data),
+                "sha256": expected_hash,
+                "source_page": page_no,
+                "evidence_id": evidence_id,
+                "kind": "formula_crop",
+            })
+            used += len(data)
+    return records, used
 
 
 def _ocr_image_references(text: str) -> tuple[list[dict], list[str]]:
@@ -833,17 +911,26 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
     result = {
         "assets": [],
         "source_pages": [],
+        "formula_crops": [],
         "unresolved": list(unsupported),
         "errors": [],
         "page_records": _ocr_manifest_page_records(job),
     }
     project_dir = project_dir.resolve()
+    formula_crops, formula_bytes = _preserve_formula_crops(
+        job, project_dir, MAX_PRESERVED_OCR_ASSET_BYTES
+    )
+    result["formula_crops"] = formula_crops
     if not references:
         preview_pages = job.get("selected_pages") or sorted((job.get("pages") or {}).keys())
         previews, _used = _preserve_source_page_previews(
-            job, project_dir, preview_pages, MAX_PRESERVED_OCR_ASSET_BYTES
+            job,
+            project_dir,
+            preview_pages,
+            max(0, MAX_PRESERVED_OCR_ASSET_BYTES - formula_bytes),
         )
         result["source_pages"] = previews
+        result["total_bytes"] = formula_bytes + _used
         return result
     target = Path(str(job.get("target") or ""))
     if not target.is_file():
@@ -1099,7 +1186,7 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
             if document is not None:
                 document.close()
 
-    total = 0
+    total = formula_bytes
     for reference in references:
         hit = extracted.get(reference["path"])
         if hit is None:
@@ -1679,6 +1766,7 @@ def _snapshot_ocr_bundle_job(job: dict) -> dict:
     """Copy only immutable/bundle-relevant OCR fields while holding the job lock."""
     return {
         "source_type": str(job.get("source_type") or ""),
+        "source_outline": deepcopy(job.get("source_outline") or []),
         "_source_sha256": str(job.get("_source_sha256") or ""),
         "target": str(job.get("target") or ""),
         "status": str(job.get("status") or ""),
@@ -1705,9 +1793,10 @@ def _snapshot_ocr_bundle_job(job: dict) -> dict:
                 "figures": deepcopy(page.get("figures") or []),
                 "image_size_pixels": list(page.get("image_size_pixels") or []),
                 "visual_input_sha256": str(page.get("visual_input_sha256") or ""),
-                "formula_evidence": _bounded_formula_evidence(
-                    page.get("formula_evidence") or []
-                ),
+                # Private import snapshot retains crop_path long enough to copy
+                # exact bytes into the project.  Public manifests still pass
+                # through _bounded_formula_evidence and never expose that path.
+                "formula_evidence": deepcopy(page.get("formula_evidence") or []),
                 "text_hint_chars": int(page.get("text_hint_chars") or 0),
                 "text_hint_sha256": str(page.get("text_hint_sha256") or ""),
                 "equation_tag_regions": deepcopy(
@@ -1924,6 +2013,7 @@ def _verified_ocr_resource_bytes(
     resource_info: dict,
     *,
     include_source_pages: bool = False,
+    include_formula_crops: bool = False,
 ) -> dict[str, bytes]:
     """Read only manifest-listed, in-project OCR resources with matching hashes."""
     from ..core.project import safe_project_relpath
@@ -1932,6 +2022,8 @@ def _verified_ocr_resource_bytes(
     groups = [resource_info.get("assets") or []]
     if include_source_pages:
         groups.append(resource_info.get("source_pages") or [])
+    if include_formula_crops:
+        groups.append(resource_info.get("formula_crops") or [])
     files: dict[str, bytes] = {}
     for item in [entry for group in groups for entry in group]:
         rel = safe_project_relpath(str(item.get("path") or ""))
@@ -2422,6 +2514,26 @@ class BatchRejectRequest(BaseModel):
     cids: list = Field(default_factory=list)
 
 
+class ReviewStateRequest(BaseModel):
+    accepted_ids: list = Field(default_factory=list)
+    expected_revision: Optional[int] = None
+
+
+class AuditSubmissionBody(BaseModel):
+    snapshot_id: str = Field(default="", max_length=128)
+    profile: str = "standard"
+    depth: str = ""
+    audit_focus: str = Field(default="", max_length=4000)
+    include_source_files: bool = True
+    include_compile_logs: bool = True
+    include_verification_records: bool = True
+    include_verification_decisions: Optional[bool] = None
+    include_page_images: Optional[bool] = None
+    include_formula_crops: Optional[bool] = None
+    include_page_images_formula_crops: Optional[bool] = None
+    sanitize_sensitive: bool = True
+
+
 class ConfigRequest(BaseModel):
     analysis_backend: Optional[str] = None
     codex_model: Optional[str] = None
@@ -2671,8 +2783,6 @@ def create_app(updated_from: str = "") -> FastAPI:
             decode_tex_bytes,
             discover_main,
             flatten_project,
-            process_project,
-            split_project,
         )
         from ..core.template import normalize_template_id
 
@@ -2689,27 +2799,10 @@ def create_app(updated_from: str = "") -> FastAPI:
             main_rel = discover_main(Path(tmpdir))
             if main_rel is None:
                 raise ValueError("文件夹中未找到 .tex 主文件")
-            if defer_process:
-                flattened, graph_obj = flatten_project(Path(tmpdir), main_rel)
-                pr = None
-                per_file = None
-                producer_identity = None
-            else:
-                cfg = get_config()
-                producer_identity = _runtime_provenance_identity(
-                    PROMPT_VERSION if mode == "ai" else "not-used"
-                )
-                res = process_project(
-                    Path(tmpdir), mode=mode, template=template or None,
-                    template_context={"title": name},
-                    ai_config=cfg.to_ai_config() if mode == "ai" else None,
-                    compile_check=True,
-                    compile_files=files,
-                    capture_compile_artifact=True,
-                    pack=pack or None,
-                )
-                flattened, graph_obj = res.flattened, res.graph
-                pr, per_file = res.pipeline, res.per_file
+            # Freeze the project before any model/compile work.  This gives a
+            # failed immediate run a durable pid and lets the same terminal
+            # snapshot path serve deferred and immediate folder processing.
+            flattened, graph_obj = flatten_project(Path(tmpdir), main_rel)
             # 项目源 = 展开文本（供 diff/决策审阅），原始文件另存本地 zip，导出时
             # 覆盖改动过的 .tex；图片/bib/sty 等二进制资源保持逐字节不变。
             pid = get_store().create(
@@ -2733,57 +2826,26 @@ def create_app(updated_from: str = "") -> FastAPI:
             with zipfile.ZipFile(project_dir / "original-files.zip", "w", zipfile.ZIP_DEFLATED) as zf:
                 for rel, content in files.items():
                     zf.writestr(rel, content)
-            if pr is not None:
-                _persist_compile_preview(pid, pr)
-                decisions = [_decision_dict(d) for d in pr.decisions]
-                persisted = {
-                    "verification": pr.verification,
-                    "ambiguous": pr.ambiguous,
-                    "applied": [],
-                    "rejected": [],
-                    "ai_notes": pr.ai_notes,
-                    "review": _persisted_review_summary(pr.review),
-                    "items": pr.decision_items,
-                    "per_file": per_file,
-                    "decision_cache": decisions,
-                    "producer_identity": producer_identity,
-                }
-                if pr.ok:
-                    get_store().set_result(
-                        pid, pr.export_text, pr.report_md, decisions, persisted
-                    )
-                else:
-                    from ..core.report import reconcile_report_status
-                    from ..core.verify import verification_failures
-
-                    failures = verification_failures(pr.verification)
-                    pr.verification["failures"] = failures
-                    pr.report_md = reconcile_report_status(
-                        pr.report_md,
-                        pr.verification,
-                        terminal_status="UNVERIFIED",
-                    )
-                    failed_draft = (
-                        str(getattr(pr, "compiled_snapshot", "") or "")
-                        or pr.result
-                        or flattened
-                    )
-                    try:
-                        failed_per_file = split_project(failed_draft)
-                    except ValueError:
-                        failed_per_file = per_file
-                    persisted["failures"] = failures
-                    persisted["per_file"] = failed_per_file
-                    get_store().record_failed_attempt(
-                        pid, failed_draft, pr.report_md, persisted
-                    )
+            processed = None
+            processing_error = ""
+            if not defer_process:
+                try:
+                    processed = _run_project(pid, set())
+                except Exception as exc:  # noqa: BLE001
+                    # _run_project has already frozen FAILED plus every stage
+                    # available before the exception.  Keep the project visible
+                    # so the user can generate/download that audit package.
+                    processing_error = _safe_task_error(exc)
             return {
                 "id": pid,
                 "graph": meta["graph"],
-                "processed": pr is not None,
-                "ok": pr.ok if pr is not None else None,
-                "applied": len(pr.applied) if pr is not None else 0,
-                "ambiguous": len(pr.ambiguous) if pr is not None else 0,
+                "processed": processed is not None or bool(processing_error),
+                "ok": processed.get("ok") if processed is not None else (
+                    False if processing_error else None
+                ),
+                "applied": int((processed or {}).get("applied") or 0),
+                "ambiguous": int((processed or {}).get("ambiguous") or 0),
+                "error": processing_error,
             }
         except Exception:
             if pid is not None:
@@ -3141,6 +3203,598 @@ def create_app(updated_from: str = "") -> FastAPI:
             raise HTTPException(409, "编译预览工件哈希不匹配，已阻止打包")
         return name, payload
 
+    def _audit_iso_timestamp(value: object = None) -> str:
+        try:
+            timestamp = float(value) if value is not None else time.time()
+        except (TypeError, ValueError):
+            timestamp = time.time()
+        return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(
+            timespec="seconds"
+        ).replace("+00:00", "Z")
+
+    def _audit_json_bytes(value: object) -> bytes:
+        return (
+            json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+
+    def _audit_workflow(meta: dict, override: AuditWorkflow | None = None) -> AuditWorkflow:
+        if override is not None:
+            return override
+        if meta.get("kind") == "folder":
+            return AuditWorkflow.MULTIFILE_PROJECT
+        if meta.get("kind") == "ocr":
+            return AuditWorkflow.OCR_ANALYSIS_REVIEW
+        if str(meta.get("template") or "").strip():
+            return AuditWorkflow.TEMPLATE_CONVERSION
+        return AuditWorkflow.ANALYSIS_REVIEW_ONLY
+
+    def _review_state_payload(meta: dict) -> dict:
+        accepted = sorted({
+            str(item) for item in (meta.get("accepted_decision_ids") or [])
+            if str(item).strip()
+        })
+        rejected = sorted({
+            str(item) for item in (meta.get("excludes") or []) if str(item).strip()
+        })
+        return {
+            "revision": max(0, int(meta.get("review_revision") or 0)),
+            "accepted_ids": accepted,
+            "rejected_ids": rejected,
+        }
+
+    def _audit_host_state_fingerprint(pid: str) -> str:
+        """Hash the mutable host files that determine whether a bundle is current.
+
+        This fingerprint is intentionally separate from ``RunSnapshot`` identity:
+        a failed or cancelled run can freeze an in-memory stage without replacing
+        the last committed project result.  Hashing the host state at the terminal
+        boundary lets later TeX/PDF/review changes invalidate that snapshot without
+        pretending the older committed result belonged to the failed run.
+        """
+        directory = Path(get_store()._dir(pid))
+        names = (
+            "meta.json",
+            "source.tex",
+            "original-source.tex",
+            "result.tex",
+            "report.md",
+            "decisions.json",
+            "verification.json",
+            "last-failed-draft.tex",
+            "last-failure-report.md",
+            "last-failure.json",
+        )
+        rows = []
+        marker_payloads = []
+        for name in names:
+            path = directory / name
+            try:
+                payload = path.read_bytes()
+            except FileNotFoundError:
+                rows.append({"path": name, "present": False})
+                continue
+            rows.append({
+                "path": name,
+                "present": True,
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            })
+            if name in {"verification.json", "last-failure.json"}:
+                marker_payloads.append(payload)
+
+        # Only the PDF named by a verification record is part of current state;
+        # older immutable preview files may coexist and must not cause false stale.
+        preview_names = set()
+        from ..core.preview import COMPILED, PARTIAL_COMPILED, preview_storage_filename
+
+        for payload in marker_payloads:
+            for digest in re.findall(rb"[0-9a-f]{64}", payload):
+                digest_text = digest.decode("ascii")
+                for status in (COMPILED, PARTIAL_COMPILED):
+                    candidate = preview_storage_filename(status, digest_text)
+                    if (directory / candidate).is_file():
+                        preview_names.add(candidate)
+        for name in sorted(preview_names):
+            payload = (directory / name).read_bytes()
+            rows.append({
+                "path": name,
+                "present": True,
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            })
+        return hashlib.sha256(_audit_json_bytes(rows)).hexdigest()
+
+    def _build_project_run_snapshot(
+        pid: str,
+        terminal_status: TerminalStatus,
+        run_id: str,
+        *,
+        capture: Optional[dict] = None,
+        error: str = "",
+        workflow_override: AuditWorkflow | None = None,
+    ) -> RunSnapshot:
+        """Freeze one terminal project run without inferring any artifact role.
+
+        This collector is the host authority boundary.  It receives the exact
+        PipelineResult while it is still in memory; FAILED/CANCELLED runs use
+        only their captured stages and never fall back to an older verified
+        result as though it belonged to the new run.
+        """
+        capture = dict(capture or {})
+        meta = get_store().get(pid) or {}
+        directory = Path(get_store()._dir(pid))
+        workflow = _audit_workflow(meta, workflow_override)
+        source_text = get_store().read_source(pid)
+        source_bytes = source_text.encode("utf-8")
+        original_source = directory / "original-source.tex"
+        input_tex_bytes = (
+            original_source.read_bytes() if original_source.is_file() else source_bytes
+        )
+        artifacts = []
+
+        def add_artifact(
+            role: str,
+            data: bytes | str,
+            *,
+            parents=(),
+            path: str | None = None,
+            media_type: str = "application/octet-stream",
+            preview_status: str | None = None,
+            index: int | None = None,
+            filename: str | None = None,
+            metadata: Optional[dict] = None,
+        ):
+            payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+            parent_ids = tuple(
+                item.artifact_id for item in parents if item is not None
+            )
+            artifact = make_audit_artifact(
+                role,
+                payload,
+                path=path,
+                media_type=media_type,
+                parent_artifact_ids=parent_ids,
+                preview_status=preview_status,
+                index=index,
+                filename=filename,
+                metadata=metadata,
+            )
+            artifacts.append(artifact)
+            return artifact
+
+        source_artifact = None
+        raw_artifact = None
+        ocr_source = None
+        if meta.get("kind") == "ocr":
+            try:
+                ocr_source = _verified_ocr_source_bytes(
+                    directory, meta.get("ocr_source") or {}, required=False
+                )
+            except ValueError:
+                ocr_source = None
+            if ocr_source is not None:
+                source_rel, source_payload, source_record = ocr_source
+                source_is_pdf = source_record.get("source_type") == "pdf"
+                source_artifact = add_artifact(
+                    (
+                        ArtifactRole.SOURCE_PDF
+                        if source_is_pdf
+                        else ArtifactRole.SOURCE_IMAGE
+                    ),
+                    source_payload,
+                    media_type=(
+                        "application/pdf"
+                        if source_is_pdf
+                        else (
+                            "image/png"
+                            if source_payload.startswith(b"\x89PNG")
+                            else "image/jpeg"
+                        )
+                    ),
+                    filename=None if source_is_pdf else source_rel,
+                    metadata={
+                        key: value for key, value in source_record.items()
+                        if key != "path"
+                    },
+                )
+            raw_artifact = add_artifact(
+                ArtifactRole.RAW_OCR_TEX,
+                source_bytes,
+                parents=(source_artifact,),
+                media_type="application/x-tex; charset=utf-8",
+            )
+            add_artifact(
+                ArtifactRole.RAW_OCR_PREVIEW,
+                source_bytes,
+                parents=(raw_artifact,),
+                path="previews/raw-ocr-source-preview.txt",
+                media_type="text/plain; charset=utf-8",
+                preview_status="SOURCE_PREVIEW",
+            )
+        else:
+            source_artifact = add_artifact(
+                ArtifactRole.SOURCE_TEX,
+                input_tex_bytes,
+                media_type="application/x-tex",
+            )
+            raw_artifact = add_artifact(
+                ArtifactRole.STAGE_SOURCE_TEX,
+                source_bytes,
+                parents=(source_artifact,),
+                media_type="application/x-tex; charset=utf-8",
+            )
+
+        pipeline_result = capture.get("pipeline_result")
+        captured_stages = capture.get("audit_stages") or {}
+
+        def captured_stage_text(*names: str) -> str:
+            for name in names:
+                entry = captured_stages.get(name)
+                if isinstance(entry, dict):
+                    value = entry.get("text")
+                else:
+                    value = entry
+                if isinstance(value, str) and value:
+                    return value
+            return ""
+
+        analyzed_text = str(
+            getattr(pipeline_result, "analyzed_tex", "") or ""
+        ) or captured_stage_text("ai_analyzed", "rule_analyzed")
+        analyzed_artifact = None
+        if analyzed_text:
+            analyzed_artifact = add_artifact(
+                (
+                    ArtifactRole.AI_ANALYZED_TEX
+                    if meta.get("mode") == "ai"
+                    else ArtifactRole.RULE_ANALYZED_TEX
+                ),
+                analyzed_text,
+                parents=(raw_artifact,),
+                media_type="application/x-tex; charset=utf-8",
+                metadata={
+                    "producer": "host-captured pipeline stage",
+                    "mode": str(meta.get("mode") or ""),
+                },
+            )
+        reviewed_text = str(
+            getattr(pipeline_result, "reviewed_tex", "") or ""
+        ) or captured_stage_text("ai_reviewed")
+        reviewed_artifact = None
+        if reviewed_text:
+            reviewed_artifact = add_artifact(
+                ArtifactRole.AI_REVIEWED_TEX,
+                reviewed_text,
+                parents=(analyzed_artifact or raw_artifact,),
+                media_type="application/x-tex; charset=utf-8",
+            )
+
+        if pipeline_result is not None:
+            if terminal_status is TerminalStatus.SUCCESS:
+                current_text = str(
+                    getattr(pipeline_result, "export_text", "")
+                    or getattr(pipeline_result, "result", "")
+                    or source_text
+                )
+            else:
+                current_text = str(
+                    getattr(pipeline_result, "compiled_snapshot", "")
+                    or getattr(pipeline_result, "compiled_tex", "")
+                    or reviewed_text
+                    or analyzed_text
+                    or getattr(pipeline_result, "result", "")
+                    or source_text
+                )
+        elif terminal_status in {TerminalStatus.FAILED, TerminalStatus.CANCELLED}:
+            current_text = str(
+                capture.get("preview") or reviewed_text or analyzed_text or source_text
+            )
+        else:
+            try:
+                current_text = _current_record(pid)["result"].decode("utf-8")
+            except (HTTPException, UnicodeDecodeError, OSError):
+                current_text = source_text
+        current_artifact = add_artifact(
+            ArtifactRole.CURRENT_TEX,
+            current_text,
+            parents=(reviewed_artifact or analyzed_artifact or raw_artifact,),
+            media_type="application/x-tex; charset=utf-8",
+            metadata={
+                "terminal_capture": True,
+                "partial": terminal_status in {
+                    TerminalStatus.FAILED,
+                    TerminalStatus.PARTIAL,
+                    TerminalStatus.CANCELLED,
+                },
+            },
+        )
+
+        verification = deepcopy(
+            getattr(pipeline_result, "verification", None) or capture.get("verification") or {}
+        )
+        # Verification status can only come from this captured machine record.
+        if terminal_status is not TerminalStatus.SUCCESS:
+            verification["safe_to_export"] = False
+        verification.setdefault("safe_to_export", False)
+        verification["audit_terminal_status"] = terminal_status.value
+
+        preview_status = str(
+            verification.get("preview_state")
+            or capture.get("preview_state")
+            or "SOURCE_PREVIEW"
+        ).upper()
+        if preview_status not in {"COMPILED", "PARTIAL_COMPILED", "SOURCE_PREVIEW"}:
+            preview_status = "SOURCE_PREVIEW"
+        compiled_pdf = bytes(
+            getattr(pipeline_result, "compiled_pdf", b"")
+            or capture.get("compiled_pdf")
+            or b""
+        )
+        if (
+            preview_status in {"COMPILED", "PARTIAL_COMPILED"}
+            and compiled_pdf.startswith(b"%PDF-")
+        ):
+            add_artifact(
+                ArtifactRole.CURRENT_PREVIEW,
+                compiled_pdf,
+                parents=(current_artifact,),
+                media_type="application/pdf",
+                preview_status=preview_status,
+            )
+        else:
+            preview_status = "SOURCE_PREVIEW"
+            verification["preview_state"] = preview_status
+            add_artifact(
+                ArtifactRole.CURRENT_PREVIEW,
+                current_text,
+                parents=(current_artifact,),
+                path="previews/current-source-preview.txt",
+                media_type="text/plain; charset=utf-8",
+                preview_status=preview_status,
+            )
+
+        info = capture.get("info") if isinstance(capture.get("info"), dict) else {}
+        if pipeline_result is not None:
+            decisions_payload = [
+                _decision_dict(item) for item in getattr(pipeline_result, "decisions", [])
+            ]
+            decision_items = deepcopy(getattr(pipeline_result, "decision_items", []) or [])
+            report_md = str(getattr(pipeline_result, "report_md", "") or "")
+        else:
+            decisions_payload = deepcopy(info.get("decision_cache") or [])
+            decision_items = deepcopy(info.get("items") or [])
+            report_md = str(capture.get("report_md") or "")
+        if not report_md:
+            report_md = (
+                "# LaTeXStruct 运行审计记录\n\n"
+                f"- 任务终态：**{terminal_status.value}**\n"
+                "- 本记录保留终态前已经产生的材料；它不表示机器验证通过。\n"
+            )
+            if error:
+                report_md += f"- 错误：{error}\n"
+        report_artifact = add_artifact(
+            ArtifactRole.REPORT,
+            report_md,
+            parents=(current_artifact,),
+            media_type="text/markdown; charset=utf-8",
+        )
+        add_artifact(
+            ArtifactRole.VERIFICATION,
+            _audit_json_bytes({
+                "terminal_status": terminal_status.value,
+                "verification": verification,
+            }),
+            parents=(current_artifact, report_artifact),
+            media_type="application/json",
+        )
+        add_artifact(
+            ArtifactRole.DECISIONS,
+            _audit_json_bytes({
+                "decisions": decisions_payload,
+                "items": decision_items,
+                "review_state": _review_state_payload(meta),
+            }),
+            parents=(current_artifact,),
+            media_type="application/json",
+        )
+        diff_text = "".join(difflib.unified_diff(
+            source_text.replace("\r\n", "\n").replace("\r", "\n").splitlines(True),
+            current_text.replace("\r\n", "\n").replace("\r", "\n").splitlines(True),
+            fromfile="raw/source.tex",
+            tofile="current/current.tex",
+        ))
+        add_artifact(
+            ArtifactRole.RAW_TO_CURRENT_DIFF,
+            diff_text,
+            parents=(raw_artifact, current_artifact),
+            media_type="text/x-diff; charset=utf-8",
+        )
+
+        compile_after = verification.get("compile_after")
+        if isinstance(compile_after, dict) and isinstance(compile_after.get("log"), str):
+            add_artifact(
+                ArtifactRole.COMPILE_CURRENT_LOG,
+                compile_after.get("log") or "",
+                parents=(current_artifact,),
+                media_type="text/plain; charset=utf-8",
+            )
+        if meta.get("kind") == "ocr":
+            # compile_before is run directly on the imported raw OCR TeX before
+            # template conversion or structural edits.
+            compile_before = verification.get("compile_before")
+            if isinstance(compile_before, dict) and isinstance(compile_before.get("log"), str):
+                add_artifact(
+                    ArtifactRole.COMPILE_RAW_LOG,
+                    compile_before.get("log") or "",
+                    parents=(raw_artifact,),
+                    media_type="text/plain; charset=utf-8",
+                )
+            outline = meta.get("ocr_outline")
+            if not isinstance(outline, list):
+                outline = []
+            add_artifact(
+                ArtifactRole.OUTLINE,
+                _audit_json_bytes({"outline": outline}),
+                parents=(source_artifact,),
+                media_type="application/json",
+            )
+            resource_info = meta.get("ocr_resources") or {}
+            try:
+                verified_resources = _verified_ocr_resource_bytes(
+                    directory,
+                    resource_info,
+                    include_source_pages=True,
+                    include_formula_crops=True,
+                )
+            except ValueError:
+                verified_resources = {}
+            for index, item in enumerate(resource_info.get("source_pages") or [], 1):
+                rel = str(item.get("path") or "")
+                payload = verified_resources.get(rel)
+                if payload:
+                    add_artifact(
+                        ArtifactRole.PAGE_IMAGE,
+                        payload,
+                        parents=(source_artifact,),
+                        index=index,
+                        filename=rel,
+                        media_type=(
+                            "image/png" if payload.startswith(b"\x89PNG") else "image/jpeg"
+                        ),
+                        metadata={"source_page": item.get("source_page") or index},
+                    )
+            for index, item in enumerate(resource_info.get("assets") or [], 1):
+                rel = str(item.get("path") or "")
+                payload = verified_resources.get(rel)
+                if payload:
+                    add_artifact(
+                        ArtifactRole.EVIDENCE,
+                        payload,
+                        parents=(raw_artifact,),
+                        filename=f"ocr-assets/asset-{index:04d}{Path(rel).suffix.lower()}",
+                        media_type=(
+                            "image/png" if payload.startswith(b"\x89PNG") else "image/jpeg"
+                        ),
+                        metadata={"evidence_kind": "ocr_figure_asset"},
+                    )
+            for index, item in enumerate(resource_info.get("formula_crops") or [], 1):
+                rel = str(item.get("path") or "")
+                payload = verified_resources.get(rel)
+                if payload:
+                    add_artifact(
+                        ArtifactRole.FORMULA_CROP,
+                        payload,
+                        parents=(source_artifact, raw_artifact),
+                        index=index,
+                        filename=rel,
+                        media_type=(
+                            "image/png" if payload.startswith(b"\x89PNG") else "image/jpeg"
+                        ),
+                        metadata={
+                            "source_page": item.get("source_page"),
+                            "evidence_id": item.get("evidence_id"),
+                        },
+                    )
+        if meta.get("kind") == "folder":
+            original_zip = directory / "original-files.zip"
+            if original_zip.is_file():
+                try:
+                    project_files = _decode_zip_files(original_zip.read_bytes())
+                except (OSError, ValueError, zipfile.BadZipFile):
+                    project_files = {}
+                for rel, payload in sorted(project_files.items()):
+                    add_artifact(
+                        ArtifactRole.PROJECT_FILE,
+                        payload,
+                        parents=(source_artifact,),
+                        filename=rel,
+                        media_type=(
+                            "application/x-tex" if rel.lower().endswith(".tex")
+                            else "application/octet-stream"
+                        ),
+                    )
+
+        safe_error = str(error or capture.get("error") or "").strip()
+        if safe_error or terminal_status in {
+            TerminalStatus.FAILED, TerminalStatus.CANCELLED, TerminalStatus.PARTIAL,
+        }:
+            add_artifact(
+                ArtifactRole.ERROR_LOG,
+                _audit_json_bytes({
+                    "terminal_status": terminal_status.value,
+                    "error": safe_error,
+                    "events": capture.get("events") or [],
+                }),
+                parents=(current_artifact,),
+                media_type="application/json",
+            )
+
+        blockers = []
+        for item in verification.get("failures") or []:
+            if isinstance(item, dict):
+                message = str(item.get("summary") or item.get("label") or "").strip()
+                if message:
+                    blockers.append(message)
+        if safe_error:
+            blockers.append(safe_error)
+        from .. import __version__
+
+        cfg = capture.get("config_snapshot")
+        if meta.get("kind") == "ocr":
+            model = str((meta.get("ocr_processing") or {}).get("model") or "unknown")
+        elif meta.get("mode") != "ai":
+            model = "rule-engine"
+        elif cfg is not None:
+            model = str(
+                getattr(cfg, "codex_model", "")
+                if getattr(cfg, "analysis_backend", "") == "codex_cli"
+                else getattr(cfg, "decide_model", "")
+            ) or "unknown"
+        else:
+            model = "unknown"
+        source_info = meta.get("ocr_source") or {}
+        selected_start = int(source_info.get("selected_start") or 1)
+        selected_end = int(source_info.get("selected_end") or selected_start)
+        page_range = (
+            f"{selected_start}-{selected_end}" if meta.get("kind") == "ocr" else "all"
+        )
+        return RunSnapshot(
+            project_id=pid,
+            run_id=str(run_id),
+            workflow=workflow,
+            terminal_status=terminal_status,
+            captured_at=_audit_iso_timestamp(capture.get("finished") or time.time()),
+            artifacts=tuple(artifacts),
+            machine_verification=verification,
+            blockers=tuple(blockers),
+            model=model,
+            app_version=__version__,
+            template=str(meta.get("template") or "none"),
+            page_range=page_range,
+            metadata={
+                "project_kind": str(meta.get("kind") or "tex"),
+                "mode": str(meta.get("mode") or ""),
+                "review_revision": _review_state_payload(meta)["revision"],
+                "preview_status": preview_status,
+                "host_state_fingerprint": _audit_host_state_fingerprint(pid),
+            },
+        )
+
+    def _project_audit_store(pid: str):
+        from .audit_store import AuditSubmissionStore
+
+        _ensure(pid)
+        return AuditSubmissionStore(get_store()._dir(pid))
+
+    def _persist_terminal_audit_snapshot(pid: str, snapshot: RunSnapshot):
+        """Publish four lightweight files before a task terminal is exposed."""
+        # The store commits the immutable snapshot, its four controls, the
+        # latest pointer and staleness of prior snapshots under one root lock.
+        # In particular, publishing a new terminal run must be able to repair a
+        # previously corrupted latest control set instead of failing the main
+        # processing task.
+        return _project_audit_store(pid).persist_terminal_snapshot(snapshot)
+
     def _current_record(pid: str) -> dict:
         """Return the newest hash-verified attempt, even when TEX validation failed."""
         _ensure(pid)
@@ -3218,6 +3872,65 @@ def create_app(updated_from: str = "") -> FastAPI:
             "attempt": "source",
             "directory": directory,
         }
+
+    def _current_audit_capture(pid: str) -> dict:
+        """Read current host files for stale checking or a legacy snapshot.
+
+        Unlike a terminal capture, this intentionally has no fabricated AI
+        stages.  It only reuses the committed/failed records already held by
+        the project store and the hash-bound compiled preview when one exists.
+        """
+        record = _current_record(pid)
+        info = deepcopy(record.get("info") or {})
+        result_bytes = bytes(record.get("result") or b"")
+        compiled_pdf = b""
+        try:
+            preview = _compile_preview_package_entry(pid, info, result_bytes)
+        except HTTPException:
+            preview = None
+        if preview is not None:
+            _name, compiled_pdf = preview
+        verification = info.get("verification")
+        if not isinstance(verification, dict):
+            verification = {}
+        return {
+            "info": info,
+            "verification": deepcopy(verification),
+            "report_md": bytes(record.get("report") or b"").decode(
+                "utf-8", errors="replace"
+            ),
+            "compiled_pdf": compiled_pdf,
+            "preview_state": str(
+                verification.get("preview_state")
+                or preview_state_from_verification(verification)
+                or "SOURCE_PREVIEW"
+            ),
+            "preview": result_bytes.decode("utf-8", errors="replace"),
+            "events": [],
+        }
+
+    def _current_audit_fingerprint(
+        pid: str,
+        terminal_status: TerminalStatus,
+    ) -> str:
+        latest = _project_audit_store(pid).latest()
+        if latest is not None:
+            frozen = _project_audit_store(pid).load_snapshot(latest.snapshot_id)
+            expected_host_state = str(
+                frozen.metadata.get("host_state_fingerprint") or ""
+            )
+            if expected_host_state and hmac.compare_digest(
+                expected_host_state,
+                _audit_host_state_fingerprint(pid),
+            ):
+                return latest.snapshot_fingerprint
+        snapshot = _build_project_run_snapshot(
+            pid,
+            terminal_status,
+            f"state-{uuid.uuid4().hex}",
+            capture=_current_audit_capture(pid),
+        )
+        return snapshot.current_fingerprint
 
     def _write_ocr_package_resources(zf, pid: str, meta: dict, reserved: dict) -> None:
         resource_info = meta.get("ocr_resources") or {}
@@ -3676,6 +4389,404 @@ def create_app(updated_from: str = "") -> FastAPI:
             raise HTTPException(404, "项目不存在")
         return p
 
+    def _legacy_audit_terminal_status(pid: str) -> TerminalStatus:
+        job = _process_jobs.latest(pid)
+        if job is not None:
+            status = str(job.get("status") or "")
+            if status == "error":
+                return TerminalStatus.FAILED
+            if status == "cancelled":
+                return TerminalStatus.CANCELLED
+            if status == "blocked":
+                return TerminalStatus.UNVERIFIED
+            if status == "done":
+                return (
+                    TerminalStatus.SUCCESS
+                    if (job.get("result") or {}).get("ok") is True
+                    else TerminalStatus.UNVERIFIED
+                )
+        record = _current_record(pid)
+        return (
+            TerminalStatus.SUCCESS
+            if record.get("verified") is True
+            else TerminalStatus.UNVERIFIED
+        )
+
+    def _audit_submission_summary(pid: str, stored, *, transient_stale: str = ""):
+        audit_store = _project_audit_store(pid)
+        snapshot = audit_store.load_snapshot(stored.snapshot_id)
+        submission_directory = audit_store.root / Path(stored.relative_directory)
+        short_path = submission_directory / "01_PROMPT_SHORT.txt"
+        manifest_path = submission_directory / "submission_manifest.json"
+        try:
+            short_prompt = short_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            short_prompt = ""
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            manifest = {}
+        stale_reason = transient_stale or stored.stale_reason
+        stale = bool(stored.stale or transient_stale)
+        zip_filename = (
+            Path(stored.zip_relative_path).name if stored.zip_relative_path else None
+        )
+        preview_state = str(
+            snapshot.metadata.get("preview_status") or "SOURCE_PREVIEW"
+        )
+        return {
+            **stored.to_dict(),
+            "captured_at": snapshot.captured_at,
+            "run_terminal_status": stored.terminal_status,
+            "preview_state": preview_state,
+            "profile": stored.depth,
+            "bundle_state": (
+                "ZIP_READY" if stored.state == "READY" else "LIGHTWEIGHT"
+            ),
+            "artifact_count": len(manifest.get("artifacts") or []),
+            "snapshot_artifact_count": len(snapshot.artifacts),
+            "filename": zip_filename,
+            "folder": "下载/LaTeXStruct" if zip_filename else None,
+            "short_prompt": short_prompt,
+            "download_url": (
+                f"/api/projects/{pid}/audit-submission/"
+                f"{stored.submission_id}/download"
+                if zip_filename else None
+            ),
+            "stale": stale,
+            "stale_reason": stale_reason,
+            "stale_reasons": [stale_reason] if stale_reason else [],
+        }
+
+    def _stored_audit_submissions(pid: str):
+        """Return only integrity-checked submissions committed by this project."""
+        audit_store = _project_audit_store(pid)
+        directory = audit_store.root / "submissions"
+        if not directory.is_dir():
+            return []
+        stored = []
+        for child in directory.iterdir():
+            if not child.is_dir() or child.is_symlink():
+                continue
+            try:
+                item = audit_store.get_submission(child.name)
+                audit_store.load_snapshot(item.snapshot_id)
+            except (KeyError, OSError, ValueError):
+                # Incomplete temporary/tampered records are never offered as
+                # client-selectable history.
+                continue
+            stored.append(item)
+        return stored
+
+    def _audit_snapshot_history(pid: str, latest=None) -> list[dict]:
+        """Expose one best submission per immutable, host-saved snapshot."""
+        best_by_snapshot = {}
+        for item in _stored_audit_submissions(pid):
+            previous = best_by_snapshot.get(item.snapshot_id)
+            rank = (item.generated_at, item.state == "READY", item.submission_id)
+            previous_rank = (
+                (
+                    previous.generated_at,
+                    previous.state == "READY",
+                    previous.submission_id,
+                )
+                if previous is not None else None
+            )
+            if previous_rank is None or rank > previous_rank:
+                best_by_snapshot[item.snapshot_id] = item
+        history = []
+        for item in best_by_snapshot.values():
+            summary = _audit_submission_summary(pid, item)
+            summary["is_latest"] = bool(
+                latest is not None and latest.submission_id == item.submission_id
+            )
+            summary["historical"] = not summary["is_latest"]
+            summary["can_generate_snapshot"] = True
+            history.append(summary)
+        history.sort(
+            key=lambda item: (
+                str(item.get("captured_at") or ""),
+                str(item.get("generated_at") or ""),
+                str(item.get("snapshot_id") or ""),
+            ),
+            reverse=True,
+        )
+        return history
+
+    def _saved_audit_snapshot_submission(pid: str, snapshot_id: str):
+        """Resolve a client-selected ID only through host-committed records."""
+        requested = str(snapshot_id or "").strip()
+        if not requested:
+            return None
+        matches = [
+            item
+            for item in _stored_audit_submissions(pid)
+            if item.snapshot_id == requested
+        ]
+        if not matches:
+            raise HTTPException(404, "所选历史运行快照不存在或完整性校验未通过")
+        return max(
+            matches,
+            key=lambda item: (
+                item.generated_at,
+                item.state == "READY",
+                item.submission_id,
+            ),
+        )
+
+    def _ensure_current_audit_snapshot(pid: str):
+        audit_store = _project_audit_store(pid)
+        latest = audit_store.latest()
+        if latest is None:
+            terminal = _legacy_audit_terminal_status(pid)
+            snapshot = _build_project_run_snapshot(
+                pid,
+                terminal,
+                f"legacy-{uuid.uuid4().hex}",
+                capture=_current_audit_capture(pid),
+            )
+            latest = _persist_terminal_audit_snapshot(pid, snapshot)
+            return latest
+        terminal = TerminalStatus(latest.terminal_status)
+        current_fingerprint = _current_audit_fingerprint(pid, terminal)
+        if latest.snapshot_fingerprint != current_fingerprint:
+            audit_store.mark_outdated_submissions(
+                current_fingerprint,
+                "current TeX/PDF/hash 或审阅记录已经改变",
+            )
+            snapshot = _build_project_run_snapshot(
+                pid,
+                terminal,
+                f"state-{uuid.uuid4().hex}",
+                capture=_current_audit_capture(pid),
+            )
+            latest = _persist_terminal_audit_snapshot(pid, snapshot)
+        elif latest.stale:
+            # An explicit review mutation can leave bytes unchanged except for
+            # the host review state.  Freeze that state before regenerating.
+            snapshot = _build_project_run_snapshot(
+                pid,
+                terminal,
+                f"state-{uuid.uuid4().hex}",
+                capture=_current_audit_capture(pid),
+            )
+            latest = _persist_terminal_audit_snapshot(pid, snapshot)
+        return latest
+
+    def _active_job_matches_latest_ocr_parent(audit_store, active, latest) -> bool:
+        """Allow live packaging only for the OCR child bound by the host."""
+        if active is None or latest is None:
+            return False
+        parent_snapshot_id = _process_jobs.audit_parent_snapshot_id(active)
+        if not parent_snapshot_id or parent_snapshot_id != latest.snapshot_id:
+            return False
+        try:
+            frozen = audit_store.load_snapshot(parent_snapshot_id)
+        except (KeyError, OSError, TypeError, ValueError):
+            return False
+        return frozen.workflow is AuditWorkflow.OCR_ONLY
+
+    @app.get("/api/projects/{pid}/audit-submission/latest")
+    def latest_audit_submission(pid: str):
+        _ensure(pid)
+        audit_store = _project_audit_store(pid)
+        latest = audit_store.latest()
+        active = _process_jobs.active(pid)
+        if latest is None:
+            history = _audit_snapshot_history(pid)
+            return {
+                "available": False,
+                "can_generate": active is None,
+                "reason": "TASK_RUNNING" if active is not None else "NO_TERMINAL_RUN",
+                "latest": None,
+                "history": history,
+                "history_count": len(history),
+            }
+        terminal = TerminalStatus(latest.terminal_status)
+        active_ocr_snapshot = _active_job_matches_latest_ocr_parent(
+            audit_store,
+            active,
+            latest,
+        )
+        if active is None:
+            current_fingerprint = _current_audit_fingerprint(pid, terminal)
+            if current_fingerprint != latest.snapshot_fingerprint:
+                audit_store.mark_outdated_submissions(
+                    current_fingerprint,
+                    "current TeX/PDF/hash 或审阅记录已经改变",
+                )
+                latest = audit_store.latest()
+            transient = ""
+        elif active_ocr_snapshot:
+            # The OCR-only terminal snapshot is already immutable.  Let users
+            # package it while the child analysis run proceeds independently.
+            transient = ""
+        else:
+            transient = "新的处理任务仍在运行"
+        history = _audit_snapshot_history(pid, latest)
+        return {
+            "available": True,
+            "can_generate": active is None or active_ocr_snapshot,
+            "reason": (
+                "TASK_RUNNING"
+                if active is not None and not active_ocr_snapshot
+                else None
+            ),
+            "latest": _audit_submission_summary(
+                pid, latest, transient_stale=transient
+            ),
+            "history": history,
+            "history_count": len(history),
+        }
+
+    def _generate_audit_zip_from_snapshot(
+        pid: str,
+        body: AuditSubmissionBody,
+        latest,
+        *,
+        frozen_snapshot: bool = False,
+    ):
+        audit_store = _project_audit_store(pid)
+        depth = AuditDepth(str(body.depth or body.profile or "standard"))
+        combined_evidence = body.include_page_images_formula_crops
+        include_verification = (
+            body.include_verification_records
+            if body.include_verification_decisions is None
+            else body.include_verification_decisions
+        )
+        request_options = AuditSubmissionRequest(
+            depth=depth,
+            audit_focus=body.audit_focus,
+            include_source_files=body.include_source_files,
+            include_compile_logs=body.include_compile_logs,
+            include_verification=include_verification,
+            include_page_images=(
+                body.include_page_images
+                if body.include_page_images is not None
+                else combined_evidence
+            ),
+            include_formula_crops=(
+                body.include_formula_crops
+                if body.include_formula_crops is not None
+                else combined_evidence
+            ),
+            sanitize_sensitive=body.sanitize_sensitive,
+        )
+        project = get_store().get(pid) or {}
+        filename = f"{project.get('name') or pid}-AI-audit.zip"
+        current_fingerprint = (
+            latest.snapshot_fingerprint
+            if frozen_snapshot
+            else _current_audit_fingerprint(
+                pid, TerminalStatus(latest.terminal_status)
+            )
+        )
+        stored = audit_store.generate_submission_zip(
+            latest.snapshot_id,
+            request_options,
+            filename=filename,
+            current_fingerprint=current_fingerprint,
+        )
+        canonical_zip = audit_store.download_path(stored.submission_id)
+        from .downloads import save_unique_download
+
+        saved = save_unique_download(canonical_zip.read_bytes(), canonical_zip.name)
+        # Saving the user-facing copy can overlap the OCR child's terminal
+        # commit.  Re-read both records under the store's commit lock so the
+        # response cannot publish a now-historic ZIP as the current package.
+        stored, newest = audit_store.submission_freshness(stored.submission_id)
+        summary = _audit_submission_summary(pid, stored)
+        is_latest = bool(
+            newest is not None and newest.submission_id == stored.submission_id
+        )
+        # A terminal run may win the race after this ZIP started building.  The
+        # store already marks that ZIP stale; make the POST response equally
+        # explicit so the client never replaces the true latest card with it.
+        summary["is_latest"] = is_latest
+        summary["historical"] = not is_latest
+        summary["filename"] = saved.name
+        summary["folder"] = "下载/LaTeXStruct"
+        summary["effective_options"] = {
+            "profile": depth.value,
+            "include_source_files": body.include_source_files,
+            "include_compile_logs": body.include_compile_logs,
+            "include_verification_records": include_verification,
+            "include_page_images": request_options.effective_page_images,
+            "include_formula_crops": request_options.effective_formula_crops,
+            "sanitize_sensitive": body.sanitize_sensitive,
+        }
+        return {"ok": True, "submission": summary}
+
+    @app.post("/api/projects/{pid}/audit-submission", status_code=201)
+    def create_audit_submission(pid: str, body: AuditSubmissionBody):
+        _ensure(pid)
+        active = _process_jobs.active(pid)
+        audit_store = _project_audit_store(pid)
+        latest = audit_store.latest()
+        selected = _saved_audit_snapshot_submission(pid, body.snapshot_id)
+        active_ocr_snapshot = _active_job_matches_latest_ocr_parent(
+            audit_store,
+            active,
+            latest,
+        )
+        if selected is not None:
+            # Every selected snapshot is immutable and was first committed by
+            # the host at a terminal boundary.  It is safe to package while a
+            # newer run proceeds because no live project files are consulted.
+            selected_is_latest = bool(
+                latest is not None and selected.snapshot_id == latest.snapshot_id
+            )
+            if active is not None and selected_is_latest and not active_ocr_snapshot:
+                raise HTTPException(
+                    409,
+                    "任务仍在运行；请等待终态快照冻结后再生成审计包",
+                )
+            response = _generate_audit_zip_from_snapshot(
+                pid,
+                body,
+                selected,
+                frozen_snapshot=True,
+            )
+            return response
+        if active is not None and not active_ocr_snapshot:
+            raise HTTPException(409, "任务仍在运行；请等待终态快照冻结后再生成审计包")
+        if active_ocr_snapshot:
+            return _generate_audit_zip_from_snapshot(
+                pid,
+                body,
+                latest,
+                frozen_snapshot=True,
+            )
+        with _project_lock(pid):
+            if _process_jobs.active(pid):
+                raise HTTPException(409, "任务仍在运行；请等待终态快照冻结后再生成审计包")
+            latest = _ensure_current_audit_snapshot(pid)
+            return _generate_audit_zip_from_snapshot(pid, body, latest)
+
+    @app.get(
+        "/api/projects/{pid}/audit-submission/{submission_id}/download"
+    )
+    def download_audit_submission(pid: str, submission_id: str):
+        _ensure(pid)
+        audit_store = _project_audit_store(pid)
+        try:
+            stored = audit_store.get_submission(submission_id)
+            path = audit_store.download_path(submission_id)
+        except KeyError:
+            raise HTTPException(404, "审计提交包不存在或尚未生成 ZIP") from None
+        stale = stored.stale
+        return FileResponse(
+            path,
+            media_type="application/zip",
+            filename=path.name,
+            headers={
+                "Cache-Control": "no-store",
+                "X-LaTeXStruct-Submission-ID": stored.submission_id,
+                "X-LaTeXStruct-Snapshot-SHA256": stored.snapshot_fingerprint,
+                "X-LaTeXStruct-Stale": "true" if stale else "false",
+            },
+        )
+
     @app.delete("/api/projects/{pid}")
     def delete_project(pid: str):
         if _process_jobs.active(pid):
@@ -3883,7 +4994,8 @@ def create_app(updated_from: str = "") -> FastAPI:
 
     def _run_project_impl(pid: str, exclude: set, reuse_decisions: bool = False,
                           progress_callback=None, control_callback=None, commit_callback=None,
-                          config_snapshot: Optional[AppConfig] = None):
+                          config_snapshot: Optional[AppConfig] = None,
+                          audit_capture: Optional[dict] = None):
         p = get_store().get(pid)
         text = get_store().read_source(pid)
         # Background tasks receive the complete settings snapshot captured when the
@@ -3927,8 +5039,38 @@ def create_app(updated_from: str = "") -> FastAPI:
         latest_draft = {"text": ""}
 
         def capture_progress(phase, progress, message, data):
-            if phase == "draft" and isinstance((data or {}).get("preview"), str):
-                latest_draft["text"] = data["preview"]
+            event_data = data or {}
+            if isinstance(event_data.get("preview"), str):
+                latest_draft["text"] = event_data["preview"]
+                if audit_capture is not None:
+                    audit_capture["preview"] = event_data["preview"]
+                    audit_capture["preview_state"] = str(
+                        event_data.get("preview_state")
+                        or audit_capture.get("preview_state")
+                        or "SOURCE_PREVIEW"
+                    )
+            audit_stage = event_data.get("audit_stage")
+            if audit_capture is not None and isinstance(audit_stage, dict):
+                role = str(audit_stage.get("role") or "")
+                stage_text = audit_stage.get("text")
+                if role and isinstance(stage_text, str) and stage_text:
+                    audit_capture.setdefault("audit_stages", {}).setdefault(
+                        role,
+                        {
+                            "text": stage_text,
+                            "sha256": hashlib.sha256(
+                                stage_text.encode("utf-8")
+                            ).hexdigest(),
+                            "captured_at": time.time(),
+                        },
+                    )
+            if audit_capture is not None:
+                audit_capture.setdefault("events", []).append({
+                    "at": time.time(),
+                    "phase": str(phase),
+                    "message": str(message)[:500],
+                })
+                audit_capture["events"] = audit_capture["events"][-80:]
             if progress_callback:
                 progress_callback(phase, progress, message, data)
 
@@ -4078,6 +5220,13 @@ def create_app(updated_from: str = "") -> FastAPI:
             res.verification,
             terminal_status=final_terminal_status,
         )
+        if audit_capture is not None:
+            audit_capture["pipeline_result"] = res
+            audit_capture["verification"] = deepcopy(res.verification)
+            audit_capture["config_snapshot"] = cfg
+            audit_capture["preview_state"] = str(
+                res.verification.get("preview_state") or "SOURCE_PREVIEW"
+            )
         _persist_compile_preview(pid, res)
         if not res.ok:
             failed_checks = [item["id"] for item in failures]
@@ -4176,13 +5325,24 @@ def create_app(updated_from: str = "") -> FastAPI:
 
     def _run_project(pid: str, exclude: set, reuse_decisions: bool = False,
                      progress_callback=None, control_callback=None, commit_callback=None,
-                     config_snapshot: Optional[AppConfig] = None):
+                     config_snapshot: Optional[AppConfig] = None,
+                     audit_run_id: str = ""):
         # Includes the final store commit. RLock is required because review
         # routes hold this transaction while updating meta.json before rerunning.
         with _project_lock(pid):
             _begin_pipeline_run()
+            run_id = str(audit_run_id or f"run-{uuid.uuid4().hex}")
+            audit_capture = {
+                "run_id": run_id,
+                "started": time.time(),
+                "preview": get_store().read_source(pid),
+                "preview_state": "SOURCE_PREVIEW",
+                "audit_stages": {},
+                "events": [],
+                "config_snapshot": config_snapshot,
+            }
             try:
-                return _run_project_impl(
+                result = _run_project_impl(
                     pid,
                     exclude,
                     reuse_decisions=reuse_decisions,
@@ -4190,7 +5350,64 @@ def create_app(updated_from: str = "") -> FastAPI:
                     control_callback=control_callback,
                     commit_callback=commit_callback,
                     config_snapshot=config_snapshot,
+                    audit_capture=audit_capture,
                 )
+                audit_capture["finished"] = time.time()
+                terminal = (
+                    TerminalStatus.SUCCESS
+                    if result.get("ok") is True
+                    else TerminalStatus.UNVERIFIED
+                )
+                snapshot = _build_project_run_snapshot(
+                    pid, terminal, run_id, capture=audit_capture
+                )
+                if progress_callback:
+                    progress_callback(
+                        "audit_submission",
+                        0.99,
+                        "正在冻结终态并生成 AI 审计轻量材料",
+                        {},
+                    )
+                _persist_terminal_audit_snapshot(pid, snapshot)
+                return result
+            except ProcessingCancelled as exc:
+                audit_capture["finished"] = time.time()
+                audit_capture["error"] = str(exc)
+                snapshot = _build_project_run_snapshot(
+                    pid,
+                    TerminalStatus.CANCELLED,
+                    run_id,
+                    capture=audit_capture,
+                    error=str(exc),
+                )
+                if progress_callback:
+                    progress_callback(
+                        "audit_submission",
+                        0.99,
+                        "正在保存取消前已有阶段和错误记录",
+                        {},
+                    )
+                _persist_terminal_audit_snapshot(pid, snapshot)
+                raise
+            except Exception as exc:
+                audit_capture["finished"] = time.time()
+                audit_capture["error"] = _safe_task_error(exc)
+                snapshot = _build_project_run_snapshot(
+                    pid,
+                    TerminalStatus.FAILED,
+                    run_id,
+                    capture=audit_capture,
+                    error=audit_capture["error"],
+                )
+                if progress_callback:
+                    progress_callback(
+                        "audit_submission",
+                        0.99,
+                        "正在保存失败前已有阶段和错误记录",
+                        {},
+                    )
+                _persist_terminal_audit_snapshot(pid, snapshot)
+                raise
             finally:
                 _end_pipeline_run()
 
@@ -4247,6 +5464,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                     control_callback=lambda: _process_jobs.control(jid),
                     commit_callback=lambda: _process_jobs.begin_commit(jid),
                     config_snapshot=launch_cfg,
+                    audit_run_id=jid,
                 )
                 _process_jobs.complete(jid, processed)
             except ProcessingCancelled:
@@ -4319,6 +5537,120 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "excludes": get_store().get(pid).get("excludes", []),
                 "verification": info.get("verification")}
 
+    def _commit_review_state(
+        pid: str,
+        meta: dict,
+        *,
+        accepted_ids,
+        rejected_ids,
+        stale_reason: str,
+    ) -> tuple[dict, bool]:
+        """Persist one disjoint host-authoritative review state and stale all old bundles."""
+        previous = _review_state_payload(meta)
+        accepted_set = {str(item) for item in accepted_ids if str(item).strip()}
+        rejected_set = {str(item) for item in rejected_ids if str(item).strip()}
+        # Repair any legacy overlap deterministically.  Callers that perform an
+        # explicit acceptance remove that ID from rejected_set first; otherwise
+        # rejection wins because it changes the generated current TeX.
+        accepted_set.difference_update(rejected_set)
+        accepted = sorted(accepted_set)
+        rejected = sorted(rejected_set)
+        changed = (
+            accepted != previous["accepted_ids"]
+            or rejected != previous["rejected_ids"]
+        )
+        if not changed:
+            return meta, False
+        meta["accepted_decision_ids"] = accepted
+        meta["excludes"] = rejected
+        meta["review_revision"] = previous["revision"] + 1
+        directory = Path(get_store()._dir(pid))
+        get_store()._write_json(str(directory), "meta.json", meta)
+        audit_store = _project_audit_store(pid)
+        latest = audit_store.latest()
+        if latest is not None:
+            current_fingerprint = _current_audit_fingerprint(
+                pid,
+                TerminalStatus(latest.terminal_status),
+            )
+            audit_store.mark_outdated_submissions(
+                current_fingerprint,
+                stale_reason,
+            )
+        return meta, True
+
+    @app.post("/api/projects/{pid}/decisions/review-state")
+    def set_decision_review_state(pid: str, req: ReviewStateRequest):
+        """Persist confirmation choices so stale detection is host-authoritative."""
+        _ensure(pid)
+        if _process_jobs.active(pid):
+            raise HTTPException(409, "请等待处理完成或先取消任务，再确认审阅结论")
+        with _project_lock(pid):
+            if _process_jobs.active(pid):
+                raise HTTPException(409, "请等待处理完成或先取消任务，再确认审阅结论")
+            directory = Path(get_store()._dir(pid))
+            meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+            revision = max(0, int(meta.get("review_revision") or 0))
+            if req.expected_revision is not None and req.expected_revision != revision:
+                raise HTTPException(
+                    409,
+                    "审阅状态已在其他操作中改变；请刷新后重试",
+                )
+            requested = sorted({
+                str(item) for item in req.accepted_ids if str(item).strip()
+            })
+            if len(requested) > 100_000 or any(len(item) > 256 for item in requested):
+                raise HTTPException(400, "确认项列表过大或候选 ID 无效")
+            failed = get_store().read_failed_attempt(pid)
+            if failed is not None:
+                info = failed.get("details") or {}
+            else:
+                info_path = directory / "verification.json"
+                info = (
+                    json.loads(info_path.read_text(encoding="utf-8"))
+                    if info_path.is_file() else {}
+                )
+            allowed = {
+                str(item.get("candidate_id") or item.get("id") or "")
+                for item in (info.get("items") or [])
+                if isinstance(item, dict)
+            }
+            allowed.update(
+                str(item.get("candidate_id") or "")
+                for item in (info.get("decision_cache") or [])
+                if isinstance(item, dict)
+            )
+            allowed.discard("")
+            unknown = [item for item in requested if item not in allowed]
+            if unknown:
+                raise HTTPException(400, f"存在不属于当前运行的确认项：{unknown[0]}")
+            rejected = {
+                str(item) for item in (meta.get("excludes") or [])
+                if str(item).strip()
+            }
+            rejected_acceptances = sorted(rejected.intersection(requested))
+            if rejected_acceptances:
+                # Accepting a rejected patch without rebuilding result.tex would
+                # make the decision authority disagree with the current TeX.
+                # Keep this endpoint metadata-only and require the existing
+                # unreject operation, which reruns the pipeline, first.
+                raise HTTPException(
+                    409,
+                    "该审阅项当前已被拒绝；请先撤销拒绝并完成重跑，再接受该项",
+                )
+            meta, _changed = _commit_review_state(
+                pid,
+                meta,
+                accepted_ids=requested,
+                rejected_ids=rejected,
+                stale_reason="用户接受、撤销或调整了审阅项",
+            )
+            return {
+                "ok": True,
+                "review_revision": int(meta.get("review_revision") or revision),
+                "accepted_ids": requested,
+            }
+
     @app.post("/api/projects/{pid}/decisions/{cid}/reject")
     def reject_decision(pid: str, cid: str):
         _ensure(pid)
@@ -4332,9 +5664,14 @@ def create_app(updated_from: str = "") -> FastAPI:
             )
             excludes = set(meta.get("excludes", []))
             excludes.add(cid)
-            meta["excludes"] = sorted(excludes)
-            Path(get_store()._dir(pid), "meta.json").write_text(
-                json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+            accepted = set(meta.get("accepted_decision_ids") or [])
+            accepted.discard(cid)
+            _commit_review_state(
+                pid,
+                meta,
+                accepted_ids=accepted,
+                rejected_ids=excludes,
+                stale_reason="用户拒绝了审阅项",
             )
             return _run_project(pid, excludes, reuse_decisions=True)
 
@@ -4352,9 +5689,12 @@ def create_app(updated_from: str = "") -> FastAPI:
             )
             excludes = set(meta.get("excludes", []))
             excludes.discard(cid)
-            meta["excludes"] = sorted(excludes)
-            Path(get_store()._dir(pid), "meta.json").write_text(
-                json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+            _commit_review_state(
+                pid,
+                meta,
+                accepted_ids=meta.get("accepted_decision_ids") or [],
+                rejected_ids=excludes,
+                stale_reason="用户撤销了审阅项拒绝状态",
             )
             return _run_project(pid, excludes, reuse_decisions=True)
 
@@ -4370,10 +5710,15 @@ def create_app(updated_from: str = "") -> FastAPI:
             meta = json.loads(
                 Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8")
             )
-            excludes = set(meta.get("excludes", [])) | set(req.cids)
-            meta["excludes"] = sorted(excludes)
-            Path(get_store()._dir(pid), "meta.json").write_text(
-                json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+            rejected_now = {str(item) for item in req.cids if str(item).strip()}
+            excludes = set(meta.get("excludes", [])) | rejected_now
+            accepted = set(meta.get("accepted_decision_ids") or []) - rejected_now
+            _commit_review_state(
+                pid,
+                meta,
+                accepted_ids=accepted,
+                rejected_ids=excludes,
+                stale_reason="用户批量拒绝了审阅项",
             )
             return _run_project(pid, excludes, reuse_decisions=True)
 
@@ -4389,9 +5734,12 @@ def create_app(updated_from: str = "") -> FastAPI:
             meta = json.loads(
                 Path(get_store()._dir(pid), "meta.json").read_text(encoding="utf-8")
             )
-            meta["excludes"] = []
-            Path(get_store()._dir(pid), "meta.json").write_text(
-                json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+            _commit_review_state(
+                pid,
+                meta,
+                accepted_ids=meta.get("accepted_decision_ids") or [],
+                rejected_ids=(),
+                stale_reason="用户撤销了全部拒绝状态",
             )
             return _run_project(pid, set(), reuse_decisions=True)
 
@@ -5669,6 +7017,7 @@ def create_app(updated_from: str = "") -> FastAPI:
             meta = json.loads((project_dir / "meta.json").read_text(encoding="utf-8"))
             meta["ocr_source"] = source_evidence
             meta["ocr_resources"] = resource_result
+            meta["ocr_outline"] = deepcopy(import_snapshot.get("source_outline") or [])
             final_quality = assess_ocr_quality(verified_snapshot, resource_result)
             if (
                 import_snapshot.get("quality_profile") == OCR_QUALITY_PUBLICATION
@@ -5691,9 +7040,46 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "target_template": template,
             }
             get_store()._write_json(str(project_dir), "meta.json", meta)
+            ocr_terminal = (
+                TerminalStatus.PARTIAL
+                if str(import_snapshot.get("status") or "").lower() == "partial"
+                else TerminalStatus.SUCCESS
+            )
+            ocr_snapshot = _build_project_run_snapshot(
+                pid,
+                ocr_terminal,
+                f"ocr-{jid}",
+                workflow_override=AuditWorkflow.OCR_ONLY,
+                capture={
+                    "verification": {
+                        "safe_to_export": False,
+                        "ocr_quality": final_quality,
+                        "ocr_source_preserved": bool(source_evidence.get("available")),
+                        "preview_state": "SOURCE_PREVIEW",
+                    },
+                    "report_md": (
+                        "# OCR 终态审计记录\n\n"
+                        "原始 OCR 转写、来源证据和可用页图已由宿主冻结；"
+                        "尚未执行结构分析与审阅，因此机器验证状态保持 UNVERIFIED。\n"
+                    ),
+                    "preview": raw_tex,
+                    "preview_state": "SOURCE_PREVIEW",
+                    "events": [{
+                        "at": time.time(),
+                        "phase": "ocr_terminal",
+                        "message": "OCR 原始转写已冻结",
+                    }],
+                    "finished": time.time(),
+                },
+            )
+            ocr_submission = _persist_terminal_audit_snapshot(pid, ocr_snapshot)
             # 立即进入工作台，再由标准后台任务提供进度、暂停与实时 TeX 草稿。
             process_job = process_start(pid)
             process_started = True
+            _process_jobs.bind_audit_parent_snapshot(
+                process_job["id"],
+                ocr_submission.snapshot_id,
+            )
             with _ocr_jobs_lock:
                 current = _ocr_jobs.get(jid)
                 if (
@@ -5710,12 +7096,51 @@ def create_app(updated_from: str = "") -> FastAPI:
                     current["imported_options"] = import_options
                     current["imported_processed"] = False
             return {"id": pid, "processed": False, "process": process_job}
-        except Exception:
-            if pid and not process_started:
+        except Exception as exc:
+            if pid and not process_started and get_store().get(pid) is not None:
                 active = _process_jobs.active(pid)
                 if active is not None:
                     _process_jobs.fail(active["id"], "项目处理任务未能启动")
-                get_store().delete(pid)
+                # Once the OCR-only terminal snapshot exists, never delete the
+                # project merely because its child analysis task failed to
+                # launch.  Freeze a FAILED child-run record and make the pid
+                # reusable so the preserved audit material remains reachable.
+                audit_store = _project_audit_store(pid)
+                if audit_store.latest() is not None:
+                    failure_snapshot = _build_project_run_snapshot(
+                        pid,
+                        TerminalStatus.FAILED,
+                        f"ocr-analysis-start-{jid}-{uuid.uuid4().hex[:8]}",
+                        workflow_override=AuditWorkflow.OCR_ANALYSIS_REVIEW,
+                        capture={
+                            "preview": raw_tex,
+                            "preview_state": "SOURCE_PREVIEW",
+                            "events": [{
+                                "at": time.time(),
+                                "phase": "analysis_start",
+                                "message": "OCR 后续分析任务未能启动",
+                            }],
+                            "finished": time.time(),
+                        },
+                        error=_safe_task_error(exc),
+                    )
+                    _persist_terminal_audit_snapshot(pid, failure_snapshot)
+                    with _ocr_jobs_lock:
+                        current = _ocr_jobs.get(jid)
+                        if current is not None:
+                            # Keep the failed project reachable for audit, but do
+                            # not mark this OCR revision as successfully imported.
+                            # A second click must create and start a fresh child
+                            # run instead of reusing the launch failure.
+                            failed_projects = list(
+                                current.get("failed_import_project_ids") or []
+                            )
+                            if pid not in failed_projects:
+                                failed_projects.append(pid)
+                            current["failed_import_project_ids"] = failed_projects
+                            current["import_error"] = _safe_task_error(exc)
+                else:
+                    get_store().delete(pid)
             raise
         finally:
             with _ocr_jobs_lock:

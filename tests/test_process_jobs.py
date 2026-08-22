@@ -4,6 +4,8 @@
 import threading
 import time
 
+import pytest
+
 from latexstruct.server.process_jobs import ProcessJobManager, ProcessingCancelled
 
 
@@ -68,6 +70,24 @@ def test_job_snapshot_exposes_only_allowlisted_analysis_backend():
     unknown = manager.create("project-unknown", analysis_backend="shell-command")
     assert manager.public(codex)["analysis_backend"] == "codex_cli"
     assert manager.public(unknown)["analysis_backend"] == "api"
+
+
+def test_audit_parent_snapshot_lineage_is_private_and_write_once():
+    manager = ProcessJobManager()
+    job = manager.create("project-ocr-child")
+
+    assert manager.audit_parent_snapshot_id(job) == ""
+    assert "_audit_parent_snapshot_id" not in manager.public(job)
+
+    manager.bind_audit_parent_snapshot(job["id"], "snapshot-ocr-parent")
+    manager.bind_audit_parent_snapshot(job["id"], "snapshot-ocr-parent")
+    assert manager.audit_parent_snapshot_id(job) == "snapshot-ocr-parent"
+    assert "_audit_parent_snapshot_id" not in manager.public(job)
+
+    with pytest.raises(ValueError, match="immutable"):
+        manager.bind_audit_parent_snapshot(job["id"], "snapshot-other")
+    with pytest.raises(KeyError, match="no longer exists"):
+        manager.bind_audit_parent_snapshot("missing", "snapshot-parent")
 
 
 def test_cancel_paused_task_wakes_worker_without_saving():

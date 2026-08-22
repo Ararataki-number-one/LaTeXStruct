@@ -9,6 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from latexstruct.core.patch import Decision, PatchContext, build_ops  # noqa: E402
+from latexstruct.core.ocrstruct import encode_ocr_metadata  # noqa: E402
 from latexstruct.core.parser import parse_latex  # noqa: E402
 from latexstruct.core.pipeline import resolve_overlaps, run_pipeline  # noqa: E402
 from latexstruct.core.rules import build_rule_decisions  # noqa: E402
@@ -91,6 +92,39 @@ def test_compile_checks_receive_preserved_ocr_resources():
         call.kwargs.get("extra_files") == extra_files
         for call in compile_latex.call_args_list
     )
+
+
+def test_ocr_compile_before_log_uses_exact_raw_ocr_stage():
+    metadata = encode_ocr_metadata(
+        [{"level": 0, "title": "Overview", "page": 1}],
+        "article",
+        [1],
+        False,
+    )
+    raw_ocr = "\n".join([
+        r"\documentclass{article}",
+        r"\begin{document}",
+        metadata,
+        "Overview",
+        "Raw OCR body.",
+        r"\end{document}",
+    ])
+    compile_result = {
+        "available": True,
+        "ok": True,
+        "pages": 1,
+        "errors": [],
+        "log": "compiled",
+    }
+    with patch(
+        "latexstruct.core.compilecheck.compile_latex",
+        return_value=compile_result,
+    ) as compile_latex:
+        result = run_pipeline(raw_ocr, mode="rule", compile_check=True)
+
+    assert compile_latex.call_count == 2
+    assert compile_latex.call_args_list[0].args[0] == raw_ocr
+    assert result.verification["compile_before"]["log"] == "compiled"
 
 
 def test_pipeline_separates_captured_pdf_from_json_verification():
