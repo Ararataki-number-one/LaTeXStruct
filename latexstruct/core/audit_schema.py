@@ -187,13 +187,13 @@ class AuditSubmissionManifest:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            **self.snapshot.to_dict(),
             "schema_version": self.schema_version,
             "submission_id": self.submission_id,
             "profile": self.profile.value,
             "package_filename": self.package_filename,
             "control_files": {key: dict(value) for key, value in self.control_files.items()},
             "warnings": list(self.warnings),
-            **self.snapshot.to_dict(),
         }
 
 
