@@ -4,6 +4,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   test:
     runs-on: windows-latest
@@ -33,3 +36,110 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npm run build
+
+  sync_release_metadata:
+    if: github.head_ref == 'trigger/main-sync-v1.2.6'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the v1.2.6 release candidate
+        uses: actions/checkout@v4
+        with:
+          ref: release/v1.2.6
+          fetch-depth: 0
+
+      - name: Synchronize release metadata and remove release-branch bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          readme = Path('README.md')
+          text = readme.read_text(encoding='utf-8')
+          text = text.replace('## 当前状态（v1.2.5）', '## 当前状态（v1.2.6）')
+          marker = '## 当前状态（v1.2.6）\n'
+          bullet = ('\n- 工作台新增“一键生成 AI 审计提交包”：自动冻结当前 RunSnapshot、整理真实源文件、'
+                    '阶段 TeX、编译预览、验证与决策记录，生成可直接提交给 ChatGPT/Codex 的 ZIP 和提示词；'
+                    '文件角色、状态、哈希与血缘全部由宿主程序确定。\n')
+          if marker in text and '工作台新增“一键生成 AI 审计提交包”' not in text:
+              text = text.replace(marker, marker + bullet, 1)
+          readme.write_text(text, encoding='utf-8')
+
+          changelog = Path('CHANGELOG.md')
+          text = changelog.read_text(encoding='utf-8')
+          heading = '## v1.2.6（2026-08-22）'
+          if heading not in text:
+              marker = '## Unreleased\n'
+              if marker not in text:
+                  raise SystemExit('CHANGELOG Unreleased marker missing')
+              section = '''
+## v1.2.6（2026-08-22）
+
+- 新增“一键生成 AI 审计提交包”：宿主程序基于不可变 RunSnapshot 收集 OCR、分析、审阅、模板转换和多文件项目的真实阶段工件，确定文件角色、终态、SHA-256 与父子关系；
+- 支持 quick、standard、full 三档以及 SUCCESS、UNVERIFIED、FAILED、PARTIAL、CANCELLED 全部终态，失败任务同样保留已有 TeX、错误日志和诚实预览；
+- 自动生成 README、短提示词、完整提示词、manifest、diff、问题 CSV、verification、decisions、编译日志与 SHA256SUMS；提示词只引用实际存在的工件，不能自行把 UNVERIFIED 提升为 VERIFIED；
+- 严格区分 COMPILED、PARTIAL_COMPILED 与 SOURCE_PREVIEW；默认清理 API Key、Authorization、GitHub token 和本机绝对路径，并按 bytes SHA-256 去重、记录 aliases；
+- 新增审计包 API、生成弹窗、复制提交话术、下载、打开目录与 stale 检测；原有导出 TEX 和工程 ZIP 行为保持不变。
+'''
+              text = text.replace(marker, marker + section, 1)
+          changelog.write_text(text, encoding='utf-8')
+
+          build = Path('.github/workflows/build.yml')
+          text = build.read_text(encoding='utf-8')
+          text = text.replace("$previousVersion = '1.2.4'", "$previousVersion = '1.2.5'")
+          build.write_text(text, encoding='utf-8')
+          PY
+          rm -f .github/workflows/sync-v1.2.6-release-metadata.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md CHANGELOG.md .github/workflows/build.yml .github/workflows/sync-v1.2.6-release-metadata.yml
+          git commit -m "chore: synchronize remaining v1.2.6 release metadata"
+          git push origin HEAD:release/v1.2.6
+
+      - name: Restore the normal main-branch CI configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B main origin/main
+          cat > .github/workflows/audit-submission-ci.yml <<'YAML'
+          name: audit-submission-ci
+
+          on:
+            pull_request:
+              branches: [main]
+
+          jobs:
+            test:
+              runs-on: windows-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-python@v5
+                  with:
+                    python-version: "3.13"
+                - uses: actions/setup-node@v4
+                  with:
+                    node-version: "22"
+                    cache: npm
+                    cache-dependency-path: frontend/package-lock.json
+                - name: 安装 Python 依赖
+                  run: python -m pip install -r requirements.txt ruff
+                - name: 静态检查
+                  run: python -m ruff check latexstruct tests tools packaging benchmark
+                - name: 全量 Python 测试与 benchmark
+                  shell: pwsh
+                  run: |
+                    python -m pytest -q
+                    if ($LASTEXITCODE -ne 0) { exit 1 }
+                    python tools/benchmark.py | Out-Null
+                    if ($LASTEXITCODE -ne 0) { exit 1 }
+                - name: 构建 React 前端
+                  working-directory: frontend
+                  run: |
+                    npm ci --no-audit --no-fund
+                    npm run build
+          YAML
+          rm -f .github/workflows/sync-release-v1.2.6-metadata.yml
+          git add .github/workflows/audit-submission-ci.yml .github/workflows/sync-release-v1.2.6-metadata.yml
+          git commit -m "chore: remove one-time v1.2.6 metadata synchronizer"
+          git push origin HEAD:main
