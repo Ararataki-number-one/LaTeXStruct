@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pymupdf
 
-from latexstruct.core.ai import AIConfig
+from latexstruct.core.ai import AIConfig, LLMError
 from latexstruct.core.full_review import FullDocumentReviewResult
 from latexstruct.core.ocrstruct import encode_ocr_metadata
 from latexstruct.core.patch import Decision
@@ -18,6 +18,7 @@ from latexstruct.core.pipeline import (
     IMAGE_TO_VISUAL_PDF_DERIVATION_ID,
     PDF_IDENTITY_VISUAL_DERIVATION_ID,
     VISUAL_SOURCE_PROVENANCE_SCHEMA,
+    _merge_usage_summaries,
     run_pipeline,
 )
 from latexstruct.core.verify import verification_failures
@@ -196,6 +197,38 @@ def _clean_full_review_result(*, decisions=(), reviewed_candidate_ids=()):
     )
 
 
+def test_visual_usage_summaries_accumulate_rounds_without_extra_calls():
+    first = {
+        "model": "vision-model",
+        "calls": 2,
+        "prompt_tokens": 20,
+        "completion_tokens": 4,
+        "estimated_cost_cny": 0.12,
+        "pricing_source": "test-pricing",
+    }
+    second = {
+        "model": "vision-model",
+        "calls": 3,
+        "prompt_tokens": 30,
+        "completion_tokens": 6,
+        "estimated_cost_cny": 0.18,
+        "billing_mode": "chatgpt_subscription",
+    }
+
+    merged = _merge_usage_summaries(first, second)
+
+    assert merged == {
+        "model": "vision-model",
+        "calls": 5,
+        "prompt_tokens": 50,
+        "completion_tokens": 10,
+        "estimated_cost_cny": 0.3,
+        "pricing_source": "test-pricing",
+        "billing_mode": "chatgpt_subscription",
+    }
+    assert first["calls"] == 2
+
+
 def test_pipeline_quality_loop_reuses_final_compile_and_records_page_audit():
     source_pdf = _pdf("A short publication-quality reconstruction test page.", x=72)
     candidate_pdf = _pdf("A short publication-quality reconstruction test page.", x=92)
@@ -226,6 +259,8 @@ def test_pipeline_quality_loop_reuses_final_compile_and_records_page_audit():
     loop = result.verification["visual_quality_loop"]
     assert loop["checked"] is True and loop["ok"] is True
     assert loop["rounds"][0]["ai_audit"]["page_count"] == 1
+    assert result.verification["ai_usage"]["visual_review"]["calls"] == 1
+    assert result.verification["ai_usage"]["visual_review"]["total_tokens"] == 2
     provenance = result.verification["source_visual_provenance"]
     assert provenance == {
         **_pdf_source_provenance(source_pdf),
@@ -245,6 +280,48 @@ def test_pipeline_quality_loop_reuses_final_compile_and_records_page_audit():
         "ok": True,
         "skipped": False,
     }
+
+
+def test_pipeline_preserves_failed_visual_transport_usage_in_verification():
+    source_pdf = _pdf("A short publication-quality reconstruction test page.", x=72)
+    candidate_pdf = _pdf("A short publication-quality reconstruction test page.", x=92)
+    calls = []
+
+    class FailedVisualClient(FullAndVisualClient):
+        def __init__(self):
+            super().__init__()
+            self.last_usage = {}
+
+        def chat_vision_json_bytes(self, *_args, **_kwargs):
+            self.visual_calls += 1
+            self.last_usage = {"total_tokens": 9}
+            raise LLMError("未配置 API Key")
+
+    client = FailedVisualClient()
+    with patch(
+        "latexstruct.core.compilecheck.compile_latex",
+        side_effect=_compiler(candidate_pdf, calls),
+    ):
+        result = run_pipeline(
+            SOURCE_TEX,
+            mode="ai",
+            ai_config=AIConfig(review_enabled=False),
+            review_client=client,
+            visual_client=client,
+            source_pdf_bytes=source_pdf,
+            source_pdf_page_range=(1, 1),
+            source_visual_provenance=_pdf_source_provenance(source_pdf),
+            quality_loop=True,
+        )
+
+    assert result.ok is False
+    assert client.visual_calls == 1
+    visual_usage = result.verification["ai_usage"]["visual_review"]
+    assert visual_usage["calls"] == 1
+    assert visual_usage["total_tokens"] == 9
+    loop = result.verification["visual_quality_loop"]
+    assert any("API Key" in item["reason"] for item in loop["unresolved"])
+    assert loop["rounds"][0]["ai_audit"]["usage"] == visual_usage
 
 
 def test_pipeline_fails_closed_when_visual_pdf_provenance_hash_is_tampered():
@@ -559,6 +636,46 @@ def test_core_ocr_quality_loop_cannot_skip_missing_source_pdf():
         if item["id"] == "compile-render-visual-repair"
     )
     assert check["skipped"] is False
+
+
+def test_structure_manual_required_counts_unique_candidate_ids():
+    target = {}
+
+    def fake_decide(_client, _doc, _ctx, candidates, *_args, **_kwargs):
+        candidate = min(candidates, key=lambda item: item.span.start_line)
+        target["id"] = candidate.id
+        return [], [
+            {
+                "candidate_id": candidate.id,
+                "line": candidate.span.start_line,
+                "reason": "范围未通过边界门",
+            },
+            {
+                "candidate_id": candidate.id,
+                "line": candidate.span.start_line,
+                "reason": "同一候选仍未形成环境",
+            },
+        ], [], {}
+
+    client = FullAndVisualClient()
+    with patch(
+        "latexstruct.core.pipeline.decide_candidates",
+        side_effect=fake_decide,
+    ):
+        result = run_pipeline(
+            TWO_FORMAL_ITEMS_TEX,
+            mode="ai",
+            ai_config=AIConfig(review_enabled=False),
+            ai_client=client,
+        )
+
+    structure = result.verification["structure_decisions"]
+    assert structure["manual_required"] == 1
+    assert structure["manual_candidate_ids"] == [target["id"]]
+    assert len([
+        item for item in result.ambiguous
+        if item.get("candidate_id") == target["id"]
+    ]) == 2
 
 
 def test_explicit_ocr_project_cannot_hide_as_plain_tex_or_disable_visual_gate():

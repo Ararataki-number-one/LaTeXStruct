@@ -1034,6 +1034,40 @@ def _normalize_tagged_display_math(text: str) -> str:
     return _DISPLAY_MATH_RE.sub(replace, text)
 
 
+def _remove_blank_paragraphs_from_display_math(text: str) -> str:
+    """Remove only whitespace-only paragraphs inside parsed display math.
+
+    A vision model may visually separate an equation from its number by an
+    empty source line.  After a tagged ``\\[...\\]`` is normalized to
+    ``equation`` that empty line becomes ``\\par`` in math mode and makes an
+    otherwise correct OCR page fail with ``Missing $ inserted``.  Whitespace is
+    not mathematical content, so the host can remove it without asking a model
+    or changing any token, command, formula, or surrounding prose.
+    """
+
+    lines = text.split("\n")
+    forbidden_lines: set[int] = set()
+    math_envs = _EQUATION_TAG_DISPLAY_ENVS | {
+        "displaymath", "math", "aligned", "alignedat", "array", "cases",
+        "gathered", "matrix", "pmatrix", "bmatrix", "Bmatrix", "vmatrix",
+        "Vmatrix", "smallmatrix", "split", "subarray",
+    }
+    for block in parse_latex(text).blocks:
+        if not (
+            block.kind == "displaymath"
+            or (block.kind == "env" and block.name in math_envs)
+        ):
+            continue
+        forbidden_lines.update(
+            range(block.span.start_line + 1, block.span.end_line)
+        )
+    return "\n".join(
+        line
+        for line_no, line in enumerate(lines, 1)
+        if line.strip() or line_no not in forbidden_lines
+    )
+
+
 def _clean_page_output(raw: str) -> str:
     text = raw.strip()
     m = re.search(r"```(?:latex)?\s*(.*?)```", text, re.S)
@@ -1042,7 +1076,9 @@ def _clean_page_output(raw: str) -> str:
     # 页码只能由 transcribe_page 在校验后写一次。视觉模型即使
     # 忽略提示词自行输出 marker，也不得覆盖/制造假页码。
     text = _PAGE_MARKER_RE.sub("", text).strip()
-    return _normalize_tagged_display_math(text)
+    return _remove_blank_paragraphs_from_display_math(
+        _normalize_tagged_display_math(text)
+    )
 
 
 def _active_ocr_image_paths(text: str) -> List[str]:

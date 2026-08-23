@@ -166,6 +166,39 @@ def test_reflow_alignment_large_and_equal_ranges_do_not_expand_review_calls():
     assert len({item.candidate_page for item in large.mappings}) == 480
 
 
+def test_equal_page_count_reflow_can_warp_around_generated_contents_page():
+    alignment = build_page_alignment(
+        4,
+        4,
+        candidate_scope=CANDIDATE_SCOPE_REFLOW,
+        source_page_texts={
+            1: "alpha unique theorem statement and introductory paragraph",
+            2: "beta unique lemma statement and complete proof paragraph",
+            3: "gamma unique proposition statement and detailed discussion",
+            4: "delta unique references bibliography closing paragraph",
+        },
+        candidate_page_texts={
+            1: "alpha unique theorem statement and introductory paragraph",
+            2: "contents alpha beta gamma delta generated navigation",
+            3: "beta unique lemma statement and complete proof paragraph",
+            4: (
+                "gamma unique proposition statement and detailed discussion "
+                "delta unique references bibliography closing paragraph"
+            ),
+        },
+    )
+
+    pairs = [
+        (item.source_page, item.candidate_page) for item in alignment.mappings
+    ]
+    assert alignment.strategy == "content_anchor_warp"
+    assert len(alignment.mappings) > 4
+    assert set(item.source_page for item in alignment.mappings) == {1, 2, 3, 4}
+    assert set(item.candidate_page for item in alignment.mappings) == {1, 2, 3, 4}
+    assert (2, 3) in pairs
+    assert pairs != [(page, page) for page in range(1, 5)]
+
+
 def test_reflow_page_count_change_is_not_a_strict_pagination_failure():
     source = _pdf_bytes(["alpha", "beta", "gamma"])
     candidate = _pdf_bytes(["contents", "alpha beta", "gamma", "colophon"], x=92)

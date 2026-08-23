@@ -7,7 +7,9 @@ import AuditSubmissionPanel from "./AuditSubmissionPanel";
 import {
   buildProcessStageTrail,
   describeProcessPhase,
+  processStageStateLabel,
   summarizeVerificationStages,
+  verificationFailureTitle,
 } from "./processStatus";
 import {
   blockAuditForPendingTask,
@@ -95,7 +97,7 @@ function VerificationFailures({ failures = [], persisted = false }) {
       </b>
       {failures.length ? failures.map((failure, failureIndex) => (
         <details key={failure.id || `failure-${failureIndex}`} open>
-          <summary>{failure.label || "安全检查"}：{failure.summary || "检查未通过"}</summary>
+          <summary>{verificationFailureTitle(failure)}</summary>
           {Array.isArray(failure.details) && failure.details.slice(0, 5).map((detail, index) => {
             const text = typeof detail === "string"
               ? detail
@@ -111,21 +113,14 @@ function VerificationFailures({ failures = [], persisted = false }) {
   );
 }
 
-function ProcessStageTrail({ job }) {
+function ProcessStageTrail({ job, verification }) {
   const stages = buildProcessStageTrail(job);
-  const stateLabels = {
-    completed: "已完成",
-    current: "进行中",
-    failed: "未通过",
-    skipped: "未运行",
-    pending: "等待中",
-  };
   return (
     <ol className="process-stage-trail" aria-label="处理阶段">
       {stages.map((stage) => (
         <li key={stage.id} className={`stage-${stage.state}`} title={stage.help}>
           <span aria-hidden="true" className="stage-dot" />
-          <span><b>{stage.label}</b><small>{stateLabels[stage.state]}</small></span>
+          <span><b>{stage.label}</b><small>{processStageStateLabel(stage, verification)}</small></span>
         </li>
       ))}
     </ol>
@@ -1356,7 +1351,7 @@ export default function Workspace({ pid, onOpenSettings }) {
             >
               <span style={{ width: `${Math.round((job.progress || 0) * 100)}%` }} />
             </div>
-            <ProcessStageTrail job={job} />
+            <ProcessStageTrail job={job} verification={verification} />
             <div className="process-metrics">
               {usesCodexSubscription && <span>引擎：Codex CLI（ChatGPT 订阅）</span>}
               <span>Token：{tokenTotal.toLocaleString()}</span>

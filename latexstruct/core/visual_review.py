@@ -74,10 +74,67 @@ VISUAL_AUDIT_SCHEMA = {
     },
 }
 
-_SYSTEM = """你是 LaTeXStruct 编译后逐页视觉复核器。图片左侧是不可变源 PDF 页，右侧是
+VISUAL_AUDIT_BATCH_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["pages"],
+    "properties": {
+        "pages": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": VISUAL_AUDIT_SCHEMA,
+        },
+    },
+}
+
+VISUAL_REVIEW_BATCH_SIZE = 3
+
+
+def _multi_transport_can_retry_as_single(exc: LLMError) -> bool:
+    """Allow one-page fallback only for bounded multi-image limitations.
+
+    Authentication, quota, refusal and arbitrary malformed JSON failures must
+    keep their original fail-closed meaning instead of multiplying requests.
+    """
+
+    message = str(exc).strip().lower()
+    if "等待本机队列超时" in message:
+        return False
+    markers = (
+        "多图",
+        "不支持多张",
+        "不接受多张",
+        "multiple image",
+        "multiple-image",
+        "too many image",
+        "more than one image",
+        "only one image",
+        "single image",
+        "image count",
+        "images per request",
+        "仅支持单张",
+        "只支持一张",
+        "达到 max_tokens",
+        "max_tokens 上限",
+        "被截断",
+        "请求过长",
+        "输入合计超过",
+        "timed out",
+        "timeout",
+        "超时",
+    )
+    return any(marker in message for marker in markers)
+
+_SYSTEM = """你是 LaTeXStruct 编译后逐页视觉复核器。每张图片左侧是不可变源 PDF 页，右侧是
 当前 LaTeX 实际编译页。检查内容是否遗漏、公式或编号是否明显异常、formal 条目是否漏套/
 错套/多套环境，以及页面是否空白、截断或严重溢出。普通字体、边距、换行和模板风格变化
 不是错误。
+
+当 candidate_scope=reflow 时，宿主冻结页对只是内容锚点，不承诺一张源页的全部文字必须位于
+同一张编译页；自动目录、分页、合页和拆页都可能产生重复的源页或编译页映射。此时不能仅因
+左右页文字不同就报告 content-loss。只有请求中的全文文本证据显示总量/相似度不足，或图片能
+直接证明空白、截断、溢出且不能由相邻页重排解释时，才可报告内容遗漏。
 
 只能引用请求中列出的 inventory_id，并且结构建议必须逐字匹配该条目的
 allowed_visual_repairs；不得生成 LaTeX、body span 或改写正文。若问题不能绑定到一个真实
@@ -356,14 +413,16 @@ def audit_compiled_pages(
     source_label: str = "SOURCE PDF",
     candidate_scope: str = CANDIDATE_SCOPE_AUTO,
     max_pages: int = 80,
+    vision_batch_size: int = 1,
     progress_callback=None,
     control_callback=None,
 ) -> VisualAuditResult:
     """Inspect each aligned page pair and return only inventory-bound repairs.
 
-    ``max_pages`` is retained for API compatibility and now bounds each
-    processing batch, not the total audit.  Every aligned page remains part of
-    the explicit quality closure.
+    ``max_pages`` is retained for API compatibility and bounds temporary work.
+    ``vision_batch_size`` groups up to three independent full-resolution page
+    images into one model request.  Every aligned pair is still echoed and
+    validated separately; one missing or duplicated answer fails closed.
     """
 
     from ..pricing import add_usage
@@ -382,6 +441,14 @@ def audit_compiled_pages(
         )
     source = candidate = None
     usage: Dict = {}
+
+    def record_usage(raw_usage) -> None:
+        add_usage(
+            usage,
+            raw_usage if isinstance(raw_usage, dict) else {},
+            getattr(getattr(client, "cfg", None), "model", ""),
+        )
+
     pages: List[dict] = []
     suggestions: List[VisualRepairSuggestion] = []
     invalid: List[dict] = []
@@ -493,22 +560,205 @@ def audit_compiled_pages(
             # Do not let a model inspect a convenient subset and accidentally
             # turn an invalid candidate-page closure into a complete audit.
             mappings = []
+        single_method = getattr(client, "chat_vision_json_bytes", None)
+        if not callable(single_method):
+            raise LLMError("当前视觉模型客户端不支持结构化逐页复核")
+        multi_method = getattr(client, "chat_vision_json_images_bytes", None)
+        requested_batch_size = max(1, int(vision_batch_size))
+        transport_batch_size = min(
+            VISUAL_REVIEW_BATCH_SIZE,
+            requested_batch_size,
+            max(1, int(max_pages)),
+        )
+        if not callable(multi_method):
+            transport_batch_size = 1
+
+        aggregate_metrics = (
+            dict(deterministic_report.get("aggregate_metrics") or {})
+            if isinstance(deterministic_report, dict)
+            else {}
+        )
+        aggregate_text_evidence = {
+            key: aggregate_metrics.get(key)
+            for key in (
+                "source_selected_text_characters",
+                "candidate_compared_text_characters",
+                "text_character_ratio",
+                "extracted_text_similarity",
+            )
+            if key in aggregate_metrics
+        }
+        # A warping path may repeat a source page when the candidate inserts a
+        # contents page or splits one source page across two outputs.  Every
+        # mapped view receives that source page's inventory so a formal title on
+        # the shorter split cannot become invisible.  Suggestions are reconciled
+        # by inventory ID after all pages are independently validated.
+        model_results: Dict[Tuple[int, int], Tuple[dict, str, str]] = {}
+
+        for batch_start in range(0, len(mappings), transport_batch_size):
+            if control_callback:
+                control_callback()
+            batch = mappings[batch_start:batch_start + transport_batch_size]
+            batch_images: List[bytes] = []
+            page_requests: List[dict] = []
+            batch_keys: List[Tuple[int, int]] = []
+            for image_index, mapping in enumerate(batch, 1):
+                source_page = int(mapping.source_page)
+                candidate_page = int(mapping.candidate_page)
+                image = _composite_page_png(
+                    module,
+                    source,
+                    candidate,
+                    source_page,
+                    candidate_page,
+                    source_label,
+                )
+                inventory_items = inventory_pages.get(source_page, [])
+                deterministic_findings = deterministic_by_mapping.get(
+                    (source_page, candidate_page),
+                    [],
+                )
+                page_requests.append({
+                    "image_index": image_index,
+                    "source_page": source_page,
+                    "candidate_page": candidate_page,
+                    "source_visual_label": source_label,
+                    "candidate_scope": alignment.candidate_scope,
+                    "alignment_strategy": alignment.strategy,
+                    "alignment_mapping_sha256": alignment.mapping_sha256,
+                    "mapping_role": (
+                        "content_anchor" if inventory_items else "coverage_transition"
+                    ),
+                    "aggregate_text_evidence": aggregate_text_evidence,
+                    "inventory_items_on_source_page": inventory_items,
+                    "deterministic_findings_to_close": deterministic_findings,
+                    "instruction": (
+                        "左源右编译；逐项视觉核对。只能引用本页 inventory_id；"
+                        "checked_finding_codes 必须逐字回显全部确定性告警 code。"
+                        "reflow 页对仅是内容锚点，不能因分页位置不同推断内容丢失。"
+                    ),
+                })
+                batch_images.append(image)
+                batch_keys.append((source_page, candidate_page))
+
+            if len(batch_keys) == 1:
+                try:
+                    obj, call_usage = single_method(
+                        _SYSTEM,
+                        json.dumps(page_requests[0], ensure_ascii=False, indent=1),
+                        batch_images[0],
+                        VISUAL_AUDIT_SCHEMA,
+                    )
+                except LLMError:
+                    record_usage(getattr(client, "last_usage", {}))
+                    raise
+                record_usage(call_usage)
+                model_results[batch_keys[0]] = (
+                    obj if isinstance(obj, dict) else {},
+                    hashlib.sha256(batch_images[0]).hexdigest(),
+                    "",
+                )
+            else:
+                try:
+                    obj, call_usage = multi_method(
+                        _SYSTEM,
+                        json.dumps(
+                            {"page_requests": page_requests},
+                            ensure_ascii=False,
+                            indent=1,
+                        ),
+                        batch_images,
+                        VISUAL_AUDIT_BATCH_SCHEMA,
+                    )
+                except LLMError as exc:
+                    record_usage(getattr(client, "last_usage", {}))
+                    if not _multi_transport_can_retry_as_single(exc):
+                        raise
+                    # Some OpenAI-compatible endpoints advertise vision but do
+                    # not accept several images in one request.  Preserve the
+                    # historical working path by retrying this bounded batch as
+                    # independent full-resolution pages.  A failed batch still
+                    # counts as a transport attempt; individual answers remain
+                    # subject to the normal strict page validation below.
+                    for request_item, key, image in zip(
+                        page_requests, batch_keys, batch_images
+                    ):
+                        try:
+                            single_obj, single_usage = single_method(
+                                _SYSTEM,
+                                json.dumps(
+                                    request_item,
+                                    ensure_ascii=False,
+                                    indent=1,
+                                ),
+                                image,
+                                VISUAL_AUDIT_SCHEMA,
+                            )
+                        except LLMError:
+                            record_usage(getattr(client, "last_usage", {}))
+                            raise
+                        record_usage(single_usage)
+                        model_results[key] = (
+                            single_obj if isinstance(single_obj, dict) else {},
+                            hashlib.sha256(image).hexdigest(),
+                            "",
+                        )
+                else:
+                    record_usage(call_usage)
+                    raw_pages = (
+                        obj.get("pages")
+                        if isinstance(obj, dict) and set(obj) == {"pages"}
+                        else None
+                    )
+                    response_by_key: Dict[Tuple[int, int], dict] = {}
+                    batch_error = ""
+                    if not isinstance(raw_pages, list):
+                        batch_error = "视觉批量复核 JSON 顶层字段无效"
+                        raw_pages = []
+                    for raw_response in raw_pages:
+                        if not isinstance(raw_response, dict):
+                            batch_error = "视觉批量复核包含非对象页结果"
+                            continue
+                        source_value = raw_response.get("source_page")
+                        candidate_value = raw_response.get("candidate_page")
+                        key = (
+                            source_value if isinstance(source_value, int) else -1,
+                            candidate_value if isinstance(candidate_value, int) else -1,
+                        )
+                        if key not in batch_keys:
+                            batch_error = "视觉批量复核回显了未知页码映射"
+                            continue
+                        if key in response_by_key:
+                            batch_error = "视觉批量复核重复回显同一页码映射"
+                            continue
+                        response_by_key[key] = raw_response
+                    for key, image in zip(batch_keys, batch_images):
+                        missing_error = (
+                            "视觉批量复核漏答宿主冻结的页码映射"
+                            if key not in response_by_key
+                            else ""
+                        )
+                        model_results[key] = (
+                            response_by_key.get(key, {}),
+                            hashlib.sha256(image).hexdigest(),
+                            batch_error or missing_error,
+                        )
+
+            if progress_callback:
+                progress_callback({
+                    "done": min(batch_start + len(batch), len(mappings)),
+                    "total": len(mappings),
+                    "usage": usage,
+                    "source_page": int(batch[-1].source_page),
+                })
+
         # Keep the historical argument without allowing it to truncate the
-        # user-selected range.  Images are still rendered and sent one page at
-        # a time; batching only bounds the temporary mapping slice.
-        for index, mapping in _iter_indexed_batches(mappings, max_pages):
+        # user-selected range.  Every response is still validated independently.
+        for _index, mapping in _iter_indexed_batches(mappings, max_pages):
             if control_callback:
                 control_callback()
             source_page = int(mapping.source_page)
             candidate_page = int(mapping.candidate_page)
-            image = _composite_page_png(
-                module,
-                source,
-                candidate,
-                source_page,
-                candidate_page,
-                source_label,
-            )
             inventory_items = inventory_pages.get(source_page, [])
             deterministic_findings = deterministic_by_mapping.get(
                 (source_page, candidate_page),
@@ -517,29 +767,10 @@ def audit_compiled_pages(
             required_finding_codes = [
                 str(item.get("code") or "") for item in deterministic_findings
             ]
-            request = json.dumps({
-                "source_page": source_page,
-                "candidate_page": candidate_page,
-                "source_visual_label": source_label,
-                "candidate_scope": alignment.candidate_scope,
-                "alignment_mapping_sha256": alignment.mapping_sha256,
-                "inventory_items_on_source_page": inventory_items,
-                "deterministic_findings_to_close": deterministic_findings,
-                "instruction": (
-                    "左源右编译；逐项视觉核对。只能引用本页 inventory_id；"
-                    "checked_finding_codes 必须逐字回显全部确定性告警 code。"
-                ),
-            }, ensure_ascii=False, indent=1)
-            method = getattr(client, "chat_vision_json_bytes", None)
-            if not callable(method):
-                raise LLMError("当前视觉模型客户端不支持结构化逐页复核")
-            obj, call_usage = method(_SYSTEM, request, image, VISUAL_AUDIT_SCHEMA)
-            add_usage(
-                usage,
-                call_usage if isinstance(call_usage, dict) else {},
-                getattr(getattr(client, "cfg", None), "model", ""),
+            obj, image_sha256, transport_error = model_results.get(
+                (source_page, candidate_page),
+                ({}, "", "视觉复核缺少宿主缓存结果"),
             )
-            image_sha256 = hashlib.sha256(image).hexdigest()
             response = obj if isinstance(obj, dict) else {}
             verdict = response.get("verdict")
             reason = response.get("reason")
@@ -569,6 +800,8 @@ def audit_compiled_pages(
                     "reason": reason_text,
                 })
 
+            if transport_error:
+                reject_page(transport_error)
             if not isinstance(obj, dict) or set(obj) != _PAGE_RESPONSE_KEYS:
                 reject_page("视觉复核 JSON 顶层字段无效")
             echoed_source = response.get("source_page")
@@ -673,15 +906,20 @@ def audit_compiled_pages(
                 reviewed_candidate_pages.add(candidate_page)
             page_record["valid"] = page_valid
             pages.append(page_record)
-            if progress_callback:
-                progress_callback({
-                    "done": index,
-                    "total": len(mappings),
-                    "usage": usage,
-                    "source_page": source_page,
-                })
-    except LLMError:
-        raise
+    except LLMError as exc:
+        return VisualAuditResult(
+            checked=False,
+            ok=False,
+            page_count=len(pages),
+            pages=pages,
+            suggestions=suggestions,
+            invalid=invalid,
+            unresolved=unresolved + [{
+                "page": 0,
+                "reason": f"逐页视觉复核模型调用失败：{str(exc)[:240]}",
+            }],
+            usage=usage,
+        )
     except Exception:  # noqa: BLE001 - PDF parser/renderer boundary
         return VisualAuditResult(
             checked=False,
@@ -700,6 +938,28 @@ def audit_compiled_pages(
                     document.close()
                 except Exception:  # noqa: BLE001
                     pass
+    suggestions_by_inventory: Dict[str, List[VisualRepairSuggestion]] = {}
+    for suggestion in suggestions:
+        suggestions_by_inventory.setdefault(suggestion.inventory_id, []).append(
+            suggestion
+        )
+    reconciled_suggestions: List[VisualRepairSuggestion] = []
+    for inventory_id, grouped in suggestions_by_inventory.items():
+        actions = {(item.problem, item.env) for item in grouped}
+        if len(actions) > 1:
+            invalid.append({
+                "page": min(item.source_page for item in grouped),
+                "reason": (
+                    "同一 inventory_id 在重排页对中产生冲突修复建议："
+                    f"{inventory_id}"
+                ),
+            })
+            continue
+        reconciled_suggestions.append(max(
+            grouped,
+            key=lambda item: (item.confidence, len(item.evidence)),
+        ))
+    suggestions = reconciled_suggestions
     checked = bool(
         alignment_complete
         and len(pages) == expected_page_count
@@ -730,6 +990,8 @@ def audit_compiled_pages(
 
 __all__ = [
     "VISUAL_AUDIT_SCHEMA",
+    "VISUAL_AUDIT_BATCH_SCHEMA",
+    "VISUAL_REVIEW_BATCH_SIZE",
     "VisualAuditResult",
     "VisualRepairSuggestion",
     "audit_compiled_pages",

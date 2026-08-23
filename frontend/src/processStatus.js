@@ -125,6 +125,36 @@ export function buildProcessStageTrail(job = {}) {
   });
 }
 
+export function verificationFailureTitle(failure = {}) {
+  const label = String(failure?.label || "安全检查").trim() || "安全检查";
+  const summary = String(failure?.summary || "检查未通过").trim() || "检查未通过";
+  if (summary === label || summary === `${label}未通过`) return `${label}：未通过`;
+  return `${label}：${summary}`;
+}
+
+export function processStageStateLabel(stage = {}, verification = {}) {
+  const stateLabels = {
+    completed: "已完成",
+    current: "进行中",
+    failed: "未通过",
+    skipped: "未运行",
+    pending: "等待中",
+  };
+  const fullReviewCheck = checkById(verification, "full-document-review");
+  const userDisabledSecondReview = (
+    fullReviewCheck?.skipped === true
+    && fullReviewCheck?.skip_reason === "user-disabled"
+  );
+  if (
+    userDisabledSecondReview
+    && stage?.state === "skipped"
+    && ["full-review", "ai-review"].includes(stage?.id)
+  ) {
+    return "用户未启用（不计为失败）";
+  }
+  return stateLabels[stage?.state] || String(stage?.state || "");
+}
+
 function checkById(verification, id) {
   const checks = Array.isArray(verification?.checks) ? verification.checks : [];
   return checks.find((check) => check?.id === id) || null;
@@ -178,7 +208,9 @@ export function summarizeVerificationStages(verification = {}) {
       summary: !fullRecorded
         ? "该旧任务未记录此阶段（不是检查通过）"
         : fullCheck?.skipped === true
-        ? "本次未要求运行"
+        ? fullCheck?.skip_reason === "user-disabled"
+          ? "用户未启用第二遍复查（不计为失败）"
+          : "本次未要求运行"
         : `复核 ${Array.isArray(full.chunks) ? full.chunks.length : 0} 个分段；`
           + `无效 ${Array.isArray(full.invalid) ? full.invalid.length : 0}；`
           + `待人工 ${Array.isArray(full.escalations) ? full.escalations.length : 0}`,

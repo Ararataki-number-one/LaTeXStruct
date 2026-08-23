@@ -65,6 +65,47 @@ class _FakeClient:
         return response, {"prompt_tokens": 2, "completion_tokens": 1}
 
 
+class _FakeBatchClient(_FakeClient):
+    def __init__(self, batch_response=None):
+        super().__init__([])
+        self.batch_response = batch_response
+        self.last_usage = {}
+
+    def chat_vision_json_bytes(self, system, request, image, schema):
+        payload = json.loads(request)
+        self.requests.append({
+            "system": system,
+            "request": payload,
+            "images": [image],
+            "schema": schema,
+        })
+        return _response(payload["source_page"], payload["candidate_page"]), {
+            "prompt_tokens": 2,
+            "completion_tokens": 1,
+        }
+
+    def chat_vision_json_images_bytes(self, system, request, images, schema):
+        payload = json.loads(request)
+        self.requests.append({
+            "system": system,
+            "request": payload,
+            "images": list(images),
+            "schema": schema,
+        })
+        if callable(self.batch_response):
+            response = self.batch_response(payload)
+        elif self.batch_response is not None:
+            response = self.batch_response
+        else:
+            response = {
+                "pages": [
+                    _response(item["source_page"], item["candidate_page"])
+                    for item in payload["page_requests"]
+                ]
+            }
+        return response, {"prompt_tokens": 2, "completion_tokens": 1}
+
+
 def _response(
     source_page,
     candidate_page,
@@ -185,6 +226,275 @@ def test_all_aligned_pages_are_reviewed_once(monkeypatch):
     assert [item["done"] for item in progress] == [1, 2, 3]
     assert result.usage["calls"] == 3
     assert all(document.closed for document in renderer.documents)
+
+
+def test_three_full_resolution_page_pairs_share_one_transport_call(monkeypatch):
+    renderer = _install_renderer(monkeypatch, 7, 7)
+    client = _FakeBatchClient()
+    progress = []
+
+    result = visual_review.audit_compiled_pages(
+        client,
+        source_pdf_bytes=b"source",
+        candidate_pdf_bytes=b"candidate",
+        page_range=None,
+        source_text="% Page 1\nLong document",
+        inventory=FormalInventory(),
+        vision_batch_size=3,
+        progress_callback=progress.append,
+    )
+
+    assert result.checked is True
+    assert result.ok is True
+    assert result.page_count == 7
+    assert len(client.requests) == 3
+    assert [len(item["images"]) for item in client.requests] == [3, 3, 1]
+    assert [item["done"] for item in progress] == [3, 6, 7]
+    assert result.usage["calls"] == 3
+    assert all(document.closed for document in renderer.documents)
+
+
+def test_batch_missing_page_echo_fails_closed(monkeypatch):
+    _install_renderer(monkeypatch, 3, 3)
+
+    def omit_last(payload):
+        return {
+            "pages": [
+                _response(item["source_page"], item["candidate_page"])
+                for item in payload["page_requests"][:-1]
+            ]
+        }
+
+    result = visual_review.audit_compiled_pages(
+        _FakeBatchClient(omit_last),
+        source_pdf_bytes=b"source",
+        candidate_pdf_bytes=b"candidate",
+        page_range=None,
+        source_text="% Page 1\nLong document",
+        inventory=FormalInventory(),
+        vision_batch_size=3,
+    )
+
+    assert result.checked is False
+    assert result.ok is False
+    assert any("漏答" in item["reason"] for item in result.invalid)
+
+
+def test_batch_duplicate_page_echo_fails_closed(monkeypatch):
+    _install_renderer(monkeypatch, 3, 3)
+
+    def duplicate_first(payload):
+        pages = [
+            _response(item["source_page"], item["candidate_page"])
+            for item in payload["page_requests"]
+        ]
+        pages.append(dict(pages[0]))
+        return {"pages": pages}
+
+    result = visual_review.audit_compiled_pages(
+        _FakeBatchClient(duplicate_first),
+        source_pdf_bytes=b"source",
+        candidate_pdf_bytes=b"candidate",
+        page_range=None,
+        source_text="% Page 1\nLong document",
+        inventory=FormalInventory(),
+        vision_batch_size=3,
+    )
+
+    assert result.checked is False
+    assert result.ok is False
+    assert any("重复" in item["reason"] for item in result.invalid)
+
+
+def test_batch_unknown_page_echo_fails_closed(monkeypatch):
+    _install_renderer(monkeypatch, 3, 3)
+
+    def append_unknown(payload):
+        pages = [
+            _response(item["source_page"], item["candidate_page"])
+            for item in payload["page_requests"]
+        ]
+        pages.append(_response(99, 99))
+        return {"pages": pages}
+
+    result = visual_review.audit_compiled_pages(
+        _FakeBatchClient(append_unknown),
+        source_pdf_bytes=b"source",
+        candidate_pdf_bytes=b"candidate",
+        page_range=None,
+        source_text="% Page 1\nLong document",
+        inventory=FormalInventory(),
+        vision_batch_size=3,
+    )
+
+    assert result.checked is False
+    assert result.ok is False
+    assert any("未知页码映射" in item["reason"] for item in result.invalid)
+
+
+def test_batch_transport_failure_retries_individual_full_resolution_pages(
+    monkeypatch,
+):
+    renderer = _install_renderer(monkeypatch, 3, 3)
+
+    def reject_multiple_images(_payload):
+        raise visual_review.LLMError("provider does not accept multiple images")
+
+    client = _FakeBatchClient(reject_multiple_images)
+    client.last_usage = {"prompt_tokens": 5, "completion_tokens": 1}
+    progress = []
+    result = visual_review.audit_compiled_pages(
+        client,
+        source_pdf_bytes=b"source",
+        candidate_pdf_bytes=b"candidate",
+        page_range=None,
+        source_text="% Page 1\nLong document",
+        inventory=FormalInventory(),
+        vision_batch_size=3,
+        progress_callback=progress.append,
+    )
+
+    assert result.checked is True
+    assert result.ok is True
+    assert [len(item["images"]) for item in client.requests] == [3, 1, 1, 1]
+    assert result.usage["calls"] == 4
+    assert result.usage["prompt_tokens"] == 11
+    assert result.usage["completion_tokens"] == 4
+    assert [item["done"] for item in progress] == [3]
+    assert all(document.closed for document in renderer.documents)
+
+
+def test_batch_auth_failure_does_not_multiply_single_page_requests(monkeypatch):
+    _install_renderer(monkeypatch, 3, 3)
+
+    def reject_authentication(_payload):
+        raise visual_review.LLMError("未配置 API Key")
+
+    client = _FakeBatchClient(reject_authentication)
+    result = visual_review.audit_compiled_pages(
+        client,
+        source_pdf_bytes=b"source",
+        candidate_pdf_bytes=b"candidate",
+        page_range=None,
+        source_text="% Page 1\nLong document",
+        inventory=FormalInventory(),
+        vision_batch_size=3,
+    )
+
+    assert result.checked is False
+    assert result.ok is False
+    assert result.usage["calls"] == 1
+    assert any("API Key" in item["reason"] for item in result.unresolved)
+    assert [len(item["images"]) for item in client.requests] == [3]
+
+
+def test_batch_malformed_protocol_failure_does_not_fallback(monkeypatch):
+    _install_renderer(monkeypatch, 3, 3)
+
+    for message in (
+        "响应 JSON 无法解析：第 1 行第 8 列",
+        "视觉 JSON 批量复核失败: 服务返回了非 JSON 响应",
+    ):
+        def reject_protocol(_payload, *, _message=message):
+            raise visual_review.LLMError(_message)
+
+        client = _FakeBatchClient(reject_protocol)
+        result = visual_review.audit_compiled_pages(
+            client,
+            source_pdf_bytes=b"source",
+            candidate_pdf_bytes=b"candidate",
+            page_range=None,
+            source_text="% Page 1\nLong document",
+            inventory=FormalInventory(),
+            vision_batch_size=3,
+        )
+        assert result.checked is False
+        assert result.ok is False
+        assert result.usage["calls"] == 1
+        assert any(message in item["reason"] for item in result.unresolved)
+        assert [len(item["images"]) for item in client.requests] == [3]
+
+
+def test_batch_timeout_and_explicit_truncation_each_fallback_once(monkeypatch):
+    _install_renderer(monkeypatch, 3, 3)
+
+    for message in (
+        "视觉 JSON 批量复核失败: 网络错误: timed out",
+        "模型输出因达到 max_tokens 上限而被截断，本页将重试",
+    ):
+        def reject_bounded_batch(_payload, *, _message=message):
+            raise visual_review.LLMError(_message)
+
+        client = _FakeBatchClient(reject_bounded_batch)
+        result = visual_review.audit_compiled_pages(
+            client,
+            source_pdf_bytes=b"source",
+            candidate_pdf_bytes=b"candidate",
+            page_range=None,
+            source_text="% Page 1\nLong document",
+            inventory=FormalInventory(),
+            vision_batch_size=3,
+        )
+        assert result.checked is True
+        assert result.ok is True
+        assert [len(item["images"]) for item in client.requests] == [3, 1, 1, 1]
+        assert result.usage["calls"] == 4
+
+
+def test_batch_fallback_midway_failure_preserves_every_attempt_usage(monkeypatch):
+    _install_renderer(monkeypatch, 3, 3)
+
+    class MidwayFailureClient(_FakeBatchClient):
+        def __init__(self):
+            super().__init__()
+            self.single_calls = 0
+
+        def chat_vision_json_images_bytes(self, system, request, images, schema):
+            payload = json.loads(request)
+            self.requests.append({
+                "system": system,
+                "request": payload,
+                "images": list(images),
+                "schema": schema,
+            })
+            self.last_usage = {"prompt_tokens": 5, "completion_tokens": 1}
+            raise visual_review.LLMError("provider accepts only one image")
+
+        def chat_vision_json_bytes(self, system, request, image, schema):
+            payload = json.loads(request)
+            self.requests.append({
+                "system": system,
+                "request": payload,
+                "images": [image],
+                "schema": schema,
+            })
+            self.single_calls += 1
+            if self.single_calls == 2:
+                self.last_usage = {"prompt_tokens": 7}
+                raise visual_review.LLMError("未配置 API Key")
+            self.last_usage = {"prompt_tokens": 2, "completion_tokens": 1}
+            return _response(payload["source_page"], payload["candidate_page"]), (
+                dict(self.last_usage)
+            )
+
+    client = MidwayFailureClient()
+    result = visual_review.audit_compiled_pages(
+        client,
+        source_pdf_bytes=b"source",
+        candidate_pdf_bytes=b"candidate",
+        page_range=None,
+        source_text="% Page 1\nLong document",
+        inventory=FormalInventory(),
+        vision_batch_size=3,
+    )
+
+    assert result.checked is False
+    assert result.ok is False
+    assert [len(item["images"]) for item in client.requests] == [3, 1, 1]
+    assert result.usage["calls"] == 3
+    assert result.usage["prompt_tokens"] == 14
+    assert result.usage["completion_tokens"] == 2
+    assert any("API Key" in item["reason"] for item in result.unresolved)
 
 
 def test_default_batch_reviews_all_pages_beyond_legacy_80_page_limit(monkeypatch):
@@ -567,6 +877,165 @@ def test_reflow_ai_audit_reuses_frozen_mapping_and_reviews_every_candidate():
     assert result.alignment_sha256 == deterministic["page_alignment"][
         "mapping_sha256"
     ]
+
+
+def test_equal_count_generated_toc_uses_frozen_covering_warp():
+    source = _pdf_bytes([
+        "alpha unique theorem statement and introduction",
+        "beta unique lemma statement and complete proof",
+        "gamma unique proposition statement and discussion",
+        "delta unique references bibliography closing paragraph",
+    ])
+    candidate = _pdf_bytes([
+        "alpha unique theorem statement and introduction",
+        "contents alpha beta gamma delta generated navigation",
+        "beta unique lemma statement and complete proof",
+        (
+            "gamma unique proposition statement and discussion "
+            "delta unique references bibliography closing paragraph"
+        ),
+    ])
+    deterministic = evaluate_visual_quality(
+        source,
+        candidate,
+        candidate_scope=CANDIDATE_SCOPE_REFLOW,
+        geometry_policy=GEOMETRY_POLICY_TEMPLATE_REFLOW,
+    ).to_dict()
+    mappings = deterministic["page_alignment"]["mappings"]
+    assert len(mappings) > 4
+
+    def close_frozen_findings(request):
+        return _response(
+            request["source_page"],
+            request["candidate_page"],
+            checked_finding_codes=[
+                item["code"]
+                for item in request["deterministic_findings_to_close"]
+            ],
+        )
+
+    result = visual_review.audit_compiled_pages(
+        _FakeClient([close_frozen_findings] * len(mappings)),
+        source_pdf_bytes=source,
+        candidate_pdf_bytes=candidate,
+        page_range=None,
+        source_text=(
+            "% Page 1\nalpha\n% Page 2\nbeta\n"
+            "% Page 3\ngamma\n% Page 4\ndelta"
+        ),
+        inventory=FormalInventory(),
+        deterministic_report=deterministic,
+        candidate_scope=CANDIDATE_SCOPE_REFLOW,
+    )
+
+    assert result.checked is True
+    assert result.ok is True
+    assert result.page_count == len(mappings)
+
+
+def test_split_source_page_shares_inventory_and_deduplicates_same_repair():
+    source = _pdf_bytes([
+        "Theorem 1. Unique formal title followed by a long complete statement body",
+    ])
+    candidate = _pdf_bytes([
+        "Theorem 1. Unique formal title",
+        "followed by a long complete statement body",
+    ])
+    deterministic = evaluate_visual_quality(
+        source,
+        candidate,
+        candidate_scope=CANDIDATE_SCOPE_REFLOW,
+        geometry_policy=GEOMETRY_POLICY_TEMPLATE_REFLOW,
+    ).to_dict()
+    mappings = deterministic["page_alignment"]["mappings"]
+    assert [(item["source_page"], item["candidate_page"]) for item in mappings] == [
+        (1, 1),
+        (1, 2),
+    ]
+
+    def report_same_repair(request):
+        return _response(
+            request["source_page"],
+            request["candidate_page"],
+            verdict="repair",
+            issues=[_issue("anchor-split", "missing-env", "theorem")],
+            checked_finding_codes=[
+                item["code"]
+                for item in request["deterministic_findings_to_close"]
+            ],
+        )
+
+    client = _FakeClient([report_same_repair] * len(mappings))
+    result = visual_review.audit_compiled_pages(
+        client,
+        source_pdf_bytes=source,
+        candidate_pdf_bytes=candidate,
+        page_range=None,
+        source_text="% Page 1\nTheorem 1. Unique formal title",
+        inventory=FormalInventory(anchors=(_anchor("anchor-split", 2, "theorem"),)),
+        deterministic_report=deterministic,
+        candidate_scope=CANDIDATE_SCOPE_REFLOW,
+    )
+
+    assert result.checked is True
+    assert len(result.suggestions) == 1
+    assert result.suggestions[0].inventory_id == "anchor-split"
+    assert all(
+        request["request"]["inventory_items_on_source_page"][0]["id"]
+        == "anchor-split"
+        for request in client.requests
+    )
+
+
+def test_split_source_page_conflicting_repairs_fail_closed():
+    source = _pdf_bytes(["Theorem 1. Unique formal title and statement body"])
+    candidate = _pdf_bytes([
+        "Theorem 1. Unique formal title",
+        "and statement body",
+    ])
+    deterministic = evaluate_visual_quality(
+        source,
+        candidate,
+        candidate_scope=CANDIDATE_SCOPE_REFLOW,
+        geometry_policy=GEOMETRY_POLICY_TEMPLATE_REFLOW,
+    ).to_dict()
+    mappings = deterministic["page_alignment"]["mappings"]
+
+    def report_conflict(request):
+        issue = (
+            _issue("anchor-conflict", "missing-env", "theorem")
+            if request["candidate_page"] == 1
+            else _issue("anchor-conflict", "overwrapped", "")
+        )
+        return _response(
+            request["source_page"],
+            request["candidate_page"],
+            verdict="repair",
+            issues=[issue],
+            checked_finding_codes=[
+                item["code"]
+                for item in request["deterministic_findings_to_close"]
+            ],
+        )
+
+    client = _FakeClient([report_conflict] * len(mappings))
+    result = visual_review.audit_compiled_pages(
+        client,
+        source_pdf_bytes=source,
+        candidate_pdf_bytes=candidate,
+        page_range=None,
+        source_text="% Page 1\nTheorem 1. Unique formal title",
+        inventory=FormalInventory(
+            anchors=(_anchor("anchor-conflict", 2, "theorem"),)
+        ),
+        deterministic_report=deterministic,
+        candidate_scope=CANDIDATE_SCOPE_REFLOW,
+    )
+
+    assert result.checked is True
+    assert result.ok is False
+    assert result.suggestions == []
+    assert any("冲突修复建议" in item["reason"] for item in result.invalid)
 
 
 def test_tampered_frozen_reflow_mapping_fails_before_model_call():

@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   buildProcessStageTrail,
   describeProcessPhase,
+  processStageStateLabel,
   summarizeVerificationStages,
+  verificationFailureTitle,
 } from "../src/processStatus.js";
 
 
@@ -162,6 +164,46 @@ test("skipped quality checks are called not run, never passed", () => {
   assert.equal(rows[0].summary, "本次未要求运行");
   assert.equal(rows[1].summary, "本次未要求运行");
   assert.equal(rows[2].summary, "本次未要求运行");
+});
+
+
+test("user-disabled second review is explicitly neutral in stage and quality copy", () => {
+  const verification = {
+    checks: [
+      {
+        id: "full-document-review",
+        ok: null,
+        skipped: true,
+        skip_reason: "user-disabled",
+      },
+    ],
+    full_document_review: {
+      checked: false,
+      ok: false,
+      status: "USER_DISABLED",
+      skip_reason: "user-disabled",
+    },
+  };
+  const rows = summarizeVerificationStages(verification);
+  assert.equal(rows[0].state, "skipped");
+  assert.equal(rows[0].summary, "用户未启用第二遍复查（不计为失败）");
+  assert.equal(processStageStateLabel({ id: "full-review", state: "skipped" }, verification),
+    "用户未启用（不计为失败）");
+  assert.equal(processStageStateLabel({ id: "ai-review", state: "skipped" }, verification),
+    "用户未启用（不计为失败）");
+});
+
+
+test("failure titles collapse legacy repeated label summaries", () => {
+  const label = "最终 TEX 已重新盘点且无漏套、错套、多套或重复 formal 环境";
+  assert.equal(
+    verificationFailureTitle({ label, summary: `${label}未通过` }),
+    `${label}：未通过`,
+  );
+  assert.equal(
+    verificationFailureTitle({ label, summary: "最终清点仍有 3 个 formal 阻断项" }),
+    `${label}：最终清点仍有 3 个 formal 阻断项`,
+  );
 });
 
 

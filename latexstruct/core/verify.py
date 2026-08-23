@@ -237,6 +237,15 @@ _FAILURE_ACTIONS = {
     "compile": "根据首条编译错误及行号修正后重试；原项目和上一次安全结果均未覆盖",
     "project": "补齐缺失的 input/include 文件并解除循环引用后重试",
     "source-encoding": "保留原项目；移除原编码无法表示的新字符，或明确将整个源项目转换编码后重试",
+    "structure-decisions": (
+        "按候选 ID 查看源坐标边界门的具体原因；修正范围证据后重新分析"
+    ),
+    "final-formal-inventory": (
+        "按报告中的行号检查仍未套用或套用错误的 formal 环境后重新分析"
+    ),
+    "compile-render-visual-repair": (
+        "按报告中的源页与编译页定位未解决的视觉问题；确认页映射或内容后重新分析"
+    ),
 }
 
 
@@ -270,7 +279,10 @@ def verification_failures(verification: Dict) -> List[Dict]:
         check_id = str(check.get("id") or "verification")
         label = str(check.get("label") or check_id)
         details: List[Dict] = []
-        summary = f"{label}未通过"
+        # ``label`` and ``summary`` are rendered next to each other by both the
+        # desktop UI and the Markdown report.  A generic summary must therefore
+        # describe the state without repeating the full label.
+        summary = "检查未通过"
         if check_id == "environments":
             details = list((verification.get("env_balance") or {}).get("issues") or [])
         elif check_id == "braces":
@@ -335,7 +347,117 @@ def verification_failures(verification: Dict) -> List[Dict]:
             if error:
                 summary = error
                 details = [{"reason": error}]
-        if details and summary == f"{label}未通过":
+        elif check_id == "structure-decisions":
+            structure = verification.get("structure_decisions") or {}
+            candidate_ids = []
+            for key in (
+                "manual_candidate_ids",
+                "missing_ids",
+                "formal_residual_ids",
+            ):
+                for candidate_id in structure.get(key, []) or []:
+                    candidate_id = str(candidate_id or "").strip()
+                    if candidate_id and candidate_id not in candidate_ids:
+                        candidate_ids.append(candidate_id)
+            raw_manual_required = structure.get("manual_required", 0)
+            manual_required = (
+                raw_manual_required
+                if isinstance(raw_manual_required, int)
+                and not isinstance(raw_manual_required, bool)
+                and raw_manual_required >= 0
+                else 0
+            )
+            count = len(candidate_ids) or manual_required
+            summary = (
+                f"{count} 个候选仍未获得通过边界门的唯一结论"
+                if count
+                else "仍有结构候选需要人工确认"
+            )
+            if candidate_ids:
+                summary += "：" + "、".join(candidate_ids[:8])
+                details = [
+                    {
+                        "candidate_id": candidate_id,
+                        "reason": f"候选 {candidate_id} 仍需核对",
+                    }
+                    for candidate_id in candidate_ids[:20]
+                ]
+        elif check_id == "final-formal-inventory":
+            inventory = verification.get("final_formal_inventory") or {}
+            findings = [
+                item for item in (inventory.get("findings") or [])
+                if isinstance(item, dict)
+                and item.get("kind") in {
+                    "missing", "wrong-env", "overwide", "duplicate",
+                }
+            ]
+            details = []
+            lines = []
+            for finding in findings[:50]:
+                start = finding.get("start_line") or finding.get("line")
+                if isinstance(start, int) and start > 0 and start not in lines:
+                    lines.append(start)
+                details.append({
+                    "line": start,
+                    "candidate_id": str(finding.get("anchor_id") or ""),
+                    "reason": _safe_failure_text(
+                        finding.get("reason") or "formal 结构清点未通过"
+                    ),
+                })
+            raw_blocker_count = check.get("blockers", 0)
+            recorded_blockers = (
+                raw_blocker_count
+                if isinstance(raw_blocker_count, int)
+                and not isinstance(raw_blocker_count, bool)
+                and raw_blocker_count >= 0
+                else 0
+            )
+            blocker_count = len(findings) or recorded_blockers
+            summary = f"最终清点仍有 {blocker_count} 个 formal 阻断项"
+            if lines:
+                summary += "（第 " + "、".join(str(line) for line in lines[:8]) + " 行）"
+        elif check_id == "compile-render-visual-repair":
+            visual = verification.get("visual_quality_loop") or {}
+            visual_items = [
+                item for item in (
+                    list(visual.get("invalid") or [])
+                    + list(visual.get("unresolved") or [])
+                )
+                if isinstance(item, dict)
+            ]
+            details = []
+            pages = []
+            for item in visual_items[:50]:
+                page = item.get("page") or item.get("source_page")
+                if isinstance(page, int) and page > 0 and page not in pages:
+                    pages.append(page)
+                details.append({
+                    "page": page,
+                    "reason": _safe_failure_text(
+                        item.get("reason") or "逐页视觉复核未完成"
+                    ),
+                })
+            complete_compile = any(
+                isinstance(round_record, dict)
+                and isinstance(round_record.get("compile"), dict)
+                and round_record["compile"].get("ok") is True
+                and round_record["compile"].get("preview_status") == "COMPILED"
+                for round_record in (visual.get("rounds") or [])
+            )
+            unresolved_count = len(visual_items)
+            summary = (
+                "最终 PDF 已完整编译，但逐页视觉复核"
+                if complete_compile
+                else "编译、渲染与逐页视觉闭环"
+            )
+            summary += (
+                f"仍有 {unresolved_count} 个未解决项"
+                if unresolved_count
+                else "尚未形成完整通过证据"
+            )
+            if pages:
+                summary += "（源页 " + "、".join(str(page) for page in pages[:8]) + "）"
+        if details and summary == "检查未通过":
             summary = str(details[0].get("reason") or summary)
         result.append({
             "id": check_id,

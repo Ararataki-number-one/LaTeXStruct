@@ -920,6 +920,72 @@ def test_environment_failure_keeps_line_and_compile_error_redacts_only_local_pat
     assert r"\end{theorem}" in failures[1]["summary"]
 
 
+def test_quality_gate_failures_use_actionable_non_repeated_summaries():
+    checks = [
+        {
+            "id": "structure-decisions",
+            "label": "所有结构候选均有唯一且无需人工兜底的结论",
+            "ok": False,
+        },
+        {
+            "id": "final-formal-inventory",
+            "label": "最终 TEX 已重新盘点且无漏套、错套、多套或重复 formal 环境",
+            "ok": False,
+            "blockers": 1,
+        },
+        {
+            "id": "compile-render-visual-repair",
+            "label": "真实编译、逐页视觉复核与定点修复闭环",
+            "ok": False,
+        },
+        {
+            "id": "full-document-review",
+            "label": "独立复核覆盖全文与全部现有 formal 环境",
+            "ok": None,
+            "skipped": True,
+            "skip_reason": "user-disabled",
+        },
+    ]
+    failures = verification_failures({
+        "checks": checks,
+        "structure_decisions": {
+            "manual_required": 1,
+            "manual_candidate_ids": ["c-0002"],
+            "formal_residual_ids": ["c-0002"],
+        },
+        "final_formal_inventory": {
+            "findings": [{
+                "kind": "missing",
+                "start_line": 150,
+                "reason": "formal 标题仍未处于 theorem 环境",
+            }],
+        },
+        "visual_quality_loop": {
+            "rounds": [{
+                "compile": {"ok": True, "preview_status": "COMPILED"},
+            }],
+            "invalid": [],
+            "unresolved": [{
+                "page": 7,
+                "reason": "源页与编译页的内容窗口尚未对齐",
+            }],
+        },
+    })
+
+    assert [item["id"] for item in failures] == [
+        "structure-decisions",
+        "final-formal-inventory",
+        "compile-render-visual-repair",
+    ]
+    assert "1 个候选" in failures[0]["summary"]
+    assert "c-0002" in failures[0]["summary"]
+    assert "第 150 行" in failures[1]["summary"]
+    assert "最终 PDF 已完整编译" in failures[2]["summary"]
+    assert "源页 7" in failures[2]["summary"]
+    for check, failure in zip(checks, failures):
+        assert failure["summary"] != f"{check['label']}未通过"
+
+
 def test_blocked_job_is_not_reported_done_and_keeps_last_structured_draft():
     manager = ProcessJobManager()
     job = manager.create("ocr-project", "original")

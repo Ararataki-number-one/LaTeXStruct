@@ -180,7 +180,65 @@ def test_high_risk_proof_candidate_is_never_mixed_with_theorem_batch():
     assert "kind: theorem-like" not in proof_calls[0]
 
 
-def test_multi_atom_theorems_are_isolated_in_decision_and_review_batches():
+def _nine_high_risk_theorems() -> str:
+    return (
+        "\\documentclass{article}\n\\begin{document}\n"
+        + "".join(
+            f"\\section{{Topic {index}}}\n"
+            f"Theorem {index}. First clause.\n\n"
+            f"This continuation belongs to theorem {index}.\n\n"
+            for index in range(1, 10)
+        )
+        + "\\section{After}\n\\end{document}\n"
+    )
+
+
+def test_nine_high_risk_decisions_use_three_strict_transport_batches():
+    client = ExplicitNoneDecisionClient()
+    result = run_pipeline(
+        _nine_high_risk_theorems(),
+        mode="ai",
+        ai_config=_config(review_enabled=False, batch_size=50),
+        ai_client=client,
+    )
+
+    assert result.ok, result.report_md
+    assert len(client.calls) == 3
+    assert [user.count("### 候选 ") for _system, user in client.calls] == [3, 3, 3]
+    assert all("逐个独立判断" in user for _system, user in client.calls)
+
+
+def test_batched_high_risk_missing_answers_still_fail_closed():
+    class OmitLastDecisionClient(ExplicitNoneDecisionClient):
+        def chat_json(self, system, user):
+            self.calls.append((system, user))
+            ids = re.findall(r"^### 候选 (\S+)$", user, flags=re.MULTILINE)
+            return {
+                "decisions": [
+                    {
+                        "candidate_id": cid,
+                        "action": "none",
+                        "reason": "显式保留已回答的候选",
+                    }
+                    for cid in ids[:-1]
+                ]
+            }, {"total_tokens": 1}
+
+    client = OmitLastDecisionClient()
+    result = run_pipeline(
+        _nine_high_risk_theorems(),
+        mode="ai",
+        ai_config=_config(review_enabled=False, batch_size=50),
+        ai_client=client,
+    )
+
+    assert not result.ok
+    assert len(client.calls) == 3
+    missing = [item for item in result.ambiguous if "未返回" in item.get("reason", "")]
+    assert len(missing) == 3
+
+
+def test_multi_atom_theorems_use_a_bounded_decision_batch_and_independent_review():
     text = (
         "\\documentclass{article}\n\\begin{document}\n"
         "Definition. First part of the definition.\n\n"
@@ -203,8 +261,8 @@ def test_multi_atom_theorems_are_isolated_in_decision_and_review_batches():
             "It is worth mentioning that this is still part of the lemma."
         ) + 1,
     }
-    decide = FakeClient([
-        {"decisions": [{
+    decide = FakeClient({
+        "decisions": [{
             "candidate_id": candidate.id,
             "action": "wrap",
             "env": candidate.env_hint,
@@ -214,9 +272,8 @@ def test_multi_atom_theorems_are_isolated_in_decision_and_review_batches():
             },
             "confidence": 0.99,
             "reason": "逐块确认到可靠停点前",
-        }]}
-        for candidate in targets
-    ])
+        } for candidate in targets]
+    })
     review = ExplicitOkReviewClient()
     result = run_pipeline(
         text,
@@ -231,10 +288,9 @@ def test_multi_atom_theorems_are_isolated_in_decision_and_review_batches():
         review_client=review,
     )
     assert result.ok, result.report_md
-    assert len(decide.calls) == 2
-    assert all(
-        user.count("### 候选 ") == 1 for _system, user in decide.calls
-    )
+    assert len(decide.calls) == 1
+    assert decide.calls[0][1].count("### 候选 ") == 2
+    assert "逐个独立判断" in decide.calls[0][1]
     for candidate in targets:
         matching_review_calls = [
             user for _system, user in review.calls
@@ -403,8 +459,7 @@ def test_styled_multi_atom_theorem_recovers_against_styled_proof_stop():
     # Reproduce the real failure shape: the first model chooses only the styled
     # title.  The legalizer must reject it, then the independent review sees the
     # parser-proven Proof stop and may recover only the exact complete range.
-    decide = FakeClient([
-        {"decisions": [{
+    decide = FakeClient({"decisions": [{
             "candidate_id": theorem.id,
             "action": "wrap",
             "env": "theorem",
@@ -414,8 +469,7 @@ def test_styled_multi_atom_theorem_recovers_against_styled_proof_stop():
             },
             "confidence": 0.99,
             "reason": "初次误选标题原子",
-        }]},
-        {"decisions": [{
+        }, {
             "candidate_id": proof.id,
             "action": "wrap",
             "env": "proof",
@@ -425,8 +479,7 @@ def test_styled_multi_atom_theorem_recovers_against_styled_proof_stop():
             },
             "confidence": 0.99,
             "reason": "Proof 标题及同行 QED",
-        }]},
-    ])
+        }]})
 
     class RecoveringReview(FakeClient):
         def __init__(self):
@@ -480,7 +533,7 @@ def test_styled_multi_atom_theorem_recovers_against_styled_proof_stop():
         review_client=review,
     )
     assert result.ok, result.report_md
-    assert len(decide.calls) == 2
+    assert len(decide.calls) == 1
     theorem_prompt = decide.calls[0][1]
     assert f"解析器可靠结构停点: 第 {proof.span.start_line} 行" in theorem_prompt
     assert f"可靠停点前最后非空原子块末行: 第 {statement_line} 行" in theorem_prompt

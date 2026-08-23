@@ -423,6 +423,64 @@ def test_chat_vision_structured_images_rejects_more_than_four_crops_before_probe
         )
 
 
+def test_chat_vision_json_images_keeps_one_call_schema_order_and_rejects_invalid(
+    monkeypatch,
+):
+    _install_ready_status(monkeypatch)
+    captured = []
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["pages"],
+        "properties": {"pages": {"type": "array"}},
+    }
+
+    def fake_run(args, **kwargs):
+        image_paths = [
+            Path(args[index + 1])
+            for index, token in enumerate(args)
+            if token == "--image"
+        ]
+        schema_path = Path(args[args.index("--output-schema") + 1])
+        captured.append({
+            "bytes": [path.read_bytes() for path in image_paths],
+            "names": [path.name for path in image_paths],
+            "paths": image_paths,
+            "schema": json.loads(schema_path.read_text(encoding="utf-8")),
+            "prompt": kwargs["input"],
+        })
+        result_path = Path(args[args.index("--output-last-message") + 1])
+        result_path.write_text('{"pages": []}', encoding="utf-8")
+        return _completed(args)
+
+    monkeypatch.setattr(codex_cli.subprocess, "run", fake_run)
+    images = [
+        b"\x89PNG\r\n\x1a\nfirst-page-pair",
+        b"\xff\xd8\xffsecond-page-pair",
+    ]
+    client = CodexCLIClient()
+    result, _usage = client.chat_vision_json_images_bytes(
+        "system",
+        '{"page_requests": [1, 2]}',
+        images,
+        schema,
+    )
+    with pytest.raises(LLMError, match="1 至 3"):
+        client.chat_vision_json_images_bytes("system", "user", images * 2, schema)
+
+    assert result == {"pages": []}
+    assert len(captured) == 1
+    assert captured[0]["bytes"] == images
+    assert captured[0]["names"] == ["page.png", "formula-01.jpg"]
+    assert captured[0]["schema"] == schema
+    assert all(not path.exists() for path in captured[0]["paths"])
+    prompt_data = json.loads(captured[0]["prompt"].split("\n\n", 1)[1])
+    assert prompt_data == {
+        "system_instructions": "system",
+        "page_requests": '{"page_requests": [1, 2]}',
+    }
+
+
 def test_chat_vision_data_uri_rejects_mime_mismatch_without_running_codex(monkeypatch):
     monkeypatch.setattr(
         codex_cli,

@@ -88,6 +88,13 @@ class AIConfig:
     codex_reasoning_effort: str = "medium"
 
 
+# Boundary-sensitive candidates still receive independent IDs, source windows,
+# and one required response object each.  Grouping at most three such targets in
+# one transport request avoids paying the Codex process/context startup cost for
+# every item while keeping the batch small enough for strict range adjudication.
+HIGH_RISK_DECISION_BATCH_SIZE = 3
+
+
 class LLMClient:
     def __init__(self, cfg: RoleConfig):
         self.cfg = cfg
@@ -193,6 +200,59 @@ class LLMClient:
         }
         self._add_provider_options(payload)
         raw = self._post_chat(payload, "视觉 JSON 复核")
+        return self._parse_json(self._message_text(raw)), self.last_usage
+
+    def chat_vision_json_images_bytes(
+        self,
+        system: str,
+        user_text: str,
+        images: List[bytes],
+        schema: dict = None,
+    ) -> Tuple[dict, Dict]:
+        """Run one bounded JSON request over several host-produced images.
+
+        Keeping each page pair as an independent full-resolution image avoids
+        shrinking mathematical text into an unreadable contact sheet, while a
+        single transport request removes repeated model/process startup cost.
+        The caller remains responsible for exact per-image echo validation.
+        """
+        del schema  # Compatible endpoints use JSON mode, then host validation.
+        if not isinstance(images, list) or not 1 <= len(images) <= 3:
+            raise LLMError("视觉 JSON 多图输入必须包含 1 至 3 张图片")
+        if sum(len(item) for item in images if isinstance(item, (bytes, bytearray))) > 100 * 1024 * 1024:
+            raise LLMError("视觉 JSON 多图输入合计超过 100 MB 限制")
+        content = []
+        for image_bytes in images:
+            if not isinstance(image_bytes, (bytes, bytearray)) or not image_bytes:
+                raise LLMError("视觉 JSON 多图输入包含空图片")
+            payload_bytes = bytes(image_bytes)
+            if payload_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+                mime = "image/png"
+            elif payload_bytes.startswith(b"\xff\xd8\xff"):
+                mime = "image/jpeg"
+            else:
+                raise LLMError("视觉 JSON 多图输入必须是 PNG 或 JPEG")
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime};base64,"
+                    + base64.b64encode(payload_bytes).decode("ascii")
+                },
+            })
+        content.append({"type": "text", "text": user_text})
+        self.last_usage = {}
+        payload = {
+            "model": self.cfg.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": content},
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "max_tokens": self._max_tokens(),
+        }
+        self._add_provider_options(payload)
+        raw = self._post_chat(payload, "视觉 JSON 批量复核")
         return self._parse_json(self._message_text(raw)), self.last_usage
 
     def _endpoint_url(self) -> str:
@@ -641,35 +701,36 @@ def decide_candidates(
     notes: List[dict] = []
     usage_total: Dict = {}
     # Proof, scope edits, and theorem entries with post-title atoms have
-    # materially higher boundary risk than a one-atom theorem heading.  Keeping
-    # them in a mixed batch made it possible for a model to copy a neighbour's
-    # stop/env or overlook one continuation while still echoing a valid ID.
-    # Isolate only those candidates; single-atom theorem batches retain normal
-    # API latency and cost.
-    batches: List[List[Candidate]] = []
-    buffered: List[Candidate] = []
+    # materially higher boundary risk than a one-atom theorem heading.  Keep
+    # them out of the low-risk pool, but send a bounded cohort of three per
+    # transport request.  ``build_decide_user`` still gives every target its own
+    # marked window and ``parse_decisions`` still requires exactly one matching
+    # response per ID, so batching cannot turn a missing/duplicate answer into a
+    # pass.
+    indexed_low_risk: List[Tuple[int, Candidate]] = []
+    indexed_high_risk: List[Tuple[int, Candidate]] = []
     low_risk_batch_size = max(1, ai_config.batch_size)
 
-    def flush_buffer() -> None:
-        nonlocal buffered
-        if buffered:
-            batches.append(buffered)
-            buffered = []
-
-    for candidate in candidates:
+    for candidate_index, candidate in enumerate(candidates):
         if (
             candidate.kind in {"proof", "scope-fix"}
             or theorem_requires_boundary_singleton(
                 doc, candidate, ctx.existing_envs
             )
         ):
-            flush_buffer()
-            batches.append([candidate])
-            continue
-        buffered.append(candidate)
-        if len(buffered) >= low_risk_batch_size:
-            flush_buffer()
-    flush_buffer()
+            indexed_high_risk.append((candidate_index, candidate))
+        else:
+            indexed_low_risk.append((candidate_index, candidate))
+
+    indexed_batches: List[Tuple[int, List[Candidate]]] = []
+    for pool, batch_size in (
+        (indexed_low_risk, low_risk_batch_size),
+        (indexed_high_risk, HIGH_RISK_DECISION_BATCH_SIZE),
+    ):
+        for start in range(0, len(pool), batch_size):
+            chunk = pool[start:start + batch_size]
+            indexed_batches.append((chunk[0][0], [item[1] for item in chunk]))
+    batches = [batch for _index, batch in sorted(indexed_batches)]
 
     processed = 0
     for batch in batches:

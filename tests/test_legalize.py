@@ -74,6 +74,89 @@ def test_multiparagraph_theorem_must_reach_structural_stop():
     assert not hasattr(complete, "_legalize_error")
 
 
+def test_closed_display_theorem_accepts_only_high_precision_exit_prose():
+    exits = (
+        "To prove the theorem, we need the following simple lemma.",
+        "The results above are surprising in view of the known lower bounds.",
+        (
+            "A new construction now applies, and combining it with the bound "
+            "shows that the following theorem holds."
+        ),
+    )
+    for exit_prose in exits:
+        text = (
+            "Theorem 2.1. The quantity satisfies\n\n"
+            "\\[\n"
+            "f(n) \\leq n^2.\n"
+            "\\]\n\n"
+            f"{exit_prose}\n\n"
+            "Lemma 2.2. A separate result.\n"
+        )
+        doc = parse_latex(text)
+        theorem = next(
+            item for item in scan(doc).candidates
+            if item.kind == "theorem-like" and item.env_hint == "theorem"
+        )
+        formula_line = text.split("\n").index(r"f(n) \leq n^2.") + 1
+        display_end = text.split("\n").index(r"\]") + 1
+        decision = Decision(
+            candidate_id=theorem.id,
+            action="wrap",
+            env="theorem",
+            source="ai",
+            body_span=(theorem.span.start_line, formula_line),
+        )
+
+        legalize_wrap(doc, decision, theorem)
+
+        assert decision.body_span == (theorem.span.start_line, display_end)
+        assert not hasattr(decision, "_legalize_error")
+
+
+def test_exit_prose_does_not_generically_relax_non_result_or_plain_atom():
+    definition_text = (
+        "Definition. The quantity satisfies\n\n"
+        "\\[\nf(n) \\leq n^2.\n\\]\n\n"
+        "The results above are useful elsewhere.\n\n"
+        "Lemma. A separate result.\n"
+    )
+    definition_doc = parse_latex(definition_text)
+    definition = next(
+        item for item in scan(definition_doc).candidates
+        if item.kind == "theorem-like" and item.env_hint == "definition"
+    )
+    display_end = definition_text.split("\n").index(r"\]") + 1
+    definition_decision = Decision(
+        candidate_id=definition.id,
+        action="wrap",
+        env="definition",
+        source="ai",
+        body_span=(definition.span.start_line, display_end),
+    )
+    legalize_wrap(definition_doc, definition_decision, definition)
+    assert "漏段" in getattr(definition_decision, "_legalize_error", "")
+
+    paragraph_text = (
+        "Theorem. A complete-looking sentence.\n\n"
+        "The results above are useful elsewhere.\n\n"
+        "Lemma. A separate result.\n"
+    )
+    paragraph_doc = parse_latex(paragraph_text)
+    theorem = next(
+        item for item in scan(paragraph_doc).candidates
+        if item.kind == "theorem-like" and item.env_hint == "theorem"
+    )
+    paragraph_decision = Decision(
+        candidate_id=theorem.id,
+        action="wrap",
+        env="theorem",
+        source="ai",
+        body_span=(theorem.span.start_line, theorem.span.end_line),
+    )
+    legalize_wrap(paragraph_doc, paragraph_decision, theorem)
+    assert "漏段" in getattr(paragraph_decision, "_legalize_error", "")
+
+
 def _assert_revealed_theorem_boundary_triad(text, env, short_text, final_text, stop_text):
     doc = parse_latex(text)
     candidate = next(

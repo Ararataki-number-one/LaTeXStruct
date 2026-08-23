@@ -111,6 +111,29 @@ _PROOF_COMPLETION_RE = re.compile(
     re.I,
 )
 _CN_PROOF_END_RE = re.compile(r"(?:证毕|证明完毕)\s*[。.!]?\s*(?:%[^\n]*)?$")
+_FORMAL_RESULT_NAME_PATTERN = (
+    r"(?:theorem|lemma|proposition|corollary|conjecture|claim|result)"
+)
+_HIGH_PRECISION_FORMAL_EXIT_LEAD_RE = re.compile(
+    rf"^(?:"
+    rf"to\s+(?:prove|establish|derive)\s+(?:the|this|that|our)\s+"
+    rf"{_FORMAL_RESULT_NAME_PATTERN}\b"
+    rf"|(?:the|these|those)\s+(?:results?|bounds?|estimates?)\s+"
+    rf"(?:above|just\s+(?:proved|established|obtained))\b"
+    rf"|(?:this|that|the\s+(?:preceding|previous))\s+"
+    rf"{_FORMAL_RESULT_NAME_PATTERN}\s+"
+    rf"(?:shows?|implies?|yields?|establishes?)\b"
+    rf")",
+    re.I,
+)
+_HIGH_PRECISION_NEXT_FORMAL_RE = re.compile(
+    rf"\b(?:the\s+following|the\s+next)\s+"
+    rf"{_FORMAL_RESULT_NAME_PATTERN}\b",
+    re.I,
+)
+_EXIT_EVIDENCE_ENVS = frozenset({
+    "theorem", "lemma", "proposition", "corollary", "conjecture", "claim",
+})
 
 
 def has_proof_end_marker(text: str) -> bool:
@@ -222,6 +245,84 @@ def _pre_stop_atomic_end(
         return None
     complete_end = _atomic_end(doc, last_line, wrap_start=start)
     return complete_end if complete_end < stop else None
+
+
+def _next_atomic_text(
+    doc: Document,
+    after: int,
+    stop: Optional[int],
+) -> str:
+    """Return the next non-empty parser atom before *stop*, if one exists."""
+
+    lines = doc.masked.split("\n")
+    cursor = after + 1
+    upper = min(len(lines), (stop - 1) if stop is not None else len(lines))
+    while cursor <= upper and not lines[cursor - 1].strip():
+        cursor += 1
+    if cursor > upper:
+        return ""
+    end = min(_atomic_end(doc, cursor), upper)
+    return "\n".join(lines[cursor - 1:end])
+
+
+def _plain_boundary_evidence(text: str) -> str:
+    """Expose prose for a deliberately small set of exit-evidence patterns."""
+
+    first = _first_nonempty_line(text)
+    semantic, _wrapper = _semantic_view(first)
+    remainder = text[text.find(first) + len(first):] if first else ""
+    visible = semantic + remainder
+    visible = re.sub(r"\\[A-Za-z@]+\*?(?:\[[^\]\n]*\])?", " ", visible)
+    visible = re.sub(r"[{}$]", " ", visible)
+    return re.sub(r"\s+", " ", visible).strip()
+
+
+def _has_high_precision_formal_exit(text: str) -> bool:
+    visible = _plain_boundary_evidence(text)
+    return bool(
+        visible
+        and (
+            _HIGH_PRECISION_FORMAL_EXIT_LEAD_RE.search(visible)
+            or _HIGH_PRECISION_NEXT_FORMAL_RE.search(visible)
+        )
+    )
+
+
+def _closed_display_atom(doc: Document, end: int) -> bool:
+    """Require a locally closed display atom before trusting prose exit evidence."""
+
+    block = _block_containing(doc, end)
+    return bool(
+        block is not None
+        and block.span.end_line == end
+        and (
+            block.kind == "displaymath"
+            or (block.kind == "env" and block.name in MATH_ENVS)
+        )
+    )
+
+
+def _can_end_before_proven_formal_exit(
+    doc: Document,
+    cand,
+    requested_atomic: int,
+    stop: Optional[int],
+) -> bool:
+    """Accept only a closed displayed conclusion followed by explicit exit prose.
+
+    This is intentionally narrower than a general grammatical-boundary guess.  It
+    covers publisher OCR statements whose last formula is followed by prose that
+    explicitly looks back at the completed result or introduces the proof/next
+    formal result.  A qualifier such as ``for all t`` has no such evidence and
+    remains fail-closed.
+    """
+
+    env = str(getattr(cand, "env_hint", "") or "").rstrip("*")
+    if env not in _EXIT_EVIDENCE_ENVS or not _closed_display_atom(doc, requested_atomic):
+        return False
+    return _has_high_precision_formal_exit(
+        _next_atomic_text(doc, requested_atomic, stop)
+    )
 
 
 def theorem_requires_boundary_singleton(
@@ -423,7 +524,13 @@ def _theorem_safe_end_line(
     # gate also must not silently extend the model's short selection: a corrected
     # full range has to come from a new decision/review response.
     if complete_end is not None and complete_end > candidate_atomic_end:
-        return complete_end if requested_atomic == complete_end else None
+        if requested_atomic == complete_end:
+            return complete_end
+        if _can_end_before_proven_formal_exit(
+            doc, cand, requested_atomic, stop
+        ):
+            return requested_atomic
+        return None
 
     # No additional atom exists before the reliable stop (or no reliable stop is
     # available).  Snapping a line *within the same parser atom* to that atom's end

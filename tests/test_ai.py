@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """AI 决策/复查引擎测试（Fake 客户端，不依赖网络与 API Key）。"""
 
+import base64
 import json
 import os
 import re
@@ -342,6 +343,51 @@ def test_llm_requests_have_finite_configurable_token_limit():
         raise AssertionError("非正 max_tokens 必须在发送请求前被拒绝")
 
 
+def test_llm_multi_image_json_preserves_order_and_rejects_invalid_before_request():
+    calls = []
+    png = b"\x89PNG\r\n\x1a\nfirst"
+    jpeg = b"\xff\xd8\xffsecond"
+    client = LLMClient(RoleConfig(model="vision-test", api_key="not-a-real-key"))
+
+    def fake_post(payload, operation):
+        calls.append((payload, operation))
+        return {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": '{"pages": []}'},
+            }],
+        }
+
+    with patch.object(client, "_post_chat", fake_post):
+        result, _usage = client.chat_vision_json_images_bytes(
+            "system",
+            '{"page_requests": [1, 2]}',
+            [png, jpeg],
+            {"type": "object"},
+        )
+        try:
+            client.chat_vision_json_images_bytes("system", "user", [png] * 4)
+        except LLMError as exc:
+            assert "1 至 3" in str(exc)
+        else:
+            raise AssertionError("非法多图数量必须在发请求前被拒绝")
+
+    assert result == {"pages": []}
+    assert len(calls) == 1
+    payload, operation = calls[0]
+    content = payload["messages"][1]["content"]
+    assert operation == "视觉 JSON 批量复核"
+    assert payload["response_format"] == {"type": "json_object"}
+    assert [item["type"] for item in content] == ["image_url", "image_url", "text"]
+    assert content[0]["image_url"]["url"] == (
+        "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+    )
+    assert content[1]["image_url"]["url"] == (
+        "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
+    )
+    assert content[2] == {"type": "text", "text": '{"page_requests": [1, 2]}'}
+
+
 def test_llm_response_does_not_accept_truncation_filter_or_refusal_as_success():
     failures = (
         (
@@ -510,8 +556,8 @@ def test_ai_mode_pipeline_with_fake_decide():
     assert out.verification["env_balance"]["ok"] is True
     assert out.verification["ai_degraded"] is False
     assert out.verification["ai_usage"]["decide"]["model"] == "fake-model"
-    # 伪决策全部被采用；多原子 theorem-like 额外占一个隔离批次。
-    assert len(fake.calls) == 5
+    # 伪决策全部被采用；边界敏感候选使用最多 3 项的独立小批。
+    assert len(fake.calls) == 2
 
 
 def test_ai_batches_emit_progressive_tex_previews():

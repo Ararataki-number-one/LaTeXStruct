@@ -1360,6 +1360,26 @@ def test_page_interval_defaults_validates_bounds_and_caps_work():
             raise AssertionError(f"应拒绝页码范围：{args}")
 
 
+def test_clean_page_output_removes_blank_paragraph_only_inside_equation():
+    cleaned = _clean_page_output(
+        """```latex
+Outside paragraph.
+
+\\begin{equation}
+
+x+y=z.\\tag{3}
+
+\\end{equation}
+
+Following paragraph.
+```"""
+    )
+
+    assert "Outside paragraph.\n\n\\begin{equation}" in cleaned
+    assert "\\begin{equation}\nx+y=z.\\tag{3}\n\\end{equation}" in cleaned
+    assert "\\end{equation}\n\nFollowing paragraph." in cleaned
+
+
 def test_parse_page_range_rejects_oversized_interval_before_expansion():
     try:
         parse_page_range("1-999999999999999999999", 20, max_pages=10)

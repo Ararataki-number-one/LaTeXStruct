@@ -733,6 +733,69 @@ def _weighted_monotonic_pairs(
     return list(reversed(reversed_result))
 
 
+def _anchor_covering_monotonic_pairs(
+    source_pages: Sequence[int],
+    candidate_pages: Sequence[int],
+    anchors: Sequence[tuple[int, int]],
+) -> list[VisualPageMapping]:
+    """Build a shortest monotonic path that covers both page axes.
+
+    Reflow can insert a generated contents page and later regain the original
+    page count by merging or splitting body pages.  A mapping with exactly
+    ``max(n, m)`` pairs degenerates to the identity whenever ``n == m`` and
+    therefore cannot represent that shape.  Host-derived rare-text anchors are
+    strong enough to freeze a warping path: horizontal/vertical steps represent
+    generated or merged pages, while every source and candidate page is still
+    covered at least once for the visual gate.
+    """
+
+    if not source_pages or not candidate_pages:
+        return []
+
+    source_last = len(source_pages) - 1
+    candidate_last = len(candidate_pages) - 1
+    controls: list[tuple[int, int]] = [(0, 0)]
+    for source_index, candidate_index in anchors:
+        if not (0 <= source_index <= source_last):
+            continue
+        if not (0 <= candidate_index <= candidate_last):
+            continue
+        previous_source, previous_candidate = controls[-1]
+        if source_index < previous_source or candidate_index < previous_candidate:
+            continue
+        if (source_index, candidate_index) != controls[-1]:
+            controls.append((source_index, candidate_index))
+    if controls[-1] != (source_last, candidate_last):
+        controls.append((source_last, candidate_last))
+
+    points: list[tuple[int, int]] = [controls[0]]
+    for (start_source, start_candidate), (end_source, end_candidate) in zip(
+        controls,
+        controls[1:],
+    ):
+        source_delta = end_source - start_source
+        candidate_delta = end_candidate - start_candidate
+        steps = max(source_delta, candidate_delta)
+        if steps <= 0:
+            continue
+        for step in range(1, steps + 1):
+            source_index = start_source + round(step * source_delta / steps)
+            candidate_index = start_candidate + round(
+                step * candidate_delta / steps
+            )
+            point = (source_index, candidate_index)
+            if point != points[-1]:
+                points.append(point)
+
+    return [
+        VisualPageMapping(
+            int(source_pages[source_index]),
+            int(candidate_pages[candidate_index]),
+        )
+        for source_index, candidate_index in points
+    ]
+
+
 def _reflow_mappings(
     selected: tuple[int, ...],
     candidate_count: int,
@@ -757,18 +820,25 @@ def _reflow_mappings(
         candidate_text[page] for page in range(1, candidate_count + 1)
     ]
     anchors = _monotonic_text_anchors(ordered_source_text, ordered_candidate_text)
-    unique = _weighted_monotonic_pairs(
-        selected,
-        tuple(range(1, candidate_count + 1)),
-        source_text,
-        candidate_text,
-        anchors,
-    )
+    candidate_pages = tuple(range(1, candidate_count + 1))
+    if anchors:
+        unique = _anchor_covering_monotonic_pairs(
+            selected,
+            candidate_pages,
+            anchors,
+        )
+    else:
+        unique = _weighted_monotonic_pairs(
+            selected,
+            candidate_pages,
+            source_text,
+            candidate_text,
+        )
     no_text_layer = not any(ordered_source_text) or not any(ordered_candidate_text)
     strategy = (
         "proportional_no_text_layer"
         if no_text_layer
-        else "content_anchor_monotonic"
+        else "content_anchor_warp"
         if anchors
         else "content_weighted_monotonic"
     )
@@ -1436,8 +1506,22 @@ def frozen_page_alignment_from_report(
             int(item.candidate_page) for item in non_null
         } != set(range(1, candidate_page_count + 1)):
             raise ValueError("frozen reflow alignment does not cover every candidate page")
-        if len(mappings) != max(len(selected), candidate_page_count):
-            raise ValueError("frozen reflow alignment is not minimum-size")
+        minimum_size = max(len(selected), candidate_page_count)
+        maximum_size = len(selected) + candidate_page_count - 1
+        if not minimum_size <= len(mappings) <= maximum_size:
+            raise ValueError("frozen reflow alignment path size is invalid")
+        source_rank = {page: index for index, page in enumerate(selected)}
+        ranked_pairs = [
+            (source_rank[item.source_page], int(item.candidate_page) - 1)
+            for item in non_null
+        ]
+        if len(set(ranked_pairs)) != len(ranked_pairs) or any(
+            (right_source - left_source, right_candidate - left_candidate)
+            not in {(0, 1), (1, 0), (1, 1)}
+            for (left_source, left_candidate), (right_source, right_candidate)
+            in zip(ranked_pairs, ranked_pairs[1:])
+        ):
+            raise ValueError("frozen reflow alignment is not a covering grid path")
 
     policy = str(raw_alignment.get("policy") or "")
     strategy = str(raw_alignment.get("strategy") or "")

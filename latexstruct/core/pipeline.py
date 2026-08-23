@@ -72,6 +72,27 @@ IMAGE_TO_VISUAL_PDF_DERIVATION_ID = (
 )
 PDF_IDENTITY_VISUAL_DERIVATION_ID = "latexstruct.original-pdf-as-visual-source.v1"
 
+_USAGE_SUMMARY_METADATA_KEYS = frozenset({
+    "model",
+    "backend",
+    "billing_mode",
+    "pricing_source",
+    "pricing_note",
+    "pricing_checked_at",
+})
+
+
+def _merge_usage_summaries(current: Optional[dict], addition: Optional[dict]) -> Dict:
+    """Merge already-aggregated usage without inventing an extra model call."""
+
+    merged = dict(current or {})
+    for key, value in (addition or {}).items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            merged[key] = merged.get(key, 0) + value
+        elif key in _USAGE_SUMMARY_METADATA_KEYS and value not in (None, ""):
+            merged[key] = value
+    return merged
+
 
 def _verify_source_visual_provenance(
     source_pdf_bytes: bytes,
@@ -2092,6 +2113,10 @@ def run_pipeline(
                     )
                     break
 
+                visual_usage_before_round = dict(
+                    ai_usage.get("visual_review") or {}
+                )
+
                 def visual_progress(state):
                     total = max(1, int(state.get("total") or 1))
                     emit(
@@ -2100,7 +2125,10 @@ def run_pipeline(
                         f"逐页视觉复核 {state.get('done', 0)}/{total} 页",
                         usage={
                             **ai_usage,
-                            "visual_review": state.get("usage", {}),
+                            "visual_review": _merge_usage_summaries(
+                                visual_usage_before_round,
+                                state.get("usage", {}),
+                            ),
                         },
                     )
 
@@ -2118,11 +2146,18 @@ def run_pipeline(
                         else "SOURCE PDF"
                     ),
                     candidate_scope=visual_candidate_scope,
+                    # Three independent full-resolution page pairs share one
+                    # transport/model startup.  Each response remains bound to
+                    # the frozen mapping and is validated fail-closed.
+                    vision_batch_size=3,
                     progress_callback=visual_progress,
                     control_callback=control,
                 )
                 round_record["ai_audit"] = visual_audit.to_dict()
-                ai_usage["visual_review"] = visual_audit.usage
+                ai_usage["visual_review"] = _merge_usage_summaries(
+                    visual_usage_before_round,
+                    visual_audit.usage,
+                )
                 quality_loop_compile_cache = (
                     result_text,
                     compiled_round,
@@ -2662,9 +2697,20 @@ def run_pipeline(
         ):
             ambiguous.append(item)
             unresolved_items.append(item)
+    # One unsafe candidate can carry more than one diagnostic: for example the
+    # legalizer explains why its proposed span was rejected and the OCR residue
+    # gate then explains that the same heading remains unwrapped.  Those are two
+    # reasons for one manual decision, not two people/tasks.  Keep every reason
+    # in ``ambiguous`` for auditability, while reporting the human workload by
+    # stable candidate identity.
+    manual_candidate_ids = sorted({
+        str(item.get("candidate_id", "") or "")
+        for item in unresolved_items
+        if str(item.get("candidate_id", "") or "") in candidate_ids
+    })
     structure_safe = bool(
         not missing_decision_ids
-        and not unresolved_items
+        and not manual_candidate_ids
         and not residual_formal_ids
         and reused_decision_validation["ok"]
     )
@@ -2677,7 +2723,8 @@ def run_pipeline(
             if candidate_ids else 1.0
         ),
         "missing_ids": missing_decision_ids,
-        "manual_required": len(unresolved_items),
+        "manual_required": len(manual_candidate_ids),
+        "manual_candidate_ids": manual_candidate_ids,
         "invalid_reused_decisions": len(
             reused_decision_validation.get("invalid") or []
         ),
