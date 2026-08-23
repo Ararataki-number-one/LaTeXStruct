@@ -40,7 +40,7 @@ VISUAL_AUDIT_SCHEMA = {
         "checked_finding_codes",
     ],
     "properties": {
-        "source_page": {"type": "integer"},
+        "source_page": {"type": ["integer", "null"]},
         "candidate_page": {"type": "integer"},
         "verdict": {"type": "string", "enum": ["ok", "repair", "manual"]},
         "reason": {"type": "string"},
@@ -141,18 +141,27 @@ allowed_visual_repairs；不得生成 LaTeX、body span 或改写正文。若问
 inventory_id（例如纯布局、公式内容或整页缺失），problem 使用 layout/formula/
 content-loss，inventory_id 与 env 都留空，verdict=manual。没有实际问题时 verdict=ok 且
 issues=[]。只有存在可由宿主既有可逆 Decision 定点修复的 missing-env/wrong-env/
-overwrapped 时 verdict=repair。每页必须单独回显宿主给出的源页和编译页。严格输出 JSON。"""
+overwrapped 时 verdict=repair。每页必须单独回显宿主给出的源页和编译页。candidate_only
+请求的 source_page 为 null，图片只含编译页；此时只检查该页自身的空白、截断、公式或布局
+问题，不得猜测对应源页，也不得提出结构修复。严格输出 JSON。"""
+
+
+@dataclass(frozen=True)
+class _VisualReviewTask:
+    source_page: int | None
+    candidate_page: int
+    role: str
 
 
 def _deterministic_findings_by_mapping(
     report: dict | None,
-    mappings,
-) -> Dict[Tuple[int, int], List[dict]]:
+    tasks,
+) -> Dict[Tuple[int | None, int], List[dict]]:
     """Route every deterministic REVIEW warning to one frozen page pair."""
 
-    result: Dict[Tuple[int, int], List[dict]] = {}
+    result: Dict[Tuple[int | None, int], List[dict]] = {}
 
-    def add(pair: Tuple[int, int], finding) -> None:
+    def add(pair: Tuple[int | None, int], finding) -> None:
         if not isinstance(finding, dict):
             return
         code = str(finding.get("code") or "")[:80]
@@ -165,8 +174,8 @@ def _deterministic_findings_by_mapping(
         })
 
     frozen_pairs = [
-        (int(item.source_page), int(item.candidate_page))
-        for item in mappings if item.candidate_page is not None
+        (item.source_page, int(item.candidate_page))
+        for item in tasks
     ]
     if not isinstance(report, dict) or not frozen_pairs:
         return result
@@ -179,13 +188,15 @@ def _deterministic_findings_by_mapping(
     for page_record in report.get("pages") or []:
         if not isinstance(page_record, dict):
             continue
-        try:
-            pair = (
-                int(page_record.get("source_page")),
-                int(page_record.get("candidate_page")),
-            )
-        except (TypeError, ValueError):
+        raw_source = page_record.get("source_page")
+        raw_candidate = page_record.get("candidate_page")
+        if raw_source is not None and (
+            isinstance(raw_source, bool) or not isinstance(raw_source, int)
+        ):
             continue
+        if isinstance(raw_candidate, bool) or not isinstance(raw_candidate, int):
+            continue
+        pair = (raw_source, raw_candidate)
         if pair not in selected:
             continue
         for finding in page_record.get("findings") or []:
@@ -384,6 +395,36 @@ def _composite_page_png(
         output.close()
 
 
+def _candidate_only_page_png(module, candidate, candidate_page: int):
+    """Render a candidate-only page without inventing a source-page panel."""
+
+    current = candidate.load_page(candidate_page - 1)
+    panel_width = 900.0
+    header = 28.0
+    scale = panel_width / max(1.0, float(current.rect.width))
+    page_height = float(current.rect.height) * scale
+    output = module.open()
+    try:
+        page = output.new_page(width=panel_width, height=header + page_height)
+        page.insert_text(
+            (8, 18),
+            f"COMPILED PDF CANDIDATE-ONLY PAGE {candidate_page}",
+            fontsize=10,
+        )
+        page.show_pdf_page(
+            module.Rect(0, header, panel_width, header + page_height),
+            candidate,
+            candidate_page - 1,
+        )
+        pixmap = page.get_pixmap(
+            matrix=module.Matrix(1.25, 1.25),
+            alpha=False,
+        )
+        return pixmap.tobytes("png")
+    finally:
+        output.close()
+
+
 def _confidence(value) -> Tuple[float, bool]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0.0, False
@@ -516,30 +557,60 @@ def audit_compiled_pages(
                     candidate_scope=candidate_scope,
                 )
         if alignment is None:
-            mappings = []
+            review_tasks: List[_VisualReviewTask] = []
             expected_page_count = 0
             deterministic_by_mapping = {}
         else:
             alignment_sha256 = alignment.mapping_sha256
-            expected_page_count = len(alignment.mappings)
-            deterministic_by_mapping = _deterministic_findings_by_mapping(
-                deterministic_report,
-                alignment.mappings,
-            )
-            alignment_complete = True
-            mappings = [
-                item for item in alignment.mappings
+            content_tasks = [
+                _VisualReviewTask(
+                    source_page=int(item.source_page),
+                    candidate_page=int(item.candidate_page),
+                    role="content",
+                )
+                for item in alignment.mappings
                 if item.candidate_page is not None
             ]
-        if alignment is not None and len(mappings) != len(alignment.mappings):
+            candidate_only_tasks = [
+                _VisualReviewTask(None, int(page), "candidate_only")
+                for page in alignment.candidate_only_pages
+            ]
+            candidate_only_tasks.extend(
+                _VisualReviewTask(None, int(page), "ambiguous_candidate")
+                for page in alignment.ambiguous_candidate_pages
+            )
+            review_tasks = content_tasks + candidate_only_tasks
+            expected_page_count = len(review_tasks)
+            deterministic_by_mapping = _deterministic_findings_by_mapping(
+                deterministic_report,
+                review_tasks,
+            )
+            alignment_complete = alignment.mapping_reliable
+            if not alignment.mapping_reliable:
+                unresolved.append({
+                    "page": 0,
+                    "reason": "宿主无法可靠确定全部源页与候选页对应关系，结果保持未验证",
+                    "ambiguous_candidate_pages": list(
+                        alignment.ambiguous_candidate_pages
+                    ),
+                    "missing_source_pages": list(alignment.missing_source_pages),
+                    "alignment_sha256": alignment.mapping_sha256,
+                })
+        missing_candidate_sources = (
+            tuple(alignment.missing_source_pages)
+            if alignment is not None and alignment.missing_source_pages
+            else tuple(
+                int(item.source_page)
+                for item in alignment.mappings
+                if item.candidate_page is None
+            )
+            if alignment is not None else ()
+        )
+        if alignment is not None and missing_candidate_sources:
             alignment_complete = False
             unresolved.append({
                 "page": 0,
-                "pages": [
-                    int(item.source_page)
-                    for item in alignment.mappings
-                    if item.candidate_page is None
-                ],
+                "pages": list(missing_candidate_sources),
                 "reason": "编译 PDF 缺少与源范围对应的页面",
             })
         if alignment is not None and (
@@ -559,7 +630,7 @@ def audit_compiled_pages(
             })
             # Do not let a model inspect a convenient subset and accidentally
             # turn an invalid candidate-page closure into a complete audit.
-            mappings = []
+            review_tasks = []
         single_method = getattr(client, "chat_vision_json_bytes", None)
         if not callable(single_method):
             raise LLMError("当前视觉模型客户端不支持结构化逐页复核")
@@ -593,27 +664,34 @@ def audit_compiled_pages(
         # mapped view receives that source page's inventory so a formal title on
         # the shorter split cannot become invisible.  Suggestions are reconciled
         # by inventory ID after all pages are independently validated.
-        model_results: Dict[Tuple[int, int], Tuple[dict, str, str]] = {}
+        model_results: Dict[Tuple[int | None, int], Tuple[dict, str, str]] = {}
 
-        for batch_start in range(0, len(mappings), transport_batch_size):
+        for batch_start in range(0, len(review_tasks), transport_batch_size):
             if control_callback:
                 control_callback()
-            batch = mappings[batch_start:batch_start + transport_batch_size]
+            batch = review_tasks[batch_start:batch_start + transport_batch_size]
             batch_images: List[bytes] = []
             page_requests: List[dict] = []
-            batch_keys: List[Tuple[int, int]] = []
-            for image_index, mapping in enumerate(batch, 1):
-                source_page = int(mapping.source_page)
-                candidate_page = int(mapping.candidate_page)
-                image = _composite_page_png(
-                    module,
-                    source,
-                    candidate,
-                    source_page,
-                    candidate_page,
-                    source_label,
+            batch_keys: List[Tuple[int | None, int]] = []
+            for image_index, task in enumerate(batch, 1):
+                source_page = task.source_page
+                candidate_page = int(task.candidate_page)
+                image = (
+                    _composite_page_png(
+                        module,
+                        source,
+                        candidate,
+                        int(source_page),
+                        candidate_page,
+                        source_label,
+                    )
+                    if source_page is not None else
+                    _candidate_only_page_png(module, candidate, candidate_page)
                 )
-                inventory_items = inventory_pages.get(source_page, [])
+                inventory_items = (
+                    inventory_pages.get(int(source_page), [])
+                    if source_page is not None else []
+                )
                 deterministic_findings = deterministic_by_mapping.get(
                     (source_page, candidate_page),
                     [],
@@ -626,14 +704,17 @@ def audit_compiled_pages(
                     "candidate_scope": alignment.candidate_scope,
                     "alignment_strategy": alignment.strategy,
                     "alignment_mapping_sha256": alignment.mapping_sha256,
-                    "mapping_role": (
-                        "content_anchor" if inventory_items else "coverage_transition"
-                    ),
+                    "mapping_role": task.role,
                     "aggregate_text_evidence": aggregate_text_evidence,
                     "inventory_items_on_source_page": inventory_items,
                     "deterministic_findings_to_close": deterministic_findings,
                     "instruction": (
-                        "左源右编译；逐项视觉核对。只能引用本页 inventory_id；"
+                        (
+                            "左源右编译；逐项视觉核对。只能引用本页 inventory_id；"
+                            if source_page is not None else
+                            "这是宿主确定的候选-only 页；只检查此编译页自身，不得猜源页；"
+                        )
+                        +
                         "checked_finding_codes 必须逐字回显全部确定性告警 code。"
                         "reflow 页对仅是内容锚点，不能因分页位置不同推断内容丢失。"
                     ),
@@ -710,7 +791,7 @@ def audit_compiled_pages(
                         if isinstance(obj, dict) and set(obj) == {"pages"}
                         else None
                     )
-                    response_by_key: Dict[Tuple[int, int], dict] = {}
+                    response_by_key: Dict[Tuple[int | None, int], dict] = {}
                     batch_error = ""
                     if not isinstance(raw_pages, list):
                         batch_error = "视觉批量复核 JSON 顶层字段无效"
@@ -721,10 +802,18 @@ def audit_compiled_pages(
                             continue
                         source_value = raw_response.get("source_page")
                         candidate_value = raw_response.get("candidate_page")
-                        key = (
-                            source_value if isinstance(source_value, int) else -1,
-                            candidate_value if isinstance(candidate_value, int) else -1,
-                        )
+                        if (
+                            isinstance(source_value, bool)
+                            or (
+                                source_value is not None
+                                and not isinstance(source_value, int)
+                            )
+                            or isinstance(candidate_value, bool)
+                            or not isinstance(candidate_value, int)
+                        ):
+                            batch_error = "视觉批量复核回显了无效页码类型"
+                            continue
+                        key = (source_value, candidate_value)
                         if key not in batch_keys:
                             batch_error = "视觉批量复核回显了未知页码映射"
                             continue
@@ -746,20 +835,26 @@ def audit_compiled_pages(
 
             if progress_callback:
                 progress_callback({
-                    "done": min(batch_start + len(batch), len(mappings)),
-                    "total": len(mappings),
+                    "done": min(batch_start + len(batch), len(review_tasks)),
+                    "total": len(review_tasks),
                     "usage": usage,
-                    "source_page": int(batch[-1].source_page),
+                    "source_page": (
+                        int(batch[-1].source_page)
+                        if batch[-1].source_page is not None else 0
+                    ),
                 })
 
         # Keep the historical argument without allowing it to truncate the
         # user-selected range.  Every response is still validated independently.
-        for _index, mapping in _iter_indexed_batches(mappings, max_pages):
+        for _index, task in _iter_indexed_batches(review_tasks, max_pages):
             if control_callback:
                 control_callback()
-            source_page = int(mapping.source_page)
-            candidate_page = int(mapping.candidate_page)
-            inventory_items = inventory_pages.get(source_page, [])
+            source_page = task.source_page
+            candidate_page = int(task.candidate_page)
+            inventory_items = (
+                inventory_pages.get(int(source_page), [])
+                if source_page is not None else []
+            )
             deterministic_findings = deterministic_by_mapping.get(
                 (source_page, candidate_page),
                 [],
@@ -796,7 +891,8 @@ def audit_compiled_pages(
                 nonlocal page_valid
                 page_valid = False
                 invalid.append({
-                    "page": source_page,
+                    "page": source_page if source_page is not None else candidate_page,
+                    "candidate_page": candidate_page,
                     "reason": reason_text,
                 })
 
@@ -808,7 +904,10 @@ def audit_compiled_pages(
             echoed_candidate = response.get("candidate_page")
             if (
                 isinstance(echoed_source, bool)
-                or not isinstance(echoed_source, int)
+                or (
+                    source_page is not None
+                    and not isinstance(echoed_source, int)
+                )
                 or echoed_source != source_page
                 or isinstance(echoed_candidate, bool)
                 or not isinstance(echoed_candidate, int)
@@ -871,11 +970,19 @@ def audit_compiled_pages(
                     if verdict != "manual" or inventory_id or env or len(evidence) < 2:
                         reject_page("非结构问题必须使用 manual 且不得绑定结构目标")
                         continue
-                    page_unresolved.append({
-                        "page": source_page,
+                    unresolved_item = {
+                        "page": (
+                            source_page if source_page is not None else candidate_page
+                        ),
                         "problem": problem,
                         "reason": evidence or page_record["reason"] or "视觉问题无法用结构补丁修复",
-                    })
+                    }
+                    if source_page is None:
+                        unresolved_item.update({
+                            "source_page": None,
+                            "candidate_page": candidate_page,
+                        })
+                    page_unresolved.append(unresolved_item)
                     continue
                 if verdict != "repair":
                     reject_page("结构修复建议必须使用 verdict=repair")
@@ -890,7 +997,7 @@ def audit_compiled_pages(
                     reject_page("视觉修复的置信度或证据不合法")
                     continue
                 page_suggestions.append(VisualRepairSuggestion(
-                    source_page=source_page,
+                    source_page=int(source_page),
                     candidate_page=candidate_page,
                     inventory_id=inventory_id,
                     problem=problem,
@@ -902,7 +1009,8 @@ def audit_compiled_pages(
                 suggestions.extend(page_suggestions)
                 unresolved.extend(page_unresolved)
                 valid_page_count += 1
-                reviewed_source_pages.add(source_page)
+                if source_page is not None:
+                    reviewed_source_pages.add(int(source_page))
                 reviewed_candidate_pages.add(candidate_page)
             page_record["valid"] = page_valid
             pages.append(page_record)

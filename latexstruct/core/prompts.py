@@ -7,11 +7,165 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
-from typing import Dict, List
+import secrets
+from dataclasses import dataclass
+from typing import Collection, Dict, List, Optional, Tuple
 
 from .parser import Document
 from .scanner import Candidate
+
+
+_BOUNDARY_ANCHOR_VERSION = "ba1"
+# Anchors live only for the current host process and are never delegated to the
+# model.  The model sees opaque IDs that it may echo, but it cannot mint a new
+# valid ID for a different candidate/document/boundary.
+_BOUNDARY_ANCHOR_SECRET = secrets.token_bytes(32)
+
+
+@dataclass(frozen=True)
+class BoundaryAnchor:
+    """Host-owned, document-bound endpoint for one complete atomic block."""
+
+    anchor_id: str
+    candidate_id: str
+    candidate_start_line: int
+    atom_start_line: int
+    end_line: int
+    document_sha256: str
+    span_sha256: str
+    preview: str
+
+
+def _boundary_anchor(
+    doc: Document,
+    candidate: Candidate,
+    atom_start_line: int,
+    end_line: int,
+) -> BoundaryAnchor:
+    lines = doc.text.split("\n")
+    body = "\n".join(lines[candidate.span.start_line - 1:end_line])
+    document_sha256 = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
+    span_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    signed = json.dumps(
+        {
+            "version": _BOUNDARY_ANCHOR_VERSION,
+            "candidate_id": candidate.id,
+            "candidate_start_line": candidate.span.start_line,
+            "end_line": end_line,
+            "document_sha256": document_sha256,
+            "span_sha256": span_sha256,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hmac.new(
+        _BOUNDARY_ANCHOR_SECRET, signed, hashlib.sha256,
+    ).hexdigest()[:32]
+    preview = next(
+        (
+            lines[line_no - 1].strip()[:120]
+            for line_no in range(atom_start_line, end_line + 1)
+            if lines[line_no - 1].strip()
+        ),
+        "",
+    )
+    return BoundaryAnchor(
+        anchor_id=f"{_BOUNDARY_ANCHOR_VERSION}_{digest}",
+        candidate_id=candidate.id,
+        candidate_start_line=candidate.span.start_line,
+        atom_start_line=atom_start_line,
+        end_line=end_line,
+        document_sha256=document_sha256,
+        span_sha256=span_sha256,
+        preview=preview,
+    )
+
+
+def candidate_boundary_anchors(
+    doc: Document,
+    candidate: Candidate,
+    window: Tuple[int, int],
+    structured_envs: Optional[Collection[str]] = None,
+) -> List[BoundaryAnchor]:
+    """Enumerate every complete host-validated body endpoint in the window.
+
+    Each ID is bound to the current normalized document, candidate identity,
+    endpoint, and exact source span.  Reliable successor structures are never
+    offered as endpoints of the preceding candidate.
+    """
+    if candidate.kind not in {"theorem-like", "proof"}:
+        return []
+    from .legalize import _atomic_end, _next_stop_line
+
+    lines = doc.text.split("\n")
+    masked_lines = doc.masked.split("\n")
+    lo, hi = window
+    lo = max(1, int(lo))
+    hi = min(len(lines), int(hi))
+    start = candidate.span.start_line
+    if start < lo or start > hi:
+        return []
+    stop = _next_stop_line(doc, start, structured_envs)
+    upper = min(hi, stop - 1) if stop is not None else hi
+    document_closers = [
+        block.span.end_line
+        for block in doc.blocks
+        if block.kind == "env"
+        and block.name == "document"
+        and block.span.end_line > start
+    ]
+    if document_closers:
+        upper = min(upper, min(document_closers) - 1)
+    if upper < max(start, candidate.span.end_line):
+        return []
+
+    anchors: List[BoundaryAnchor] = []
+    first_end = _atomic_end(
+        doc,
+        candidate.span.end_line,
+        wrap_start=start,
+    )
+    if first_end > upper:
+        return []
+    anchors.append(_boundary_anchor(doc, candidate, start, first_end))
+
+    cursor = first_end + 1
+    while cursor <= upper:
+        while cursor <= upper and not masked_lines[cursor - 1].strip():
+            cursor += 1
+        if cursor > upper:
+            break
+        atom_start = cursor
+        atom_end = _atomic_end(doc, cursor, wrap_start=start)
+        if atom_end > upper:
+            break
+        anchors.append(_boundary_anchor(doc, candidate, atom_start, atom_end))
+        cursor = atom_end + 1
+    return anchors
+
+
+def resolve_candidate_boundary_anchor(
+    doc: Document,
+    candidate: Candidate,
+    window: Tuple[int, int],
+    anchor_id: str,
+    structured_envs: Optional[Collection[str]] = None,
+) -> Optional[BoundaryAnchor]:
+    """Resolve only an anchor that the host can regenerate for this candidate."""
+    if not isinstance(anchor_id, str) or not anchor_id.startswith(
+        f"{_BOUNDARY_ANCHOR_VERSION}_"
+    ):
+        return None
+    for anchor in candidate_boundary_anchors(
+        doc, candidate, window, structured_envs,
+    ):
+        if hmac.compare_digest(anchor.anchor_id, anchor_id):
+            return anchor
+    return None
 
 # ---------------------------------------------------------------------------
 # 母提示词（附录 A，v3）
@@ -24,7 +178,9 @@ SYSTEM_PROMPT = """你是「LaTeX 数学文档结构化整理引擎」。你的�
 1. 只改结构，不改内容：正文文字、数学公式、标点、段落顺序逐字不变。
 2. 最小改动：能不动就不动；无法确定时选择不动。
 3. 绝不重复包裹已正确的环境。
-4. 所有 body_span 都是“原始源文件行号”，不是修改后预览的行号。
+4. 每个候选会列出宿主签发的完整原子块边界 anchor。action=wrap 时优先原样回传
+   end_anchor_id；该 ID 决定正文终点，模型不得生成、改写或跨候选复用 anchor。
+   body_span 仅供旧模型兼容，仍必须使用“原始源文件行号”，不是修改后预览的行号。
 5. 环境边界必须服从 LaTeX 嵌套：绝不能把 \\end{theorem}/\\end{proof} 放在
    尚未闭合的 \\[...\\]、equation、align、gather、multline 等数学环境内部。
 6. 每个 candidate 是独立任务。只能依据该 candidate 的 ``>>>`` 标题行及其上下文判断；
@@ -95,7 +251,7 @@ C. 已有环境范围错误（scope-fix 候选）：
 candidate_id 恰好输出一个决策；不得漏答、重复回答或发明 candidate_id。
 """
 
-PROMPT_VERSION = "3.6"
+PROMPT_VERSION = "3.7"
 
 DECIDE_SCHEMA = """输出格式（严格 JSON，不要输出任何其他内容）：
 {
@@ -104,6 +260,7 @@ DECIDE_SCHEMA = """输出格式（严格 JSON，不要输出任何其他内容�
       "candidate_id": "c-0004",
       "action": "wrap | move-boundary | none",
       "env": "theorem",
+      "end_anchor_id": "ba1_从当前候选的宿主边界列表原样复制",
       "body_span": {"start_line": 20, "end_line": 21},
       "optional_arg": "",
       "keep_title_text": true,
@@ -116,7 +273,10 @@ DECIDE_SCHEMA = """输出格式（严格 JSON，不要输出任何其他内容�
 说明：
 - action=wrap 时 env 必填，可选值：theorem/lemma/proposition/corollary/definition/remark/
   example/conjecture/problem/question/claim/fact/observation/note/exercise/proof；
-- body_span 必须落在该候选上下文行号范围内；
+- action=wrap 时应优先提供 end_anchor_id，且只能从该 candidate 的“宿主边界 anchors”
+  原样复制；宿主会由 candidate 起点和 anchor 还原 body_span，模型给出的冲突行号会被忽略；
+- 不提供 end_anchor_id 的旧响应仍可使用 body_span，但必须落在该候选上下文行号范围内；
+- 伪造、过期或从另一 candidate 复制的 end_anchor_id 会令该决策保守失败，不会降级采用 body_span；
 - action=move-boundary 时提供 move_payload.old_end_line（当前 \\end{env} 所在行）与
   new_end_line（修正后的边界行）；
 - action=none 表示该候选无需处理（含"歧义"），reason 说明原因。"""
@@ -372,6 +532,26 @@ def build_decide_user(
                 f"{c.payload.get('next_kind', '-')} 起于第 {c.payload.get('next_line', '-')} 行"
             )
         parts.append(f"合法行号范围: {lo}..{hi}")
+        anchors = candidate_boundary_anchors(
+            doc,
+            c,
+            (lo, hi),
+            structured_envs,
+        )
+        if c.kind in {"theorem-like", "proof"}:
+            parts.append(
+                "宿主边界 anchors（完整原子块候选；只能为当前 candidate 原样回传）:"
+            )
+            if anchors:
+                for anchor in anchors:
+                    parts.append(
+                        "  - end_anchor_id="
+                        f"{anchor.anchor_id} | 原子块第 "
+                        f"{anchor.atom_start_line}..{anchor.end_line} 行 | "
+                        f"预览={anchor.preview!r}"
+                    )
+            else:
+                parts.append("  - 无可验证完整原子块；必须 action=none")
         if c.id in incomplete_windows:
             parts.append(
                 "安全提示: 下一个可靠结构停点超出本窗口；"

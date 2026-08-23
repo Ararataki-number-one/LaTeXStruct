@@ -26,6 +26,8 @@ from latexstruct.core.audit_schema import (
     TerminalStatus,
 )
 from latexstruct.core.audit_submission import make_audit_artifact
+from latexstruct.core.ocr_sources import build_multi_image_source
+from latexstruct.core.pipeline import _verify_source_visual_provenance
 from latexstruct.server.audit_store import AuditSubmissionStore
 
 
@@ -579,6 +581,100 @@ def test_ai_image_ocr_is_wrapped_as_one_immutable_visual_page(tmp_path: Path):
         assert document.page_count == 1
     finally:
         document.close()
+
+
+def test_imported_multi_image_ocr_keeps_ordered_lineage_for_ai_quality_loop(
+    tmp_path: Path,
+):
+    first = _png_bytes()
+    second = _png_bytes() + b"\nsecond-original-byte-stream"
+    # Build through the production importer format: immutable originals ZIP plus
+    # a host-derived, page-preserving visual PDF.
+    source = build_multi_image_source([
+        ("第一页 中文.png", first),
+        ("第二页 中文.png", second),
+    ])
+    (tmp_path / "ocr-source.zip").write_bytes(source.bundle_bytes)
+    (tmp_path / "ocr-visual-source.pdf").write_bytes(source.visual_pdf_bytes)
+    bundle_hash = hashlib.sha256(source.bundle_bytes).hexdigest()
+    visual_hash = hashlib.sha256(source.visual_pdf_bytes).hexdigest()
+    source_images = [dict(row) for row in source.image_entries]
+    record = {
+        "available": True,
+        "path": "ocr-source.zip",
+        "bytes": len(source.bundle_bytes),
+        "sha256": bundle_hash,
+        "source_type": "images",
+        "source_pages": 2,
+        "selected_start": 1,
+        "selected_end": 2,
+        "immutable_evidence": True,
+        "source_images": source_images,
+        "visual_source": {
+            "available": True,
+            "path": "ocr-visual-source.pdf",
+            "bytes": len(source.visual_pdf_bytes),
+            "sha256": visual_hash,
+            "page_count": 2,
+            "is_original_upload": False,
+            "derivation_id": srv.MULTI_IMAGE_DERIVATION_ID,
+            "derived_from_source_sha256": bundle_hash,
+        },
+    }
+
+    provenance = {}
+    enabled, visual_pdf, page_range = srv._quality_loop_inputs(
+        tmp_path,
+        {"kind": "ocr", "ocr_source": record},
+        mode="ai",
+        provenance_out=provenance,
+    )
+    checked = _verify_source_visual_provenance(visual_pdf, provenance)
+
+    assert enabled is True
+    assert page_range == (1, 2)
+    assert visual_pdf == source.visual_pdf_bytes
+    assert provenance["source_type"] == "images"
+    assert provenance["derivation_id"] == srv.MULTI_IMAGE_DERIVATION_ID
+    assert provenance["derived_from_source_sha256"] == bundle_hash
+    assert provenance["source_images"] == [
+        {
+            "order": row["order"],
+            "original_filename": row["original_filename"],
+            "bytes": row["bytes"],
+            "sha256": row["sha256"],
+        }
+        for row in source_images
+    ]
+    assert checked["ok"] is True
+    assert checked["issues"] == []
+
+
+def test_multi_image_visual_provenance_rejects_unknown_type_and_broken_lineage():
+    visual_pdf = _pdf_bytes(2)
+    digest = hashlib.sha256(visual_pdf).hexdigest()
+    base = {
+        "schema": srv.VISUAL_SOURCE_PROVENANCE_SCHEMA,
+        "source_type": "images",
+        "original_upload_bytes": 200,
+        "original_upload_sha256": "a" * 64,
+        "visual_pdf_bytes": len(visual_pdf),
+        "visual_pdf_sha256": digest,
+        "visual_pdf_is_derived": True,
+        "derivation_id": srv.MULTI_IMAGE_DERIVATION_ID,
+        "derived_from_source_sha256": "a" * 64,
+        "original_image_count": 2,
+        "source_images": [
+            {"order": 1, "original_filename": "1.png", "bytes": 10, "sha256": "b" * 64},
+            {"order": 2, "original_filename": "2.png", "bytes": 11, "sha256": "c" * 64},
+        ],
+    }
+    assert _verify_source_visual_provenance(visual_pdf, base)["ok"] is True
+
+    unknown = {**base, "source_type": "image-set"}
+    assert _verify_source_visual_provenance(visual_pdf, unknown)["ok"] is False
+    broken = {**base, "derived_from_source_sha256": "d" * 64}
+    assert _verify_source_visual_provenance(visual_pdf, broken)["ok"] is False
 
 
 def test_process_wires_ocr_source_range_and_visual_client(tmp_path: Path):

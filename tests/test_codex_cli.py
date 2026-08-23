@@ -8,6 +8,9 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -25,6 +28,7 @@ from latexstruct.core.ai import (  # noqa: E402
 from latexstruct.core.codex_cli import (  # noqa: E402
     CODEX_BACKEND,
     CODEX_BILLING_MODE,
+    CODEX_VISUAL_CONCURRENCY,
     CodexCLIClient,
     validate_codex_effort,
     validate_codex_model,
@@ -56,6 +60,35 @@ def _install_ready_status(monkeypatch: pytest.MonkeyPatch) -> None:
         },
     )
     monkeypatch.setattr(codex_cli, "resolve_codex_path", lambda: FAKE_CODEX)
+    monkeypatch.setattr(
+        codex_cli,
+        "_supported_codex_features",
+        lambda _path: frozenset(codex_cli.CODEX_DISABLED_FEATURES),
+    )
+
+
+def test_disable_feature_args_only_uses_runtime_supported_names(monkeypatch):
+    monkeypatch.setattr(
+        codex_cli,
+        "_supported_codex_features",
+        lambda _path: frozenset({"shell_tool", "browser_use"}),
+    )
+
+    assert codex_cli._disable_feature_args(FAKE_CODEX) == [
+        "--disable", "shell_tool", "--disable", "browser_use",
+    ]
+
+
+def test_supported_feature_probe_fails_closed_on_empty_registry(monkeypatch):
+    codex_cli._FEATURE_CACHE.clear()
+    monkeypatch.setattr(
+        codex_cli,
+        "_run_probe",
+        lambda *_args, **_kwargs: _completed([], stdout=""),
+    )
+
+    with pytest.raises(LLMError, match="未返回可验证的功能清单"):
+        codex_cli._supported_codex_features(FAKE_CODEX)
 
 
 def test_safe_child_env_is_allowlist_and_never_inherits_api_credentials(monkeypatch):
@@ -514,6 +547,53 @@ def test_chat_json_reports_nonzero_runtime_failure_without_raw_secret(monkeypatc
     }
 
 
+def test_visual_runtime_reads_jsonl_error_without_exposing_raw_provider_text(monkeypatch):
+    _install_ready_status(monkeypatch)
+    secret = "private-document-fragment"
+
+    def fake_run(args, **_kwargs):
+        return _completed(
+            args,
+            returncode=1,
+            stdout=(
+                '{"type":"turn.failed","error":{"message":'
+                f'"invalid_json_schema Invalid schema for response_format {secret}"}}'
+            ),
+            stderr="Reading prompt from stdin",
+        )
+
+    monkeypatch.setattr(codex_cli.subprocess, "run", fake_run)
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+    }
+
+    with pytest.raises(LLMError) as raised:
+        CodexCLIClient().chat_vision_json_bytes(
+            "system", "user", b"\x89PNG\r\n\x1a\nfixture", schema,
+        )
+
+    assert "结构化输出协议不兼容" in str(raised.value)
+    assert secret not in str(raised.value)
+
+
+def test_runtime_unknown_feature_is_actionable_config_failure(monkeypatch):
+    _install_ready_status(monkeypatch)
+
+    monkeypatch.setattr(
+        codex_cli.subprocess,
+        "run",
+        lambda args, **_kwargs: _completed(
+            args, returncode=1, stderr="error: unknown feature: future_tool",
+        ),
+    )
+
+    with pytest.raises(LLMError, match="安全配置不兼容"):
+        CodexCLIClient().chat_json(DECIDE_SYSTEM, "document")
+
+
 def test_chat_json_turns_subprocess_timeout_into_fail_closed_error(monkeypatch):
     _install_ready_status(monkeypatch)
     monkeypatch.setattr(codex_cli, "_transient_text_retry_wait", lambda _attempt: None)
@@ -589,6 +669,128 @@ def test_client_probes_runtime_only_once_across_candidate_batches(monkeypatch):
     client.chat_json(DECIDE_SYSTEM, "first")
     client.chat_json(DECIDE_SYSTEM, "second")
     assert calls == {"status": 1, "resolve": 1, "run": 2}
+
+
+def test_role_gate_allows_visual_parallelism_but_caps_total_processes_at_three(
+    monkeypatch,
+):
+    _install_ready_status(monkeypatch)
+    client = CodexCLIClient(timeout=2)
+    active = 0
+    peak = 0
+    call_index = 0
+    condition = threading.Condition()
+    release = threading.Event()
+
+    def fake_request(_path, _prompt, _schema, **_kwargs):
+        nonlocal active, peak, call_index
+        with condition:
+            call_index += 1
+            current = call_index
+            active += 1
+            peak = max(peak, active)
+            condition.notify_all()
+        client.last_usage = {"call": current}
+        assert release.wait(2)
+        with condition:
+            active -= 1
+            condition.notify_all()
+        return {"ok": True}, dict(client.last_usage)
+
+    monkeypatch.setattr(client, "_run_request", fake_request)
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+    }
+    image = b"\x89PNG\r\n\x1a\nparallel"
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [
+            pool.submit(
+                client.chat_vision_json_bytes,
+                "system",
+                f"page {index}",
+                image,
+                schema,
+            )
+            for index in range(4)
+        ]
+        with condition:
+            reached_three = condition.wait_for(lambda: active == 3, timeout=1.0)
+        release.set()
+        results = [future.result(timeout=2) for future in futures]
+
+    assert reached_three is True
+    assert peak == CODEX_VISUAL_CONCURRENCY == 3
+    assert sorted(usage["call"] for _result, usage in results) == [1, 2, 3, 4]
+
+
+def test_role_gate_keeps_text_analysis_serial_while_visual_lane_is_parallel(
+    monkeypatch,
+):
+    _install_ready_status(monkeypatch)
+    client = CodexCLIClient(timeout=2)
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def fake_run(_path, _prompt, _schema):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.025)
+        with lock:
+            active -= 1
+        return {"decisions": []}, {}
+
+    monkeypatch.setattr(client, "_run", fake_run)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(pool.map(
+            lambda index: client.chat_json(DECIDE_SYSTEM, f"document {index}"),
+            range(3),
+        ))
+
+    assert all(result == {"decisions": []} for result, _usage in results)
+    assert peak == 1
+
+
+def test_concurrent_first_visual_calls_probe_runtime_once(monkeypatch):
+    calls = {"status": 0, "resolve": 0}
+    lock = threading.Lock()
+
+    def status():
+        with lock:
+            calls["status"] += 1
+        time.sleep(0.02)
+        return {"ready": True}
+
+    def resolve():
+        with lock:
+            calls["resolve"] += 1
+        return FAKE_CODEX
+
+    monkeypatch.setattr(codex_cli, "codex_status", status)
+    monkeypatch.setattr(codex_cli, "resolve_codex_path", resolve)
+    client = CodexCLIClient(timeout=2)
+    monkeypatch.setattr(
+        client,
+        "_run_request",
+        lambda *_args, **_kwargs: ({"ok": True}, {}),
+    )
+    schema = {"type": "object", "properties": {}}
+    image = b"\x89PNG\r\n\x1a\nprobe"
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(pool.map(
+            lambda index: client.chat_vision_json_bytes(
+                "system", f"page {index}", image, schema,
+            ),
+            range(3),
+        ))
+
+    assert len(results) == 3
+    assert calls == {"status": 1, "resolve": 1}
 
 
 @pytest.mark.parametrize(

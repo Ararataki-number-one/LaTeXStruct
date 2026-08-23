@@ -46,6 +46,7 @@ def assess_ocr_quality(job: Mapping[str, Any], resources: Mapping[str, Any] | No
     low_confidence_pages: list[int] = []
     review_pages: list[int] = []
     missing_provenance_pages: list[int] = []
+    recorded_provenance_pages: list[int] = []
     quality_flag_count = 0
     local_evidence_pages: list[int] = []
     equation_tag_expected = 0
@@ -128,14 +129,23 @@ def assess_ocr_quality(job: Mapping[str, Any], resources: Mapping[str, Any] | No
             str(flag.get("evidence_id") or "") for flag in footnote_flags
         }:
             footnote_mismatch_pages.append(page_no)
-        if status == "done" and (
-            int(page.get("attempts") or 0) < 1
-            or len(page.get("image_size_pixels") or []) != 2
-            or re.fullmatch(
-                r"[0-9a-f]{64}", str(page.get("visual_input_sha256") or "").lower()
-            ) is None
-        ):
-            missing_provenance_pages.append(page_no)
+        if status == "done":
+            provenance_recorded = (
+                int(page.get("attempts") or 0) >= 1
+                and len(page.get("image_size_pixels") or []) == 2
+                and re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(page.get("visual_input_sha256") or "").lower(),
+                ) is not None
+                # New v2 jobs explicitly record whether the exact visual bytes
+                # survived the atomic page commit.  Older callers omit this
+                # field and continue to use the pre-v2 metadata gate.
+                and page.get("visual_input_persisted") is not False
+            )
+            if provenance_recorded:
+                recorded_provenance_pages.append(page_no)
+            else:
+                missing_provenance_pages.append(page_no)
 
     status = str(job.get("status") or "")
     terminal_complete = bool(selected) and status == "done" and len(done_pages) == len(selected)
@@ -195,7 +205,12 @@ def assess_ocr_quality(job: Mapping[str, Any], resources: Mapping[str, Any] | No
     resource_summary = {
         "verified": resources is not None,
         "assets": 0,
-        "source_pages": 0,
+        # During live polling this is the number of completed pages whose exact
+        # visual-input record passed the page provenance predicate above.  Once
+        # a bundle is assembled it is replaced by the number of physically
+        # saved and hash-listed source-page files.
+        "source_pages": len(recorded_provenance_pages),
+        "source_pages_scope": "live_page_provenance",
         "unresolved": 0,
         "errors": 0,
         "format_mismatches": 0,
@@ -212,6 +227,7 @@ def assess_ocr_quality(job: Mapping[str, Any], resources: Mapping[str, Any] | No
         resource_summary.update({
             "assets": len(resources.get("assets") or []),
             "source_pages": len(resources.get("source_pages") or []),
+            "source_pages_scope": "bundle_files",
             "unresolved": len(unresolved),
             "errors": len(resource_errors),
             "format_mismatches": format_mismatches,
@@ -262,6 +278,7 @@ def assess_ocr_quality(job: Mapping[str, Any], resources: Mapping[str, Any] | No
             "low_confidence_pages": len(low_confidence_pages),
             "needs_review_pages": len(review_pages),
             "missing_provenance_pages": len(missing_provenance_pages),
+            "recorded_provenance_pages": len(recorded_provenance_pages),
             "quality_flags": quality_flag_count,
             "local_evidence_pages": len(set(local_evidence_pages)),
             "equation_tags_expected": equation_tag_expected,

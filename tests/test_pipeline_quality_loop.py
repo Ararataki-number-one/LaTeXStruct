@@ -496,7 +496,8 @@ def test_layout_template_allows_and_reviews_a_new_toc_page():
     assert loop["candidate_scope"] == "reflow"
     deterministic = loop["rounds"][0]["deterministic"]
     assert deterministic["candidate_page_count"] == 2
-    assert deterministic["compared_page_count"] == 2
+    assert deterministic["compared_page_count"] == 1
+    assert deterministic["page_alignment"]["candidate_only_pages"] == [1]
     assert {
         page["candidate_page"] for page in deterministic["pages"]
     } == {1, 2}

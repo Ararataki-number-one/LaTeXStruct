@@ -131,7 +131,10 @@ def test_bundle_manifest_binds_source_processing_and_resource_quality(tmp_path):
 
     assert manifest["source_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
     assert manifest["source_total"] == 1
-    assert manifest["processing"] == {
+    # The processing section is intentionally extensible: bundle consumers
+    # must bind the stable production fields while newer run-snapshot fields
+    # (tier/concurrency/retry policy) may be added without breaking them.
+    required_processing = {
         "profile": "publication",
         "transcription_source": "full_page_visual_plus_bounded_pdf_evidence",
         "backend": "codex_cli",
@@ -140,6 +143,12 @@ def test_bundle_manifest_binds_source_processing_and_resource_quality(tmp_path):
         "dpi": 300,
         "target_template": "faithfulbook",
     }
+    assert {
+        key: manifest["processing"][key] for key in required_processing
+    } == required_processing
+    assert set(("quality_tier", "batch_size", "concurrency_limit", "max_retries")).issubset(
+        manifest["processing"]
+    )
     assert manifest["quality_report"]["publication_readiness"] == "not_established"
     assert manifest["quality_report"]["resource_gate_passed"] is True
     with zipfile.ZipFile(io.BytesIO(data)) as archive:

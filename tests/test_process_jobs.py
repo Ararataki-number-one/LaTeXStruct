@@ -64,6 +64,23 @@ def test_preview_state_is_explicit_and_only_promoted_by_terminal_evidence():
     assert manager.public(invalid)["preview_state"] == "SOURCE_PREVIEW"
 
 
+def test_terminal_execution_and_verification_are_separate_statuses():
+    manager = ProcessJobManager()
+    blocked = manager.create("project-unverified-progress", "source")
+    manager.complete(blocked["id"], {"ok": False})
+    public = manager.public(blocked)
+
+    # 100% means the task reached a terminal execution state.  It is not a
+    # safety-pass signal: consumers must use verification_status for that.
+    assert public["progress"] == 1.0
+    assert public["execution_state"] == "completed"
+    assert public["verification_status"] == "failed"
+
+    cancelled = manager.create("project-cancelled-progress", "source")
+    manager.cancelled(cancelled["id"])
+    assert manager.public(cancelled)["verification_status"] == "not_reached"
+
+
 def test_job_snapshot_exposes_only_allowlisted_analysis_backend():
     manager = ProcessJobManager()
     codex = manager.create("project-codex", analysis_backend="codex_cli")

@@ -128,16 +128,59 @@ export function buildProcessStageTrail(job = {}) {
 export function verificationFailureTitle(failure = {}) {
   const label = String(failure?.label || "安全检查").trim() || "安全检查";
   const summary = String(failure?.summary || "检查未通过").trim() || "检查未通过";
-  if (summary === label || summary === `${label}未通过`) return `${label}：未通过`;
+  // Older reports sometimes stored "<label>未通过" (or repeated the label
+  // after a colon) as the summary.  Rendering both fields verbatim makes one
+  // failure look like two failures, which is particularly misleading in a
+  // terminal safety gate.  The host still retains the unmodified failure in
+  // the report; this is presentation-only de-duplication.
+  const compact = (value) => String(value || "").replace(/[：:\s]/g, "");
+  const compactLabel = compact(label);
+  const compactSummary = compact(summary);
+  if (
+    compactSummary === compactLabel
+    || compactSummary === `${compactLabel}未通过`
+    || compactSummary === `${compactLabel}${compactLabel}未通过`
+  ) return `${label}：未通过`;
+  if (compactSummary.startsWith(compactLabel)) {
+    const suffix = compactSummary.slice(compactLabel.length);
+    if (!suffix || suffix === "未通过") return `${label}：未通过`;
+  }
   return `${label}：${summary}`;
 }
 
-export function processStageStateLabel(stage = {}, verification = {}) {
+const STAGE_CHECK_IDS = Object.freeze({
+  "full-review": ["full-document-review"],
+  "ai-review": ["ai-second-review", "second-ai-review", "ai-review"],
+  "quality-compile": ["compile-render-visual-repair"],
+  "quality-visual": ["compile-render-visual-repair"],
+  "final-inventory": ["final-formal-inventory"],
+});
+
+function skipReason(stage = {}, verification = {}, job = {}) {
+  const matchingCheck = (STAGE_CHECK_IDS[stage?.id] || [])
+    .map((id) => checkById(verification, id))
+    .find(Boolean);
+  const configuredReason = String(matchingCheck?.skip_reason || "").trim();
+  if (configuredReason === "user-disabled") return "用户未启用（不计为失败）";
+  if (configuredReason) return `配置跳过：${configuredReason}`;
+  if (matchingCheck?.skipped === true) return "配置跳过（不计为失败）";
+
+  // A terminal job has stopped advancing.  Never leave an unvisited stage
+  // with the ambiguous label "未运行": explain whether it was intentionally
+  // skipped, prevented by missing evidence, or cut off by the terminal state.
+  const status = String(job?.status || "").toLowerCase();
+  if (status === "blocked") return "因安全检查未通过而未执行";
+  if (status === "error") return "因处理错误而中止";
+  if (status === "cancelled") return "因用户取消而未执行";
+  if (status === "done") return "本次流程不需要此步骤";
+  return "等待前置步骤";
+}
+
+export function processStageStateLabel(stage = {}, verification = {}, job = {}) {
   const stateLabels = {
     completed: "已完成",
     current: "进行中",
     failed: "未通过",
-    skipped: "未运行",
     pending: "等待中",
   };
   const fullReviewCheck = checkById(verification, "full-document-review");
@@ -152,7 +195,36 @@ export function processStageStateLabel(stage = {}, verification = {}) {
   ) {
     return "用户未启用（不计为失败）";
   }
+  if (stage?.state === "skipped") return skipReason(stage, verification, job);
   return stateLabels[stage?.state] || String(stage?.state || "");
+}
+
+/**
+ * `progress` is execution coverage only.  A blocked task legitimately reaches
+ * 100% because its run has ended; it must never be presented as a verification
+ * success.  Keeping this mapping pure makes the wording testable without a
+ * React render and keeps the status API/UI contract explicit.
+ */
+export function describeExecutionProgress(job = {}) {
+  const numeric = Number(job?.progress);
+  const percent = Math.max(0, Math.min(100, Math.round((Number.isFinite(numeric) ? numeric : 0) * 100)));
+  const status = String(job?.status || "").toLowerCase();
+  const verificationStatus = String(job?.verification_status || "").toLowerCase();
+  if (percent < 100) return { percent, label: "执行进度", detail: "正在执行，尚未形成验证结论" };
+  if (verificationStatus === "passed" || status === "done") return { percent, label: "执行进度", detail: "执行完成；安全检查通过" };
+  if (verificationStatus === "failed" || status === "blocked") return { percent, label: "执行进度", detail: "执行完成；安全检查未通过" };
+  if (status === "cancelled") return { percent, label: "执行进度", detail: "执行结束：任务已取消，未形成验证结论" };
+  if (status === "error") return { percent, label: "执行进度", detail: "执行结束：发生错误，未形成验证结论" };
+  return { percent, label: "执行进度", detail: "执行完成，等待验证结论" };
+}
+
+export function verificationCheckDisplayLabel(check = {}) {
+  const label = String(check?.label || check?.id || "安全检查");
+  if (check?.skipped !== true) return `${check?.ok ? "✓" : "✗"}${label}`;
+  const reason = String(check?.skip_reason || "").trim();
+  if (reason === "user-disabled") return `·${label}（用户未启用）`;
+  if (reason) return `·${label}（配置跳过：${reason}）`;
+  return `·${label}（配置跳过；未形成通过结论）`;
 }
 
 function checkById(verification, id) {
@@ -257,4 +329,179 @@ export function summarizeVerificationStages(verification = {}) {
       details: reasons(blockers),
     },
   ];
+}
+
+function dashboardNumber(...values) {
+  for (const value of values) {
+    if (value === "" || value == null) continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) return Math.max(0, Math.trunc(number));
+  }
+  return null;
+}
+
+function dashboardSeconds(job = {}, metrics = {}) {
+  const explicit = dashboardNumber(
+    metrics.elapsed_seconds,
+    metrics.total_elapsed_seconds,
+    job.elapsed_seconds,
+    job.duration_seconds,
+  );
+  if (explicit != null) return explicit;
+  const started = Date.parse(job.started_at || job.snapshot?.started_at || "");
+  const ended = Date.parse(job.finished_at || job.completed_at || "");
+  if (!Number.isFinite(started)) return null;
+  return Math.max(0, Math.round(((Number.isFinite(ended) ? ended : Date.now()) - started) / 1000));
+}
+
+function dashboardArtifact(job, name, fallbackAvailable = false) {
+  const stores = [
+    job?.artifacts,
+    job?.outputs,
+    job?.result?.artifacts,
+    job?.snapshot?.artifacts,
+  ].filter(Boolean);
+  for (const store of stores) {
+    const value = store?.[name];
+    if (typeof value === "string" && value) return { available: true, url: value };
+    if (value && typeof value === "object") {
+      return {
+        available: value.available !== false && value.exists !== false,
+        url: value.download_url || value.url || value.href || "",
+        filename: value.filename || value.name || "",
+      };
+    }
+    if (value === true) return { available: true, url: "" };
+  }
+  return { available: Boolean(fallbackAvailable), url: "" };
+}
+
+export function formatProcessDuration(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return "暂无";
+  const rounded = Math.round(value);
+  if (rounded < 60) return `${rounded} 秒`;
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  if (hours) return `${hours} 小时 ${minutes} 分`;
+  return `${minutes} 分钟`;
+}
+
+export function buildAnalysisDashboard(job = {}, verification = {}, decisions = [], info = {}) {
+  const metrics = job.performance_metrics || job.progress_metrics || job.metrics || {};
+  const issueCounts = job.issue_counts || job.issue_summary || job.result?.issue_counts || {};
+  const ledger = Array.isArray(job.issue_ledger)
+    ? job.issue_ledger
+    : Array.isArray(job.result?.issue_ledger) ? job.result.issue_ledger : [];
+  const decisionItems = Array.isArray(decisions) ? decisions : [];
+  const statusCounts = ledger.reduce((counts, issue) => {
+    const status = String(issue?.current_status || issue?.status || "OPEN").toUpperCase();
+    counts[status] = (counts[status] || 0) + 1;
+    return counts;
+  }, {});
+  const found = dashboardNumber(
+    issueCounts.found,
+    issueCounts.total,
+    metrics.issues_found,
+    job.issues_found,
+    ledger.length || null,
+    decisionItems.length || null,
+  ) || 0;
+  const fixed = dashboardNumber(
+    issueCounts.fixed,
+    issueCounts.verified_closed,
+    metrics.issues_fixed,
+    job.issues_fixed,
+    statusCounts.VERIFIED_CLOSED,
+    decisionItems.filter((item) => item?.status === "applied").length || null,
+  ) || 0;
+  const blocked = dashboardNumber(
+    issueCounts.blocked,
+    metrics.blocked_issues,
+    job.blocked_issues,
+    statusCounts.BLOCKED,
+  ) || 0;
+  const remaining = dashboardNumber(
+    issueCounts.remaining,
+    issueCounts.open,
+    metrics.issues_remaining,
+    job.issues_remaining,
+    (statusCounts.OPEN || 0) + (statusCounts.FIXING || 0)
+      + (statusCounts.FIXED_PENDING_REVIEW || 0) + (statusCounts.REGRESSION || 0),
+  ) ?? Math.max(0, found - fixed);
+  const totalPages = dashboardNumber(metrics.total_pages, job.page_count, job.total_pages, info.page_count);
+  const checkedPages = dashboardNumber(
+    metrics.checked_pages,
+    metrics.pages_checked,
+    job.checked_pages,
+    job.pages_checked,
+    job.result?.checked_pages,
+  );
+  const currentValues = metrics.current_pages || job.current_pages || job.current_page_ids;
+  const currentPages = (Array.isArray(currentValues) ? currentValues : [
+    metrics.current_page,
+    job.current_page,
+    job.source_page,
+  ]).map(Number).filter((value, index, values) => (
+    Number.isInteger(value) && value > 0 && values.indexOf(value) === index
+  ));
+  const currentPhase = describeProcessPhase(job.phase, job.phase_label || job.message);
+  const rollbackCount = dashboardNumber(
+    metrics.rollback_count,
+    metrics.rollbacks,
+    job.rollback_count,
+    job.rollback_history?.length,
+  ) || 0;
+  const bestVersion = String(
+    job.best_candidate_id
+      || job.best_version
+      || job.result?.best_candidate_id
+      || job.result?.candidate_id
+      || (info.has_result ? "已保存最佳版本" : ""),
+  );
+  const analysisArchive = job.analysis_archive || job.result?.analysis_archive || {};
+  // v2 final status is a host-derived, hash-bound archive decision.  Legacy
+  // safe_to_export remains useful for the unchanged export endpoints, but it
+  // must never promote the analysis dashboard to VERIFIED.
+  const rawFinalStatus = String(
+    analysisArchive.final_status || job.final_status || job.result?.final_status || "",
+  ).toUpperCase();
+  let finalStatus = rawFinalStatus;
+  if (!["VERIFIED", "COMPLETED_WITH_ISSUES", "FAILED_BEST_RETAINED"].includes(finalStatus)) {
+    if (["done", "blocked", "cancelled"].includes(String(job.status || "").toLowerCase())) {
+      finalStatus = "COMPLETED_WITH_ISSUES";
+    } else if (String(job.status || "").toLowerCase() === "error") {
+      finalStatus = "FAILED_BEST_RETAINED";
+    } else finalStatus = "";
+  }
+  const terminal = TERMINAL_STATUSES.has(String(job.status || "").toLowerCase()) || Boolean(finalStatus);
+
+  return {
+    stage: String(job.stage_label || job.phase_label || currentPhase.label || "等待开始"),
+    stageHelp: currentPhase.help,
+    round: dashboardNumber(metrics.current_round, job.current_round, job.round, job.macro_round),
+    totalPages,
+    checkedPages,
+    currentPages,
+    found,
+    fixed,
+    remaining,
+    blocked,
+    rollbackCount,
+    rolledBack: Boolean(job.rolled_back || job.rollback_occurred || rollbackCount > 0),
+    bestVersion,
+    elapsedSeconds: dashboardSeconds(job, metrics),
+    etaSeconds: dashboardNumber(metrics.eta_seconds, metrics.estimated_remaining_seconds, job.eta_seconds),
+    finalStatus,
+    terminal,
+    canContinue: terminal && job.can_refine !== false && Boolean(bestVersion || info.has_result),
+    artifacts: [
+      { id: "raw-ocr", label: "OCR 原稿 TEX", ...dashboardArtifact(job, "raw_ocr_tex", Boolean(info.raw_ocr_available)) },
+      { id: "baseline-tex", label: "OCR 基线 TEX", ...dashboardArtifact(job, "baseline_tex", Boolean(info.baseline_tex_available)) },
+      { id: "baseline-pdf", label: "OCR 基线 PDF", ...dashboardArtifact(job, "baseline_pdf", Boolean(info.baseline_pdf_available)) },
+      { id: "best-tex", label: "AI 最佳 TEX", ...dashboardArtifact(job, "best_tex", Boolean(info.has_result)) },
+      { id: "best-pdf", label: "AI 最佳 PDF", ...dashboardArtifact(job, "best_pdf", Boolean(info.result_pdf_available || job.preview_state === "COMPILED")) },
+      { id: "quality-report", label: "简洁质量报告", ...dashboardArtifact(job, "quality_report", Boolean(info.has_report || job.result)) },
+    ],
+  };
 }

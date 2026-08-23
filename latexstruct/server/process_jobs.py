@@ -74,6 +74,11 @@ class ProcessJobManager:
                 "phase": "queued",
                 "phase_label": "已进入处理队列",
                 "progress": 0.0,
+                # Progress measures execution coverage only.  Keep the
+                # independent verification conclusion explicit so a terminal
+                # 100% cannot be mistaken for a passed safety gate.
+                "execution_state": "running",
+                "verification_status": "pending",
                 "message": "正在启动后台任务",
                 "created": now,
                 "updated": now,
@@ -383,6 +388,8 @@ class ProcessJobManager:
                 return
             passed = bool(result.get("ok"))
             job["status"] = "done" if passed else "blocked"
+            job["execution_state"] = "completed"
+            job["verification_status"] = "passed" if passed else "failed"
             job["phase"] = "done" if passed else "verification_failed"
             job["phase_label"] = "处理完成" if passed else "安全检查未通过"
             job["message"] = (
@@ -417,6 +424,8 @@ class ProcessJobManager:
             if not job:
                 return
             job["status"] = "cancelled"
+            job["execution_state"] = "cancelled"
+            job["verification_status"] = "not_reached"
             job["phase"] = "cancelled"
             job["phase_label"] = "任务已取消"
             job["message"] = "未保存未验证草稿，原项目保持不变"
@@ -439,6 +448,8 @@ class ProcessJobManager:
                 except (TypeError, ValueError):
                     job["failure_progress"] = 0.0
             job["status"] = "error"
+            job["execution_state"] = "failed"
+            job["verification_status"] = "not_reached"
             job["phase"] = "error"
             job["phase_label"] = "处理未完成"
             job["message"] = "处理未完成，原项目保持不变"

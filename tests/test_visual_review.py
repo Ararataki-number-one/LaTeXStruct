@@ -863,6 +863,10 @@ def test_reflow_ai_audit_reuses_frozen_mapping_and_reviews_every_candidate():
         (item["source_page"], item["candidate_page"])
         for item in deterministic["page_alignment"]["mappings"]
     ]
+    frozen_pairs.extend(
+        (None, page)
+        for page in deterministic["page_alignment"]["candidate_only_pages"]
+    )
     requested_pairs = [
         (item["request"]["source_page"], item["request"]["candidate_page"])
         for item in client.requests
@@ -902,7 +906,9 @@ def test_equal_count_generated_toc_uses_frozen_covering_warp():
         geometry_policy=GEOMETRY_POLICY_TEMPLATE_REFLOW,
     ).to_dict()
     mappings = deterministic["page_alignment"]["mappings"]
-    assert len(mappings) > 4
+    candidate_only = deterministic["page_alignment"]["candidate_only_pages"]
+    assert len(mappings) == 4
+    assert candidate_only == [2]
 
     def close_frozen_findings(request):
         return _response(
@@ -915,7 +921,9 @@ def test_equal_count_generated_toc_uses_frozen_covering_warp():
         )
 
     result = visual_review.audit_compiled_pages(
-        _FakeClient([close_frozen_findings] * len(mappings)),
+        _FakeClient(
+            [close_frozen_findings] * (len(mappings) + len(candidate_only))
+        ),
         source_pdf_bytes=source,
         candidate_pdf_bytes=candidate,
         page_range=None,
@@ -930,7 +938,7 @@ def test_equal_count_generated_toc_uses_frozen_covering_warp():
 
     assert result.checked is True
     assert result.ok is True
-    assert result.page_count == len(mappings)
+    assert result.page_count == len(mappings) + len(candidate_only)
 
 
 def test_split_source_page_shares_inventory_and_deduplicates_same_repair():
@@ -1047,7 +1055,7 @@ def test_tampered_frozen_reflow_mapping_fails_before_model_call():
         candidate_scope=CANDIDATE_SCOPE_REFLOW,
         geometry_policy=GEOMETRY_POLICY_TEMPLATE_REFLOW,
     ).to_dict()
-    deterministic["page_alignment"]["mappings"][0]["candidate_page"] = 2
+    deterministic["page_alignment"]["mappings"][0]["candidate_page"] = 3
     client = _FakeClient([])
 
     result = visual_review.audit_compiled_pages(

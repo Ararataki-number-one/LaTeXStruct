@@ -44,6 +44,9 @@ def test_publication_profile_passes_workflow_but_never_claims_publication_accura
     assert report["publication_readiness"] == "not_established"
     assert report["accuracy_measurement"] == "not_performed"
     assert report["counts"]["local_evidence_pages"] == 1
+    assert report["counts"]["recorded_provenance_pages"] == 2
+    assert report["resources"]["source_pages"] == 2
+    assert report["resources"]["source_pages_scope"] == "live_page_provenance"
     assert report["limitations"]
 
 
@@ -62,6 +65,17 @@ def test_publication_profile_blocks_low_confidence_review_and_missing_provenance
     }
     assert report["pages"]["low_confidence"] == [3]
     assert report["pages"]["missing_provenance"] == [4]
+
+
+def test_explicitly_unpersisted_visual_input_remains_a_provenance_blocker():
+    job = _job()
+    job["pages"][3]["visual_input_persisted"] = False
+
+    report = assess_ocr_quality(job)
+
+    assert report["page_gate_passed"] is False
+    assert report["pages"]["missing_provenance"] == [3]
+    assert report["resources"]["source_pages"] == 1
 
 
 def test_standard_profile_keeps_findings_as_visible_warnings():

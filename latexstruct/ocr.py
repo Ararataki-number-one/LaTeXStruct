@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from .core.ai import LLMClient, LLMError, RoleConfig
+from .core.ocr_runtime import OcrPageRequest, make_page_id
 from .core.ocrstruct import encode_ocr_metadata, infer_document_kind
 from .core.parser import mask_comments, parse_latex
 
@@ -193,6 +194,35 @@ class OcrPageTranscription:
     reference_text_chars: int = 0
     quality_flags: List[dict] = field(default_factory=list)
     formula_evidence: List[dict] = field(default_factory=list)
+
+
+def make_host_ocr_page_request(
+    image_bytes: bytes,
+    source_page: int,
+    task_index: int,
+    *,
+    dpi: int = 200,
+    text_layer_hint: str = "",
+    crops: tuple[bytes, ...] = (),
+    correction_instruction: str = "",
+    retry_state: dict | None = None,
+) -> OcrPageRequest:
+    """Bind one rendered page to its host-owned stable v2 OCR identity.
+
+    This narrow adapter lets the existing renderer feed the resumable runtime
+    without changing the legacy ``transcribe_page``/export APIs.
+    """
+    return OcrPageRequest(
+        page_id=make_page_id(task_index),
+        source_page=source_page,
+        task_index=task_index,
+        image_bytes=bytes(image_bytes),
+        dpi=dpi,
+        text_layer_hint=text_layer_hint,
+        crops=tuple(crops),
+        correction_instruction=correction_instruction,
+        retry_state=dict(retry_state or {}),
+    )
 
 
 class _OcrQualityGateError(LLMError):

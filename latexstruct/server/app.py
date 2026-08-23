@@ -31,6 +31,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
 
 from ..config import AppConfig, load_config, save_config
+from ..core.analysis_adapter import (
+    AnalysisRunArtifacts,
+    freeze_pipeline_analysis_run,
+)
+from ..core.analysis_schema import AnalysisFinalStatus, ModelBinding
 from ..core.audit_schema import (
     ArtifactRole,
     AuditDepth,
@@ -49,11 +54,39 @@ from ..core.audit_evidence import (
     template_manifest,
 )
 from ..core.audit_submission import make_audit_artifact
+from ..core.audit_sanitize import sanitize_plain_text
 from ..core.invariants import IMG_RE
 from ..core.ocr_quality import (
     OCR_QUALITY_PUBLICATION,
     assess_ocr_quality,
     normalize_ocr_quality_profile,
+)
+from ..core.ocr_artifacts import available_ocr_artifacts, resolve_ocr_artifact
+from ..core.ocr_runtime import (
+    BoundedOcrExecutor,
+    OcrErrorCategory,
+    OcrPageRecord,
+    OcrPageStatus,
+    OcrPreviewStatus,
+    OcrRunPaused,
+    OcrRunStore,
+    OcrStoreError,
+    OCR_TRANSCRIPTION_SYSTEM_PROMPT,
+    make_page_id,
+    make_run_snapshot,
+    normalize_quality_tier,
+    ocr_batch_output_schema,
+    ocr_batch_request_payload,
+    progress_metrics as ocr_progress_metrics,
+    public_page_state,
+    quality_tier_policy,
+    thaw_json,
+)
+from ..core.ocr_sources import (
+    MULTI_IMAGE_DERIVATION_ID,
+    build_multi_image_source,
+    extract_multi_image_bytes,
+    verify_multi_image_source,
 )
 from ..core.parser import parse_latex
 from ..core.pipeline import (
@@ -192,12 +225,17 @@ def _public_ocr_job(job: dict) -> dict:
         retry_available = (
             not job_busy
             and job.get("client") is not None
-            and callable(job.get("_transcribe_one"))
+            and (
+                callable(job.get("_v2_retry_page"))
+                or callable(job.get("_transcribe_one"))
+            )
             and callable(job.get("_render_one"))
         )
         pages_summary = {
             str(n): {
                 "status": page.get("status", "pending"),
+                "page_id": str(page.get("page_id") or ""),
+                "source_page": int(page.get("source_page") or n),
                 "low_conf": bool(page.get("low_conf")),
                 "needs_review": page.get("needs_review", False),
                 "error": str(page.get("error") or "")[:120],
@@ -205,7 +243,9 @@ def _public_ocr_job(job: dict) -> dict:
                 "task_index": page.get("task_index", 0),
                 "retrying": page.get("retrying", False),
                 "can_retry": retry_available and not page.get("retrying", False),
-                "preview_ready": os.path.isfile(str(page.get("png") or "")),
+                "preview_ready": os.path.isfile(str(
+                    page.get("persisted_visual_path") or page.get("png") or ""
+                )),
                 "figure_count": len(page.get("figures") or []),
                 "figure_bbox_ready": bool(page.get("figures")),
                 "text_reference_chars": int(page.get("text_hint_chars") or 0),
@@ -217,6 +257,9 @@ def _public_ocr_job(job: dict) -> dict:
                         str(page.get("visual_input_sha256") or "").lower(),
                     )
                     else ""
+                ),
+                "visual_input_persisted": bool(
+                    page.get("visual_input_persisted")
                 ),
                 "formula_visual_evidence": _bounded_formula_evidence(
                     page.get("formula_evidence") or []
@@ -237,11 +280,12 @@ def _public_ocr_job(job: dict) -> dict:
             key: deepcopy(value)
             for key, value in job.items()
             if key not in (
-                "raw_tex", "pages", "client", "dir", "target", "suffix",
+                "raw_tex", "pages", "client", "dir", "target", "visual_target", "suffix",
                 "pause_requested",
                 "_transcribe_one", "_refresh_raw_preview", "_merge_job", "_render_one",
                 "_mark_page_error",
-                "_source_sha256",
+                "_source_sha256", "_visual_source_sha256", "_v2_store", "_v2_snapshot",
+                "_v2_retry_page", "_compatibility_single",
             )
         }
         public["raw_revision"] = int(job.get("raw_revision") or 0)
@@ -251,10 +295,95 @@ def _public_ocr_job(job: dict) -> dict:
         # 否则切换后端后历史任务会显示错误的计费来源。
         public["backend"] = str(job.get("backend") or "unknown")
         public["can_pause"] = job.get("status") == "running"
-        public["can_resume"] = job.get("status") in {"pausing", "paused"}
+        public["can_resume"] = job.get("status") in {"pausing", "paused"} or (
+            job.get("status") == "partial"
+            and job.get("_v2_snapshot") is not None
+            and not bool(job.get("raw_frozen"))
+        )
         public["can_cancel"] = False
         public["pages"] = pages_summary
-        public["quality_report"] = assess_ocr_quality(job)
+        v2_store = job.get("_v2_store")
+        v2_snapshot = job.get("_v2_snapshot")
+        v2_records = None
+        if isinstance(v2_store, OcrRunStore) and v2_snapshot is not None:
+            try:
+                records = v2_store.list_records(v2_snapshot.run_id)
+                v2_records = records
+                metrics = ocr_progress_metrics(
+                    v2_snapshot,
+                    records,
+                    terminal_epoch=job.get("terminal_epoch"),
+                    merge_complete=bool(job.get("raw_ready")),
+                    raw_frozen=bool(job.get("raw_frozen")),
+                    compile_status=job.get("compile_status") or None,
+                    rate_limited=bool(job.get("rate_limited")),
+                    concurrency_limit=int(job.get("current_concurrency_limit") or 0) or None,
+                )
+                counts = metrics.get("counts") or {}
+                metrics.update({
+                    "total_pages": counts.get("total", 0),
+                    "pending_pages": counts.get("pending", 0),
+                    "active_pages": counts.get("processing", 0),
+                    "success_pages": counts.get("success", 0),
+                    "needs_review_pages": counts.get("needs_review", 0),
+                    "failed_pages": counts.get("failed", 0),
+                    "auto_retry_pages": counts.get("automatic_retry_pages", 0),
+                    "progress": metrics.get("overall_progress", 0),
+                })
+                public["progress_metrics"] = metrics
+                public["progress"] = metrics["overall_progress"]
+                public["elapsed_seconds"] = metrics["elapsed_seconds"]
+                public["average_pages_per_minute"] = metrics[
+                    "average_pages_per_minute"
+                ]
+                public["recent_pages_per_minute"] = metrics[
+                    "recent_pages_per_minute"
+                ]
+                public["eta_seconds"] = metrics["eta_seconds"]
+                public["current_pages"] = metrics["current_pages"]
+                public["current_dpi"] = metrics["current_dpi"]
+                public["current_concurrency"] = metrics["current_concurrency"]
+                public["rate_limited"] = metrics["rate_limited"]
+                for record in records:
+                    legacy = pages_summary.get(str(record.source_page))
+                    if legacy is not None:
+                        legacy_attempts = int(legacy.get("attempts") or 0)
+                        runtime_state = public_page_state(record)
+                        runtime_state.pop("status", None)
+                        runtime_state["attempts"] = max(
+                            legacy_attempts, int(runtime_state.get("attempts") or 0)
+                        )
+                        legacy.update(runtime_state)
+                        # Keep the old lower-case state for legacy consumers,
+                        # while exposing the v2 state as final_status.
+                        legacy["final_status"] = record.status.value
+                available = available_ocr_artifacts(v2_store, v2_snapshot.run_id)
+                artifact_urls = {}
+                for public_name, role in {
+                    "source_pdf": "source",
+                    "source_images_manifest": "source-images-manifest",
+                    "derived_visual_source_pdf": "visual-source",
+                    "raw_ocr_tex": "raw-ocr",
+                    "baseline_tex": "baseline-tex",
+                    "baseline_pdf": "baseline-pdf",
+                    "compile_log": "compile-log",
+                    "run_snapshot": "snapshot",
+                }.items():
+                    evidence = available.get(role) or {}
+                    artifact_urls[public_name] = {
+                        "available": bool(evidence),
+                        "download_url": f"/api/ocr/jobs/{job['id']}/artifacts/{role}",
+                        **deepcopy(evidence),
+                    }
+                artifact_urls["baseline_pdf"]["preview_status"] = str(
+                    job.get("compile_status") or ""
+                )
+                public["artifacts"] = artifact_urls
+            except Exception:  # noqa: BLE001 - polling must survive a corrupt run
+                public["persistence_error"] = "OCR 持久化记录需要恢复；已保留内存结果"
+        public["quality_report"] = assess_ocr_quality(
+            _snapshot_ocr_bundle_job(job, v2_records=v2_records)
+        )
         return public
 
 
@@ -371,7 +500,9 @@ def _raster_extension(data: bytes) -> str:
 def _job_page_raster(job: dict, page_no: int) -> tuple[bytes, str] | None:
     pages = job.get("pages") or {}
     page = pages.get(page_no) or pages.get(str(page_no)) or {}
-    page_path = Path(str(page.get("png") or ""))
+    page_path = Path(str(
+        page.get("persisted_visual_path") or page.get("png") or ""
+    ))
     try:
         data = page_path.read_bytes()
     except OSError:
@@ -964,7 +1095,12 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
         result["source_pages"] = previews
         result["total_bytes"] = formula_bytes + _used
         return result
-    target = Path(str(job.get("target") or ""))
+    source_type = str(job.get("source_type") or "")
+    target = Path(str((
+        job.get("visual_target")
+        if source_type == "images"
+        else job.get("target")
+    ) or ""))
     if not target.is_file():
         result["errors"].append(
             "原始上传文件已不可用；源页预览仅供审阅，不会冒充插图"
@@ -999,7 +1135,7 @@ def _preserve_ocr_resources(job: dict, raw_tex: str, project_dir: Path) -> dict:
                 finally:
                     if image_document is not None:
                         image_document.close()
-    elif target.is_file() and job.get("source_type") == "pdf":
+    elif target.is_file() and source_type in {"pdf", "images"}:
         document = None
         try:
             import fitz
@@ -1351,6 +1487,10 @@ def _ocr_bundle_bytes(job: dict, raw_tex: str) -> tuple[bytes, dict]:
             "usage_revision": int(verified_job.get("usage_revision") or 0),
             "page_revision": int(verified_job.get("page_revision") or 0),
             "pages": _ocr_manifest_page_records(verified_job),
+            "run_snapshot": deepcopy(verified_job.get("ocr_run_snapshot") or {}),
+            "performance_metrics": deepcopy(
+                verified_job.get("performance_metrics") or {}
+            ),
             "resources": resources,
             "evidence_errors": list(verified_job.get("evidence_errors") or []),
             "processing": {
@@ -1360,6 +1500,22 @@ def _ocr_bundle_bytes(job: dict, raw_tex: str) -> tuple[bytes, dict]:
                 "model": str(verified_job.get("model") or ""),
                 "reasoning_effort": str(verified_job.get("reasoning_effort") or ""),
                 "dpi": int(verified_job.get("dpi") or 0),
+                "quality_tier": str(
+                    (verified_job.get("ocr_run_snapshot") or {}).get("quality_tier")
+                    or verified_job.get("quality_tier")
+                    or ""
+                ),
+                "batch_size": int(
+                    (verified_job.get("ocr_run_snapshot") or {}).get("batch_size") or 0
+                ),
+                "concurrency_limit": int(
+                    (verified_job.get("ocr_run_snapshot") or {}).get(
+                        "concurrency_limit"
+                    ) or 0
+                ),
+                "max_retries": int(
+                    (verified_job.get("ocr_run_snapshot") or {}).get("max_retries") or 0
+                ),
                 "target_template": str(
                     verified_job.get("output_template") or "faithfulbook"
                 ),
@@ -1785,6 +1941,34 @@ def _ocr_manifest_page_records(job: dict) -> list[dict]:
         visual_sha256 = str(page.get("visual_input_sha256") or "").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", visual_sha256):
             visual_sha256 = ""
+        telemetry = {
+            "page_id": str(page.get("page_id") or "")[:80],
+            "status": str(
+                page.get("v2_status") or page.get("status") or "pending"
+            )[:40],
+            "task_index": max(0, int(page.get("task_index") or 0)),
+            "dpi": max(0, int(page.get("dpi") or 0)),
+            "model": str(page.get("model") or "")[:160],
+            "call_index": max(0, int(page.get("call_index") or 0)),
+            "batch_call": bool(page.get("batch_call")),
+            "batch_id": str(page.get("batch_id") or "")[:80],
+            "started_at": str(page.get("started_at") or "")[:80],
+            "ended_at": str(page.get("ended_at") or "")[:80],
+            "elapsed_seconds": page.get("elapsed_seconds"),
+            "retry_count": max(0, int(page.get("retry_count") or 0)),
+            "raw_response_sha256": str(
+                page.get("raw_response_sha256") or ""
+            )[:64],
+            "tex_sha256": str(page.get("tex_sha256") or "")[:64],
+            "usage": deepcopy(page.get("usage_v2") or {}),
+            "quality_issues": deepcopy(page.get("quality_issues_v2") or [])[:32],
+            "unresolved_regions": deepcopy(
+                page.get("unresolved_regions_v2") or []
+            )[:32],
+            "terminal_error": str(page.get("terminal_error") or "")[:500],
+        }
+        if not isinstance(telemetry["elapsed_seconds"], (int, float)):
+            telemetry["elapsed_seconds"] = None
         records.append({
             "source_page": page_no,
             "status": str(page.get("status") or "pending"),
@@ -1811,13 +1995,18 @@ def _ocr_manifest_page_records(job: dict) -> list[dict]:
                 page.get("needs_review")
                 or any(flag.get("needs_review") for flag in quality_flags)
             ),
+            "telemetry": telemetry,
         })
     return records
 
 
-def _snapshot_ocr_bundle_job(job: dict) -> dict:
+def _snapshot_ocr_bundle_job(
+    job: dict,
+    *,
+    v2_records: list[OcrPageRecord] | None = None,
+) -> dict:
     """Copy only immutable/bundle-relevant OCR fields while holding the job lock."""
-    return {
+    snapshot = {
         "source_type": str(job.get("source_type") or ""),
         # The original document total is distinct from selected_pages.  This
         # field was accidentally omitted before v1.2.9, causing every imported
@@ -1829,7 +2018,10 @@ def _snapshot_ocr_bundle_job(job: dict) -> dict:
         "source_total": deepcopy(job.get("source_total")),
         "source_outline": deepcopy(job.get("source_outline") or []),
         "_source_sha256": str(job.get("_source_sha256") or ""),
+        "_visual_source_sha256": str(job.get("_visual_source_sha256") or ""),
+        "source_images": deepcopy(job.get("source_images") or []),
         "target": str(job.get("target") or ""),
+        "visual_target": str(job.get("visual_target") or ""),
         "status": str(job.get("status") or ""),
         "quality_profile": str(job.get("quality_profile") or "standard"),
         "backend": str(job.get("backend") or "unknown"),
@@ -1851,10 +2043,13 @@ def _snapshot_ocr_bundle_job(job: dict) -> dict:
         "page_revision": int(job.get("page_revision") or 0),
         "pages": {
             page_no: {
-                "png": str(page.get("png") or ""),
+                "png": str(
+                    page.get("persisted_visual_path") or page.get("png") or ""
+                ),
                 "figures": deepcopy(page.get("figures") or []),
                 "image_size_pixels": list(page.get("image_size_pixels") or []),
                 "visual_input_sha256": str(page.get("visual_input_sha256") or ""),
+                "visual_input_persisted": page.get("visual_input_persisted"),
                 # Private import snapshot retains crop_path long enough to copy
                 # exact bytes into the project.  Public manifests still pass
                 # through _bounded_formula_evidence and never expose that path.
@@ -1878,6 +2073,67 @@ def _snapshot_ocr_bundle_job(job: dict) -> dict:
             for page_no, page in (job.get("pages") or {}).items()
         },
     }
+    runtime_snapshot = job.get("_v2_snapshot")
+    if runtime_snapshot is not None:
+        runtime_source_hash = str(runtime_snapshot.source_sha256 or "").lower()
+        if re.fullmatch(r"[0-9a-f]{64}", runtime_source_hash):
+            snapshot["_source_sha256"] = runtime_source_hash
+    if v2_records is None:
+        runtime_store = job.get("_v2_store")
+        if isinstance(runtime_store, OcrRunStore) and runtime_snapshot is not None:
+            try:
+                v2_records = runtime_store.list_records(runtime_snapshot.run_id)
+            except (OcrStoreError, OSError, ValueError):
+                v2_records = []
+    for record in v2_records or []:
+        page = snapshot["pages"].get(
+            record.source_page,
+            snapshot["pages"].get(str(record.source_page)),
+        )
+        if not isinstance(page, dict):
+            continue
+        page["attempts"] = max(
+            int(page.get("attempts") or 0),
+            int(record.call_index or 0),
+        )
+        if len(record.image_size_pixels) == 2:
+            page["image_size_pixels"] = list(record.image_size_pixels)
+        if re.fullmatch(r"[0-9a-f]{64}", str(record.image_sha256 or "")):
+            page["visual_input_sha256"] = record.image_sha256
+        page.update({
+            "page_id": record.page_id,
+            "v2_status": record.status.value,
+            "task_index": record.task_index,
+            "dpi": record.dpi,
+            "model": record.model,
+            "call_index": record.call_index,
+            "batch_call": record.batch_call,
+            "batch_id": record.batch_id,
+            "raw_response_sha256": record.raw_response_sha256,
+            "tex_sha256": record.tex_sha256,
+            "started_at": record.started_at,
+            "ended_at": record.ended_at,
+            "elapsed_seconds": record.elapsed_seconds,
+            "retry_count": record.retry_count,
+            "quality_issues_v2": thaw_json(record.quality_issues),
+            "unresolved_regions_v2": thaw_json(record.unresolved_regions),
+            "usage_v2": thaw_json(record.usage),
+            "terminal_error": record.error_reason,
+        })
+    if runtime_snapshot is not None:
+        snapshot["ocr_run_snapshot"] = runtime_snapshot.to_dict()
+        if v2_records is not None:
+            snapshot["performance_metrics"] = ocr_progress_metrics(
+                runtime_snapshot,
+                v2_records,
+                terminal_epoch=job.get("terminal_epoch"),
+                merge_complete=bool(job.get("raw_ready")),
+                raw_frozen=bool(job.get("raw_frozen")),
+                compile_status=job.get("compile_status") or None,
+                rate_limited=bool(job.get("rate_limited")),
+                concurrency_limit=int(job.get("current_concurrency_limit") or 0) or None,
+            )
+    return snapshot
 
 
 def _verified_ocr_bundle_snapshot(job: dict) -> dict:
@@ -1936,7 +2192,10 @@ def _verified_ocr_bundle_snapshot(job: dict) -> dict:
                 raise ValueError("page image dimensions changed")
         except (OSError, TypeError, ValueError):
             page["visual_input_sha256"] = ""
+            page["visual_input_persisted"] = False
             evidence_errors.append(f"第 {page_no} 页视觉输入已丢失或被改变")
+        else:
+            page["visual_input_persisted"] = True
     snapshot["evidence_errors"] = evidence_errors[:100]
     return snapshot
 
@@ -1960,6 +2219,9 @@ def _preserve_original_ocr_source(job: dict, project_dir: Path) -> dict:
     ):
         raise RuntimeError("原始 OCR 文件缺少启动时冻结的哈希，不能建立出版审校证据")
     source_type = str(job.get("source_type") or "")
+    source_images: list[dict] = []
+    visual_source_record: dict | None = None
+    visual_data = b""
     if source_type == "pdf":
         if not data.startswith(b"%PDF-"):
             raise RuntimeError("原始 OCR PDF 内容已损坏")
@@ -1988,6 +2250,51 @@ def _preserve_original_ocr_source(job: dict, project_dir: Path) -> dict:
             raise RuntimeError("原始 OCR 图片缺少有效的冻结页数") from None
         if frozen_total != 1:
             raise RuntimeError("原始 OCR 图片冻结页数无效")
+    elif source_type == "images":
+        visual_path = Path(str(job.get("visual_target") or ""))
+        if visual_path.is_symlink() or not visual_path.is_file():
+            raise RuntimeError("多图片 OCR 的派生视觉 PDF 已不可用")
+        visual_data = visual_path.read_bytes()
+        expected_visual_hash = str(job.get("_visual_source_sha256") or "").lower()
+        if (
+            not visual_data.startswith(b"%PDF-")
+            or re.fullmatch(r"[0-9a-f]{64}", expected_visual_hash) is None
+            or not hmac.compare_digest(
+                expected_visual_hash, hashlib.sha256(visual_data).hexdigest()
+            )
+        ):
+            raise RuntimeError("多图片 OCR 的派生视觉 PDF 哈希校验失败")
+        try:
+            manifest = verify_multi_image_source(
+                data,
+                expected_images=job.get("source_images") or (),
+                expected_visual_sha256=expected_visual_hash,
+            )
+            from ..ocr import pdf_page_count_bytes
+
+            visual_pages = pdf_page_count_bytes(visual_data)
+        except Exception as exc:
+            raise RuntimeError("多图片 OCR 原始字节、顺序或派生关系校验失败") from exc
+        source_images = [dict(item) for item in manifest.get("images") or ()]
+        source_pages = len(source_images)
+        frozen_total = job.get("source_total")
+        try:
+            frozen_total = _strict_page_number(frozen_total)
+        except ValueError:
+            raise RuntimeError("多图片 OCR 缺少有效的冻结总页数") from None
+        if frozen_total != source_pages or visual_pages != source_pages:
+            raise RuntimeError("多图片 OCR 页数与不可变来源清单不一致")
+        extension = ".zip"
+        visual_source_record = {
+            "available": True,
+            "path": "ocr-visual-source.pdf",
+            "bytes": len(visual_data),
+            "sha256": expected_visual_hash,
+            "page_count": visual_pages,
+            "is_original_upload": False,
+            "derivation_id": MULTI_IMAGE_DERIVATION_ID,
+            "derived_from_source_sha256": actual_hash,
+        }
     else:
         raise RuntimeError("原始 OCR 文件类型未知")
     frozen_start = job.get("selected_start")
@@ -2018,6 +2325,18 @@ def _preserve_original_ocr_source(job: dict, project_dir: Path) -> dict:
     destination = (project_dir / f"ocr-source{extension}").resolve()
     destination.relative_to(project_dir.resolve())
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    visual_destination = (
+        (project_dir / "ocr-visual-source.pdf").resolve()
+        if visual_source_record is not None
+        else None
+    )
+    visual_temporary = (
+        visual_destination.with_name(
+            f".{visual_destination.name}.{uuid.uuid4().hex}.tmp"
+        )
+        if visual_destination is not None
+        else None
+    )
     committed = False
     try:
         with open(temporary, "xb") as stream:
@@ -2028,13 +2347,26 @@ def _preserve_original_ocr_source(job: dict, project_dir: Path) -> dict:
         stored = destination.read_bytes()
         if stored != data:
             raise RuntimeError("原始 OCR 文件落盘校验失败")
+        if visual_destination is not None and visual_temporary is not None:
+            visual_destination.relative_to(project_dir.resolve())
+            with open(visual_temporary, "xb") as stream:
+                stream.write(visual_data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(visual_temporary, visual_destination)
+            if visual_destination.read_bytes() != visual_data:
+                raise RuntimeError("多图片 OCR 派生视觉 PDF 落盘校验失败")
         committed = True
     finally:
         if temporary.exists():
             temporary.unlink()
+        if visual_temporary is not None and visual_temporary.exists():
+            visual_temporary.unlink()
         if not committed and destination.exists():
             destination.unlink()
-    return {
+        if not committed and visual_destination is not None and visual_destination.exists():
+            visual_destination.unlink()
+    result = {
         "available": True,
         "path": destination.name,
         "bytes": len(data),
@@ -2048,6 +2380,11 @@ def _preserve_original_ocr_source(job: dict, project_dir: Path) -> dict:
         "immutable_evidence": has_frozen_hash,
         "reason": "" if has_frozen_hash else "legacy_job_without_frozen_hash",
     }
+    if source_images:
+        result["source_images"] = source_images
+    if visual_source_record is not None:
+        result["visual_source"] = visual_source_record
+    return result
 
 
 def _verified_ocr_source_bytes(
@@ -2101,6 +2438,49 @@ def _verified_ocr_source_bytes(
             Path(rel).suffix
         ) != detected:
             raise ValueError("OCR 原始图片格式校验失败")
+    elif source_type == "images":
+        if not rel.lower().endswith(".zip"):
+            raise ValueError("OCR 多图片原始来源必须是清单化 ZIP")
+        visual = source_info.get("visual_source")
+        if not isinstance(visual, dict) or visual.get("is_original_upload") is not False:
+            raise ValueError("OCR 多图片派生视觉来源记录缺失")
+        visual_rel = safe_project_relpath(str(visual.get("path") or ""))
+        visual_path = (root / Path(visual_rel)).resolve()
+        try:
+            visual_path.relative_to(root)
+            visual_data = visual_path.read_bytes()
+        except (OSError, ValueError):
+            raise ValueError("OCR 多图片派生视觉 PDF 丢失") from None
+        visual_sha = str(visual.get("sha256") or "").lower()
+        if (
+            visual_path.is_symlink()
+            or not visual_data.startswith(b"%PDF-")
+            or visual.get("bytes") != len(visual_data)
+            or re.fullmatch(r"[0-9a-f]{64}", visual_sha) is None
+            or not hmac.compare_digest(
+                visual_sha, hashlib.sha256(visual_data).hexdigest()
+            )
+            or str(visual.get("derived_from_source_sha256") or "") != expected_hash
+            or visual.get("is_original_upload") is not False
+        ):
+            raise ValueError("OCR 多图片派生视觉 PDF 校验失败")
+        try:
+            manifest = verify_multi_image_source(
+                data,
+                expected_images=source_info.get("source_images") or (),
+                expected_visual_sha256=visual_sha,
+            )
+            from ..ocr import pdf_page_count_bytes
+
+            visual_pages = pdf_page_count_bytes(visual_data)
+        except Exception as exc:
+            raise ValueError("OCR 多图片来源清单或派生关系校验失败") from exc
+        if (
+            source_info.get("source_pages") != len(manifest.get("images") or ())
+            or visual.get("page_count") != visual_pages
+            or visual_pages != source_info.get("source_pages")
+        ):
+            raise ValueError("OCR 多图片来源页数校验失败")
     else:
         raise ValueError("OCR 原始来源类型无效")
     public_record = {
@@ -2119,6 +2499,8 @@ def _verified_ocr_source_bytes(
             "selected_end",
             "immutable_evidence",
             "reason",
+            "source_images",
+            "visual_source",
         )
         if key in source_info
     }
@@ -2329,6 +2711,54 @@ def _quality_loop_inputs(
         raise ValueError("PDF 视觉校验器不可用，已阻止 OCR 质量闭环") from None
 
     source_type = str(source_record.get("source_type") or "")
+    if source_type == "images":
+        from ..core.project import safe_project_relpath
+        from ..ocr import pdf_page_count_bytes
+
+        visual = source_record.get("visual_source")
+        if not isinstance(visual, dict):
+            raise ValueError("OCR 多图片派生视觉证据缺失，已阻止质量闭环")
+        visual_rel = safe_project_relpath(str(visual.get("path") or ""))
+        visual_path = (project_dir.resolve() / Path(visual_rel)).resolve()
+        try:
+            visual_path.relative_to(project_dir.resolve())
+            visual_bytes = visual_path.read_bytes()
+        except (OSError, ValueError):
+            raise ValueError("OCR 多图片派生视觉 PDF 丢失，已阻止质量闭环") from None
+        expected_visual_sha = str(visual.get("sha256") or "").lower()
+        if (
+            visual_path.is_symlink()
+            or not visual_bytes.startswith(b"%PDF-")
+            or visual.get("bytes") != len(visual_bytes)
+            or not hmac.compare_digest(
+                expected_visual_sha, hashlib.sha256(visual_bytes).hexdigest()
+            )
+            or pdf_page_count_bytes(visual_bytes) != source_record.get("source_pages")
+        ):
+            raise ValueError("OCR 多图片派生视觉 PDF 校验失败，已阻止质量闭环")
+        selected_start = _strict_page_number(source_record.get("selected_start"))
+        selected_end = _strict_page_number(source_record.get("selected_end"))
+        if selected_start > selected_end or selected_end > source_record.get("source_pages"):
+            raise ValueError("OCR 多图片页范围无效，已阻止质量闭环")
+        record_provenance(visual_bytes, derived=True)
+        if provenance_out is not None:
+            provenance_out.update({
+                "derivation_id": str(visual.get("derivation_id") or ""),
+                "original_image_count": len(source_record.get("source_images") or ()),
+                "source_images": [
+                    {
+                        "order": row.get("order"),
+                        "original_filename": row.get("original_filename"),
+                        "bytes": row.get("bytes"),
+                        "sha256": row.get("sha256"),
+                    }
+                    for row in (source_record.get("source_images") or ())
+                ],
+                "derived_from_source_sha256": str(
+                    visual.get("derived_from_source_sha256") or ""
+                ),
+            })
+        return quality_loop, visual_bytes, (selected_start, selected_end)
     if source_type != "pdf":
         # A one-page image remains the immutable visual source.  Wrap its exact
         # bytes in an in-memory one-page PDF so the core can use one page-pair
@@ -2624,7 +3054,7 @@ MAX_FOLDER_FILES = 1000
 MAX_FOLDER_FILE_BYTES = 25 * 1024 * 1024
 MAX_FOLDER_TOTAL_BYTES = 100 * 1024 * 1024
 MAX_OCR_UPLOAD_BYTES = 100 * 1024 * 1024
-MAX_OCR_PAGES_PER_JOB = 500
+MAX_OCR_PAGES_PER_JOB = 2000
 OCR_JOB_TTL_SECONDS = 24 * 60 * 60
 MAX_ZIP_COMPRESSION_RATIO = 200
 
@@ -3703,6 +4133,8 @@ def create_app(updated_from: str = "") -> FastAPI:
             "last-failure-report.md",
             "last-failure.json",
             "ocr-source.pdf",
+            "ocr-source.zip",
+            "ocr-visual-source.pdf",
             "original-files.zip",
         )
         rows = []
@@ -3843,29 +4275,81 @@ def create_app(updated_from: str = "") -> FastAPI:
                 ocr_source = None
             if ocr_source is not None:
                 source_rel, source_payload, source_record = ocr_source
-                source_is_pdf = source_record.get("source_type") == "pdf"
-                source_artifact = add_artifact(
-                    (
-                        ArtifactRole.SOURCE_PDF
-                        if source_is_pdf
-                        else ArtifactRole.SOURCE_IMAGE
-                    ),
-                    source_payload,
-                    media_type=(
-                        "application/pdf"
-                        if source_is_pdf
-                        else (
-                            "image/png"
-                            if source_payload.startswith(b"\x89PNG")
-                            else "image/jpeg"
-                        )
-                    ),
-                    filename=None if source_is_pdf else source_rel,
-                    metadata={
-                        key: value for key, value in source_record.items()
-                        if key != "path"
-                    },
-                )
+                source_type = str(source_record.get("source_type") or "")
+                if source_type == "images":
+                    visual = source_record.get("visual_source") or {}
+                    manifest_view = {
+                        "images": source_record.get("source_images") or [],
+                        "derived_visual_source": {
+                            "sha256": visual.get("sha256"),
+                        },
+                    }
+                    originals = extract_multi_image_bytes(source_payload, manifest_view)
+                    original_artifacts = []
+                    for row, payload in originals:
+                        original_artifacts.append(add_artifact(
+                            ArtifactRole.SOURCE_IMAGE,
+                            payload,
+                            media_type=str(row.get("media_type") or "application/octet-stream"),
+                            index=int(row.get("order") or 0),
+                            filename=str(row.get("original_filename") or ""),
+                            metadata={
+                                "order": row.get("order"),
+                                "original_filename": row.get("original_filename"),
+                                "source_bytes_sha256": row.get("sha256"),
+                                "canonical_input": True,
+                            },
+                        ))
+                    add_artifact(
+                        ArtifactRole.PROJECT_FILE,
+                        source_payload,
+                        filename=source_rel,
+                        media_type="application/zip",
+                        metadata={
+                            "kind": "CANONICAL_MULTI_IMAGE_SOURCE_BUNDLE",
+                            "contains_original_bytes": True,
+                            "image_count": len(original_artifacts),
+                        },
+                    )
+                    visual_path = directory / Path(str(visual.get("path") or ""))
+                    visual_payload = visual_path.read_bytes()
+                    source_artifact = add_artifact(
+                        ArtifactRole.SOURCE_PDF,
+                        visual_payload,
+                        parents=tuple(original_artifacts),
+                        media_type="application/pdf",
+                        filename=visual_path.name,
+                        metadata={
+                            **{key: value for key, value in visual.items() if key != "path"},
+                            "source_type": "images",
+                            "derived_visual_source": True,
+                            "is_original_upload": False,
+                        },
+                    )
+                else:
+                    source_is_pdf = source_type == "pdf"
+                    source_artifact = add_artifact(
+                        (
+                            ArtifactRole.SOURCE_PDF
+                            if source_is_pdf
+                            else ArtifactRole.SOURCE_IMAGE
+                        ),
+                        source_payload,
+                        media_type=(
+                            "application/pdf"
+                            if source_is_pdf
+                            else (
+                                "image/png"
+                                if source_payload.startswith(b"\x89PNG")
+                                else "image/jpeg"
+                            )
+                        ),
+                        filename=None if source_is_pdf else source_rel,
+                        metadata={
+                            key: value for key, value in source_record.items()
+                            if key != "path"
+                        },
+                    )
             raw_artifact = add_artifact(
                 ArtifactRole.RAW_OCR_TEX,
                 source_bytes,
@@ -4927,6 +5411,330 @@ def create_app(updated_from: str = "") -> FastAPI:
         # processing task.
         return _project_audit_store(pid).persist_terminal_snapshot(snapshot)
 
+    def _freeze_analysis_run_archive(
+        pid: str,
+        run_id: str,
+        terminal_status: TerminalStatus,
+        snapshot: RunSnapshot,
+        capture: dict,
+    ) -> dict:
+        """Run the host-owned v2 evidence gate and freeze its immutable archive.
+
+        Existing pipeline compile/visual/decision evidence is reused without a
+        new model call.  The v2 runtime owns candidates, rollback and terminal
+        status; legacy ``safe_to_export`` remains non-authoritative.
+        """
+
+        def artifact_for(*roles: str):
+            wanted = set(roles)
+            return next(
+                (
+                    artifact
+                    for artifact in reversed(snapshot.artifacts)
+                    if artifact.artifact_role in wanted
+                ),
+                None,
+            )
+
+        def artifact_text(*roles: str) -> str:
+            artifact = artifact_for(*roles)
+            if artifact is None:
+                return ""
+            try:
+                return artifact.data.decode("utf-8")
+            except UnicodeDecodeError:
+                return ""
+
+        def compiled_pdf_for(role: str) -> bytes:
+            artifact = artifact_for(role)
+            if (
+                artifact is None
+                or artifact.media_type != "application/pdf"
+                or artifact.preview_status not in {"COMPILED", "PARTIAL_COMPILED"}
+                or not artifact.data.startswith(b"%PDF-")
+            ):
+                return b""
+            return bytes(artifact.data)
+
+        verification = thaw_json(snapshot.machine_verification)
+        if not isinstance(verification, dict):
+            verification = {}
+        pipeline_result = capture.get("pipeline_result")
+        is_ocr = str(snapshot.metadata.get("project_kind") or "") == "ocr"
+
+        source_pdf_artifact = artifact_for(ArtifactRole.SOURCE_PDF)
+        source_pdf = bytes(source_pdf_artifact.data) if source_pdf_artifact else b""
+        source_tex = artifact_text(ArtifactRole.SOURCE_TEX)
+        raw_ocr_tex = artifact_text(ArtifactRole.RAW_OCR_TEX) if is_ocr else ""
+        original_text = str(
+            getattr(pipeline_result, "original", "") or raw_ocr_tex or source_tex
+        )
+        if not source_tex and not is_ocr:
+            source_tex = original_text or artifact_text(ArtifactRole.STAGE_SOURCE_TEX)
+
+        baseline_tex = str(
+            getattr(pipeline_result, "raw_compiled_tex", "") or original_text
+        )
+        baseline_pdf = compiled_pdf_for(ArtifactRole.RAW_OCR_PREVIEW)
+        compile_before = verification.get("compile_before")
+        compile_before = compile_before if isinstance(compile_before, dict) else {}
+        compile_after = verification.get("compile_after")
+        compile_after = compile_after if isinstance(compile_after, dict) else {}
+
+        pipeline_ok = bool(
+            pipeline_result is not None and getattr(pipeline_result, "ok", False)
+        )
+        if pipeline_result is not None and not pipeline_ok:
+            # A blocked run still has a useful *attempted* candidate when the
+            # captured CURRENT_TEX and CURRENT_PREVIEW are hash-bound to the
+            # exact compile evidence.  Preserve it in the immutable candidate
+            # history so the v2 quality runtime can compare it with baseline
+            # and continue from history-best.  It remains UNVERIFIED and never
+            # replaces the ordinary project result merely because it compiled.
+            attempted_tex = artifact_text(ArtifactRole.CURRENT_TEX)
+            attempted_pdf = compiled_pdf_for(ArtifactRole.CURRENT_PREVIEW)
+            preview_evidence = verification.get("preview_artifact")
+            preview_evidence = (
+                preview_evidence if isinstance(preview_evidence, dict) else {}
+            )
+            attempted_tex_hash = sha256_bytes(attempted_tex.encode("utf-8"))
+            attempted_pdf_hash = sha256_bytes(attempted_pdf) if attempted_pdf else ""
+            attempted_exact = bool(
+                attempted_tex
+                and attempted_pdf
+                and preview_evidence.get("tex_sha256") == attempted_tex_hash
+                and preview_evidence.get("pdf_sha256") == attempted_pdf_hash
+            )
+            if attempted_exact:
+                current_tex = attempted_tex
+                current_pdf = attempted_pdf
+                current_compile_log = str(compile_after.get("log") or "")
+            else:
+                current_tex = str(
+                    getattr(pipeline_result, "result", "") or original_text
+                )
+                raw_compiled_tex = str(
+                    getattr(pipeline_result, "raw_compiled_tex", "") or ""
+                )
+                current_pdf = (
+                    baseline_pdf
+                    if raw_compiled_tex and raw_compiled_tex == current_tex
+                    else b""
+                )
+                current_compile_log = str(
+                    compile_before.get("log") or "" if current_pdf else ""
+                )
+        else:
+            current_tex = artifact_text(ArtifactRole.CURRENT_TEX) or str(
+                getattr(pipeline_result, "result", "") or original_text
+            )
+            current_pdf = compiled_pdf_for(ArtifactRole.CURRENT_PREVIEW)
+            current_compile_log = str(compile_after.get("log") or "")
+
+        source_info = snapshot.source_pdf
+        if source_info is not None and source_info.page_count:
+            page_count = int(source_info.page_count)
+            selected_pages = tuple(source_info.selected_page_range.pages)
+            page_range = selected_pages or tuple(range(1, page_count + 1))
+        else:
+            page_count = 1
+            page_range = (1,)
+
+        decision_items = [
+            dict(item)
+            for item in (getattr(pipeline_result, "decision_items", ()) or ())
+            if isinstance(item, dict)
+        ]
+        # Page markers are immutable OCR output, so binding a decision line to
+        # the most recent marker is a deterministic host operation, not an LLM
+        # guess.  Single-page TEX inputs have the same unambiguous binding.
+        marker_by_line: dict[int, int] = {}
+        active_page = page_range[0] if len(page_range) == 1 else 0
+        for line_number, line in enumerate(current_tex.splitlines(), 1):
+            marker = re.match(r"^\s*%+\s*Page\s+(\d+)\b", line, re.IGNORECASE)
+            if marker:
+                active_page = int(marker.group(1))
+            if active_page in page_range:
+                marker_by_line[line_number] = active_page
+        for item in decision_items:
+            if any(
+                item.get(key) not in {None, ""}
+                for key in ("source_page_id", "source_page_number", "page_number", "pdf_page")
+            ):
+                continue
+            try:
+                line_number = int(item.get("line") or 0)
+            except (TypeError, ValueError):
+                line_number = 0
+            bound_page = marker_by_line.get(line_number)
+            if bound_page:
+                item["source_page_number"] = bound_page
+
+        provenance = snapshot.provenance.to_dict()
+        model_rows = provenance.get("models") or {}
+        role_names = {
+            "ocr": ("OCR", ("vision", "transcription")),
+            "decision": ("STRUCTURE_ANALYSIS", ("text", "structure")),
+            "review": ("INDEPENDENT_REVIEW", ("text", "review")),
+        }
+        models = []
+        for name, (role, capabilities) in role_names.items():
+            record = model_rows.get(name)
+            if not isinstance(record, dict):
+                continue
+            model_id = str(record.get("model") or "").strip()
+            if model_id:
+                models.append(ModelBinding(role, model_id, capabilities))
+        if not models:
+            models = [ModelBinding(
+                "HOST_PIPELINE",
+                str(snapshot.model or "unrecorded-model"),
+                ("artifact-freeze",),
+            )]
+
+        prompt_rows = provenance.get("prompts") or {}
+        prompt_version = next(
+            (
+                str(prompt_rows.get(name))
+                for name in (
+                    "review_prompt_version",
+                    "decision_prompt_version",
+                    "ocr_prompt_version",
+                )
+                if prompt_rows.get(name)
+            ),
+            "not-recorded",
+        )
+        elapsed = max(
+            0.0,
+            float(capture.get("finished") or time.time())
+            - float(capture.get("started") or capture.get("created") or time.time()),
+        )
+        v2_evidence = verification.get("v2_verification_evidence")
+        if not isinstance(v2_evidence, dict):
+            v2_evidence = None
+        rollback_history = []
+        if verification.get("rolled_back") is True:
+            rollback_history.append({
+                "reason": "pipeline machine gates retained the prior/source best",
+                "host_recorded": True,
+            })
+
+        try:
+            archived = freeze_pipeline_analysis_run(
+                project_dir=get_store()._dir(pid),
+                run_id=run_id,
+                project_id=pid,
+                artifacts=AnalysisRunArtifacts(
+                    source_pdf=source_pdf,
+                    source_tex=source_tex,
+                    raw_ocr_tex=raw_ocr_tex,
+                    baseline_tex=baseline_tex,
+                    baseline_pdf=baseline_pdf,
+                    baseline_compile_log=str(compile_before.get("log") or ""),
+                    current_tex=current_tex,
+                    current_pdf=current_pdf,
+                    current_compile_log=current_compile_log,
+                    verification=verification,
+                    decision_items=tuple(decision_items),
+                    report_md=artifact_text(ArtifactRole.REPORT),
+                    rollback_history=tuple(rollback_history),
+                ),
+                page_range=page_range,
+                page_count=page_count,
+                models=tuple(models),
+                application_version=str(snapshot.app_version or "unknown"),
+                verification_evidence=v2_evidence,
+                processing_failed=terminal_status in {
+                    TerminalStatus.FAILED,
+                    TerminalStatus.CANCELLED,
+                },
+                prompt_version=prompt_version,
+                started_at=str(
+                    (provenance.get("runtime") or {}).get("started_at")
+                    or snapshot.captured_at
+                ),
+                performance_metrics={
+                    "available": True,
+                    "elapsed_seconds": elapsed,
+                    "source": "host pipeline timestamps",
+                },
+                config={
+                    "workflow": snapshot.workflow.value,
+                    "terminal_status": terminal_status.value,
+                    "template": snapshot.template,
+                    "page_range": snapshot.page_range,
+                    "audit_snapshot_id": snapshot.snapshot_id,
+                },
+            )
+            quality_path = archived.run_directory / "audit" / "quality_vector.json"
+            quality = json.loads(quality_path.read_text(encoding="utf-8"))
+            relative_path = PurePosixPath("analysis-runs", run_id).as_posix()
+            failures = list(archived.failures)
+            return {
+                "archive_status": "READY",
+                "run_id": run_id,
+                "final_status": archived.status.value,
+                "verified": archived.verified,
+                "relative_path": relative_path,
+                "snapshot_sha256": archived.snapshot_sha256,
+                "artifact_count": archived.artifact_count,
+                "failures": failures,
+                "quality": {
+                    "evidence_complete": bool(quality.get("evidence_complete")),
+                    "unknown_fields": list(quality.get("unknown_fields") or ()),
+                    "vector": quality.get("vector") or {},
+                    "priority_key": list(quality.get("priority_key") or ()),
+                },
+                "quality_runtime": {
+                    "executed": archived.runtime_executed,
+                    "best_candidate_id": archived.best_candidate_id,
+                    "candidate_count": archived.candidate_count,
+                    "rollback_count": archived.rollback_count,
+                },
+                "verification": {
+                    "status": "VERIFIED" if archived.verified else "UNVERIFIED",
+                    "verified": archived.verified,
+                    "failure_count": len(failures),
+                    "failures": failures,
+                    "evidence_source": archived.evidence_source,
+                    "review_pass_count": archived.review_pass_count,
+                },
+            }
+        except Exception as exc:
+            failure = "analysis_archive_freeze_failed"
+            return {
+                "archive_status": "FAILED",
+                "run_id": run_id,
+                "final_status": AnalysisFinalStatus.FAILED_BEST_RETAINED.value,
+                "verified": False,
+                "relative_path": None,
+                "snapshot_sha256": None,
+                "artifact_count": 0,
+                "failures": [failure],
+                "quality": {
+                    "evidence_complete": False,
+                    "unknown_fields": ["analysis_archive_unavailable"],
+                    "vector": {},
+                    "priority_key": [],
+                },
+                "quality_runtime": {
+                    "executed": False,
+                    "best_candidate_id": "",
+                    "candidate_count": 0,
+                    "rollback_count": 0,
+                },
+                "verification": {
+                    "status": "UNVERIFIED",
+                    "verified": False,
+                    "failure_count": 1,
+                    "failures": [failure],
+                    "evidence_source": "archive-failure",
+                    "review_pass_count": 0,
+                },
+                "error": sanitize_plain_text(_safe_task_error(exc)),
+            }
+
     def _current_record(pid: str) -> dict:
         """Return the newest hash-verified attempt, even when TEX validation failed."""
         _ensure(pid)
@@ -5127,6 +5935,27 @@ def create_app(updated_from: str = "") -> FastAPI:
                 raise HTTPException(409, f"OCR 原始来源路径与工程文件冲突：{source_rel}")
             zf.writestr(source_rel, source_bytes)
             existing.add(source_rel)
+            if source_record.get("source_type") == "images":
+                visual = source_record.get("visual_source") or {}
+                visual_rel = str(visual.get("path") or "")
+                visual_path = (project_dir / Path(visual_rel)).resolve()
+                try:
+                    visual_path.relative_to(project_dir)
+                    visual_bytes = visual_path.read_bytes()
+                except (OSError, ValueError):
+                    raise HTTPException(409, "OCR 多图片派生视觉 PDF 已丢失") from None
+                if (
+                    visual_rel in reserved
+                    or visual_rel in existing
+                    or not visual_bytes.startswith(b"%PDF-")
+                    or not hmac.compare_digest(
+                        str(visual.get("sha256") or "").lower(),
+                        hashlib.sha256(visual_bytes).hexdigest(),
+                    )
+                ):
+                    raise HTTPException(409, "OCR 多图片派生视觉 PDF 校验失败")
+                zf.writestr(visual_rel, visual_bytes)
+                existing.add(visual_rel)
         else:
             source_record = {
                 "available": False,
@@ -6592,6 +7421,9 @@ def create_app(updated_from: str = "") -> FastAPI:
                 snapshot = _build_project_run_snapshot(
                     pid, terminal, run_id, capture=audit_capture
                 )
+                result["analysis_archive"] = _freeze_analysis_run_archive(
+                    pid, run_id, terminal, snapshot, audit_capture
+                )
                 if progress_callback:
                     progress_callback(
                         "audit_submission",
@@ -6618,6 +7450,14 @@ def create_app(updated_from: str = "") -> FastAPI:
                     capture=audit_capture,
                     error=str(exc),
                 )
+                if audit_capture.get("pipeline_result") is not None:
+                    audit_capture["analysis_archive"] = _freeze_analysis_run_archive(
+                        pid,
+                        run_id,
+                        TerminalStatus.CANCELLED,
+                        snapshot,
+                        audit_capture,
+                    )
                 if progress_callback:
                     progress_callback(
                         "audit_submission",
@@ -6644,6 +7484,14 @@ def create_app(updated_from: str = "") -> FastAPI:
                     capture=audit_capture,
                     error=audit_capture["error"],
                 )
+                if audit_capture.get("pipeline_result") is not None:
+                    audit_capture["analysis_archive"] = _freeze_analysis_run_archive(
+                        pid,
+                        run_id,
+                        TerminalStatus.FAILED,
+                        snapshot,
+                        audit_capture,
+                    )
                 if progress_callback:
                     progress_callback(
                         "audit_submission",
@@ -7151,16 +7999,33 @@ def create_app(updated_from: str = "") -> FastAPI:
 
     # ---- OCR ----
 
-    async def _read_ocr_upload(file: UploadFile):
-        suffix = Path(file.filename or "scan.pdf").suffix.lower()
-        if suffix not in (".pdf", ".png", ".jpg", ".jpeg"):
+    async def _read_ocr_upload(files: list[UploadFile]):
+        uploads = list(files or ())
+        if not uploads:
+            raise HTTPException(400, "请选择 PDF 或图片")
+        if len(uploads) > MAX_OCR_PAGES_PER_JOB:
+            raise HTTPException(400, f"单次最多选择 {MAX_OCR_PAGES_PER_JOB} 张图片")
+        suffixes = [Path(item.filename or "").suffix.lower() for item in uploads]
+        if any(suffix not in (".pdf", ".png", ".jpg", ".jpeg") for suffix in suffixes):
             raise HTTPException(400, "仅支持 PDF/PNG/JPG")
-        upload = await file.read(MAX_OCR_UPLOAD_BYTES + 1)
-        if not upload:
-            raise HTTPException(400, "上传文件为空")
-        if len(upload) > MAX_OCR_UPLOAD_BYTES:
-            raise HTTPException(413, "OCR 文件超过 100 MB，请拆分后重试")
-        if suffix == ".pdf":
+        if len(uploads) > 1 and any(suffix == ".pdf" for suffix in suffixes):
+            raise HTTPException(400, "请选择一个 PDF，或按顺序选择多张 PNG/JPG；不能混合上传")
+
+        payloads: list[bytes] = []
+        total_bytes = 0
+        for item in uploads:
+            remaining = MAX_OCR_UPLOAD_BYTES - total_bytes
+            payload = await item.read(max(0, remaining) + 1)
+            if not payload:
+                raise HTTPException(400, f"图片 {Path(item.filename or '').name or len(payloads) + 1} 为空")
+            total_bytes += len(payload)
+            if total_bytes > MAX_OCR_UPLOAD_BYTES:
+                raise HTTPException(413, "OCR 文件合计超过 100 MB，请拆分后重试")
+            payloads.append(payload)
+
+        suffix = suffixes[0]
+        upload = payloads[0]
+        if len(uploads) == 1 and suffix == ".pdf":
             if not upload.startswith(b"%PDF-"):
                 raise HTTPException(400, "文件扩展名是 PDF，但内容不是有效 PDF")
             from ..core.ai import LLMError
@@ -7174,7 +8039,13 @@ def create_app(updated_from: str = "") -> FastAPI:
                 raise HTTPException(400, str(exc)) from None
             except LLMError as exc:
                 raise HTTPException(503, str(exc)) from None
-        else:
+            return (
+                suffix, upload, source_total, source_outline, "pdf",
+                Path(uploads[0].filename or "scan.pdf").name,
+                b"", (),
+            )
+
+        if len(uploads) == 1:
             from ..core.ai import LLMError
             from ..ocr import image_mime_type
 
@@ -7182,9 +8053,31 @@ def create_app(updated_from: str = "") -> FastAPI:
                 image_mime_type(upload)
             except LLMError as exc:
                 raise HTTPException(400, str(exc)) from None
-            source_total = 1
-            source_outline = []
-        return suffix, upload, source_total, source_outline
+            return (
+                suffix, upload, 1, [], "image",
+                Path(uploads[0].filename or f"scan{suffix}").name,
+                b"", (),
+            )
+
+        try:
+            collection = build_multi_image_source([
+                (Path(item.filename or f"image-{index:06d}{suffixes[index - 1]}").name, payload)
+                for index, (item, payload) in enumerate(zip(uploads, payloads), 1)
+            ])
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from None
+        if len(collection.bundle_bytes) > MAX_OCR_UPLOAD_BYTES:
+            raise HTTPException(413, "多图片不可变源包超过 100 MB，请减少图片后重试")
+        return (
+            ".zip",
+            collection.bundle_bytes,
+            len(payloads),
+            [],
+            "images",
+            f"multi-images-{len(payloads)}.zip",
+            collection.visual_pdf_bytes,
+            tuple(collection.image_entries),
+        )
 
     def _create_ocr_job(
         suffix: str,
@@ -7192,12 +8085,20 @@ def create_app(updated_from: str = "") -> FastAPI:
         source_total: int,
         status: str,
         source_outline: list[dict] = None,
+        original_filename: str = "",
+        source_type: str = "",
+        visual_source: bytes = b"",
+        source_images: tuple[dict, ...] = (),
     ):
         tmpdir = tempfile.mkdtemp(prefix="ls-ocr-")
         target = os.path.join(tmpdir, f"scan{suffix}")
+        visual_target = os.path.join(tmpdir, "visual-source.pdf") if visual_source else ""
         try:
             with open(target, "wb") as stream:
                 stream.write(upload)
+            if visual_source:
+                with open(visual_target, "wb") as stream:
+                    stream.write(visual_source)
         except Exception:
             shutil.rmtree(tmpdir, ignore_errors=True)
             raise
@@ -7205,10 +8106,15 @@ def create_app(updated_from: str = "") -> FastAPI:
         job = {
             "id": jid,
             "status": status,
-            "source_type": "pdf" if suffix == ".pdf" else "image",
+            "source_type": source_type or ("pdf" if suffix == ".pdf" else "image"),
+            "original_filename": Path(original_filename or f"scan{suffix}").name,
             "source_total": source_total,
             "source_outline": list(source_outline or []),
             "_source_sha256": hashlib.sha256(upload).hexdigest(),
+            "_visual_source_sha256": (
+                hashlib.sha256(visual_source).hexdigest() if visual_source else ""
+            ),
+            "source_images": [deepcopy(item) for item in source_images],
             "progress": 0.0,
             "total": 0,
             "done": 0,
@@ -7235,7 +8141,8 @@ def create_app(updated_from: str = "") -> FastAPI:
             "usage": {},
             "backend": "unknown",
             "quality_profile": "standard",
-            "output_template": "faithfulbook",
+            "quality_tier": "recommended",
+            "output_template": "",
             "reasoning_effort": "",
             "created": time.time(),
             "updated": time.time(),
@@ -7245,6 +8152,7 @@ def create_app(updated_from: str = "") -> FastAPI:
             "pages": {},
             "dir": tmpdir,
             "target": target,
+            "visual_target": visual_target,
             "suffix": suffix,
             "errors": [],
         }
@@ -7265,10 +8173,13 @@ def create_app(updated_from: str = "") -> FastAPI:
         job["selected_pages"] = list(page_nos)
         job["pages"] = {
             page_no: {
+                "page_id": make_page_id(index),
+                "source_page": page_no,
                 "status": "pending",
                 "tex": "",
                 "error": "",
                 "png": os.path.join(job["dir"], f"page-{page_no}.img"),
+                "persisted_visual_path": "",
                 "low_conf": False,
                 "needs_review": False,
                 "attempts": 0,
@@ -7277,6 +8188,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "figures": [],
                 "image_size_pixels": [],
                 "visual_input_sha256": "",
+                "visual_input_persisted": False,
                 "formula_evidence_inputs": [],
                 "formula_evidence": [],
                 "text_hint": "",
@@ -7293,6 +8205,239 @@ def create_app(updated_from: str = "") -> FastAPI:
             }
             for index, page_no in enumerate(page_nos, start=1)
         }
+        # A single-image OCR job already has an exact visual source at inspect
+        # time.  Publish a private, fsync'd preview copy before the asynchronous
+        # provider/bootstrap work begins.  This makes preview availability a
+        # fact about durable bytes, not an accidental side effect of a later
+        # model call (which may fail before rendering).
+        if str(job.get("source_type") or "") == "image" and page_nos == [1]:
+            source_path = Path(str(job.get("target") or ""))
+            page_path = Path(str(job["pages"][1]["png"]))
+            source_bytes = source_path.read_bytes()
+            if not source_bytes:
+                raise ValueError("上传图片为空，无法建立预览")
+            tmp_path = page_path.with_name(
+                f"{page_path.name}.{uuid.uuid4().hex}.tmp"
+            )
+            try:
+                with open(tmp_path, "wb") as stream:
+                    stream.write(source_bytes)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(tmp_path, page_path)
+            finally:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+
+    def _restore_persisted_ocr_job(jid: str) -> dict | None:
+        """Rebuild a read-safe job from its immutable snapshot after restart."""
+        if re.fullmatch(r"[0-9a-f]{32}", str(jid or "")) is None:
+            return None
+        with _ocr_jobs_lock:
+            existing = _ocr_jobs.get(jid)
+            if existing is not None:
+                return existing
+        store = OcrRunStore(Path(get_store().root).parent / "ocr-runs")
+        try:
+            snapshot = store.load_snapshot(jid)
+            source_path = store.verify_source(jid)
+            visual_source_path = (
+                store.verify_visual_source(jid)
+                if snapshot.source_type == "images"
+                else None
+            )
+            records = store.recover(jid)
+        except (OcrStoreError, OSError, ValueError):
+            return None
+        tmpdir = tempfile.mkdtemp(prefix="ls-ocr-recovered-")
+        suffix = source_path.suffix.lower() or ".bin"
+        started_epoch = time.time()
+        try:
+            started_epoch = datetime.fromisoformat(
+                snapshot.started_at.replace("Z", "+00:00")
+            ).timestamp()
+        except ValueError:
+            pass
+        job = {
+            "id": jid,
+            "status": "partial",
+            "source_type": snapshot.source_type,
+            "original_filename": snapshot.original_filename,
+            "source_total": snapshot.source_total_pages,
+            "source_outline": list(thaw_json(snapshot.bookmarks)),
+            "_source_sha256": snapshot.source_sha256,
+            "_visual_source_sha256": snapshot.visual_source_sha256,
+            "source_images": list(thaw_json(snapshot.source_images)),
+            "progress": 0.0,
+            "total": len(snapshot.selected_pages),
+            "done": 0,
+            "page": 0,
+            "current_index": 0,
+            "phase": "已从不可变快照恢复；可继续失败页",
+            "raw_tex": "",
+            "raw_ready": False,
+            "raw_frozen": False,
+            "raw_revision": 0,
+            "raw_chars": 0,
+            "usage_revision": 0,
+            "page_revision": 0,
+            "downloaded_revision": 0,
+            "downloaded_usage_revision": 0,
+            "downloaded_page_revision": 0,
+            "imported_revision": 0,
+            "imported_usage_revision": 0,
+            "imported_page_revision": 0,
+            "importing": False,
+            "saving": False,
+            "imported_project_id": "",
+            "imported_processed": None,
+            "error": "",
+            "usage": {},
+            "backend": snapshot.api_backend,
+            "model": snapshot.ocr_model,
+            "quality_profile": (
+                OCR_QUALITY_PUBLICATION
+                if snapshot.quality_tier.value == "high" else "standard"
+            ),
+            "quality_tier": snapshot.quality_tier.value,
+            "output_template": "",
+            "reasoning_effort": "",
+            "created": started_epoch,
+            "updated": time.time(),
+            "state_revision": 1,
+            "pause_requested": False,
+            "retrying_failed": False,
+            "provider_blocked": False,
+            "selected_pages": list(snapshot.selected_pages),
+            "selected_start": snapshot.selected_pages[0],
+            "selected_end": snapshot.selected_pages[-1],
+            "dpi": snapshot.initial_dpi,
+            "current_concurrency_limit": snapshot.concurrency_limit,
+            "rate_limited": False,
+            "pages": {},
+            "dir": tmpdir,
+            "target": str(source_path),
+            "visual_target": str(visual_source_path) if visual_source_path else "",
+            "suffix": suffix,
+            "errors": [],
+            "_v2_store": store,
+            "_v2_snapshot": snapshot,
+            "recovered_after_restart": True,
+        }
+        for record in records:
+            is_done = record.status in {OcrPageStatus.SUCCESS, OcrPageStatus.NEEDS_REVIEW}
+            is_error = record.status in {OcrPageStatus.FAILED, OcrPageStatus.CANCELLED}
+            persisted_visual = False
+            persisted_visual_path = os.path.join(
+                tmpdir, f"page-{record.source_page}.img"
+            )
+            if record.image_sha256:
+                try:
+                    persisted_visual_path = str(
+                        store.verify_page_image(snapshot.run_id, record)
+                    )
+                    persisted_visual = True
+                except (OcrStoreError, OSError, ValueError):
+                    pass
+            job["pages"][record.source_page] = {
+                "page_id": record.page_id,
+                "source_page": record.source_page,
+                "status": "done" if is_done else ("error" if is_error else "pending"),
+                "tex": record.cleaned_tex,
+                "error": record.error_reason,
+                "png": os.path.join(tmpdir, f"page-{record.source_page}.img"),
+                "persisted_visual_path": (
+                    persisted_visual_path if persisted_visual else ""
+                ),
+                "low_conf": record.status == OcrPageStatus.NEEDS_REVIEW or is_error,
+                "needs_review": record.status == OcrPageStatus.NEEDS_REVIEW,
+                "attempts": max(record.call_index, record.retry_count),
+                "task_index": record.task_index,
+                "retrying": False,
+                "figures": [],
+                "image_size_pixels": (
+                    list(record.image_size_pixels) if persisted_visual else []
+                ),
+                "visual_input_sha256": (
+                    record.image_sha256 if persisted_visual else ""
+                ),
+                "visual_input_persisted": persisted_visual,
+                "formula_evidence_inputs": [],
+                "formula_evidence": [],
+                "text_hint": "",
+                "text_hint_chars": 0,
+                "text_hint_sha256": "",
+                "italic_terms": [],
+                "relation_regions": [],
+                "divider_regions": [],
+                "framed_inset_regions": [],
+                "equation_tag_regions": [],
+                "equation_tag_extraction_status": "pending",
+                "footnote_regions": [],
+                "quality_flags": list(thaw_json(record.quality_issues)),
+            }
+            if is_error or not is_done:
+                job["errors"].append({
+                    "page": record.source_page,
+                    "task_index": record.task_index,
+                    "reason": record.error_reason or record.status.value,
+                })
+        job["done"] = sum(page["status"] in {"done", "error"} for page in job["pages"].values())
+        try:
+            raw_artifact = resolve_ocr_artifact(store, jid, "raw-ocr")
+        except (OcrStoreError, OSError, ValueError):
+            raw_artifact = None
+        if raw_artifact is not None:
+            raw_tex = raw_artifact.path.read_text(encoding="utf-8")
+            job.update({
+                "raw_tex": raw_tex,
+                "raw_ready": True,
+                "raw_frozen": True,
+                "raw_revision": 1,
+                "raw_chars": len(raw_tex),
+            })
+        try:
+            baseline_manifest = json.loads(
+                resolve_ocr_artifact(store, jid, "baseline-manifest").path.read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (OcrStoreError, OSError, ValueError, json.JSONDecodeError):
+            baseline_manifest = {}
+        if baseline_manifest:
+            job["compile_status"] = str(baseline_manifest.get("preview_status") or "")
+            job["baseline_compile"] = baseline_manifest
+        terminal_timestamp = str(baseline_manifest.get("created_at") or "")
+        if not terminal_timestamp and records and all(
+            record.status in {
+                OcrPageStatus.SUCCESS,
+                OcrPageStatus.NEEDS_REVIEW,
+                OcrPageStatus.FAILED,
+                OcrPageStatus.CANCELLED,
+            }
+            for record in records
+        ):
+            terminal_timestamp = max(
+                (str(record.ended_at or "") for record in records),
+                default="",
+            )
+        if terminal_timestamp:
+            try:
+                job["terminal_epoch"] = datetime.fromisoformat(
+                    terminal_timestamp.replace("Z", "+00:00")
+                ).timestamp()
+            except ValueError:
+                pass
+        if all(page["status"] == "done" for page in job["pages"].values()) and job["raw_frozen"]:
+            job["status"] = "done"
+            job["phase"] = "OCR 已从不可变快照完整恢复"
+        with _ocr_jobs_lock:
+            concurrent = _ocr_jobs.get(jid)
+            if concurrent is not None:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+                return concurrent
+            _ocr_jobs[jid] = job
+        return job
 
     def _launch_ocr_job(
         job: dict,
@@ -7305,6 +8450,11 @@ def create_app(updated_from: str = "") -> FastAPI:
     ):
         # 启动时冻结后端选择；后续设置变化不应改变本任务的重试/计费身份。
         launch_cfg = deepcopy(get_config())
+        quality_tier = normalize_quality_tier(
+            job.get("quality_tier") or quality_profile
+        )
+        tier_policy = quality_tier_policy(quality_tier)
+        dpi = tier_policy.initial_dpi
         quality_profile = normalize_ocr_quality_profile(quality_profile)
         if (
             quality_profile == OCR_QUALITY_PUBLICATION
@@ -7316,6 +8466,11 @@ def create_app(updated_from: str = "") -> FastAPI:
         with _ocr_jobs_lock:
             job["backend"] = str(launch_cfg.analysis_backend or "api")
             job["quality_profile"] = quality_profile
+            job["quality_tier"] = quality_tier.value
+            job["dpi"] = dpi
+            job["current_concurrency_limit"] = tier_policy.concurrency_limit
+            job["rate_limited"] = False
+            job["terminal_epoch"] = None
             job["reasoning_effort"] = (
                 str(launch_cfg.codex_reasoning_effort or "")
                 if launch_cfg.analysis_backend == "codex_cli" else ""
@@ -7464,61 +8619,74 @@ def create_app(updated_from: str = "") -> FastAPI:
             )
 
             page = job["pages"][page_no]
-            if job["source_type"] == "pdf":
+            source_type = str(job.get("source_type") or "")
+            if source_type in {"pdf", "images"}:
+                visual_path = (
+                    job["target"] if source_type == "pdf" else job.get("visual_target")
+                )
+                if not visual_path:
+                    raise RuntimeError("多图片任务缺少已记录的派生视觉 PDF")
                 rendered = iter(iter_pdf_pages(
-                    job["target"], [page_no], int(job.get("dpi") or dpi),
+                    visual_path, [page_no], int(job.get("dpi") or dpi),
                 ))
                 try:
                     rendered_page, image_bytes = next(rendered)
                 except StopIteration:
-                    raise RuntimeError(f"原 PDF 第 {page_no} 页未生成图像") from None
+                    label = "原 PDF" if source_type == "pdf" else "派生视觉页源"
+                    raise RuntimeError(f"{label}第 {page_no} 页未生成图像") from None
                 if int(rendered_page) != page_no:
-                    raise RuntimeError(f"原 PDF 第 {page_no} 页渲染结果页码不一致")
-                # Text extraction is an optional, bounded spelling reference.
-                # It must never prevent the visual OCR path from running.
-                try:
-                    text_hint = pdf_page_text_hint(job["target"], page_no)
-                except Exception:  # noqa: BLE001
+                    raise RuntimeError(f"第 {page_no} 页渲染结果页码不一致")
+                if source_type == "images":
+                    # Original image names/bytes/hashes are the source
+                    # authority.  The derived PDF contains no trusted text or
+                    # semantic geometry, so none is invented here.
                     text_hint = ""
-                try:
-                    italic_terms = pdf_page_italic_terms(job["target"], page_no)
-                except Exception:  # noqa: BLE001
                     italic_terms = []
-                try:
-                    relation_regions = pdf_page_relation_regions(
-                        job["target"], page_no,
-                    )
-                except Exception:  # noqa: BLE001
                     relation_regions = []
-                try:
-                    divider_regions = pdf_page_divider_regions(
-                        job["target"], page_no,
-                    )
-                except Exception:  # noqa: BLE001
                     divider_regions = []
-                try:
-                    equation_tag_regions = pdf_page_equation_tag_regions(
-                        job["target"], page_no,
-                    )
-                    equation_tag_extraction_status = "ok"
-                except Exception:  # noqa: BLE001 - optional born-digital geometry
                     equation_tag_regions = []
-                    equation_tag_extraction_status = "error"
-                try:
-                    framed_inset_regions = pdf_page_framed_insets(
-                        job["target"], page_no,
-                    )
-                except Exception:  # noqa: BLE001
+                    equation_tag_extraction_status = "not_applicable"
                     framed_inset_regions = []
-                try:
-                    footnote_regions = pdf_page_footnote_regions(
-                        job["target"], page_no,
-                    )
-                except Exception as exc:  # noqa: BLE001 - footnotes fail closed
-                    raise RuntimeError(
-                        f"第 {page_no} 页脚注源证据提取失败：{str(exc)[:180]}"
-                    ) from None
-                formula_evidence_inputs = _prepare_page_formula_evidence(job, page_no)
+                    footnote_regions = []
+                    formula_evidence_inputs = []
+                else:
+                    # Text extraction is an optional, bounded spelling reference.
+                    # It must never prevent the visual OCR path from running.
+                    try:
+                        text_hint = pdf_page_text_hint(job["target"], page_no)
+                    except Exception:  # noqa: BLE001
+                        text_hint = ""
+                    try:
+                        italic_terms = pdf_page_italic_terms(job["target"], page_no)
+                    except Exception:  # noqa: BLE001
+                        italic_terms = []
+                    try:
+                        relation_regions = pdf_page_relation_regions(job["target"], page_no)
+                    except Exception:  # noqa: BLE001
+                        relation_regions = []
+                    try:
+                        divider_regions = pdf_page_divider_regions(job["target"], page_no)
+                    except Exception:  # noqa: BLE001
+                        divider_regions = []
+                    try:
+                        equation_tag_regions = pdf_page_equation_tag_regions(
+                            job["target"], page_no,
+                        )
+                        equation_tag_extraction_status = "ok"
+                    except Exception:  # noqa: BLE001 - optional born-digital geometry
+                        equation_tag_regions = []
+                        equation_tag_extraction_status = "error"
+                    try:
+                        framed_inset_regions = pdf_page_framed_insets(job["target"], page_no)
+                    except Exception:  # noqa: BLE001
+                        framed_inset_regions = []
+                    try:
+                        footnote_regions = pdf_page_footnote_regions(job["target"], page_no)
+                    except Exception as exc:  # noqa: BLE001 - footnotes fail closed
+                        raise RuntimeError(
+                            f"第 {page_no} 页脚注源证据提取失败：{str(exc)[:180]}"
+                        ) from None
+                    formula_evidence_inputs = _prepare_page_formula_evidence(job, page_no)
             else:
                 if page_no != 1:
                     raise RuntimeError("单张图片任务仅有第 1 页")
@@ -7570,6 +8738,8 @@ def create_app(updated_from: str = "") -> FastAPI:
                 page["footnote_regions"] = deepcopy(footnote_regions)
                 page["image_size_pixels"] = list(pixel_size)
                 page["visual_input_sha256"] = hashlib.sha256(image_bytes).hexdigest()
+                page["visual_input_persisted"] = False
+                page["persisted_visual_path"] = ""
                 page["formula_evidence_inputs"] = deepcopy(formula_evidence_inputs)
                 page["formula_evidence"] = [
                     {
@@ -7604,7 +8774,10 @@ def create_app(updated_from: str = "") -> FastAPI:
                     for page_no in job["selected_pages"]
                     if job["pages"][page_no]["status"] == "done"
                 ]
-                chunks = [page["tex"] for _page_no, page in completed]
+                chunks = [
+                    f"% Page {page_no}\n{page['tex']}"
+                    for page_no, page in completed
+                ]
                 evidence = verified_equation_tag_evidence([
                     {
                         "page": page_no,
@@ -7617,10 +8790,12 @@ def create_app(updated_from: str = "") -> FastAPI:
                     outline=job.get("source_outline"),
                     equation_tag_evidence=evidence,
                 )
+                previous = str(job.get("raw_tex") or "")
                 job["raw_tex"] = merged
                 job["raw_ready"] = bool(chunks)
                 job["raw_chars"] = len(merged)
-                job["raw_revision"] = int(job.get("raw_revision") or 0) + 1
+                if merged != previous:
+                    job["raw_revision"] = int(job.get("raw_revision") or 0) + 1
                 _bump_ocr_state(job)
 
         def _merge_job(job, complete_progress: bool = True):
@@ -7635,12 +8810,21 @@ def create_app(updated_from: str = "") -> FastAPI:
                             "reason": page["error"] or page["status"],
                         })
                 job["errors"] = errors
-                job["status"] = "done" if not errors else "partial"
-                job["phase"] = "原始 OCR 已就绪" if not errors else "部分页面失败，等待重试"
+                if job.get("pause_requested"):
+                    job["status"] = "pausing"
+                    job["phase"] = "正在完成当前步骤，随后安全暂停"
+                else:
+                    job["status"] = "done" if not errors else "partial"
+                    job["phase"] = "原始 OCR 已就绪" if not errors else "部分页面失败，等待重试"
                 job["error"] = "" if not errors else str(errors[0]["reason"])
-                job["pause_requested"] = False
+                if not job.get("pause_requested"):
+                    job["pause_requested"] = False
                 if complete_progress:
                     job["progress"] = 1.0
+                if not job.get("pause_requested"):
+                    # Freeze only after the caller has completed merge/freeze and
+                    # baseline compilation.  Page OCR timestamps remain untouched.
+                    job["terminal_epoch"] = time.time()
                 _bump_ocr_state(job)
                 _ocr_jobs_changed.notify_all()
 
@@ -7653,56 +8837,692 @@ def create_app(updated_from: str = "") -> FastAPI:
             job["dpi"] = dpi
             _bump_ocr_state(job)
 
+        def _iso_now() -> str:
+            return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        def _record_v2_usage(client, usage: dict) -> None:
+            if not isinstance(usage, dict) or not usage:
+                usage = client.last_usage if isinstance(client.last_usage, dict) else {}
+            if not usage:
+                return
+            from ..pricing import add_usage, summarize_ai_usage
+
+            with _ocr_jobs_lock:
+                add_usage(job["usage"], usage, getattr(client.cfg, "model", ""))
+                job["cost"] = summarize_ai_usage({"ocr": job["usage"]})
+                job["usage_revision"] = int(job.get("usage_revision") or 0) + 1
+                _bump_ocr_state(job)
+
+        def _v2_model_call(client, requests):
+            expected = [request.page_id for request in requests]
+            prompt = ocr_batch_request_payload(requests)
+            schema = ocr_batch_output_schema(expected)
+            _ocr_control(job)
+            client.last_usage = {}
+            if len(requests) == 1:
+                generic_single = getattr(client, "chat_vision_json_bytes", None)
+                configured_key = str(getattr(getattr(client, "cfg", None), "api_key", "") or "")
+                active_backend = str(job.get("backend") or "api")
+                if callable(generic_single) and (
+                    active_backend == "codex_cli" or configured_key
+                ):
+                    response, usage = generic_single(
+                        OCR_TRANSCRIPTION_SYSTEM_PROMPT,
+                        prompt,
+                        requests[0].image_bytes,
+                        schema,
+                    )
+                else:
+                    # Compatibility path for old provider adapters used by
+                    # existing installations/tests.  It remains a real visual
+                    # OCR call and is wrapped in the host-owned page_id schema.
+                    from ..ocr import transcribe_page_result
+
+                    legacy_page = job["pages"][requests[0].source_page]
+                    transcription = transcribe_page_result(
+                        client,
+                        requests[0].image_bytes,
+                        requests[0].source_page,
+                        reference_text=requests[0].text_layer_hint,
+                        correction_feedback=requests[0].correction_instruction,
+                        quality_retry_state=thaw_json(requests[0].retry_state),
+                        reference_italic_terms=list(
+                            legacy_page.get("italic_terms") or []
+                        ),
+                        reference_relation_regions=deepcopy(
+                            legacy_page.get("relation_regions") or []
+                        ),
+                        reference_divider_regions=deepcopy(
+                            legacy_page.get("divider_regions") or []
+                        ),
+                        reference_framed_insets=deepcopy(
+                            legacy_page.get("framed_inset_regions") or []
+                        ),
+                        reference_equation_tag_regions=deepcopy(
+                            legacy_page.get("equation_tag_regions") or []
+                        ),
+                        reference_footnote_regions=deepcopy(
+                            legacy_page.get("footnote_regions") or []
+                        ),
+                        reference_formula_evidence=deepcopy(
+                            legacy_page.get("formula_evidence_inputs") or []
+                        ),
+                    )
+                    legacy_tex = re.sub(
+                        r"(?mi)^\s*%\s*Page\s+\d+\s*$",
+                        "",
+                        transcription.tex,
+                    ).strip()
+                    response = {"pages": [{
+                        "page_id": requests[0].page_id,
+                        "latex": legacy_tex,
+                        "figures": transcription.figures,
+                        "host_quality_flags": deepcopy(transcription.quality_flags or []),
+                        "unresolved_regions": [
+                            {"type": "legacy_quality_flag", **deepcopy(flag)}
+                            for flag in (transcription.quality_flags or [])
+                            if isinstance(flag, dict) and flag.get("needs_review")
+                        ],
+                    }]}
+                    usage = client.last_usage if isinstance(client.last_usage, dict) else {}
+            else:
+                generic_batch = getattr(client, "chat_vision_json_images_bytes", None)
+                configured_key = str(getattr(getattr(client, "cfg", None), "api_key", "") or "")
+                active_backend = str(job.get("backend") or "api")
+                if not callable(generic_batch) or (
+                    active_backend == "api" and not configured_key
+                ):
+                    raise RuntimeError("batch unsupported by this provider adapter")
+                response, usage = generic_batch(
+                    OCR_TRANSCRIPTION_SYSTEM_PROMPT,
+                    prompt,
+                    [request.image_bytes for request in requests],
+                    schema,
+                )
+            _record_v2_usage(client, usage)
+            # Keep bounded, per-page telemetry next to the immutable page
+            # record.  A multi-image provider reports one shared usage object;
+            # record that relationship instead of dividing tokens by guesswork.
+            if isinstance(usage, dict) and usage:
+                with _ocr_jobs_lock:
+                    telemetry = job.setdefault("_v2_page_usage", {})
+                    for request in requests:
+                        telemetry.setdefault(request.page_id, []).append({
+                            "call_index": int(
+                                job["pages"][request.source_page].get("attempts") or 0
+                            ),
+                            "batch_shared": len(requests) > 1,
+                            "batch_page_count": len(requests),
+                            "usage": deepcopy(usage),
+                        })
+                    _bump_ocr_state(job)
+            return response
+
+        def _prepare_v2_request(
+            store,
+            snapshot,
+            record,
+            *,
+            retry: bool = False,
+            correction_instruction: str = "",
+            retry_state: dict | None = None,
+        ):
+            from ..ocr import make_host_ocr_page_request
+
+            page_no = record.source_page
+            page = job["pages"][page_no]
+            if (
+                retry
+                and record.status != OcrPageStatus.RETRYING
+                and record.status != OcrPageStatus.PENDING
+            ):
+                record = record.transition(
+                    OcrPageStatus.RETRYING,
+                    retry_count=record.retry_count + 1,
+                    error_reason="自动提高到 300 DPI 并进行单页重试",
+                )
+                store.persist_record(snapshot.run_id, record)
+            render_dpi = tier_policy.retry_dpi if retry else snapshot.initial_dpi
+            with _ocr_jobs_lock:
+                job["dpi"] = render_dpi
+                job["page"] = page_no
+                job["current_index"] = record.task_index
+                job["phase"] = (
+                    f"正在以 {render_dpi} DPI 重试第 {page_no} 页"
+                    if retry else f"正在渲染并识别第 {page_no} 页"
+                )
+                page["retrying"] = retry
+                _bump_ocr_state(job)
+            record = record.transition(OcrPageStatus.RENDERING, dpi=render_dpi)
+            store.persist_record(snapshot.run_id, record)
+            _render_one(job, page_no)
+            image_bytes = Path(page["png"]).read_bytes()
+            with _ocr_jobs_lock:
+                page["status"] = "running"
+                _bump_ocr_state(job)
+            record = record.transition(
+                OcrPageStatus.OCR_RUNNING,
+                image_sha256=hashlib.sha256(image_bytes).hexdigest(),
+                image_size_pixels=tuple(page.get("image_size_pixels") or ()),
+                dpi=render_dpi,
+                model=snapshot.ocr_model,
+                call_index=record.call_index + 1,
+                started_at=_iso_now(),
+                error_reason="",
+            )
+            store.persist_record(snapshot.run_id, record)
+            with _ocr_jobs_lock:
+                page["attempts"] = max(
+                    int(page.get("attempts") or 0),
+                    int(record.call_index or 0),
+                )
+                _bump_ocr_state(job)
+            return make_host_ocr_page_request(
+                image_bytes,
+                page_no,
+                record.task_index,
+                dpi=render_dpi,
+                text_layer_hint=str(page.get("text_hint") or ""),
+                correction_instruction=correction_instruction,
+                retry_state=retry_state,
+            )
+
+        def _commit_v2_result(store, snapshot, execution, *, exhausted=False):
+            request = execution.request
+            record = store.load_record(snapshot.run_id, request.page_id)
+            page = job["pages"][request.source_page]
+            persisted_visual_path = store.persist_page_image(
+                snapshot.run_id,
+                record,
+                request.image_bytes,
+            )
+            with _ocr_jobs_lock:
+                page["persisted_visual_path"] = str(persisted_visual_path)
+                page["attempts"] = max(
+                    int(page.get("attempts") or 0),
+                    int(record.call_index or 0),
+                )
+                page["image_size_pixels"] = list(record.image_size_pixels)
+                page["visual_input_sha256"] = record.image_sha256
+                page["visual_input_persisted"] = True
+                _bump_ocr_state(job)
+            if execution.page is None:
+                failure_issue = {
+                    "code": "OCR_CALL_FAILED",
+                    "severity": "error",
+                    "category": (
+                        execution.error_category.value
+                        if execution.error_category is not None
+                        else OcrErrorCategory.UNKNOWN.value
+                    ),
+                    "message": (execution.error or "OCR 未返回可验证页面结果")[:500],
+                }
+                record = record.transition(
+                    OcrPageStatus.FAILED,
+                    ended_at=_iso_now(),
+                    error_reason=execution.error or "OCR 未返回可验证页面结果",
+                    quality_issues=tuple(record.quality_issues) + (failure_issue,),
+                    usage={
+                        "attempts": deepcopy(
+                            (job.get("_v2_page_usage") or {}).get(request.page_id) or []
+                        )
+                    },
+                )
+                store.persist_record(snapshot.run_id, record)
+                _mark_page_error(job, request.source_page, record.error_reason)
+                return False
+            validated = execution.page
+            raw_object = thaw_json(validated.raw_object)
+            raw_bytes = json.dumps(
+                raw_object,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            needs_review = bool(validated.needs_review or (validated.needs_retry and exhausted))
+            final_status = (
+                OcrPageStatus.NEEDS_REVIEW if needs_review else OcrPageStatus.SUCCESS
+            )
+            elapsed = None
+            try:
+                started = datetime.fromisoformat(record.started_at.replace("Z", "+00:00"))
+                elapsed = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - started).total_seconds(),
+                )
+            except (TypeError, ValueError):
+                pass
+            record = record.transition(OcrPageStatus.VALIDATING)
+            record = record.transition(
+                final_status,
+                batch_call=bool(execution.used_batch),
+                batch_id=execution.batch_id,
+                raw_response_sha256=hashlib.sha256(raw_bytes).hexdigest(),
+                raw_tex=validated.latex,
+                cleaned_tex=validated.latex,
+                ended_at=_iso_now(),
+                elapsed_seconds=elapsed,
+                quality_issues=(
+                    tuple(record.quality_issues)
+                    + tuple(issue.to_dict() for issue in validated.issues)
+                ),
+                unresolved_regions=tuple(thaw_json(validated.unresolved_regions)),
+                usage={
+                    "attempts": deepcopy(
+                        (job.get("_v2_page_usage") or {}).get(request.page_id) or []
+                    )
+                },
+                error_reason=(
+                    "自动重试已用尽；该页需要人工确认" if needs_review else ""
+                ),
+            )
+            store.persist_record(snapshot.run_id, record, raw_response=raw_object)
+            with _ocr_jobs_lock:
+                page["tex"] = validated.latex
+                page["status"] = "done"
+                page["error"] = record.error_reason
+                page["low_conf"] = needs_review
+                page["needs_review"] = needs_review
+                page["retrying"] = False
+                page["figures"] = list(thaw_json(validated.figures))
+                runtime_flags = [
+                    {
+                        "type": "v2_ocr_validation",
+                        **issue.to_dict(),
+                        "needs_review": needs_review,
+                    }
+                    for issue in validated.issues
+                ]
+                legacy_flags = [
+                    deepcopy(flag)
+                    for flag in (raw_object.get("host_quality_flags") or [])
+                    if isinstance(flag, dict)
+                ]
+                page["quality_flags"] = legacy_flags or runtime_flags
+                job["page_revision"] = int(job.get("page_revision") or 0) + 1
+                _bump_ocr_state(job)
+            _refresh_raw_preview(job)
+            return True
+
+        def _retry_v2_execution(store, snapshot, client, execution):
+            current = execution
+            attempts = 0
+            while (
+                (current.page is None or current.page.needs_retry)
+                and attempts < snapshot.max_retries
+            ):
+                if (
+                    current.page is None
+                    and not current.retry_instruction
+                    and current.error_category not in {
+                        OcrErrorCategory.TRANSIENT,
+                        OcrErrorCategory.RATE_LIMIT,
+                    }
+                ):
+                    break
+                attempts += 1
+                record = store.load_record(snapshot.run_id, current.request.page_id)
+                if record.status == OcrPageStatus.OCR_RUNNING:
+                    retry_issue = {
+                        "code": "OCR_RETRY_SCHEDULED",
+                        "severity": "warning",
+                        "category": (
+                            current.error_category.value
+                            if current.error_category is not None
+                            else OcrErrorCategory.UNKNOWN.value
+                        ),
+                        "message": (
+                            current.error
+                            or current.retry_instruction
+                            or "页面质量门要求重新识别"
+                        )[:500],
+                    }
+                    record = record.transition(
+                        OcrPageStatus.RETRYING,
+                        retry_count=record.retry_count + 1,
+                        error_reason=current.error or "页面质量门要求重新识别",
+                        quality_issues=tuple(record.quality_issues) + (retry_issue,),
+                    )
+                    store.persist_record(snapshot.run_id, record)
+                if current.error_category in {
+                    OcrErrorCategory.TRANSIENT,
+                    OcrErrorCategory.RATE_LIMIT,
+                }:
+                    _ocr_retry_wait(attempts)
+                request = _prepare_v2_request(
+                    store,
+                    snapshot,
+                    record,
+                    retry=True,
+                    correction_instruction=current.retry_instruction,
+                    retry_state=thaw_json(current.retry_state),
+                )
+                current = BoundedOcrExecutor(batch_size=1, concurrency_limit=1).run(
+                    [request],
+                    single_call=lambda item: _v2_model_call(client, [item]),
+                )[0]
+            return current, bool(
+                current.page is not None and current.page.needs_retry
+            )
+
+        def _finalize_v2_ocr(store, snapshot):
+            from ..core.ocr_baseline import compile_ocr_baseline
+            from ..ocr import merge_book
+
+            with _ocr_jobs_lock:
+                job["phase"] = "正在冻结不可变 OCR 原稿"
+                _bump_ocr_state(job)
+            raw_manifest = store.freeze_raw_ocr(
+                snapshot.run_id,
+                document_builder=lambda fragments: merge_book(
+                    fragments,
+                    outline=job.get("source_outline"),
+                ),
+                model_usage=job.get("usage") or {},
+                merge_version="2.0.0",
+            )
+            artifact_dir = store.run_dir(snapshot.run_id) / "artifacts"
+            raw_tex = (artifact_dir / "raw-ocr.tex").read_text(encoding="utf-8")
+            with _ocr_jobs_lock:
+                previous = str(job.get("raw_tex") or "")
+                job["raw_tex"] = raw_tex
+                job["raw_ready"] = True
+                job["raw_frozen"] = True
+                job["raw_chars"] = len(raw_tex)
+                if raw_tex != previous:
+                    job["raw_revision"] = int(job.get("raw_revision") or 0) + 1
+                job["phase"] = "正在真实编译 OCR 基线（两次）"
+                _bump_ocr_state(job)
+            if job.get("_compatibility_single"):
+                # Old no-key provider adapters are retained only for backward
+                # compatibility and unit-level fakes.  They cannot establish
+                # the v2 structured-provider contract, so record an explicit
+                # source preview instead of pretending a compile occurred.
+                manifest = store.save_compile_baseline(
+                    snapshot.run_id,
+                    baseline_tex=raw_tex,
+                    compile_log=(
+                        "SOURCE_PREVIEW：这不是 LaTeX 编译结果；旧兼容适配器未执行基线编译。"
+                    ),
+                    preview_status=OcrPreviewStatus.SOURCE_PREVIEW,
+                    exit_code=1,
+                    successful_passes=0,
+                    pdf_bytes=b"",
+                    preview_filename="source-preview.pdf",
+                )
+                with _ocr_jobs_lock:
+                    job["compile_status"] = OcrPreviewStatus.SOURCE_PREVIEW.value
+                    job["baseline_compile"] = manifest
+                    job["baseline_tex_sha256"] = manifest.get("baseline_tex_sha256")
+                    job["raw_ocr_sha256"] = raw_manifest.get("raw_ocr_sha256")
+                    _bump_ocr_state(job)
+                return
+            baseline = compile_ocr_baseline(raw_tex)
+            manifest = store.save_compile_baseline(
+                snapshot.run_id,
+                baseline_tex=baseline.tex,
+                compile_log=baseline.log,
+                preview_status=baseline.preview_status,
+                exit_code=baseline.exit_code,
+                successful_passes=baseline.successful_passes,
+                pdf_bytes=baseline.pdf_bytes,
+                syntax_repairs=baseline.syntax_repairs,
+                error_lines=baseline.error_lines,
+                preview_filename="source-preview.pdf",
+            )
+            with _ocr_jobs_lock:
+                job["compile_status"] = baseline.preview_status.value
+                job["baseline_compile"] = manifest
+                job["baseline_tex_sha256"] = manifest.get("baseline_tex_sha256")
+                job["raw_ocr_sha256"] = raw_manifest.get("raw_ocr_sha256")
+                job["phase"] = (
+                    "OCR 基线已真实编译"
+                    if baseline.preview_status == OcrPreviewStatus.COMPILED
+                    else "OCR 已完成；基线编译需检查"
+                )
+                _bump_ocr_state(job)
+
+        def _retry_v2_page(page_no: int) -> bool:
+            """Retry one non-final page against the same immutable run identity."""
+            store = job.get("_v2_store")
+            snapshot = job.get("_v2_snapshot")
+            client = job.get("client")
+            if not isinstance(store, OcrRunStore) or snapshot is None or client is None:
+                raise OcrStoreError("OCR 运行证据尚未初始化")
+            if job.get("provider_blocked"):
+                retry_cfg = deepcopy(get_config())
+                retry_cfg.analysis_backend = snapshot.api_backend
+                refreshed, selected_model, selected_backend = _build_ocr_client(
+                    retry_cfg, "", snapshot.ocr_model, ""
+                )
+                if selected_model != snapshot.ocr_model or selected_backend != snapshot.api_backend:
+                    raise OcrStoreError("当前模型设置与不可变 OCR 任务不一致")
+                client = refreshed
+                with _ocr_jobs_lock:
+                    job["client"] = refreshed
+                    job["provider_blocked"] = False
+            records = store.recover(snapshot.run_id)
+            record = next((item for item in records if item.source_page == page_no), None)
+            if record is None:
+                raise OcrStoreError("页面不属于本次不可变页范围")
+            if record.status == OcrPageStatus.SUCCESS:
+                raise OcrStoreError("成功页已经冻结；如需重做请创建新的 OCR 任务")
+            if job.get("raw_frozen"):
+                raise OcrStoreError("OCR 原稿已经冻结；如需重做请创建新的 OCR 任务")
+            request = _prepare_v2_request(store, snapshot, record, retry=True)
+            execution = BoundedOcrExecutor(batch_size=1, concurrency_limit=1).run(
+                [request],
+                single_call=lambda item: _v2_model_call(client, [item]),
+            )[0]
+            final, exhausted = _retry_v2_execution(store, snapshot, client, execution)
+            ok = _commit_v2_result(store, snapshot, final, exhausted=exhausted)
+            remaining = store.list_records(snapshot.run_id)
+            if all(item.status in {OcrPageStatus.SUCCESS, OcrPageStatus.NEEDS_REVIEW} for item in remaining):
+                _finalize_v2_ocr(store, snapshot)
+            _merge_job(job)
+            return ok
+
         def worker():
             try:
                 client, selected_model, backend = _build_ocr_client(
                     launch_cfg, base_url, model, api_key,
                 )
+                from .. import __version__
+
+                source_bytes = Path(job["target"]).read_bytes()
+                visual_source_bytes = (
+                    Path(job["visual_target"]).read_bytes()
+                    if job.get("source_type") == "images" and job.get("visual_target")
+                    else b""
+                )
+                store = OcrRunStore(Path(get_store().root).parent / "ocr-runs")
+                snapshot_path = store.run_dir(job["id"]) / "run-snapshot.json"
+                if snapshot_path.is_file():
+                    snapshot = store.load_snapshot(job["id"])
+                    if (
+                        snapshot.source_sha256 != hashlib.sha256(source_bytes).hexdigest()
+                        or snapshot.selected_pages != tuple(page_nos)
+                        or snapshot.ocr_model != selected_model
+                        or snapshot.api_backend != backend
+                        or (
+                            snapshot.source_type == "images"
+                            and snapshot.visual_source_sha256
+                            != hashlib.sha256(visual_source_bytes).hexdigest()
+                        )
+                    ):
+                        raise OcrStoreError("恢复设置与不可变 OCR 任务不一致")
+                    store.verify_source(snapshot.run_id)
+                    if snapshot.source_type == "images":
+                        store.verify_visual_source(snapshot.run_id)
+                else:
+                    snapshot = make_run_snapshot(
+                        source_bytes=source_bytes,
+                        source_type=job["source_type"],
+                        original_filename=job.get("original_filename") or f"scan{job['suffix']}",
+                        source_total_pages=int(job["source_total"]),
+                        selected_pages=tuple(page_nos),
+                        ocr_model=selected_model,
+                        api_backend=backend,
+                        app_version=__version__,
+                        quality_tier=quality_tier,
+                        bookmarks=tuple(job.get("source_outline") or ()),
+                        source_images=tuple(job.get("source_images") or ()),
+                        visual_source_bytes=visual_source_bytes,
+                        runtime_options={
+                            "initial_dpi": tier_policy.initial_dpi,
+                            "max_retries": tier_policy.max_retries,
+                            "batch_size": tier_policy.batch_size,
+                            "concurrency_limit": tier_policy.concurrency_limit,
+                            "retry_dpi": tier_policy.retry_dpi,
+                        },
+                        run_id=job["id"],
+                    )
+                    store.initialize(
+                        snapshot,
+                        source_bytes,
+                        visual_source_bytes=visual_source_bytes,
+                    )
+                records = store.recover(snapshot.run_id)
                 with _ocr_jobs_lock:
                     job["client"] = client
                     job["model"] = selected_model
                     job["backend"] = backend
-                    job["phase"] = (
-                        "出版审校：逐页视觉转写与证据核验"
-                        if quality_profile == OCR_QUALITY_PUBLICATION
-                        else "逐页渲染与忠实转写"
-                    )
+                    job["_v2_store"] = store
+                    job["_v2_snapshot"] = snapshot
+                    job["_v2_retry_page"] = _retry_v2_page
+                    job["started_at"] = snapshot.started_at
+                    job["phase"] = "三页批处理 OCR；失败页自动提高清晰度重试"
                     _bump_ocr_state(job)
-                for index, page_no in enumerate(page_nos, start=1):
+                configured_key = str(
+                    getattr(getattr(client, "cfg", None), "api_key", "") or ""
+                )
+                compatibility_single = backend == "api" and not configured_key
+                with _ocr_jobs_lock:
+                    job["_compatibility_single"] = compatibility_single
+                executor = BoundedOcrExecutor(
+                    batch_size=1 if compatibility_single else snapshot.batch_size,
+                    concurrency_limit=(
+                        1 if compatibility_single else snapshot.concurrency_limit
+                    ),
+                )
+                pending = [
+                    record for record in records
+                    if record.status in {
+                        OcrPageStatus.PENDING,
+                        OcrPageStatus.RETRYING,
+                        OcrPageStatus.FAILED,
+                    }
+                ]
+                effective_batch_size = executor.batch_size
+                for offset in range(0, len(pending), effective_batch_size):
                     _ocr_control(job)
-                    page = job["pages"][page_no]
-                    with _ocr_jobs_lock:
-                        job["page"] = page_no
-                        job["current_index"] = index
-                        job["phase"] = (
-                            f"正在转写原 PDF 第 {page_no} 页"
-                            if job["source_type"] == "pdf" else "正在转写图片"
-                        )
-                        job["progress"] = round((index - 1) / max(1, len(page_nos)), 3)
-                        _bump_ocr_state(job)
-                    try:
-                        _render_one(job, page_no)
-                    except Exception as exc:  # noqa: BLE001
-                        _mark_page_error(job, page_no, exc)
-                        with _ocr_jobs_lock:
-                            job["done"] = index
-                            job["progress"] = round(index / max(1, len(page_nos)), 3)
-                            _bump_ocr_state(job)
-                        if index < len(page_nos):
-                            _ocr_control(job)
+                    batch_records = pending[offset:offset + effective_batch_size]
+                    requests = []
+                    for record in batch_records:
+                        try:
+                            requests.append(_prepare_v2_request(
+                                store,
+                                snapshot,
+                                record,
+                                retry=record.status in {
+                                    OcrPageStatus.RETRYING,
+                                    OcrPageStatus.FAILED,
+                                },
+                            ))
+                        except Exception as exc:  # noqa: BLE001
+                            failed = store.load_record(snapshot.run_id, record.page_id)
+                            if failed.status in {
+                                OcrPageStatus.RENDERING,
+                                OcrPageStatus.OCR_RUNNING,
+                                OcrPageStatus.RETRYING,
+                            }:
+                                failed = failed.transition(
+                                    OcrPageStatus.FAILED,
+                                    error_reason=_safe_task_error(exc),
+                                    ended_at=_iso_now(),
+                                )
+                                store.persist_record(snapshot.run_id, failed)
+                            _mark_page_error(job, record.source_page, exc)
+                    if not requests:
                         continue
-                    # 渲染也可能较慢；在真正发起付费视觉请求前再设一个安全点。
-                    _ocr_control(job)
-                    page_ok = _transcribe_one(job, client, page_no, page["png"])
-                    if page_ok:
-                        _refresh_raw_preview(job)
+                    results = executor.run(
+                        requests,
+                        single_call=lambda request: _v2_model_call(client, [request]),
+                        # Codex CLI process startup is independently bounded by
+                        # its role-aware global gate.  Three parallel single-page
+                        # calls make the configured OCR concurrency real, while
+                        # API providers retain their lower-overhead three-image
+                        # batch transport.
+                        batch_call=(
+                            None
+                            if backend == "codex_cli"
+                            else lambda items: _v2_model_call(client, items)
+                        ),
+                    )
+                    for execution in results:
+                        final, exhausted = _retry_v2_execution(
+                            store, snapshot, client, execution
+                        )
+                        _commit_v2_result(
+                            store, snapshot, final, exhausted=exhausted
+                        )
                     with _ocr_jobs_lock:
-                        job["done"] = index
-                        job["progress"] = round(index / max(1, len(page_nos)), 3)
+                        job["done"] = sum(
+                            page.get("status") in {"done", "error"}
+                            for page in job["pages"].values()
+                        )
                         _bump_ocr_state(job)
-                    if index < len(page_nos):
-                        _ocr_control(job)
+                errors = [
+                    record for record in store.list_records(snapshot.run_id)
+                    if record.status in {OcrPageStatus.FAILED, OcrPageStatus.CANCELLED}
+                ]
+                if not errors:
+                    _finalize_v2_ocr(store, snapshot)
                 _merge_job(job)
+                with _ocr_jobs_lock:
+                    job["dpi"] = snapshot.initial_dpi
+                    _bump_ocr_state(job)
+            except OcrRunPaused as exc:
+                message = _safe_task_error(exc)
+                store = job.get("_v2_store")
+                snapshot = job.get("_v2_snapshot")
+                if isinstance(store, OcrRunStore) and snapshot is not None:
+                    try:
+                        records_to_fail = store.list_records(snapshot.run_id)
+                    except (OcrStoreError, OSError):
+                        records_to_fail = []
+                    for record in records_to_fail:
+                        if record.status in {
+                            OcrPageStatus.RENDERING,
+                            OcrPageStatus.QUEUED,
+                            OcrPageStatus.OCR_RUNNING,
+                            OcrPageStatus.VALIDATING,
+                            OcrPageStatus.RETRYING,
+                        }:
+                            try:
+                                failed = record.transition(
+                                    OcrPageStatus.FAILED,
+                                    ended_at=_iso_now(),
+                                    error_reason=message,
+                                )
+                                store.persist_record(snapshot.run_id, failed)
+                            except (OcrStoreError, OSError):
+                                pass
+                            _mark_page_error(job, record.source_page, message)
+                with _ocr_jobs_lock:
+                    job["status"] = "partial"
+                    job["provider_blocked"] = True
+                    job["pause_requested"] = False
+                    job["phase"] = "识别服务暂停；已完成页面均已保存"
+                    job["error"] = message
+                    job["terminal_epoch"] = time.time()
+                    if not job.get("errors"):
+                        job["errors"] = [{
+                            "page": int(job.get("page") or 0),
+                            "task_index": int(job.get("current_index") or 0),
+                            "reason": job["error"],
+                        }]
+                    _bump_ocr_state(job)
             except Exception as exc:  # noqa: BLE001
                 message = _safe_task_error(exc)
                 if "No module named 'fitz'" in message:
@@ -7722,7 +9542,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                     job["status"] = "partial" if has_done else "error"
                     job["phase"] = (
                         "后续页面处理失败，已保留完成页"
-                        if has_done else "准备或渲染失败"
+                        if has_done else "准备、识别或基线编译失败"
                     )
                     job["error"] = message
                     _bump_ocr_state(job)
@@ -7732,12 +9552,29 @@ def create_app(updated_from: str = "") -> FastAPI:
         ).start()
 
     @app.post("/api/ocr/inspect")
-    async def ocr_inspect(file: UploadFile = File(...)):
+    async def ocr_inspect(file: list[UploadFile] = File(...)):
         """上传一次 PDF/图片并创建不可猜测的待启动任务。"""
         _cleanup_ocr_jobs()
-        suffix, upload, source_total, source_outline = await _read_ocr_upload(file)
+        (
+            suffix,
+            upload,
+            source_total,
+            source_outline,
+            source_type,
+            original_filename,
+            visual_source,
+            source_images,
+        ) = await _read_ocr_upload(file)
         job = _create_ocr_job(
-            suffix, upload, source_total, "ready", source_outline=source_outline
+            suffix,
+            upload,
+            source_total,
+            "ready",
+            source_outline=source_outline,
+            original_filename=original_filename,
+            source_type=source_type,
+            visual_source=visual_source,
+            source_images=source_images,
         )
         return {
             "id": job["id"],
@@ -7751,12 +9588,13 @@ def create_app(updated_from: str = "") -> FastAPI:
         jid: str,
         start_page: Optional[int] = Form(None),
         end_page: Optional[int] = Form(None),
-        dpi: int = Form(150),
+        dpi: int = Form(200),
         base_url: str = Form(""),
         model: str = Form(""),
         api_key: str = Form(""),
         quality_profile: str = Form("standard"),
-        output_template: str = Form("faithfulbook"),
+        quality_tier: Optional[str] = Form(None),
+        output_template: str = Form(""),
     ):
         _cleanup_ocr_jobs()
         if not 72 <= dpi <= 300:
@@ -7764,11 +9602,31 @@ def create_app(updated_from: str = "") -> FastAPI:
         if len(model) > 160 or len(base_url) > 500:
             raise HTTPException(400, "模型或 Base URL 输入过长")
         try:
-            quality_profile = normalize_ocr_quality_profile(quality_profile)
+            legacy_profile = normalize_ocr_quality_profile(quality_profile)
+            if legacy_profile == OCR_QUALITY_PUBLICATION and dpi < 200:
+                raise ValueError("出版审校工作流要求至少 200 DPI")
+            explicit_tier = str(quality_tier or "").strip()
+            # v2 callers own the three-tier selection.  A legacy publication
+            # profile may imply ``high`` only when no explicit v2 tier was
+            # supplied; otherwise a visible "recommended" choice must never be
+            # silently promoted after the job starts.
+            tier_input = explicit_tier or (
+                "high" if legacy_profile == OCR_QUALITY_PUBLICATION else "recommended"
+            )
+            normalized_tier = normalize_quality_tier(
+                tier_input
+            )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
-        if quality_profile == OCR_QUALITY_PUBLICATION and dpi < 200:
-            raise HTTPException(400, "出版审校工作流要求至少 200 DPI")
+        policy = quality_tier_policy(normalized_tier)
+        quality_profile = (
+            OCR_QUALITY_PUBLICATION
+            if normalized_tier.value == "high"
+            else "standard"
+        )
+        # v2 OCR quality is tier-driven.  The request field remains accepted
+        # for old clients, but all tiers start from the frozen 200-DPI policy.
+        dpi = policy.initial_dpi
         from ..core.template import normalize_template_id
 
         try:
@@ -7807,6 +9665,8 @@ def create_app(updated_from: str = "") -> FastAPI:
                 job["status"] = "starting"
                 _set_ocr_selection(job, page_nos)
                 job["output_template"] = output_template
+                job["quality_tier"] = normalized_tier.value
+                job["quality_profile"] = quality_profile
                 # Freeze the build/prompt that will produce this OCR text.  A
                 # later application update may export the task, but must never
                 # rewrite its producer identity as the newer exporter.
@@ -7850,18 +9710,52 @@ def create_app(updated_from: str = "") -> FastAPI:
     def ocr_status(jid: str):
         with _ocr_jobs_lock:
             job = _ocr_jobs.get(jid)
-            if job is None:
-                raise HTTPException(404, "任务不存在")
-            return _public_ocr_job(job)
+        if job is None:
+            job = _restore_persisted_ocr_job(jid)
+        if job is None:
+            raise HTTPException(404, "任务不存在")
+        return _public_ocr_job(job)
+
+    @app.get("/api/ocr/jobs/{jid}/artifacts/{role}")
+    def ocr_artifact(jid: str, role: str):
+        """Download a manifest/hash-verified immutable OCR artifact by role."""
+        with _ocr_jobs_lock:
+            job = _ocr_jobs.get(jid)
+        if job is None:
+            job = _restore_persisted_ocr_job(jid)
+        if job is None:
+            raise HTTPException(404, "任务不存在")
+        with _ocr_jobs_lock:
+            store = job.get("_v2_store")
+            snapshot = job.get("_v2_snapshot")
+        if not isinstance(store, OcrRunStore) or snapshot is None:
+            raise HTTPException(404, "该任务没有 2.0.0 OCR 证据")
+        try:
+            artifact = resolve_ocr_artifact(store, snapshot.run_id, role)
+        except ValueError:
+            raise HTTPException(404, "OCR 产物角色不存在") from None
+        except (OcrStoreError, OSError) as exc:
+            raise HTTPException(409, _safe_task_error(exc)) from None
+        return FileResponse(
+            artifact.path,
+            media_type=artifact.media_type,
+            filename=artifact.filename,
+            headers={
+                "X-LaTeXStruct-SHA256": artifact.sha256,
+                "Cache-Control": "no-store",
+            },
+        )
 
     @app.get("/api/ocr/jobs/{jid}/quality")
     def ocr_quality(jid: str):
         """Return the live evidence gate without claiming measured accuracy."""
         with _ocr_jobs_lock:
             job = _ocr_jobs.get(jid)
-            if job is None:
-                raise HTTPException(404, "任务不存在")
-            return assess_ocr_quality(job)
+        if job is None:
+            job = _restore_persisted_ocr_job(jid)
+        if job is None:
+            raise HTTPException(404, "任务不存在")
+        return assess_ocr_quality(job)
 
     @app.post("/api/ocr/jobs/{jid}/pause")
     def ocr_pause(jid: str):
@@ -7886,12 +9780,14 @@ def create_app(updated_from: str = "") -> FastAPI:
     @app.post("/api/ocr/jobs/{jid}/resume")
     def ocr_resume(jid: str):
         """继续一个正在安全暂停或已经暂停的 OCR 任务。"""
+        job = _ocr_jobs.get(jid) or _restore_persisted_ocr_job(jid)
+        if job is None:
+            raise HTTPException(404, "任务不存在")
+        relaunch = False
+        snapshot = job.get("_v2_snapshot")
         with _update_state_lock:
             _raise_if_update_preparing()
             with _ocr_jobs_changed:
-                job = _ocr_jobs.get(jid)
-                if job is None:
-                    raise HTTPException(404, "任务不存在")
                 status = str(job.get("status") or "")
                 if status in {"pausing", "paused"}:
                     job["pause_requested"] = False
@@ -7899,17 +9795,41 @@ def create_app(updated_from: str = "") -> FastAPI:
                     job["phase"] = "已继续 OCR"
                     _bump_ocr_state(job)
                     _ocr_jobs_changed.notify_all()
+                elif (
+                    status == "partial"
+                    and snapshot is not None
+                    and not job.get("raw_frozen")
+                ):
+                    job["pause_requested"] = False
+                    job["status"] = "running"
+                    job["phase"] = "正在从不可变页记录继续失败页"
+                    job["error"] = ""
+                    relaunch = True
+                    _bump_ocr_state(job)
                 elif status != "running":
                     raise HTTPException(409, "当前 OCR 任务没有暂停")
-                return _public_ocr_job(job)
+        if relaunch:
+            _launch_ocr_job(
+                job,
+                list(snapshot.selected_pages),
+                snapshot.initial_dpi,
+                "",
+                snapshot.ocr_model,
+                "",
+                str(job.get("quality_profile") or "standard"),
+            )
+        return _public_ocr_job(job)
 
     @app.get("/api/ocr/jobs/{jid}/preview")
     def ocr_preview(jid: str):
         """返回当前已完成页的原子 LaTeX 草稿快照。"""
         with _ocr_jobs_lock:
             job = _ocr_jobs.get(jid)
-            if job is None:
-                raise HTTPException(404, "任务不存在")
+        if job is None:
+            job = _restore_persisted_ocr_job(jid)
+        if job is None:
+            raise HTTPException(404, "任务不存在")
+        with _ocr_jobs_lock:
             raw_tex = str(job.get("raw_tex") or "")
             revision = int(job.get("raw_revision") or 0)
             raw_chars = int(job.get("raw_chars") or len(raw_tex))
@@ -7924,14 +9844,25 @@ def create_app(updated_from: str = "") -> FastAPI:
 
     @app.get("/api/ocr/jobs/{jid}/pages/{n}")
     def ocr_page_png(jid: str, n: int):
-        job = _ocr_jobs.get(jid)
-        page = (job or {}).get("pages", {}).get(n)
-        if not page or not os.path.exists(page.get("png", "")):
-            raise HTTPException(404, "页面不存在")
+        # ``preview_ready`` in the polling response is derived from this same
+        # durable file check.  Keep a not-yet-rendered page distinct from an
+        # unknown page: callers must wait for preview_ready rather than infer
+        # availability from an OCR state such as ``running`` or ``error``.
+        with _ocr_jobs_lock:
+            job = _ocr_jobs.get(jid)
+            page = (job or {}).get("pages", {}).get(n)
+            if not page:
+                raise HTTPException(404, "页面不存在")
+            page_path = str(
+                page.get("persisted_visual_path") or page.get("png") or ""
+            )
+            preview_ready = os.path.isfile(page_path)
+        if not preview_ready:
+            raise HTTPException(409, "页面预览尚未持久化，请等待 preview_ready")
         from ..ocr import image_mime_type
 
-        media_type = image_mime_type(Path(page["png"]).read_bytes())
-        return FileResponse(page["png"], media_type=media_type)
+        media_type = image_mime_type(Path(page_path).read_bytes())
+        return FileResponse(page_path, media_type=media_type)
 
     @app.get("/api/ocr/jobs/{jid}/pages/{n}/tex")
     def ocr_page_tex(jid: str, n: int):
@@ -7960,14 +9891,17 @@ def create_app(updated_from: str = "") -> FastAPI:
                 client = job.get("client")
                 if client is None:
                     raise HTTPException(400, "任务尚未初始化")
-                required = (
-                    "_transcribe_one", "_refresh_raw_preview", "_merge_job",
-                    "_render_one", "_mark_page_error",
-                )
-                if not all(callable(job.get(name)) for name in required):
-                    raise HTTPException(409, "OCR 任务版本过旧，请重新上传后再试")
+                v2_retry = job.get("_v2_retry_page")
+                if not callable(v2_retry):
+                    required = (
+                        "_transcribe_one", "_refresh_raw_preview", "_merge_job",
+                        "_render_one", "_mark_page_error",
+                    )
+                    if not all(callable(job.get(name)) for name in required):
+                        raise HTTPException(409, "OCR 任务版本过旧，请重新上传后再试")
                 page["retrying"] = True
                 job["status"] = "running"
+                job["terminal_epoch"] = None
                 job["pause_requested"] = False
                 job["page"] = n
                 job["current_index"] = page.get("task_index", 0)
@@ -7977,6 +9911,26 @@ def create_app(updated_from: str = "") -> FastAPI:
                 )
                 _bump_ocr_state(job)
         ok = False
+        if callable(v2_retry):
+            try:
+                ok = v2_retry(n)
+            except OcrStoreError as exc:
+                with _ocr_jobs_lock:
+                    page["retrying"] = False
+                    job["status"] = "done" if job.get("raw_frozen") else "partial"
+                    _bump_ocr_state(job)
+                raise HTTPException(409, _safe_task_error(exc)) from None
+            except Exception as exc:  # noqa: BLE001
+                job["_mark_page_error"](job, n, exc)
+                job["_merge_job"](job)
+            finally:
+                with _ocr_jobs_lock:
+                    page["retrying"] = False
+                    _bump_ocr_state(job)
+            snapshot = _public_ocr_job(job)
+            snapshot["ok"] = ok
+            snapshot["retried_page"] = n
+            return snapshot
         try:
             try:
                 if not os.path.isfile(str(page.get("png") or "")):
@@ -8021,6 +9975,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 )
                 if not all(callable(job.get(name)) for name in required):
                     raise HTTPException(409, "OCR 任务版本过旧，请重新上传后再试")
+                v2_retry = job.get("_v2_retry_page")
                 targets = [
                     page_no for page_no in job.get("selected_pages", [])
                     if job["pages"][page_no].get("status") != "done"
@@ -8031,6 +9986,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 job["retry_total"] = len(targets)
                 job["retry_done"] = 0
                 job["status"] = "running"
+                job["terminal_epoch"] = None
                 job["pause_requested"] = False
                 job["phase"] = f"准备顺序重试 {len(targets)} 个失败页面"
                 job["error"] = ""
@@ -8059,15 +10015,18 @@ def create_app(updated_from: str = "") -> FastAPI:
                         )
                         _bump_ocr_state(job)
                     try:
-                        if not os.path.isfile(str(page.get("png") or "")):
-                            job["_render_one"](job, page_no)
-                        # 暂停若发生在渲染期间，不再继续发出新的视觉模型请求。
-                        _ocr_control(job)
-                        ok = job["_transcribe_one"](
-                            job, client, page_no, page["png"]
-                        )
-                        if ok:
-                            job["_refresh_raw_preview"](job)
+                        if callable(v2_retry):
+                            ok = v2_retry(page_no)
+                        else:
+                            if not os.path.isfile(str(page.get("png") or "")):
+                                job["_render_one"](job, page_no)
+                            # 暂停若发生在渲染期间，不再继续发出新的视觉模型请求。
+                            _ocr_control(job)
+                            ok = job["_transcribe_one"](
+                                job, client, page_no, page["png"]
+                            )
+                            if ok:
+                                job["_refresh_raw_preview"](job)
                     except Exception as exc:  # noqa: BLE001
                         job["_mark_page_error"](job, page_no, exc)
                     finally:

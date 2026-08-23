@@ -32,9 +32,56 @@ CODEX_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 CODEX_MAX_IMAGE_BYTES = 100 * 1024 * 1024
 CODEX_TRANSIENT_TEXT_RETRIES = 2
 CODEX_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
+CODEX_TEXT_CONCURRENCY = 1
+CODEX_VISUAL_CONCURRENCY = 3
+CODEX_DISABLED_FEATURES = (
+    "shell_tool", "shell_snapshot", "unified_exec", "code_mode",
+    "code_mode_host", "code_mode_only", "hooks", "apps", "enable_mcp_apps",
+    "plugins", "remote_plugin", "skill_mcp_dependency_install", "multi_agent",
+    "memories", "in_app_browser", "browser_use", "browser_use_external",
+    "computer_use", "image_generation", "workspace_dependencies",
+    "tool_call_mcp_elicitation", "tool_suggest", "request_permissions_tool",
+    "artifact", "goals",
+)
 
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
-_RUN_LOCK = threading.BoundedSemaphore(1)
+_GLOBAL_RUN_GATE = threading.BoundedSemaphore(CODEX_VISUAL_CONCURRENCY)
+_TEXT_RUN_GATE = threading.BoundedSemaphore(CODEX_TEXT_CONCURRENCY)
+_VISUAL_RUN_GATE = _GLOBAL_RUN_GATE
+# Kept as a private compatibility alias for older in-process integrations.
+# Text analysis remains atomic and serial; OCR/visual calls use the separate
+# three-slot gate below.
+_RUN_LOCK = _TEXT_RUN_GATE
+_FEATURE_CACHE: dict[str, frozenset[str]] = {}
+_FEATURE_CACHE_LOCK = threading.Lock()
+
+
+def _acquire_role_gate(
+    role: str,
+    timeout: float,
+) -> tuple[threading.BoundedSemaphore, ...]:
+    """Acquire a role lane while keeping total Codex processes at three."""
+
+    wait = max(1.0, float(timeout))
+    acquired: list[threading.BoundedSemaphore] = []
+    gates = (
+        (_TEXT_RUN_GATE, _GLOBAL_RUN_GATE)
+        if role == "text" else (_GLOBAL_RUN_GATE,)
+    )
+    for gate in gates:
+        if gate.acquire(timeout=wait):
+            acquired.append(gate)
+            continue
+        for held in reversed(acquired):
+            held.release()
+        label = "视觉/OCR" if role == "visual" else "文本分析"
+        raise LLMError(f"Codex {label}正在处理其他任务，等待本机队列超时")
+    return tuple(acquired)
+
+
+def _release_role_gates(gates: Sequence[threading.BoundedSemaphore]) -> None:
+    for gate in reversed(tuple(gates)):
+        gate.release()
 
 
 def validate_codex_model(value: str) -> str:
@@ -127,6 +174,47 @@ def _run_probe(path: Path, args: list[str], timeout: float = 12.0) -> subprocess
         creationflags=_creation_flags(),
         check=False,
     )
+
+
+def _supported_codex_features(path: Path) -> frozenset[str]:
+    """Read the runtime feature registry once; fail closed if it is unavailable."""
+    cache_key = str(path.resolve())
+    with _FEATURE_CACHE_LOCK:
+        cached = _FEATURE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        completed = _run_probe(path, ["features", "list"])
+    except (OSError, subprocess.SubprocessError):
+        raise LLMError(
+            "Codex runtime 功能清单无法读取；为保持工具禁用状态，本次请求已停止"
+        ) from None
+    if completed.returncode != 0:
+        raise LLMError(
+            "Codex runtime 功能清单不兼容；为保持工具禁用状态，请更新 LaTeXStruct"
+        )
+    names = frozenset(
+        match.group(1)
+        for line in (completed.stdout or "").splitlines()
+        if (match := re.match(r"^([A-Za-z0-9_]+)\s+", line.strip()))
+    )
+    if not names:
+        raise LLMError(
+            "Codex runtime 未返回可验证的功能清单；为保持工具禁用状态，本次请求已停止"
+        )
+    with _FEATURE_CACHE_LOCK:
+        _FEATURE_CACHE[cache_key] = names
+    return names
+
+
+def _disable_feature_args(path: Path) -> list[str]:
+    supported = _supported_codex_features(path)
+    return [
+        token
+        for feature in CODEX_DISABLED_FEATURES
+        if feature in supported
+        for token in ("--disable", feature)
+    ]
 
 
 def codex_status() -> Dict:
@@ -454,14 +542,30 @@ def _usage_from_jsonl(text: str) -> Dict:
     return usage
 
 
-def _friendly_failure(stderr: str, returncode: int) -> str:
-    lower = (stderr or "").lower()
+def _friendly_failure(diagnostic: str, returncode: int) -> str:
+    """Map captured Codex JSONL/stderr to a bounded user-safe failure.
+
+    Provider errors are normally emitted as JSONL on stdout, while startup and
+    authentication diagnostics use stderr.  We inspect both but never echo the
+    raw text, because it may contain document fragments or credentials.
+    """
+    lower = (diagnostic or "").lower()
     if "login" in lower or "auth" in lower or "unauthorized" in lower:
         return "Codex 的 ChatGPT 登录已失效，请运行 codex login 后重试"
     if any(word in lower for word in ("rate limit", "usage limit", "quota", "too many requests")):
         return "Codex 订阅额度不足或触发限流，请稍后重试"
     if "model" in lower and any(word in lower for word in ("not found", "unsupported", "unavailable")):
         return "所选 Codex 模型不可用，请留空使用默认模型或更换模型"
+    if "invalid_json_schema" in lower or "invalid schema for response_format" in lower:
+        return "Codex 结构化输出协议不兼容，请更新 LaTeXStruct 后重试"
+    if any(token in lower for token in (
+        "unknown feature", "unrecognized option", "unexpected argument",
+        "unknown configuration", "unknown config", "failed to load config",
+        "strict-config", "invalid value for",
+    )):
+        return "Codex runtime 与当前安全配置不兼容，请更新 LaTeXStruct 后重试"
+    if any(word in lower for word in ("context_length_exceeded", "request too large")):
+        return "Codex 请求内容过长，请缩小页批次后重试"
     return f"Codex 本地 runtime 调用失败（退出码 {returncode}）"
 
 
@@ -507,19 +611,39 @@ class CodexCLIClient:
         )
         self.backend = CODEX_BACKEND
         self.billing_mode = CODEX_BILLING_MODE
+        self._usage_local = threading.local()
         self.last_usage: Dict = {}
         self._runtime_path: Optional[Path] = None
+        self._runtime_lock = threading.Lock()
+
+    @property
+    def last_usage(self) -> Dict:
+        """Usage for the current caller thread.
+
+        OCR workers intentionally share one client.  A process-global dict
+        would let one page overwrite a sibling's accounting before the host
+        persists it.
+        """
+
+        return dict(getattr(self._usage_local, "value", {}))
+
+    @last_usage.setter
+    def last_usage(self, value: Dict) -> None:
+        self._usage_local.value = dict(value) if isinstance(value, dict) else {}
 
     def _ensure_runtime(self) -> Path:
         # 每个客户端只做一次无模型探测；逐页 OCR 或候选批次不重复执行
         # ``--version`` 与 ``login status``。
         if self._runtime_path is None:
-            status = codex_status()
-            if not status.get("ready"):
-                raise LLMError(str(status.get("message") or "Codex 尚未就绪"))
-            self._runtime_path = resolve_codex_path()
-            if self._runtime_path is None:
-                raise LLMError("未找到可执行的 Codex runtime")
+            with self._runtime_lock:
+                if self._runtime_path is not None:
+                    return self._runtime_path
+                status = codex_status()
+                if not status.get("ready"):
+                    raise LLMError(str(status.get("message") or "Codex 尚未就绪"))
+                self._runtime_path = resolve_codex_path()
+                if self._runtime_path is None:
+                    raise LLMError("未找到可执行的 Codex runtime")
         return self._runtime_path
 
     def chat_json(self, system: str, user: str) -> Tuple[dict, Dict]:
@@ -543,16 +667,17 @@ class CodexCLIClient:
         attempt = 0
         while True:
             attempt += 1
-            acquired = _RUN_LOCK.acquire(timeout=max(1.0, self.cfg.timeout))
-            if not acquired:
-                error = LLMError("Codex 正在处理另一个项目，等待本机队列超时")
+            try:
+                gate = _acquire_role_gate("text", self.cfg.timeout)
+            except LLMError as exc:
+                error = exc
             else:
                 try:
                     return self._run(runtime_path, prompt, _schema_for(system))
                 except LLMError as exc:
                     error = exc
                 finally:
-                    _RUN_LOCK.release()
+                    _release_role_gates(gate)
             if attempt > self.cfg.max_retries or not _transient_text_error(str(error)):
                 raise error
             _transient_text_retry_wait(attempt)
@@ -610,9 +735,7 @@ class CodexCLIClient:
                 ensure_ascii=False,
             )
         )
-        acquired = _RUN_LOCK.acquire(timeout=max(1.0, self.cfg.timeout))
-        if not acquired:
-            raise LLMError("Codex 正在处理另一个项目，等待本机队列超时")
+        gate = _acquire_role_gate("visual", self.cfg.timeout)
         try:
             obj, _usage = self._run_request(
                 runtime_path,
@@ -622,7 +745,7 @@ class CodexCLIClient:
                 operation="OCR",
             )
         finally:
-            _RUN_LOCK.release()
+            _release_role_gates(gate)
         latex = obj.get("latex")
         figures = obj.get("figures")
         framed_insets = obj.get("framed_insets")
@@ -679,9 +802,7 @@ class CodexCLIClient:
                 ensure_ascii=False,
             )
         )
-        acquired = _RUN_LOCK.acquire(timeout=max(1.0, self.cfg.timeout))
-        if not acquired:
-            raise LLMError("Codex 正在处理另一个项目，等待本机队列超时")
+        gate = _acquire_role_gate("visual", self.cfg.timeout)
         try:
             obj, _usage = self._run_request(
                 runtime_path,
@@ -694,7 +815,7 @@ class CodexCLIClient:
                 operation="OCR",
             )
         finally:
-            _RUN_LOCK.release()
+            _release_role_gates(gate)
         latex = obj.get("latex")
         figures = obj.get("figures")
         framed_insets = obj.get("framed_insets")
@@ -745,9 +866,7 @@ class CodexCLIClient:
                 "page_request": user_text,
             }, ensure_ascii=False)
         )
-        acquired = _RUN_LOCK.acquire(timeout=max(1.0, self.cfg.timeout))
-        if not acquired:
-            raise LLMError("Codex 正在处理另一个项目，等待本机队列超时")
+        gate = _acquire_role_gate("visual", self.cfg.timeout)
         try:
             return self._run_request(
                 runtime_path,
@@ -757,7 +876,7 @@ class CodexCLIClient:
                 operation="视觉复核",
             )
         finally:
-            _RUN_LOCK.release()
+            _release_role_gates(gate)
 
     def chat_vision_json_images_bytes(
         self,
@@ -795,9 +914,7 @@ class CodexCLIClient:
                 "page_requests": user_text,
             }, ensure_ascii=False)
         )
-        acquired = _RUN_LOCK.acquire(timeout=max(1.0, self.cfg.timeout))
-        if not acquired:
-            raise LLMError("Codex 正在处理另一个项目，等待本机队列超时")
+        gate = _acquire_role_gate("visual", self.cfg.timeout)
         try:
             return self._run_request(
                 runtime_path,
@@ -807,7 +924,7 @@ class CodexCLIClient:
                 operation="视觉批量复核",
             )
         finally:
-            _RUN_LOCK.release()
+            _release_role_gates(gate)
 
     @staticmethod
     def _validated_image_suffix(image_bytes: bytes) -> str:
@@ -863,35 +980,10 @@ class CodexCLIClient:
                 "--config", "check_for_update_on_startup=false",
                 "--config", 'history.persistence="none"',
                 "--config", f'model_reasoning_effort="{self.reasoning_effort}"',
-                "--disable", "shell_tool",
-                # shell_snapshot is independent from the model-visible shell tool and is
-                # enabled by default.  Disable it explicitly so session startup cannot
-                # source a user's shell profile or persist its exported environment.
-                "--disable", "shell_snapshot",
-                "--disable", "unified_exec",
-                "--disable", "code_mode",
-                "--disable", "code_mode_host",
-                "--disable", "code_mode_only",
-                "--disable", "hooks",
-                "--disable", "apps",
-                "--disable", "enable_mcp_apps",
-                "--disable", "plugins",
-                "--disable", "remote_plugin",
-                "--disable", "skill_mcp_dependency_install",
-                "--disable", "multi_agent",
-                "--disable", "memories",
-                "--disable", "in_app_browser",
-                "--disable", "browser_use",
-                "--disable", "browser_use_external",
-                "--disable", "computer_use",
-                "--disable", "image_generation",
-                "--disable", "workspace_dependencies",
-                "--disable", "tool_call_mcp_elicitation",
-                "--disable", "tool_suggest",
-                "--disable", "request_permissions_tool",
-                "--disable", "artifact",
-                "--disable", "goals",
             ]
+            # Disable every feature this exact runtime exposes.  Unknown names are
+            # omitted because Codex rejects them before the model request starts.
+            args.extend(_disable_feature_args(path))
             if image is not None:
                 image_bytes, image_suffix = image
                 image_path = root / f"page{image_suffix}"
@@ -929,7 +1021,10 @@ class CodexCLIClient:
                 raise LLMError("Codex runtime 无法启动，原项目保持不变") from None
             self.last_usage = _usage_from_jsonl(completed.stdout)
             if completed.returncode != 0:
-                raise LLMError(_friendly_failure(completed.stderr, completed.returncode))
+                raise LLMError(_friendly_failure(
+                    f"{completed.stderr or ''}\n{completed.stdout or ''}",
+                    completed.returncode,
+                ))
             if not result_path.is_file():
                 raise LLMError("Codex 未返回最终结构化结果")
             try:

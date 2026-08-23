@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildAnalysisDashboard,
   buildProcessStageTrail,
+  describeExecutionProgress,
   describeProcessPhase,
   processStageStateLabel,
   summarizeVerificationStages,
+  verificationCheckDisplayLabel,
   verificationFailureTitle,
 } from "../src/processStatus.js";
 
@@ -204,6 +207,47 @@ test("failure titles collapse legacy repeated label summaries", () => {
     verificationFailureTitle({ label, summary: "最终清点仍有 3 个 formal 阻断项" }),
     `${label}：最终清点仍有 3 个 formal 阻断项`,
   );
+  assert.equal(
+    verificationFailureTitle({ label, summary: `${label}：${label}未通过` }),
+    `${label}：未通过`,
+  );
+});
+
+
+test("terminal skipped stages say why they did not run", () => {
+  const blocked = { status: "blocked" };
+  assert.equal(
+    processStageStateLabel({ id: "ai-review", state: "skipped" }, {}, blocked),
+    "因安全检查未通过而未执行",
+  );
+  assert.equal(
+    processStageStateLabel({ id: "quality-visual", state: "skipped" }, {}, { status: "error" }),
+    "因处理错误而中止",
+  );
+  assert.equal(
+    processStageStateLabel({ id: "full-review", state: "skipped" }, {
+      checks: [{ id: "full-document-review", skipped: true, skip_reason: "user-disabled" }],
+    }, blocked),
+    "用户未启用（不计为失败）",
+  );
+});
+
+
+test("100 percent represents execution completion, never an implied verification pass", () => {
+  assert.deepEqual(describeExecutionProgress({ status: "blocked", progress: 1 }), {
+    percent: 100,
+    label: "执行进度",
+    detail: "执行完成；安全检查未通过",
+  });
+  assert.match(describeExecutionProgress({ status: "running", progress: 0.5 }).detail, /尚未形成验证结论/);
+  assert.equal(
+    verificationCheckDisplayLabel({ label: "全文独立复核", ok: true, skipped: true, skip_reason: "user-disabled" }),
+    "·全文独立复核（用户未启用）",
+  );
+  assert.match(
+    verificationCheckDisplayLabel({ label: "逐页视觉复核", ok: true, skipped: true }),
+    /配置跳过；未形成通过结论/,
+  );
 });
 
 
@@ -212,4 +256,66 @@ test("legacy verification without quality evidence is not displayed as passed or
   assert.ok(rows.every((row) => row.state === "skipped"));
   assert.ok(rows.every((row) => row.summary.includes("旧任务未记录")));
   assert.ok(rows.every((row) => row.summary.includes("不是检查通过")));
+});
+
+
+test("analysis dashboard exposes rounds, pages, issue ledger, rollback and best version", () => {
+  const dashboard = buildAnalysisDashboard({
+    status: "running",
+    phase: "quality-visual",
+    current_round: 3,
+    checked_pages: 15,
+    page_count: 17,
+    current_pages: [8, 9],
+    issue_counts: { total: 9, verified_closed: 5, remaining: 3, blocked: 1 },
+    rollback_history: [{ candidate_id: "round-2" }],
+    best_candidate_id: "round-1",
+    progress_metrics: { elapsed_seconds: 420, eta_seconds: 180 },
+  }, {}, [], {});
+  assert.equal(dashboard.round, 3);
+  assert.equal(dashboard.checkedPages, 15);
+  assert.deepEqual(dashboard.currentPages, [8, 9]);
+  assert.deepEqual([dashboard.found, dashboard.fixed, dashboard.remaining, dashboard.blocked], [9, 5, 3, 1]);
+  assert.equal(dashboard.rolledBack, true);
+  assert.equal(dashboard.bestVersion, "round-1");
+  assert.equal(dashboard.etaSeconds, 180);
+});
+
+
+test("analysis dashboard maps terminal states without upgrading unverified work", () => {
+  const issues = buildAnalysisDashboard({
+    status: "blocked",
+    result: { final_status: "COMPLETED_WITH_ISSUES", best_candidate_id: "best-7" },
+  }, { safe_to_export: false }, [], { has_result: true });
+  assert.equal(issues.finalStatus, "COMPLETED_WITH_ISSUES");
+  assert.equal(issues.canContinue, true);
+  assert.equal(issues.artifacts.find((item) => item.id === "best-tex").available, true);
+
+  const verified = buildAnalysisDashboard({
+    status: "done",
+    result: { analysis_archive: { final_status: "VERIFIED", verified: true } },
+  }, { safe_to_export: true }, [], { has_result: true });
+  assert.equal(verified.finalStatus, "VERIFIED");
+
+  const legacy = buildAnalysisDashboard(
+    { status: "done" },
+    { safe_to_export: true },
+    [],
+    { has_result: true },
+  );
+  assert.equal(legacy.finalStatus, "COMPLETED_WITH_ISSUES");
+
+  const v2Issues = buildAnalysisDashboard({
+    status: "done",
+    result: {
+      analysis_archive: {
+        final_status: "COMPLETED_WITH_ISSUES",
+        verified: false,
+      },
+    },
+  }, { safe_to_export: true }, [], { has_result: true });
+  assert.equal(v2Issues.finalStatus, "COMPLETED_WITH_ISSUES");
+
+  const failed = buildAnalysisDashboard({ status: "error" }, { safe_to_export: false }, [], { has_result: true });
+  assert.equal(failed.finalStatus, "FAILED_BEST_RETAINED");
 });

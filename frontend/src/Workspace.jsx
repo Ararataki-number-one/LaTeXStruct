@@ -5,10 +5,14 @@ import { DiffEditor, Editor, loader } from "@monaco-editor/react";
 import { api } from "./api";
 import AuditSubmissionPanel from "./AuditSubmissionPanel";
 import {
+  buildAnalysisDashboard,
   buildProcessStageTrail,
+  describeExecutionProgress,
   describeProcessPhase,
+  formatProcessDuration,
   processStageStateLabel,
   summarizeVerificationStages,
+  verificationCheckDisplayLabel,
   verificationFailureTitle,
 } from "./processStatus";
 import {
@@ -120,7 +124,7 @@ function ProcessStageTrail({ job, verification }) {
       {stages.map((stage) => (
         <li key={stage.id} className={`stage-${stage.state}`} title={stage.help}>
           <span aria-hidden="true" className="stage-dot" />
-          <span><b>{stage.label}</b><small>{processStageStateLabel(stage, verification)}</small></span>
+          <span><b>{stage.label}</b><small>{processStageStateLabel(stage, verification, job)}</small></span>
         </li>
       ))}
     </ol>
@@ -147,6 +151,91 @@ function VerificationStageSummary({ verification }) {
         </details>
       ))}
     </div>
+  );
+}
+
+const FINAL_STATUS_LABELS = Object.freeze({
+  VERIFIED: "已验证",
+  COMPLETED_WITH_ISSUES: "已完成，仍有问题",
+  FAILED_BEST_RETAINED: "处理失败，最佳版本已保留",
+});
+
+function AnalysisProgressDashboard({ dashboard, job, verification, onContinue }) {
+  const execution = describeExecutionProgress(job);
+  const progress = execution.percent;
+  const currentPages = dashboard.currentPages.length
+    ? dashboard.currentPages.map((page) => `P${page}`).join("、")
+    : "等待中";
+  return (
+    <>
+      <div className="process-summary">
+        <div>
+          <b>{dashboard.finalStatus
+            ? FINAL_STATUS_LABELS[dashboard.finalStatus]
+            : String(job?.status || "") === "paused" ? "已暂停" : "AI 正在自动整理"}</b>
+          <span>{dashboard.stage}</span>
+        </div>
+        <div className="process-progress-summary">
+          <small>{execution.label}</small>
+          <strong>{progress}%</strong>
+        </div>
+      </div>
+      <div
+        className="process-track"
+        role="progressbar"
+        aria-label={execution.label}
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow={progress}
+      >
+        <span style={{ width: `${progress}%` }} />
+      </div>
+      <p className="analysis-execution-note">{execution.detail}</p>
+      <ProcessStageTrail job={job} verification={verification} />
+      <div className="analysis-progress-grid" aria-label="AI 自动整理实时统计">
+        <span><small>当前阶段</small><b>{dashboard.stage}</b></span>
+        <span><small>当前轮次</small><b>{dashboard.round == null ? "暂无记录" : `第 ${dashboard.round} 轮`}</b></span>
+        <span><small>已检查页面</small><b>{dashboard.checkedPages == null
+          ? "暂无记录" : `${dashboard.checkedPages}/${dashboard.totalPages ?? "?"}`}</b></span>
+        <span><small>正在处理</small><b>{currentPages}</b></span>
+        <span><small>发现问题</small><b>{dashboard.found}</b></span>
+        <span><small>自动修复</small><b>{dashboard.fixed}</b></span>
+        <span><small>剩余问题</small><b>{dashboard.remaining}</b></span>
+        <span><small>阻塞问题</small><b>{dashboard.blocked}</b></span>
+        <span><small>回滚</small><b>{dashboard.rolledBack ? `是（${dashboard.rollbackCount} 次）` : "否"}</b></span>
+        <span><small>当前最佳版本</small><b>{dashboard.bestVersion || "尚未形成"}</b></span>
+        <span><small>已用时间</small><b>{formatProcessDuration(dashboard.elapsedSeconds)}</b></span>
+        <span><small>预计剩余</small><b>{formatProcessDuration(dashboard.etaSeconds)}</b></span>
+      </div>
+      <p className="analysis-stage-help">{dashboard.stageHelp}</p>
+      {dashboard.rolledBack && (
+        <p className="analysis-rollback-note">检测到质量回退，较差候选已拒绝，当前继续使用历史最佳版本。</p>
+      )}
+      {dashboard.terminal && (
+        <section className={`analysis-final ${dashboard.finalStatus === "VERIFIED" ? "verified" : "issues"}`}>
+          <div className="analysis-final-heading">
+            <div>
+              <h3>本次自动整理产物</h3>
+              <p>最终状态：{FINAL_STATUS_LABELS[dashboard.finalStatus] || "已保存当前最佳结果"}</p>
+            </div>
+            {dashboard.canContinue && (
+              <button className="primary" type="button" onClick={onContinue}>继续自动精修</button>
+            )}
+          </div>
+          <div className="analysis-artifact-grid">
+            {dashboard.artifacts.map((artifact) => (
+              <div key={artifact.id} className={artifact.available ? "available" : "pending"}>
+                <span>{artifact.available ? "✓" : "·"}</span>
+                <b>{artifact.label}</b>
+                {artifact.url
+                  ? <a href={artifact.url} target="_blank" rel="noreferrer">打开 / 下载</a>
+                  : <small>{artifact.available ? "已保存，可使用上方导出按钮" : "本任务暂无此产物"}</small>}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+    </>
   );
 }
 
@@ -997,6 +1086,7 @@ export default function Workspace({ pid, onOpenSettings }) {
     job?.phase,
     job?.phase_label || job?.message,
   );
+  const analysisDashboard = buildAnalysisDashboard(job || {}, verification || {}, decisions, info || {});
   const priceText = usesCodexSubscription
     ? "Codex 订阅额度（非 API 计费）"
     : estimatedCny == null
@@ -1158,7 +1248,7 @@ export default function Workspace({ pid, onOpenSettings }) {
       <section className="card toolbar">
         <b>{info ? `${info.name}（${info.mode}）` : pid}</b>
         <button className="primary" disabled={taskActive} onClick={runProcess}>
-          {taskActive ? "正在处理" : result || failedAttempt ? "重新分析" : "开始分析"}
+          {taskActive ? "AI 正在自动整理" : result || failedAttempt ? "继续自动精修" : "AI 全自动整理"}
         </button>
         {job?.status === "paused" ? (
           <button className="primary" onClick={() => controlTask("resume")}>▶ 继续</button>
@@ -1330,55 +1420,12 @@ export default function Workspace({ pid, onOpenSettings }) {
         )}
         {job && job.status !== "idle" && (
           <div className={`process-card process-${job.status}`}>
-            <div className="process-summary">
-              <div>
-                <b>{job.status === "paused" ? "已暂停" : job.status === "done" ? "处理完成" :
-                  job.status === "blocked" ? "安全检查未通过" :
-                  job.status === "error" ? "处理未完成" : job.status === "cancelled" ? "已取消" :
-                  job.status === "pausing" ? "正在安全暂停" : job.status === "cancelling" ? "正在取消" :
-                  job.status === "committing" ? "正在安全保存" : "正在处理"}</b>
-                <span>{currentPhase.label}</span>
-              </div>
-              <strong>{Math.round((job.progress || 0) * 100)}%</strong>
-            </div>
-            <div
-              className="process-track"
-              role="progressbar"
-              aria-label="项目处理进度"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              aria-valuenow={Math.round((job.progress || 0) * 100)}
-            >
-              <span style={{ width: `${Math.round((job.progress || 0) * 100)}%` }} />
-            </div>
-            <ProcessStageTrail job={job} verification={verification} />
-            <div className="process-metrics">
-              {usesCodexSubscription && <span>引擎：Codex CLI（ChatGPT 订阅）</span>}
-              <span>Token：{tokenTotal.toLocaleString()}</span>
-              <span>费用：{priceText}</span>
-              <span>实时预览：{job.preview_label || "等待草稿"}</span>
-              <span>预览状态：{PREVIEW_STATE_LABELS[job.preview_state] || PREVIEW_STATE_LABELS.SOURCE_PREVIEW}</span>
-              {candidateTotal > 0 && (
-                <span>候选进度：{Math.min(processedCandidateCount, candidateTotal)}/{candidateTotal}</span>
-              )}
-              {Array.isArray(job.completed_candidates) && (
-                <span>已形成建议：{job.completed_candidates.length} 项</span>
-              )}
-              {(job.preview_revision || 0) > 1 && <span>草稿版本：{job.preview_revision}</span>}
-            </div>
-            <p className="process-current-action">
-              当前动作：{job.phase_label || job.message || "等待下一安全批次"}
-              <small>{currentPhase.help}</small>
-            </p>
-            {job.events?.length > 0 && (
-              <ol className="process-events">
-                {job.events.slice(-5).map((event, index) => (
-                  <li key={`${event.at}-${index}`} className={index === job.events.slice(-5).length - 1 ? "current" : ""}>
-                    {event.message}
-                  </li>
-                ))}
-              </ol>
-            )}
+            <AnalysisProgressDashboard
+              dashboard={analysisDashboard}
+              job={job}
+              verification={verification}
+              onContinue={runProcess}
+            />
             {job.error && (
               <>
                 <p className="process-error-message">{job.error}。{processIssueGuidance(job)}</p>
@@ -1426,7 +1473,7 @@ export default function Workspace({ pid, onOpenSettings }) {
         {verification?.checks && !showingFailedDraft && (
           <span className={`safety ${safeToExport ? "safe" : "unsafe"}`}>
             安全检查：{verification.checks.map((c) =>
-              `${c.ok ? "✓" : "✗"}${c.label}${c.skipped ? "（未运行）" : ""}`).join(" · ")}
+              verificationCheckDisplayLabel(c)).join(" · ")}
           </span>
         )}
         {safeToExport && !reviewComplete && (
@@ -1566,8 +1613,8 @@ export default function Workspace({ pid, onOpenSettings }) {
               <ul className="safety-check-list" aria-label="安全检查清单">
                 {verification.checks.map((check) => (
                   <li key={check.id} className={check.ok ? "ok" : "failed"}>
-                    <span aria-hidden="true">{check.ok ? "✓" : "✗"}</span>
-                    {check.label}{check.skipped ? "（未运行）" : ""}
+                    <span aria-hidden="true">{check.skipped ? "·" : check.ok ? "✓" : "✗"}</span>
+                    {verificationCheckDisplayLabel(check).replace(/^[✓✗·]/, "")}
                   </li>
                 ))}
               </ul>

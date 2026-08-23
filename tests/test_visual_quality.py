@@ -106,10 +106,19 @@ def test_reflow_alignment_covers_fewer_candidate_pages_with_minimum_pairs():
     assert alignment.expected_candidate_page_count == 3
     assert len(alignment.mappings) == 5
     assert {item.source_page for item in alignment.mappings} == set(range(1, 6))
-    assert {item.candidate_page for item in alignment.mappings} == {1, 2, 3}
+    assert {
+        item.candidate_page for item in alignment.mappings
+        if item.candidate_page is not None
+    } == {1, 2, 3}
+    assert alignment.mapping_reliable is False
+    assert alignment.missing_source_pages
     assert all(
         left.source_page <= right.source_page
-        and left.candidate_page <= right.candidate_page
+        and (
+            left.candidate_page is None
+            or right.candidate_page is None
+            or left.candidate_page <= right.candidate_page
+        )
         for left, right in zip(alignment.mappings, alignment.mappings[1:])
     )
 
@@ -134,10 +143,45 @@ def test_reflow_alignment_covers_extra_toc_pages_with_minimum_pairs():
     )
 
     assert alignment.candidate_scope == CANDIDATE_SCOPE_REFLOW
-    assert len(alignment.mappings) == 5
+    assert len(alignment.mappings) == 3
     assert {item.source_page for item in alignment.mappings} == {1, 2, 3}
-    assert {item.candidate_page for item in alignment.mappings} == set(range(1, 6))
+    assert {item.candidate_page for item in alignment.mappings} == {2, 3, 4}
+    assert alignment.candidate_only_pages == (1, 5)
+    assert alignment.ambiguous_candidate_pages == ()
+    assert alignment.mapping_reliable is True
+    assert [item.role for item in alignment.mapping_evidence] == [
+        "candidate_only", "content", "content", "content", "candidate_only",
+    ]
     assert alignment.mapping_sha256
+
+
+def test_reflow_alignment_keeps_real_missing_source_page_fail_closed():
+    alignment = build_page_alignment(
+        3,
+        3,
+        candidate_scope=CANDIDATE_SCOPE_REFLOW,
+        source_page_texts={
+            1: "alpha theorem complete statement",
+            2: "beta lemma complete argument",
+            3: "gamma proof complete conclusion",
+        },
+        candidate_page_texts={
+            1: "Contents alpha 1 beta 2 gamma 3",
+            2: "alpha theorem complete statement",
+            3: "gamma proof complete conclusion",
+        },
+    )
+
+    assert alignment.candidate_only_pages == (1,)
+    assert alignment.missing_source_pages == (2,)
+    assert alignment.mapping_reliable is False
+    assert (2, None) in [
+        (item.source_page, item.candidate_page) for item in alignment.mappings
+    ]
+    assert any(
+        item.role == "missing_source" and item.source_page == 2
+        for item in alignment.mapping_evidence
+    )
 
 
 def test_reflow_alignment_large_and_equal_ranges_do_not_expand_review_calls():
@@ -161,9 +205,11 @@ def test_reflow_alignment_large_and_equal_ranges_do_not_expand_review_calls():
         {"source_page": page, "candidate_page": page}
         for page in range(1, 18)
     ]
-    assert len(large.mappings) == 480
+    assert len(large.mappings) == 473
     assert len({item.source_page for item in large.mappings}) == 473
-    assert len({item.candidate_page for item in large.mappings}) == 480
+    assert len({item.candidate_page for item in large.mappings}) == 473
+    assert large.ambiguous_candidate_pages == tuple(range(474, 481))
+    assert large.mapping_reliable is False
 
 
 def test_equal_page_count_reflow_can_warp_around_generated_contents_page():
@@ -191,10 +237,12 @@ def test_equal_page_count_reflow_can_warp_around_generated_contents_page():
     pairs = [
         (item.source_page, item.candidate_page) for item in alignment.mappings
     ]
-    assert alignment.strategy == "content_anchor_warp"
-    assert len(alignment.mappings) > 4
+    assert alignment.strategy == "host_text_anchor_monotonic_gapped"
+    assert len(alignment.mappings) == 4
     assert set(item.source_page for item in alignment.mappings) == {1, 2, 3, 4}
-    assert set(item.candidate_page for item in alignment.mappings) == {1, 2, 3, 4}
+    assert set(item.candidate_page for item in alignment.mappings) == {1, 3, 4}
+    assert alignment.candidate_only_pages == (2,)
+    assert alignment.mapping_reliable is True
     assert (2, 3) in pairs
     assert pairs != [(page, page) for page in range(1, 5)]
 
@@ -212,9 +260,9 @@ def test_reflow_page_count_change_is_not_a_strict_pagination_failure():
 
     assert "EXTRA_CANDIDATE_PAGES" not in _all_codes(report)
     assert "PAGE_COUNT_MISMATCH" not in _all_codes(report)
-    assert len(report.pages) == 4
+    assert len(report.pages) >= 4
     assert report.page_alignment is not None
-    assert {page.source_page for page in report.pages} == {1, 2, 3}
+    assert {page.source_page for page in report.pages if page.source_page} == {1, 2, 3}
     assert {page.candidate_page for page in report.pages} == {1, 2, 3, 4}
 
 

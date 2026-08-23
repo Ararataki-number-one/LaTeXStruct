@@ -256,19 +256,16 @@ def test_frontend_preserves_standard_tex_and_freezes_ocr_quality_and_template():
     assert '先确定版式，再导入内容' in projects
     assert 'const [mode, setMode] = useState("ai")' in projects
     assert 'AI 深度整理（默认，章节 + 定理 + 复查）' in projects
-    assert 'const [qualityProfile, setQualityProfile] = useState(OCR_QUALITY_PUBLICATION)' in ocr
-    assert 'api("/api/templates")' in ocr
-    assert 'fd.append("quality_profile", qualityProfile)' in ocr
-    assert 'fd.append("output_template", outputTemplate)' in ocr
+    assert 'const [qualityTier, setQualityTier] = useState("recommended")' in ocr
+    assert 'api("/api/templates")' not in ocr
+    assert 'fd.append("quality_tier", qualityTier)' in ocr
+    assert 'fd.append("quality_profile", legacyOcrQualityProfile(qualityTier))' in ocr
+    assert 'fd.append("output_template", "")' in ocr
     assert 'const importTemplate = "faithfulbook"' not in ocr
-    assert '版式在任务启动时冻结并随任务恢复' in ocr
-    assert '未测量文字或数学准确率，也不代表出版就绪' in ocr
-    assert 'const [importMode, setImportMode] = useState("ai")' in ocr
-    assert '<option value="ai">AI 深度整理（默认，重点维护）</option>' in ocr
-    assert '<option value="rule">旧规则兼容模式（不再主动优化）</option>' in ocr
-    assert 'mode: importMode' in ocr
-    assert "目录页并插入真正的 \\\\tableofcontents" in ocr
-    assert "不会悄悄换成规则结果" in ocr
+    assert 'OCR 阶段只做忠实转写与基线恢复' in ocr
+    assert '把 PDF 或图片忠实转成可编辑 LaTeX' in ocr
+    assert 'mode: "ai"' in ocr
+    assert '<option value="rule">' not in ocr
 
 
 def test_every_user_import_entry_defaults_to_ai_but_keeps_rule_compatibility():
@@ -457,7 +454,7 @@ def test_release_build_safety_guards():
     assert "v1.1.4" not in workflow
     assert "name: LaTeXStruct-v${{ env.APP_VERSION }}" in workflow
     assert "name: LaTeXStruct-${{ github.ref_name }}" not in workflow
-    assert "$previousVersion = '1.2.8'" in workflow
+    assert "$previousVersion = '1.2.10'" in workflow
     assert "$env:LATEXSTRUCT_SMOKE_PREVIOUS_VERSION = $previousVersion" in workflow
     assert "previous_version=os.environ['LATEXSTRUCT_SMOKE_PREVIOUS_VERSION']" in workflow
     assert "previous_version='1.2.2'" not in workflow

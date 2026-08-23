@@ -183,7 +183,7 @@ class PageDifferenceMetrics:
 
 @dataclass(frozen=True, slots=True)
 class VisualPageReport:
-    source_page: int
+    source_page: int | None
     candidate_page: int | None
     source: PageVisualMetrics | None
     candidate: PageVisualMetrics | None
@@ -218,6 +218,37 @@ class VisualPageMapping:
 
 
 @dataclass(frozen=True, slots=True)
+class VisualPageMappingEvidence:
+    """Host-derived evidence for one reflow alignment action.
+
+    Page numbers, roles and hashes are produced by the host.  They are never
+    inferred from a vision-model response.  ``source_page=None`` is reserved
+    for a candidate-only page such as a generated table of contents.
+    """
+
+    role: str
+    source_page: int | None
+    candidate_page: int | None
+    similarity: float | None
+    source_text_sha256: str
+    candidate_text_sha256: str
+    signals: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "role": self.role,
+            "source_page": self.source_page,
+            "candidate_page": self.candidate_page,
+            "similarity": self.similarity,
+            "source_text_sha256": self.source_text_sha256,
+            "candidate_text_sha256": self.candidate_text_sha256,
+            "signals": list(self.signals),
+        }
+
+    as_dict = to_dict
+
+
+@dataclass(frozen=True, slots=True)
 class VisualPageAlignment:
     policy: str
     expected_candidate_page_count: int
@@ -228,6 +259,11 @@ class VisualPageAlignment:
     candidate_page_count: int = 0
     strategy: str = "page_index"
     requires_model_review: bool = False
+    mapping_reliable: bool = True
+    candidate_only_pages: tuple[int, ...] = ()
+    ambiguous_candidate_pages: tuple[int, ...] = ()
+    missing_source_pages: tuple[int, ...] = ()
+    mapping_evidence: tuple[VisualPageMappingEvidence, ...] = ()
     mapping_sha256: str = ""
 
     def to_dict(self) -> dict[str, object]:
@@ -241,6 +277,13 @@ class VisualPageAlignment:
             "candidate_page_count": self.candidate_page_count,
             "strategy": self.strategy,
             "requires_model_review": self.requires_model_review,
+            "mapping_reliable": self.mapping_reliable,
+            "candidate_only_pages": list(self.candidate_only_pages),
+            "ambiguous_candidate_pages": list(self.ambiguous_candidate_pages),
+            "missing_source_pages": list(self.missing_source_pages),
+            "mapping_evidence": [
+                item.to_dict() for item in self.mapping_evidence
+            ],
             "mapping_sha256": self.mapping_sha256,
         }
 
@@ -432,6 +475,11 @@ def _page_alignment_sha256(
     candidate_page_count: int,
     strategy: str,
     requires_model_review: bool,
+    mapping_reliable: bool,
+    candidate_only_pages: Sequence[int],
+    ambiguous_candidate_pages: Sequence[int],
+    missing_source_pages: Sequence[int],
+    mapping_evidence: Sequence[VisualPageMappingEvidence],
 ) -> str:
     payload = {
         "policy": policy,
@@ -443,6 +491,13 @@ def _page_alignment_sha256(
         "candidate_page_count": int(candidate_page_count),
         "strategy": strategy,
         "requires_model_review": bool(requires_model_review),
+        "mapping_reliable": bool(mapping_reliable),
+        "candidate_only_pages": [int(page) for page in candidate_only_pages],
+        "ambiguous_candidate_pages": [
+            int(page) for page in ambiguous_candidate_pages
+        ],
+        "missing_source_pages": [int(page) for page in missing_source_pages],
+        "mapping_evidence": [item.to_dict() for item in mapping_evidence],
     }
     return _sha256(json.dumps(
         payload,
@@ -463,8 +518,17 @@ def _finish_alignment(
     candidate_page_count: int,
     strategy: str,
     requires_model_review: bool = False,
+    mapping_reliable: bool = True,
+    candidate_only_pages: Sequence[int] = (),
+    ambiguous_candidate_pages: Sequence[int] = (),
+    missing_source_pages: Sequence[int] = (),
+    mapping_evidence: Sequence[VisualPageMappingEvidence] = (),
 ) -> VisualPageAlignment:
     frozen_mappings = tuple(mappings)
+    frozen_candidate_only = tuple(int(page) for page in candidate_only_pages)
+    frozen_ambiguous = tuple(int(page) for page in ambiguous_candidate_pages)
+    frozen_missing = tuple(int(page) for page in missing_source_pages)
+    frozen_evidence = tuple(mapping_evidence)
     digest = _page_alignment_sha256(
         policy=policy,
         expected_candidate_page_count=expected_candidate_page_count,
@@ -475,6 +539,11 @@ def _finish_alignment(
         candidate_page_count=candidate_page_count,
         strategy=strategy,
         requires_model_review=requires_model_review,
+        mapping_reliable=mapping_reliable,
+        candidate_only_pages=frozen_candidate_only,
+        ambiguous_candidate_pages=frozen_ambiguous,
+        missing_source_pages=frozen_missing,
+        mapping_evidence=frozen_evidence,
     )
     return VisualPageAlignment(
         policy=policy,
@@ -486,6 +555,11 @@ def _finish_alignment(
         candidate_page_count=candidate_page_count,
         strategy=strategy,
         requires_model_review=requires_model_review,
+        mapping_reliable=mapping_reliable,
+        candidate_only_pages=frozen_candidate_only,
+        ambiguous_candidate_pages=frozen_ambiguous,
+        missing_source_pages=frozen_missing,
+        mapping_evidence=frozen_evidence,
         mapping_sha256=digest,
     )
 
@@ -796,17 +870,160 @@ def _anchor_covering_monotonic_pairs(
     ]
 
 
+def _alignment_text_sha256(text: str) -> str:
+    return _sha256(_normalized_text(text).encode("utf-8"))
+
+
+def _alignment_similarity(source_text: str, candidate_text: str) -> float:
+    """Score page-content overlap without assigning authority to an LLM."""
+
+    def without_extracted_page_prefix(value: str) -> str:
+        return re.sub(
+            r"^\s*\d+\s*[.\-:)\]]\s*",
+            "",
+            _normalized_text(value),
+            count=1,
+        ).casefold()
+
+    source = without_extracted_page_prefix(source_text)
+    candidate = without_extracted_page_prefix(candidate_text)
+    if not source or not candidate:
+        return 0.0
+    if source == candidate:
+        return 1.0
+    shorter, longer = (
+        (source, candidate) if len(source) <= len(candidate) else (candidate, source)
+    )
+    if len(shorter) >= 16 and shorter in longer:
+        return 1.0
+    source_tokens = _alignment_tokens(source)
+    candidate_tokens = _alignment_tokens(candidate)
+    shared = source_tokens & candidate_tokens
+    containment = (
+        len(shared) / max(1, min(len(source_tokens), len(candidate_tokens)))
+        if source_tokens and candidate_tokens else 0.0
+    )
+    source_words = {
+        word for word in re.findall(r"[^\W_]{4,}", source, flags=re.UNICODE)
+        if not word.isdigit()
+    }
+    candidate_words = {
+        word for word in re.findall(r"[^\W_]{4,}", candidate, flags=re.UNICODE)
+        if not word.isdigit()
+    }
+    shared_words = source_words & candidate_words
+    word_containment = (
+        len(shared_words) / max(1, min(len(source_words), len(candidate_words)))
+        if source_words and candidate_words else 0.0
+    )
+    # The character ratio is useful for short headings where the bounded token
+    # inventory contains only one word.  It is deliberately down-weighted so a
+    # common running header cannot become a page-number authority by itself.
+    char_ratio = difflib.SequenceMatcher(
+        None,
+        source[:12000],
+        candidate[:12000],
+        autojunk=False,
+    ).ratio()
+    if not shared:
+        char_ratio *= 0.55
+    return _rounded(min(1.0, max(containment, word_containment, char_ratio)))
+
+
+_CANDIDATE_ONLY_HEADING = re.compile(
+    r"^(?:\d+\s*[.\-:]\s*)?(?:table\s+of\s+contents|contents|目\s*录|目\s*次|"
+    r"colophon|版权页|索引|index\b)",
+    flags=re.IGNORECASE,
+)
+
+
+def _candidate_only_signals(text: str) -> tuple[str, ...]:
+    """Return conservative host signals for generated navigation/meta pages."""
+
+    normalized = _normalized_text(text)
+    if not normalized:
+        return ()
+    signals: list[str] = []
+    if _CANDIDATE_ONLY_HEADING.search(normalized[:240]):
+        signals.append("generated_page_heading")
+    elif re.search(r"\bcolophon\b", normalized[:120], flags=re.IGNORECASE):
+        signals.append("generated_colophon_marker")
+    raw_lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+    numbered_lines = sum(
+        bool(re.search(r"(?:\.{2,}|\s)\s*\d+\s*$", line))
+        for line in raw_lines[:80]
+    )
+    if numbered_lines >= 3:
+        signals.append("navigation_page_number_lines")
+    return tuple(signals)
+
+
+@dataclass(frozen=True, slots=True)
+class _ReflowAlignmentOutcome:
+    mappings: tuple[VisualPageMapping, ...]
+    strategy: str
+    requires_model_review: bool
+    mapping_reliable: bool
+    candidate_only_pages: tuple[int, ...]
+    ambiguous_candidate_pages: tuple[int, ...]
+    missing_source_pages: tuple[int, ...]
+    evidence: tuple[VisualPageMappingEvidence, ...]
+
+
+def _mapping_evidence(
+    *,
+    role: str,
+    source_page: int | None,
+    candidate_page: int | None,
+    source_text: str,
+    candidate_text: str,
+    similarity: float | None,
+    signals: Sequence[str] = (),
+) -> VisualPageMappingEvidence:
+    return VisualPageMappingEvidence(
+        role=role,
+        source_page=source_page,
+        candidate_page=candidate_page,
+        similarity=similarity,
+        source_text_sha256=(
+            _alignment_text_sha256(source_text) if source_page is not None else ""
+        ),
+        candidate_text_sha256=(
+            _alignment_text_sha256(candidate_text)
+            if candidate_page is not None else ""
+        ),
+        signals=tuple(str(signal) for signal in signals),
+    )
+
+
 def _reflow_mappings(
     selected: tuple[int, ...],
     candidate_count: int,
     source_page_texts: Mapping[int, str] | Sequence[str] | None,
     candidate_page_texts: Mapping[int, str] | Sequence[str] | None,
-) -> tuple[tuple[VisualPageMapping, ...], str, bool]:
+) -> _ReflowAlignmentOutcome:
     if candidate_count <= 0:
-        return (
-            tuple(VisualPageMapping(page, None) for page in selected),
-            "proportional_no_candidate_pages",
-            True,
+        mappings = tuple(VisualPageMapping(page, None) for page in selected)
+        return _ReflowAlignmentOutcome(
+            mappings=mappings,
+            strategy="host_monotonic_no_candidate_pages",
+            requires_model_review=True,
+            mapping_reliable=False,
+            candidate_only_pages=(),
+            ambiguous_candidate_pages=(),
+            missing_source_pages=selected,
+            evidence=tuple(
+                _mapping_evidence(
+                    role="missing_source",
+                    source_page=page,
+                    candidate_page=None,
+                    source_text=_alignment_text(source_page_texts, page),
+                    candidate_text="",
+                    similarity=None,
+                    signals=("candidate_document_empty",),
+                )
+                for page in selected
+            ),
         )
     source_text = {
         page: _alignment_text(source_page_texts, page) for page in selected
@@ -821,28 +1038,211 @@ def _reflow_mappings(
     ]
     anchors = _monotonic_text_anchors(ordered_source_text, ordered_candidate_text)
     candidate_pages = tuple(range(1, candidate_count + 1))
-    if anchors:
-        unique = _anchor_covering_monotonic_pairs(
-            selected,
-            candidate_pages,
-            anchors,
-        )
-    else:
-        unique = _weighted_monotonic_pairs(
+    no_text_layer = not any(ordered_source_text) or not any(ordered_candidate_text)
+    if no_text_layer:
+        fallback = tuple(_weighted_monotonic_pairs(
             selected,
             candidate_pages,
             source_text,
             candidate_text,
+        ))
+        return _ReflowAlignmentOutcome(
+            mappings=fallback,
+            strategy="proportional_no_text_layer",
+            requires_model_review=True,
+            mapping_reliable=False,
+            candidate_only_pages=(),
+            ambiguous_candidate_pages=(),
+            missing_source_pages=(),
+            evidence=tuple(
+                _mapping_evidence(
+                    role="fallback_content",
+                    source_page=item.source_page,
+                    candidate_page=item.candidate_page,
+                    source_text=source_text[item.source_page],
+                    candidate_text=candidate_text[int(item.candidate_page)],
+                    similarity=None,
+                    signals=("text_layer_unavailable",),
+                )
+                for item in fallback
+            ),
         )
-    no_text_layer = not any(ordered_source_text) or not any(ordered_candidate_text)
-    strategy = (
-        "proportional_no_text_layer"
-        if no_text_layer
-        else "content_anchor_warp"
-        if anchors
-        else "content_weighted_monotonic"
+
+    source_count = len(selected)
+    similarities = [
+        [
+            _alignment_similarity(source_text[source_page], candidate_text[candidate_page])
+            for candidate_page in candidate_pages
+        ]
+        for source_page in selected
+    ]
+    anchor_set = set(anchors)
+
+    # A monotonic dynamic program admits explicit candidate-only and
+    # source-missing transitions.  It therefore never has to invent a source
+    # page number merely to make both page axes have equal length.
+    diagonal = 1
+    split_candidate = 2
+    candidate_gap = 3
+    merge_source = 4
+    source_gap = 5
+    choices = [bytearray(candidate_count + 1) for _ in range(source_count + 1)]
+    previous = [float("inf")] * (candidate_count + 1)
+    previous[0] = 0.0
+    for candidate_index in range(1, candidate_count + 1):
+        signals = _candidate_only_signals(
+            ordered_candidate_text[candidate_index - 1]
+        )
+        previous[candidate_index] = previous[candidate_index - 1] + (
+            0.03 if signals else 0.95
+        )
+        choices[0][candidate_index] = candidate_gap
+
+    def pair_cost(source_index: int, candidate_index: int) -> float:
+        score = similarities[source_index][candidate_index]
+        if score >= 0.72:
+            cost = 1.0 - score
+        elif score > 0.0:
+            # Weak overlap is evidence for neither a merge nor a split.  A
+            # source-missing/candidate-ambiguous transition is intentionally
+            # cheaper so the gate fails closed instead of blessing a page
+            # match based on a running header or one generic word.
+            cost = 1.25 + (0.72 - score)
+        else:
+            cost = 1.70
+        if (source_index, candidate_index) in anchor_set:
+            cost -= 0.80
+        return cost
+
+    for source_index in range(1, source_count + 1):
+        current = [float("inf")] * (candidate_count + 1)
+        current[0] = previous[0] + 1.05
+        choices[source_index][0] = source_gap
+        for candidate_index in range(1, candidate_count + 1):
+            source_rank = source_index - 1
+            candidate_rank = candidate_index - 1
+            local = pair_cost(source_rank, candidate_rank)
+            candidate_signals = _candidate_only_signals(
+                ordered_candidate_text[candidate_rank]
+            )
+            options = (
+                (previous[candidate_index - 1] + local, diagonal),
+                (current[candidate_index - 1] + local + 0.18, split_candidate),
+                (
+                    current[candidate_index - 1]
+                    + (0.03 if candidate_signals else 0.95),
+                    candidate_gap,
+                ),
+                (previous[candidate_index] + local + 0.18, merge_source),
+                (previous[candidate_index] + 1.05, source_gap),
+            )
+            cost, action = min(options, key=lambda item: (item[0], item[1]))
+            current[candidate_index] = cost
+            choices[source_index][candidate_index] = action
+        previous = current
+
+    source_index = source_count
+    candidate_index = candidate_count
+    reversed_mappings: list[VisualPageMapping] = []
+    reversed_evidence: list[VisualPageMappingEvidence] = []
+    candidate_only: list[int] = []
+    ambiguous_candidate: list[int] = []
+    missing_source: list[int] = []
+    low_confidence_pair = False
+    while source_index or candidate_index:
+        action = choices[source_index][candidate_index]
+        if action in {diagonal, split_candidate, merge_source}:
+            source_rank = source_index - 1
+            candidate_rank = candidate_index - 1
+            source_page = int(selected[source_rank])
+            candidate_page = int(candidate_pages[candidate_rank])
+            similarity = similarities[source_rank][candidate_rank]
+            signals = [
+                "rare_text_anchor"
+                if (source_rank, candidate_rank) in anchor_set
+                else "text_overlap"
+            ]
+            if action == split_candidate:
+                signals.append("one_source_to_multiple_candidates")
+            elif action == merge_source:
+                signals.append("multiple_sources_to_one_candidate")
+            if similarity < 0.72 and (source_rank, candidate_rank) not in anchor_set:
+                low_confidence_pair = True
+                signals.append("low_confidence_pair")
+            reversed_mappings.append(VisualPageMapping(source_page, candidate_page))
+            reversed_evidence.append(_mapping_evidence(
+                role="content",
+                source_page=source_page,
+                candidate_page=candidate_page,
+                source_text=source_text[source_page],
+                candidate_text=candidate_text[candidate_page],
+                similarity=similarity,
+                signals=signals,
+            ))
+            if action == diagonal:
+                source_index -= 1
+                candidate_index -= 1
+            elif action == split_candidate:
+                candidate_index -= 1
+            else:
+                source_index -= 1
+            continue
+        if action == candidate_gap and candidate_index:
+            candidate_page = int(candidate_pages[candidate_index - 1])
+            signals = _candidate_only_signals(candidate_text[candidate_page])
+            role = "candidate_only" if signals else "ambiguous_candidate"
+            (candidate_only if signals else ambiguous_candidate).append(candidate_page)
+            reversed_evidence.append(_mapping_evidence(
+                role=role,
+                source_page=None,
+                candidate_page=candidate_page,
+                source_text="",
+                candidate_text=candidate_text[candidate_page],
+                similarity=None,
+                signals=signals or ("no_reliable_source_match",),
+            ))
+            candidate_index -= 1
+            continue
+        if action == source_gap and source_index:
+            source_page = int(selected[source_index - 1])
+            missing_source.append(source_page)
+            reversed_mappings.append(VisualPageMapping(source_page, None))
+            reversed_evidence.append(_mapping_evidence(
+                role="missing_source",
+                source_page=source_page,
+                candidate_page=None,
+                source_text=source_text[source_page],
+                candidate_text="",
+                similarity=None,
+                signals=("no_reliable_candidate_match",),
+            ))
+            source_index -= 1
+            continue
+        # This branch is only reachable if the transition table was corrupted.
+        raise ValueError("host reflow alignment backtrack is invalid")
+
+    mappings = tuple(reversed(reversed_mappings))
+    evidence = tuple(reversed(reversed_evidence))
+    candidate_only_pages = tuple(sorted(candidate_only))
+    ambiguous_candidate_pages = tuple(sorted(ambiguous_candidate))
+    missing_source_pages = tuple(sorted(missing_source))
+    mapping_reliable = not (
+        ambiguous_candidate_pages or missing_source_pages or low_confidence_pair
     )
-    return tuple(unique), strategy, no_text_layer
+    strategy = (
+        "host_text_anchor_monotonic_gapped"
+        if anchors else "host_text_monotonic_gapped"
+    )
+    return _ReflowAlignmentOutcome(
+        mappings=mappings,
+        strategy=strategy,
+        requires_model_review=not mapping_reliable,
+        mapping_reliable=mapping_reliable,
+        candidate_only_pages=candidate_only_pages,
+        ambiguous_candidate_pages=ambiguous_candidate_pages,
+        missing_source_pages=missing_source_pages,
+        evidence=evidence,
+    )
 
 
 def build_page_alignment(
@@ -877,7 +1277,7 @@ def build_page_alignment(
     if normalized_scope == CANDIDATE_SCOPE_REFLOW:
         policy = "content_anchor_monotonic_reflow"
         expected = candidate_count
-        mappings, strategy, requires_model_review = _reflow_mappings(
+        outcome = _reflow_mappings(
             selected,
             candidate_count,
             source_page_texts,
@@ -887,12 +1287,17 @@ def build_page_alignment(
             policy=policy,
             expected_candidate_page_count=expected,
             selected_source_pages=selected,
-            mappings=mappings,
+            mappings=outcome.mappings,
             candidate_scope=normalized_scope,
             source_page_count=source_count,
             candidate_page_count=candidate_count,
-            strategy=strategy,
-            requires_model_review=requires_model_review,
+            strategy=outcome.strategy,
+            requires_model_review=outcome.requires_model_review,
+            mapping_reliable=outcome.mapping_reliable,
+            candidate_only_pages=outcome.candidate_only_pages,
+            ambiguous_candidate_pages=outcome.ambiguous_candidate_pages,
+            missing_source_pages=outcome.missing_source_pages,
+            mapping_evidence=outcome.evidence,
         )
     if normalized_scope == CANDIDATE_SCOPE_SELECTED_RANGE:
         policy = "selected_range_sequence_explicit"
@@ -1492,6 +1897,97 @@ def frozen_page_alignment_from_report(
             raise ValueError("frozen page mapping contains an out-of-scope page")
         mappings.append(VisualPageMapping(source_page, candidate_page))
 
+    def page_list(name: str, *, source_axis: bool = False) -> tuple[int, ...]:
+        raw_pages = raw_alignment.get(name)
+        if not isinstance(raw_pages, list):
+            raise ValueError(f"frozen page alignment {name} is invalid")
+        upper = source_page_count if source_axis else candidate_page_count
+        pages: list[int] = []
+        for page in raw_pages:
+            if (
+                isinstance(page, bool)
+                or not isinstance(page, int)
+                or not 1 <= page <= upper
+                or (source_axis and page not in selected)
+            ):
+                raise ValueError(f"frozen page alignment {name} is out of scope")
+            pages.append(page)
+        if pages != sorted(set(pages)):
+            raise ValueError(f"frozen page alignment {name} is not canonical")
+        return tuple(pages)
+
+    candidate_only_pages = page_list("candidate_only_pages")
+    ambiguous_candidate_pages = page_list("ambiguous_candidate_pages")
+    missing_source_pages = page_list("missing_source_pages", source_axis=True)
+    mapping_reliable = raw_alignment.get("mapping_reliable")
+    if not isinstance(mapping_reliable, bool):
+        raise ValueError("frozen page alignment reliability is invalid")
+
+    raw_evidence = raw_alignment.get("mapping_evidence")
+    if not isinstance(raw_evidence, list):
+        raise ValueError("frozen page alignment evidence is invalid")
+    evidence: list[VisualPageMappingEvidence] = []
+    evidence_keys = {
+        "role", "source_page", "candidate_page", "similarity",
+        "source_text_sha256", "candidate_text_sha256", "signals",
+    }
+    allowed_roles = {
+        "content", "fallback_content", "candidate_only",
+        "ambiguous_candidate", "missing_source",
+    }
+    for raw_item in raw_evidence:
+        if not isinstance(raw_item, Mapping) or set(raw_item) != evidence_keys:
+            raise ValueError("frozen page alignment evidence structure is invalid")
+        role = raw_item.get("role")
+        source_page = raw_item.get("source_page")
+        candidate_page = raw_item.get("candidate_page")
+        similarity = raw_item.get("similarity")
+        source_hash = raw_item.get("source_text_sha256")
+        candidate_hash = raw_item.get("candidate_text_sha256")
+        signals = raw_item.get("signals")
+        if (
+            role not in allowed_roles
+            or (
+                source_page is not None
+                and (
+                    isinstance(source_page, bool)
+                    or not isinstance(source_page, int)
+                    or source_page not in selected
+                )
+            )
+            or (
+                candidate_page is not None
+                and (
+                    isinstance(candidate_page, bool)
+                    or not isinstance(candidate_page, int)
+                    or not 1 <= candidate_page <= candidate_page_count
+                )
+            )
+            or (
+                similarity is not None
+                and (
+                    isinstance(similarity, bool)
+                    or not isinstance(similarity, (int, float))
+                    or not math.isfinite(float(similarity))
+                    or not 0.0 <= float(similarity) <= 1.0
+                )
+            )
+            or not isinstance(source_hash, str)
+            or not isinstance(candidate_hash, str)
+            or not isinstance(signals, list)
+            or any(not isinstance(signal, str) for signal in signals)
+        ):
+            raise ValueError("frozen page alignment evidence value is invalid")
+        evidence.append(VisualPageMappingEvidence(
+            role=str(role),
+            source_page=source_page,
+            candidate_page=candidate_page,
+            similarity=(float(similarity) if similarity is not None else None),
+            source_text_sha256=source_hash,
+            candidate_text_sha256=candidate_hash,
+            signals=tuple(signals),
+        ))
+
     non_null = [item for item in mappings if item.candidate_page is not None]
     if any(
         left.source_page > right.source_page
@@ -1502,26 +1998,45 @@ def frozen_page_alignment_from_report(
     if {item.source_page for item in mappings} != set(selected):
         raise ValueError("frozen page alignment does not cover every source page")
     if normalized_scope == CANDIDATE_SCOPE_REFLOW:
-        if len(non_null) != len(mappings) or {
+        mapped_candidates = {
             int(item.candidate_page) for item in non_null
-        } != set(range(1, candidate_page_count + 1)):
-            raise ValueError("frozen reflow alignment does not cover every candidate page")
-        minimum_size = max(len(selected), candidate_page_count)
-        maximum_size = len(selected) + candidate_page_count - 1
-        if not minimum_size <= len(mappings) <= maximum_size:
-            raise ValueError("frozen reflow alignment path size is invalid")
-        source_rank = {page: index for index, page in enumerate(selected)}
-        ranked_pairs = [
-            (source_rank[item.source_page], int(item.candidate_page) - 1)
-            for item in non_null
-        ]
-        if len(set(ranked_pairs)) != len(ranked_pairs) or any(
-            (right_source - left_source, right_candidate - left_candidate)
-            not in {(0, 1), (1, 0), (1, 1)}
-            for (left_source, left_candidate), (right_source, right_candidate)
-            in zip(ranked_pairs, ranked_pairs[1:])
+        }
+        candidate_only_set = set(candidate_only_pages)
+        ambiguous_set = set(ambiguous_candidate_pages)
+        if (
+            candidate_only_set & ambiguous_set
+            or mapped_candidates & (candidate_only_set | ambiguous_set)
+            or mapped_candidates | candidate_only_set | ambiguous_set
+            != set(range(1, candidate_page_count + 1))
         ):
-            raise ValueError("frozen reflow alignment is not a covering grid path")
+            raise ValueError("frozen reflow alignment candidate coverage is invalid")
+        actual_missing = {
+            item.source_page for item in mappings if item.candidate_page is None
+        }
+        if actual_missing != set(missing_source_pages):
+            raise ValueError("frozen reflow alignment missing-source evidence differs")
+        if mapping_reliable and (
+            ambiguous_candidate_pages or missing_source_pages
+        ):
+            raise ValueError("frozen reflow alignment overstates reliability")
+        expected_evidence_pairs = [
+            (item.source_page, item.candidate_page) for item in mappings
+        ]
+        actual_evidence_pairs = [
+            (item.source_page, item.candidate_page)
+            for item in evidence
+            if item.role in {"content", "fallback_content", "missing_source"}
+        ]
+        if actual_evidence_pairs != expected_evidence_pairs:
+            raise ValueError("frozen reflow mapping and evidence disagree")
+        if {
+            int(item.candidate_page)
+            for item in evidence if item.role == "candidate_only"
+        } != candidate_only_set or {
+            int(item.candidate_page)
+            for item in evidence if item.role == "ambiguous_candidate"
+        } != ambiguous_set:
+            raise ValueError("frozen reflow candidate-only evidence disagrees")
 
     policy = str(raw_alignment.get("policy") or "")
     strategy = str(raw_alignment.get("strategy") or "")
@@ -1548,6 +2063,11 @@ def frozen_page_alignment_from_report(
         candidate_page_count=candidate_page_count,
         strategy=strategy,
         requires_model_review=requires_review,
+        mapping_reliable=mapping_reliable,
+        candidate_only_pages=candidate_only_pages,
+        ambiguous_candidate_pages=ambiguous_candidate_pages,
+        missing_source_pages=missing_source_pages,
+        mapping_evidence=evidence,
     )
     if raw_alignment.get("mapping_sha256") != alignment.mapping_sha256:
         raise ValueError("frozen page alignment digest is invalid")
@@ -1557,12 +2077,25 @@ def frozen_page_alignment_from_report(
     report_pairs = [
         (page.get("source_page"), page.get("candidate_page"))
         for page in report.get("pages") or []
-        if isinstance(page, Mapping)
+        if isinstance(page, Mapping) and page.get("source_page") is not None
     ]
     if report_pairs != frozen_pairs:
         raise ValueError("deterministic page evidence and frozen alignment disagree")
     if report.get("compared_page_count") != len(non_null):
         raise ValueError("deterministic compared-page count and alignment disagree")
+    unpaired_candidate_records = {
+        int(page.get("candidate_page"))
+        for page in report.get("pages") or []
+        if (
+            isinstance(page, Mapping)
+            and page.get("source_page") is None
+            and isinstance(page.get("candidate_page"), int)
+        )
+    }
+    if unpaired_candidate_records != (
+        set(candidate_only_pages) | set(ambiguous_candidate_pages)
+    ):
+        raise ValueError("deterministic candidate-only evidence is incomplete")
     return alignment
 
 
@@ -1847,18 +2380,30 @@ def evaluate_visual_quality(
                 },
             ))
         if alignment.requires_model_review:
+            unreliable = not alignment.mapping_reliable
             global_findings.append(VisualFinding(
-                code="REFLOW_ALIGNMENT_PROPORTIONAL_FALLBACK",
+                code=(
+                    "REFLOW_ALIGNMENT_PROPORTIONAL_FALLBACK"
+                    if alignment.strategy == "proportional_no_text_layer"
+                    else "REFLOW_ALIGNMENT_UNRELIABLE"
+                    if unreliable
+                    else "REFLOW_ALIGNMENT_REQUIRES_REVIEW"
+                ),
                 severity=VisualSeverity.WARNING,
                 message=(
-                    "Reflow page alignment used the host proportional fallback because "
-                    "a usable PDF text layer was unavailable; every candidate page must "
-                    "be closed by visual review."
+                    "The host could not establish a reliable monotonic page mapping; "
+                    "the run must remain unverified."
+                    if unreliable else
+                    "The host page mapping needs independent visual review."
                 ),
                 needs_model_review=True,
                 evidence={
                     "strategy": alignment.strategy,
                     "mapping_sha256": alignment.mapping_sha256,
+                    "ambiguous_candidate_pages": list(
+                        alignment.ambiguous_candidate_pages
+                    ),
+                    "missing_source_pages": list(alignment.missing_source_pages),
                 },
             ))
 
@@ -1948,6 +2493,83 @@ def evaluate_visual_quality(
                 geometry_policy=normalized_geometry_policy,
             ))
 
+        # Candidate-only pages are real evidence, but deliberately have no
+        # fabricated source-page partner.  They are rendered independently so
+        # blank/failed generated contents pages remain observable.
+        for candidate_page in (
+            alignment.candidate_only_pages
+            + alignment.ambiguous_candidate_pages
+        ):
+            ambiguous = candidate_page in alignment.ambiguous_candidate_pages
+            try:
+                candidate_render = rendered_candidate.setdefault(
+                    candidate_page,
+                    _render_page(
+                        module,
+                        candidate_document.load_page(candidate_page - 1),
+                        candidate_page,
+                        render_dpi,
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - untrusted renderer boundary
+                render_failed = True
+                page_reports.append(VisualPageReport(
+                    source_page=None,
+                    candidate_page=candidate_page,
+                    source=None,
+                    candidate=None,
+                    difference=None,
+                    findings=(VisualFinding(
+                        code="CANDIDATE_PAGE_RENDER_FAILED",
+                        severity=VisualSeverity.CRITICAL,
+                        message="A candidate-only page could not be rendered.",
+                        candidate_page=candidate_page,
+                        needs_model_review=True,
+                    ),),
+                ))
+                continue
+            candidate_blank = (
+                candidate_render.metrics.text_character_count == 0
+                and candidate_render.metrics.ink_ratio < 0.0015
+            )
+            findings = [VisualFinding(
+                code=(
+                    "UNMAPPED_CANDIDATE_PAGE"
+                    if ambiguous else "HOST_CLASSIFIED_CANDIDATE_ONLY_PAGE"
+                ),
+                severity=(
+                    VisualSeverity.WARNING if ambiguous else VisualSeverity.INFO
+                ),
+                message=(
+                    "This candidate page has no reliable source-page match."
+                    if ambiguous else
+                    "Host text evidence classifies this as a generated candidate-only page."
+                ),
+                candidate_page=candidate_page,
+                needs_model_review=ambiguous,
+                evidence={
+                    "mapping_sha256": alignment.mapping_sha256,
+                    "mapping_role": (
+                        "ambiguous_candidate" if ambiguous else "candidate_only"
+                    ),
+                },
+            )]
+            if candidate_blank:
+                findings.append(VisualFinding(
+                    code="BLANK_CANDIDATE_ONLY_PAGE",
+                    severity=VisualSeverity.ERROR,
+                    message="A generated candidate-only page rendered blank.",
+                    candidate_page=candidate_page,
+                ))
+            page_reports.append(VisualPageReport(
+                source_page=None,
+                candidate_page=candidate_page,
+                source=None,
+                candidate=candidate_render.metrics,
+                difference=None,
+                findings=tuple(findings),
+            ))
+
         compared = [
             page for page in page_reports
             if page.source is not None
@@ -1976,6 +2598,12 @@ def evaluate_visual_quality(
             "alignment_strategy": alignment.strategy,
             "alignment_mapping_sha256": alignment.mapping_sha256,
             "alignment_requires_model_review": alignment.requires_model_review,
+            "alignment_mapping_reliable": alignment.mapping_reliable,
+            "candidate_only_pages": list(alignment.candidate_only_pages),
+            "ambiguous_candidate_pages": list(
+                alignment.ambiguous_candidate_pages
+            ),
+            "missing_source_pages": list(alignment.missing_source_pages),
             "grid_width": _GRID_WIDTH,
             "grid_height": _GRID_HEIGHT,
             "source_selected_text_characters": len(source_text),

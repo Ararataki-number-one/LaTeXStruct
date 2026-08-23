@@ -6,12 +6,14 @@ __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
+.pytest_tmp*/
 .test-tmp/
 .pytest-tmp-*/
 pytest-of-*/
 tests/.pytest-tmp-*/
 frontend/node_modules/
 latexstruct/server/static-react/
+.playwright-cli/
 
 # 本地数据与调试
 .tmp/

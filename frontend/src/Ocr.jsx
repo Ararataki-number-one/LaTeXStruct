@@ -2,29 +2,21 @@ import { useEffect, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import { api } from "./api";
 import { apiAuthority, sameApiAuthority } from "./providerUrl";
+import {
+  buildOcrArtifacts,
+  buildOcrProgress,
+  buildOcrRecoveryPresentation,
+  formatOcrDuration,
+  formatPagesPerMinute,
+  legacyOcrQualityProfile,
+  normalizeOcrQualityTier,
+  ocrPagePresentation,
+  OCR_QUALITY_TIERS,
+  qualityTierLabel,
+} from "./ocrPresentation";
 
 const OCR_SESSION_JOB_KEY = "latexstruct-current-ocr-job-v1";
 const CODEX_BACKEND = "codex_cli";
-const OCR_QUALITY_PUBLICATION = "publication";
-const OCR_QUALITY_STANDARD = "standard";
-const OCR_TEMPLATE_IDS = new Set(["", "faithfulbook", "elegantbook"]);
-const OCR_FALLBACK_TEMPLATES = [
-  {
-    id: "faithfulbook",
-    label: "出版书籍版式（推荐）",
-    description: "适合 OCR 图书；使用双面页眉、章内目录并保留源页分隔。",
-  },
-  {
-    id: "",
-    label: "保持原排版",
-    description: "保留 OCR 生成的文档类和样式，只进行明确的结构整理。",
-  },
-  {
-    id: "elegantbook",
-    label: "统一讲义（ElegantBook）",
-    description: "转换为统一讲义风格，文档类、章节层级和定理外观变化较大。",
-  },
-];
 // 兼容 v1.1.2 的 10 位旧任务号；新任务使用完整 UUID4 hex（128-bit）。
 const OCR_JOB_ID_RE = /^(?:[0-9a-f]{10}|[0-9a-f]{32})$/;
 const OCR_ACTIVE_STATUSES = new Set(["starting", "running", "pausing", "paused"]);
@@ -77,18 +69,6 @@ function ocrStatusLabel(status) {
   })[status] || "等待处理";
 }
 
-function qualityProfileLabel(profile) {
-  return profile === OCR_QUALITY_PUBLICATION ? "出版审校" : "标准转写";
-}
-
-function selectableOcrTemplates(payload) {
-  const items = Array.isArray(payload?.templates) ? payload.templates : [];
-  const selected = items.filter((item) => (
-    item && typeof item.id === "string" && OCR_TEMPLATE_IDS.has(item.id)
-  ));
-  return selected.length ? selected : OCR_FALLBACK_TEMPLATES;
-}
-
 function qualityPageNumbers(report) {
   const pages = report?.pages || {};
   return new Set([
@@ -102,30 +82,25 @@ function qualityPageNumbers(report) {
 function QualityGateCard({ job, onSelectPage }) {
   const report = job?.quality_report;
   if (!report) return null;
-  const profile = job?.quality_profile === OCR_QUALITY_PUBLICATION
-    ? OCR_QUALITY_PUBLICATION : OCR_QUALITY_STANDARD;
   const running = report.status === "running";
   const passed = report.page_gate_passed === true;
-  const blocked = profile === OCR_QUALITY_PUBLICATION && !running && !passed;
   const findings = running ? [] : [
     ...(Array.isArray(report.blockers) ? report.blockers : []),
     ...(Array.isArray(report.warnings) ? report.warnings : []),
   ];
   const counts = report.counts || {};
-  const statusLabel = running ? "检查中" : passed ? "页级门通过" : blocked ? "阻断导入" : "有警告";
+  const statusLabel = running ? "检查中" : passed ? "检查完成" : "有待确认页面";
 
   return (
     <section
       className={`ocr-quality-gate ${running ? "running" : passed ? "passed" : "blocked"}`}
-      role={blocked ? "alert" : "status"}
-      aria-label={`${qualityProfileLabel(profile)}页级质量门`}
+      role={passed || running ? "status" : "alert"}
+      aria-label="OCR 页面检查"
     >
       <div className="quality-gate-heading">
         <div>
-          <b>{qualityProfileLabel(profile)} · 页级质量门</b>
-          <span>{profile === OCR_QUALITY_PUBLICATION
-            ? "低置信、待人工复核或来源记录缺失都会阻止进入结构化审阅"
-            : "页级问题会显示为警告，但完整转写仍可进入结构化审阅"}</span>
+          <b>问题页检查</b>
+          <span>已完成页面会保留；只需重试下方列出的页面。</span>
         </div>
         <strong>{statusLabel}</strong>
       </div>
@@ -155,9 +130,6 @@ function QualityGateCard({ job, onSelectPage }) {
           ))}
         </div>
       )}
-      <p className="quality-gate-limit">
-        这只是已知页级问题、视觉来源记录和资源完整性的流程门；未测量文字或数学准确率，也不代表出版就绪。最终交付仍需逐页对照、公式复核和 PDF 视觉验收。
-      </p>
     </section>
   );
 }
@@ -269,15 +241,13 @@ function ocrReadiness(setup, overrideModel, customVisionConfirmed) {
 }
 
 export default function Ocr({ onImport, onOpenSettings }) {
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
+  const file = files[0] || null;
   const [startPage, setStartPage] = useState("1");
   const [endPage, setEndPage] = useState("");
   const [pdfInfo, setPdfInfo] = useState({ status: "idle", total: 0, maxPages: 500, jobId: null });
   const [dpi, setDpi] = useState(200);
-  const [qualityProfile, setQualityProfile] = useState(OCR_QUALITY_PUBLICATION);
-  const [outputTemplates, setOutputTemplates] = useState(OCR_FALLBACK_TEMPLATES);
-  const [ocrDefaultTemplate, setOcrDefaultTemplate] = useState("faithfulbook");
-  const [outputTemplate, setOutputTemplate] = useState("faithfulbook");
+  const [qualityTier, setQualityTier] = useState("recommended");
   const [model, setModel] = useState("");
   const [setup, setSetup] = useState({ status: "loading", config: null, providers: [] });
   const [customVisionConfirmed, setCustomVisionConfirmed] = useState(false);
@@ -289,7 +259,6 @@ export default function Ocr({ onImport, onOpenSettings }) {
   const [liveTex, setLiveTex] = useState("");
   const [liveRevision, setLiveRevision] = useState(0);
   const [rawSaved, setRawSaved] = useState(null);
-  const [importMode, setImportMode] = useState("ai");
   const [importingProject, setImportingProject] = useState(false);
   const [msg, setMsg] = useState("");
   const [starting, setStarting] = useState(false);
@@ -327,12 +296,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
       jobId: next.id,
       revision: Number.isFinite(revision) ? revision : previous.jobId === next.id ? previous.revision : -1,
     };
-    if ([OCR_QUALITY_STANDARD, OCR_QUALITY_PUBLICATION].includes(next.quality_profile)) {
-      setQualityProfile(next.quality_profile);
-    }
-    if (typeof next.output_template === "string" && OCR_TEMPLATE_IDS.has(next.output_template)) {
-      setOutputTemplate(next.output_template);
-    }
+    setQualityTier(normalizeOcrQualityTier(next.quality_tier, next.quality_profile));
     if (Number.isFinite(Number(next.dpi)) && Number(next.dpi) >= 72) {
       setDpi(Number(next.dpi));
     }
@@ -353,18 +317,23 @@ export default function Ocr({ onImport, onOpenSettings }) {
   };
 
   const inspectFile = async (selected, sequence = inspectSequence.current) => {
-    const selectedIsPdf = /\.pdf$/i.test(selected?.name || "");
+    const selectedFiles = Array.isArray(selected) ? selected.filter(Boolean) : (selected ? [selected] : []);
+    const selectedIsPdf = selectedFiles.length === 1 && /\.pdf$/i.test(selectedFiles[0]?.name || "");
+    const selectedIsCollection = selectedFiles.length > 1;
+    const expectedSourceType = selectedIsPdf ? "pdf" : (selectedIsCollection ? "images" : "image");
     setPdfInfo({ status: "loading", total: 0, maxPages: 500, jobId: null });
-    setMsg(selectedIsPdf ? "正在上传 PDF 并读取总页数……" : "正在上传图片并准备转写……");
+    setMsg(selectedIsPdf
+      ? "正在上传 PDF 并读取总页数……"
+      : (selectedIsCollection ? `正在按选择顺序上传 ${selectedFiles.length} 张图片……` : "正在上传图片并准备转写……"));
     const form = new FormData();
-    form.append("file", selected);
+    selectedFiles.forEach((item) => form.append("file", item));
     try {
       const info = await (await api("/api/ocr/inspect", { method: "POST", body: form })).json();
       if (sequence !== inspectSequence.current) {
         api(`/api/ocr/jobs/${info.id}`, { method: "DELETE" }).catch(() => {});
         return;
       }
-      if (info.source_type !== (selectedIsPdf ? "pdf" : "image")) {
+      if (info.source_type !== expectedSourceType) {
         await api(`/api/ocr/jobs/${info.id}`, { method: "DELETE" }).catch(() => {});
         throw new Error("服务识别的文件类型与所选文件不一致");
       }
@@ -382,11 +351,15 @@ export default function Ocr({ onImport, onOpenSettings }) {
         maxPages: info.max_pages_per_job,
         jobId: info.id,
       });
-      setMsg(selectedIsPdf
-        ? (info.total_pages > info.max_pages_per_job
+      if (selectedIsPdf) {
+        setMsg(info.total_pages > info.max_pages_per_job
           ? `已读取 PDF：共 ${info.total_pages} 页；为控制耗时与费用，默认选择前 ${defaultEnd} 页`
-          : `已读取 PDF：共 ${info.total_pages} 页，默认处理全部`)
-        : "图片已安全上传，可开始单页转写");
+          : `已读取 PDF：共 ${info.total_pages} 页，默认处理全部`);
+      } else if (selectedIsCollection) {
+        setMsg(`已按选择顺序保存 ${info.total_pages} 张原始图片；本地生成的视觉 PDF 仅用于逐页识别`);
+      } else {
+        setMsg("图片已安全上传，可开始单页转写");
+      }
     } catch (error) {
       if (sequence !== inspectSequence.current) return;
       inspectedJobId.current = null;
@@ -396,6 +369,12 @@ export default function Ocr({ onImport, onOpenSettings }) {
   };
 
   const chooseFile = async (selected) => {
+    const selectedFiles = Array.isArray(selected) ? selected.filter(Boolean) : (selected ? [selected] : []);
+    const pdfCount = selectedFiles.filter((item) => /\.pdf$/i.test(item?.name || "")).length;
+    if (pdfCount && (pdfCount !== 1 || selectedFiles.length !== 1)) {
+      setMsg("PDF 必须单独选择；多文件模式仅支持按顺序选择 PNG/JPG 图片");
+      return false;
+    }
     if (restoringJob || restoreFailed) {
       setMsg("正在恢复上一份 OCR 任务，请稍候再选择新文件");
       return false;
@@ -408,6 +387,11 @@ export default function Ocr({ onImport, onOpenSettings }) {
     }
     if (job?.importing) {
       setMsg("OCR 结果正在导入项目，请等待完成后再选择新文件");
+      return false;
+    }
+    const recovery = buildOcrRecoveryPresentation(job || {});
+    if (recovery.canResumeIncomplete) {
+      setMsg(`上一份 OCR 还有 ${recovery.incompleteCount} 页未完成；请先继续任务或明确放弃。`);
       return false;
     }
 
@@ -426,7 +410,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
       if (hasValuableResult && !preserved && !window.confirm(
         "当前 OCR 已产生结果或费用，但最新结果还没有下载或导入项目。切换文件会永久放弃这些内容，是否继续？",
       )) {
-        setMsg("已保留当前 OCR 结果；请先下载原始 OCR 或进入结构化审阅");
+        setMsg("已保留当前 OCR 结果；请先下载原稿或打开项目");
         return false;
       }
     }
@@ -460,7 +444,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
     snapshotEpochRef.current += 1;
     snapshotRevisionRef.current = { jobId: "", revision: -1 };
     pageSelectionSequence.current += 1;
-    setFile(selected || null);
+    setFiles(selectedFiles);
     setJob(null);
     setCurrent(null);
     setCurrentTex("");
@@ -469,21 +453,23 @@ export default function Ocr({ onImport, onOpenSettings }) {
     setLiveRevision(0);
     setRestoreFailed(false);
     setPollingStopped(false);
-    if (!selected) {
+    if (!selectedFiles.length) {
       setPdfInfo({ status: "idle", total: 0, maxPages: 500, jobId: null });
       setMsg("");
       return true;
     }
-    inspectFile(selected, sequence);
+    inspectFile(selectedFiles, sequence);
     return true;
   };
 
   const isPdf = Boolean(file && /\.pdf$/i.test(file.name || ""));
+  const isImageCollection = files.length > 1;
+  const isPagedSource = isPdf || isImageCollection;
   const startNumber = Number(startPage);
   const endNumber = Number(endPage);
   let pageRangeError = "";
   let selectedPageCount = 0;
-  if (isPdf && pdfInfo.status === "ready") {
+  if (isPagedSource && pdfInfo.status === "ready") {
     if (!/^\d+$/.test(startPage) || !/^\d+$/.test(endPage)) {
       pageRangeError = "起始页和结束页必须填写整数";
     } else if (startNumber < 1 || endNumber > pdfInfo.total) {
@@ -513,24 +499,24 @@ export default function Ocr({ onImport, onOpenSettings }) {
       return;
     }
     if (!file) return alert("请选择 PDF 或图片");
-    if (qualityProfile === OCR_QUALITY_PUBLICATION && dpi < 200) {
-      setMsg("出版审校工作流要求至少 200 DPI；请提高渲染清晰度后再开始");
-      return;
-    }
-    if (pdfInfo.status !== "ready" || !pdfInfo.jobId || (isPdf && pageRangeError)) {
+    if (pdfInfo.status !== "ready" || !pdfInfo.jobId || (isPagedSource && pageRangeError)) {
       setMsg(pageRangeError || "请等待文件上传与页数读取完成后再开始");
       return;
     }
     const fd = new FormData();
     fd.append("dpi", String(dpi));
     fd.append("model", model);
-    fd.append("quality_profile", qualityProfile);
-    fd.append("output_template", outputTemplate);
+    fd.append("quality_tier", qualityTier);
+    fd.append("quality_profile", legacyOcrQualityProfile(qualityTier));
+    // OCR 阶段只做忠实转写与基线恢复，不冻结任何出版模板。
+    fd.append("output_template", "");
     const endpoint = `/api/ocr/jobs/${pdfInfo.jobId}/start`;
-    if (isPdf) {
+    if (isPagedSource) {
       fd.append("start_page", startPage);
       fd.append("end_page", endPage);
-      setMsg(`正在启动原 PDF 第 ${startPage}-${endPage} 页转写……`);
+      setMsg(isPdf
+        ? `正在启动原 PDF 第 ${startPage}-${endPage} 页转写……`
+        : `正在启动所选图片序列第 ${startPage}-${endPage} 张转写……`);
     } else {
       setMsg("正在启动图片转写……");
     }
@@ -554,27 +540,28 @@ export default function Ocr({ onImport, onOpenSettings }) {
       setJob({
         id,
         status: "running",
-        source_type: isPdf ? "pdf" : "image",
-        source_total: isPdf ? pdfInfo.total : 1,
-        total: isPdf ? selectedPageCount : 1,
+        source_type: isPdf ? "pdf" : (isImageCollection ? "images" : "image"),
+        source_total: isPagedSource ? pdfInfo.total : 1,
+        total: isPagedSource ? selectedPageCount : 1,
         done: 0,
         raw_revision: 0,
         raw_chars: 0,
         usage_revision: 0,
         page_revision: 0,
-        quality_profile: qualityProfile,
-        output_template: outputTemplate,
+        quality_tier: qualityTier,
+        quality_profile: legacyOcrQualityProfile(qualityTier),
+        output_template: "",
         dpi,
         pages: {},
       });
-      setMsg((isPdf ? "正在逐页处理所选范围……" : "正在处理图片……")
+      setMsg((isPagedSource ? "正在逐页处理所选范围……" : "正在处理图片……")
         + (recoverable ? "" : " 浏览器无法记录恢复信息，本次处理完成前请勿离开 OCR 页面。"));
     } catch (e) {
       try {
         const recovered = await (await api(`/api/ocr/jobs/${pdfInfo.jobId}`)).json();
         if (recovered.id !== pdfInfo.jobId) throw new Error("恢复到的任务编号不一致");
         if (recovered.status === "ready") {
-          setMsg("启动尚未生效，可再次点击“开始转写”：" + e.message);
+          setMsg("启动尚未生效，可再次点击“开始 OCR”：" + e.message);
         } else {
           activeJobId.current = recovered.id;
           snapshotRevisionRef.current = {
@@ -583,9 +570,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
               ? Number(recovered.state_revision) : -1,
           };
           inspectedJobId.current = null;
-          if (typeof recovered.output_template === "string" && OCR_TEMPLATE_IDS.has(recovered.output_template)) {
-            setOutputTemplate(recovered.output_template);
-          }
+          setQualityTier(normalizeOcrQualityTier(recovered.quality_tier, recovered.quality_profile));
           setJob(recovered);
           setRestoreFailed(false);
           setMsg("启动响应曾中断，已通过原任务编号恢复，未重复创建 OCR 任务");
@@ -608,7 +593,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
 
   const selectPage = async (n) => {
     const page = job?.pages?.[n];
-    if (page?.status === "pending") return;
+    if (ocrPagePresentation(page).pending) return;
     const selectedJobId = job?.id;
     if (!selectedJobId) return;
     const selection = pageSelectionSequence.current + 1;
@@ -663,7 +648,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
       if (!updated || !stillCurrent()) return;
       await selectPage(n);
       if (updated?.status === "done") {
-        setMsg("原始 OCR 已保留，可逐页检查或进入结构化审阅");
+        setMsg("原始 OCR 已保留，可逐页检查或开始 AI 自动整理");
       } else if (updated?.status === "partial") {
         setMsg("本页重试后仍有失败页面；请查看错误后再次重试");
       } else {
@@ -679,7 +664,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
         setMsg("重试已在后台完成，原始 OCR 已更新并保留");
       } else if (latest?.status === "partial") {
         await selectPage(n);
-        setMsg(latest.pages?.[n]?.status === "done"
+        setMsg(ocrPagePresentation(latest.pages?.[n]).success
           ? "本页已在后台重试成功；仍有其他失败页面需要处理"
           : "本页后台重试后仍失败，请查看错误并再次重试");
       } else if (!latest && !e?.status) {
@@ -814,8 +799,8 @@ export default function Ocr({ onImport, onOpenSettings }) {
       const params = new URLSearchParams({
         name: projectName,
         title: sourceStem,
-        mode: importMode,
-        template: (typeof job.output_template === "string" ? job.output_template : outputTemplate),
+        mode: "ai",
+        template: "",
       });
       const r = await api(`/api/ocr/jobs/${job.id}/import?${params.toString()}`, {
         method: "POST",
@@ -918,15 +903,14 @@ export default function Ocr({ onImport, onOpenSettings }) {
       snapshotRevisionRef.current = { jobId: "", revision: -1 };
       pageSelectionSequence.current += 1;
       setJob(null);
-      setFile(null);
+      setFiles([]);
       setCurrent(null);
       setCurrentTex("");
       setPreviewMode("live");
       setLiveTex("");
       setLiveRevision(0);
-      setQualityProfile(OCR_QUALITY_PUBLICATION);
+      setQualityTier("recommended");
       setDpi(200);
-      setOutputTemplate(ocrDefaultTemplate);
       setPdfInfo({ status: "idle", total: 0, maxPages: 500, jobId: null });
       setMsg("本次 OCR 临时结果已清除");
     } catch (error) {
@@ -939,8 +923,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
     Promise.all([
       api("/api/config").then((r) => r.json()),
       api("/api/providers").then((r) => r.json()),
-      api("/api/templates").then((r) => r.json()).catch(() => null),
-    ]).then(async ([config, data, templateData]) => {
+    ]).then(async ([config, data]) => {
       let codexStatus = null;
       let codexStatusError = "";
       if (config.analysis_backend === CODEX_BACKEND) {
@@ -951,15 +934,6 @@ export default function Ocr({ onImport, onOpenSettings }) {
         }
       }
       if (!active) return;
-      const templates = selectableOcrTemplates(templateData);
-      const requestedDefault = typeof templateData?.ocr_default === "string"
-        && OCR_TEMPLATE_IDS.has(templateData.ocr_default)
-        ? templateData.ocr_default : "faithfulbook";
-      const defaultTemplate = templates.some((item) => item.id === requestedDefault)
-        ? requestedDefault : "faithfulbook";
-      setOutputTemplates(templates);
-      setOcrDefaultTemplate(defaultTemplate);
-      setOutputTemplate(defaultTemplate);
       setSetup({
         status: "ready",
         config,
@@ -1008,13 +982,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
             ? Number(restored.state_revision) : -1,
         };
         inspectedJobId.current = restored.status === "ready" ? remembered : null;
-        if (
-          restored.status !== "ready"
-          && typeof restored.output_template === "string"
-          && OCR_TEMPLATE_IDS.has(restored.output_template)
-        ) {
-          setOutputTemplate(restored.output_template);
-        }
+        setQualityTier(normalizeOcrQualityTier(restored.quality_tier, restored.quality_profile));
         setJob(restored.status === "ready" ? null : restored);
         setCurrent(null);
         setCurrentTex("");
@@ -1045,12 +1013,15 @@ export default function Ocr({ onImport, onOpenSettings }) {
             jobId: restored.status === "ready" ? remembered : null,
           });
         }
+        const recovery = buildOcrRecoveryPresentation(restored);
         setMsg(["running", "pausing"].includes(restored.status)
           ? (restored.status === "pausing"
             ? "已恢复上一份 OCR，正在完成当前页后安全暂停……"
             : "已恢复上一份 OCR，正在继续接收逐页进度……")
           : restored.status === "paused"
             ? "已恢复上一份 OCR 的暂停状态；可点击“继续识别”。"
+          : recovery.canResumeIncomplete
+            ? `已从不可变快照恢复；还有 ${recovery.incompleteCount} 页未完成，可点击“继续未完成页面”。`
           : restored.status === "ready"
             ? `已恢复上一份${restored.source_type === "pdf" ? " PDF 页数记录" : "图片上传记录"}；若文件选择已清空，请重新选择原文件`
             : "已恢复上一份 OCR 结果，可继续检查、保存或导入项目");
@@ -1120,16 +1091,19 @@ export default function Ocr({ onImport, onOpenSettings }) {
 
   useEffect(() => {
     if (!job?.status) return;
+    const recovery = buildOcrRecoveryPresentation(job);
     if (job.saving) {
       setMsg("正在把 OCR 工程 ZIP（TEX+图片）保存到下载文件夹……");
     } else if (job.importing) {
       setMsg("正在把原始 OCR 导入项目并执行安全检查……");
     } else if (job.status === "done") {
-      setMsg("原始 OCR 已保留，可逐页检查或进入结构化审阅");
+      setMsg("原始 OCR 已保留，可下载原稿或开始 AI 自动整理");
     } else if (job.status === "partial") {
-      setMsg("部分页面转写失败；请在左侧选择失败页并重试，全部成功后再进入结构化审阅");
+      setMsg(recovery.canResumeIncomplete
+        ? `任务从不可变快照恢复，尚有 ${recovery.incompleteCount} 页未完成；请点击“继续未完成页面”。`
+        : "部分页面识别失败；成功页已保留，请只重试问题页");
     } else if (job.status === "error") {
-      setMsg("OCR 未完成；请检查文件与视觉模型设置后重新开始转写");
+      setMsg("OCR 未完成；请检查文件与识别服务设置后重试");
     } else if (job.status === "pausing") {
       setMsg("正在完成当前页，随后安全暂停；已完成结果不会丢失。");
     } else if (job.status === "paused") {
@@ -1207,47 +1181,44 @@ export default function Ocr({ onImport, onOpenSettings }) {
 
   const pageNums = job ? Object.keys(job.pages || {}).map(Number).sort((a, b) => a - b) : [];
   const successfulPages = job
-    ? Object.values(job.pages || {}).filter((page) => page.status === "done").length : 0;
+    ? Object.values(job.pages || {}).filter((page) => ocrPagePresentation(page).success).length : 0;
   const failedPageNums = job ? pageNums.filter((n) => {
     const page = job.pages?.[n];
-    return page?.status !== "done" && (
-      page?.can_retry === true || (page?.can_retry == null && page?.status === "error")
+    const presentation = ocrPagePresentation(page);
+    return !presentation.success && (
+      page?.can_retry === true || (page?.can_retry == null && presentation.failed)
     );
   }) : [];
   const retryBusy = retryingPage !== null || retryingFailed;
   const totalPages = job ? (job.total || pageNums.length || successfulPages) : 0;
-  const processedPages = job ? Math.min(totalPages, Math.max(job.done || 0, successfulPages)) : 0;
-  const progressCount = job && ["partial", "error"].includes(job.status)
-    ? `成功 ${successfulPages}/${totalPages} 页`
-    : job?.status === "done"
-      ? `完成 ${totalPages}/${totalPages} 页`
-      : `已处理 ${processedPages}/${totalPages} 页`;
   const readiness = ocrReadiness(setup, model, customVisionConfirmed);
-  const usesCodex = setup.config?.analysis_backend === CODEX_BACKEND;
-  const jobBackend = job?.analysis_backend || job?.ai_backend || job?.backend || job?.cost?.backend;
-  const jobUsesCodex = jobBackend === CODEX_BACKEND || (usesCodex && !jobBackend);
   const currentTaskIndex = current == null ? 0 : (job?.pages?.[current]?.task_index || 0);
-  const activeQualityProfile = job
-    ? (job.quality_profile === OCR_QUALITY_PUBLICATION
-      ? OCR_QUALITY_PUBLICATION : OCR_QUALITY_STANDARD)
-    : qualityProfile;
-  const activeOutputTemplate = job
-    && typeof job.output_template === "string"
-    && OCR_TEMPLATE_IDS.has(job.output_template)
-    ? job.output_template : outputTemplate;
-  const selectedOutputPreset = outputTemplates.find((item) => item.id === activeOutputTemplate)
-    || OCR_FALLBACK_TEMPLATES.find((item) => item.id === activeOutputTemplate)
-    || OCR_FALLBACK_TEMPLATES[0];
+  const activeQualityTier = job
+    ? normalizeOcrQualityTier(job.quality_tier, job.quality_profile)
+    : qualityTier;
   const qualityReport = job?.quality_report || null;
   const qualityRetryPageSet = qualityPageNumbers(qualityReport);
-  const qualityImportBlocked = job?.status === "done"
-    && activeQualityProfile === OCR_QUALITY_PUBLICATION
-    && qualityReport?.page_gate_passed !== true;
+  const ocrProgress = buildOcrProgress(job || {});
+  const ocrRecovery = buildOcrRecoveryPresentation(job || {});
+  const ocrArtifacts = buildOcrArtifacts(job || {});
+  const issuePages = Array.from(new Set([
+    ...failedPageNums,
+    ...ocrRecovery.incompletePageNumbers,
+    ...qualityRetryPageSet,
+    ...pageNums.filter((n) => job?.pages?.[n]?.needs_review || job?.pages?.[n]?.low_conf),
+  ])).sort((a, b) => a - b);
+  const terminalOcr = ["done", "partial", "error"].includes(job?.status);
 
   return (
     <div className="ocr">
       <section className="card">
-        <h2>OCR 转写（PDF / 图片 → 原始 LaTeX → 结构化审阅）</h2>
+        <div className="ocr-page-heading">
+          <div>
+            <h2>OCR 识别</h2>
+            <p>把 PDF 或图片忠实转成可编辑 LaTeX，并生成真实编译的 OCR 基线。</p>
+          </div>
+          {!readiness.blocked && <span className="ocr-ready-badge">识别服务已就绪</span>}
+        </div>
         <div
           className={`ocr-config-status ${readiness.blocked ? "blocked" : "ready"}`}
           role={readiness.blocked ? "alert" : "status"}
@@ -1255,8 +1226,8 @@ export default function Ocr({ onImport, onOpenSettings }) {
           <div>
             <b>{readiness.blocked
               ? "OCR 尚未就绪"
-              : readiness.codex ? "Codex 视觉 OCR 已就绪" : "视觉模型与 Key 已就绪"}</b>
-            <p>{readiness.reason}</p>
+              : "可以开始识别"}</b>
+            {readiness.blocked && <p>{readiness.reason}</p>}
             {readiness.needsConfirmation && (
               <label className="toggle-line">
                 <input
@@ -1272,98 +1243,62 @@ export default function Ocr({ onImport, onOpenSettings }) {
             <button type="button" onClick={onOpenSettings}>前往设置</button>
           )}
         </div>
-        <div className={`ocr-quality-profile ${activeQualityProfile}`}>
-          <label>
-            <span>OCR 工作流</span>
-            <select
-              aria-label="OCR 质量工作流"
-              value={activeQualityProfile}
-              disabled={Boolean(job?.id) || starting || restoringJob || restoreFailed}
-              onChange={(event) => {
-                const next = event.target.value === OCR_QUALITY_STANDARD
-                  ? OCR_QUALITY_STANDARD : OCR_QUALITY_PUBLICATION;
-                setQualityProfile(next);
-                if (next === OCR_QUALITY_PUBLICATION && dpi < 200) setDpi(200);
+        <div className="ocr-start-grid">
+          <label className="ocr-file-picker">
+            <span>1　选择 PDF 或一组图片</span>
+            <input
+              type="file"
+              accept=".pdf,.png,.jpg,.jpeg"
+              multiple
+              disabled={restoringJob || restoreFailed || starting || OCR_ACTIVE_STATUSES.has(job?.status)
+                || ocrRecovery.canResumeIncomplete || job?.importing || controlAction || retryBusy || rawSaving}
+              onChange={async (event) => {
+                const accepted = await chooseFile(Array.from(event.target.files || []));
+                if (!accepted) event.target.value = "";
               }}
-            >
-              <option value={OCR_QUALITY_PUBLICATION}>出版审校（默认，严格页级门）</option>
-              <option value={OCR_QUALITY_STANDARD}>标准转写（更快，允许警告）</option>
-            </select>
+            />
+            <small>{isImageCollection
+              ? `${files.length} 张图片（按选择顺序）：${files.map((item) => item.name).join("、")}`
+              : (file?.name || "支持单个 PDF，或按顺序选择多张 PNG/JPG")}</small>
           </label>
-          <div>
-            <b>{activeQualityProfile === OCR_QUALITY_PUBLICATION ? "出版审校已启用" : "标准转写已启用"}</b>
-            <p>{activeQualityProfile === OCR_QUALITY_PUBLICATION
-              ? "至少使用 200 DPI；Codex 推理强度为“低”时，本任务会提升到“中”。低置信、待人工复核或视觉来源记录缺失的页面会阻止导入，但原始 OCR 工程始终可以保存。"
-              : "完整转写可以带页级警告进入结构化审阅；适合草稿和快速检查。"}</p>
-            <small>该流程门不测量文字或数学准确率，也不代表出版就绪。</small>
-          </div>
-        </div>
-        <div className="ocr-output-template">
-          <label>
-            <span>成品版式</span>
-            <select
-              aria-label="OCR 成品版式"
-              value={activeOutputTemplate}
-              disabled={Boolean(job?.id) || starting || restoringJob || restoreFailed}
-              onChange={(event) => setOutputTemplate(event.target.value)}
-            >
-              {outputTemplates.map((item) => (
-                <option key={item.id || "preserve"} value={item.id}>{item.label}</option>
+          <fieldset className="ocr-quality-picker" disabled={Boolean(job?.id) || starting || restoringJob || restoreFailed}>
+            <legend>2　识别质量</legend>
+            <div className="ocr-quality-options">
+              {OCR_QUALITY_TIERS.map((tier) => (
+                <label key={tier.id} className={activeQualityTier === tier.id ? "active" : ""}>
+                  <input
+                    type="radio"
+                    name="ocr-quality-tier"
+                    value={tier.id}
+                    checked={activeQualityTier === tier.id}
+                    onChange={() => {
+                      setQualityTier(tier.id);
+                      setDpi(200);
+                    }}
+                  />
+                  <span><b>{tier.label}{tier.recommended ? "（推荐）" : ""}</b><small>{tier.description}</small></span>
+                </label>
               ))}
-            </select>
-          </label>
-          <div>
-            <b>{selectedOutputPreset.label}</b>
-            <p>{selectedOutputPreset.description}</p>
-            <small>版式在任务启动时冻结并随任务恢复；之后的设置变化不会改动本任务。</small>
-          </div>
-        </div>
-        <div className="row">
-          <input
-            type="file"
-            accept=".pdf,.png,.jpg,.jpeg"
-            disabled={restoringJob || restoreFailed || starting || OCR_ACTIVE_STATUSES.has(job?.status)
-              || job?.importing || controlAction || retryBusy || rawSaving}
-            onChange={async (event) => {
-              const accepted = await chooseFile(event.target.files?.[0] || null);
-              if (!accepted) event.target.value = "";
-            }}
-          />
-          <select
-            aria-label="PDF 渲染清晰度"
-            value={dpi}
-            disabled={Boolean(job?.id) || starting || restoringJob || restoreFailed}
-            onChange={(e) => setDpi(Number(e.target.value))}
-          >
-            <option value={150} disabled={activeQualityProfile === OCR_QUALITY_PUBLICATION}>150 DPI（仅标准转写）</option>
-            <option value={200}>200 DPI</option>
-            <option value={300}>300 DPI</option>
-          </select>
-          <button
-            className="primary"
-            disabled={restoringJob || restoreFailed || starting || Boolean(job?.id) || job?.saving || job?.importing
-              || readiness.blocked || controlAction || retryBusy || rawSaving
-              || (Boolean(file) && pdfInfo.status !== "ready") || (isPdf && Boolean(pageRangeError))}
-            onClick={start}
-          >
-            {starting ? "正在启动……" : "开始转写"}
-          </button>
+            </div>
+          </fieldset>
         </div>
         {file && pdfInfo.status === "loading" && (
           <div className="pdf-range-card loading" role="status">
-            {isPdf ? "正在上传 PDF 并读取总页数……" : "正在安全上传图片……"}
+            {isPdf
+              ? "正在上传 PDF 并读取总页数……"
+              : (isImageCollection ? `正在按顺序安全上传 ${files.length} 张图片……` : "正在安全上传图片……")}
           </div>
         )}
         {file && pdfInfo.status === "error" && (
           <div className="pdf-range-card error" role="alert">
             <span>{isPdf ? "未能读取 PDF 页数" : "未能准备图片"}，尚未产生 OCR 费用。</span>
-            <button type="button" onClick={() => inspectFile(file)}>重新读取</button>
+            <button type="button" onClick={() => inspectFile(files)}>重新读取</button>
           </div>
         )}
-        {isPdf && pdfInfo.status === "ready" && (
+        {isPagedSource && pdfInfo.status === "ready" && (
           <div className="pdf-range-card">
             <div className="pdf-page-total">
-              <b>PDF 共 {pdfInfo.total} 页</b>
+              <b>{isPdf ? `PDF 共 ${pdfInfo.total} 页` : `图片序列共 ${pdfInfo.total} 张`}</b>
               <span>{pdfInfo.total > pdfInfo.maxPages
                 ? `单次上限 ${pdfInfo.maxPages} 页，默认选择前 ${pdfInfo.maxPages} 页`
                 : "默认处理全部，可在开始前缩小范围"}</span>
@@ -1392,12 +1327,14 @@ export default function Ocr({ onImport, onOpenSettings }) {
               />
             </label>
             <div className={`pdf-selection-summary ${pageRangeError ? "invalid" : ""}`}>
-              {pageRangeError || `本次处理 ${selectedPageCount} 页（原第 ${startNumber}-${endNumber} 页）`}
+              {pageRangeError || (isPdf
+                ? `本次处理 ${selectedPageCount} 页（原第 ${startNumber}-${endNumber} 页）`
+                : `本次处理 ${selectedPageCount} 张（选择顺序第 ${startNumber}-${endNumber} 张）`)}
               <small>单次最多 {pdfInfo.maxPages} 页；Token 与费用只累计所选页面</small>
             </div>
           </div>
         )}
-        {!isPdf && file && <p className="hint">图片按单页处理，无需填写页码。</p>}
+        {!isPagedSource && file && <p className="hint">单张图片按一页处理，无需填写页码。</p>}
         {restoreFailed && (
           <div className="pdf-range-card error" role="alert">
             <span>上一份 OCR 的任务编号仍安全保留；恢复前不会允许新建任务。</span>
@@ -1413,66 +1350,51 @@ export default function Ocr({ onImport, onOpenSettings }) {
             </button>
           </div>
         )}
-        {!usesCodex && <details className="advanced">
-            <summary>临时指定其他视觉模型（一般无需填写）</summary>
-            <div className="row">
-              <input
-                placeholder="视觉模型 ID；留空使用设置页选择的模型"
-                value={model}
-                onChange={(e) => {
-                  setModel(e.target.value);
-                  setCustomVisionConfirmed(false);
-                }}
-              />
-            </div>
-          </details>}
+        {!job && (
+          <div className="ocr-start-action">
+            <button
+              className="primary"
+              disabled={restoringJob || restoreFailed || starting || readiness.blocked || controlAction
+                || retryBusy || rawSaving || !file || pdfInfo.status !== "ready"
+                || (isPagedSource && Boolean(pageRangeError))}
+              onClick={start}
+            >
+              {starting ? "正在启动……" : "开始 OCR"}
+            </button>
+            <span>{file
+              ? `将按“${qualityTierLabel(activeQualityTier)}”档识别${isPagedSource && selectedPageCount ? ` ${selectedPageCount} 页` : "此图片"}`
+              : "选择文件后即可开始"}</span>
+          </div>
+        )}
         {job && (
           <div className={`process-card process-${job.status}`}>
             <div className="process-summary">
-              <div><b>{job.phase || ocrStatusLabel(job.status)}</b><span>{progressCount}</span></div>
-              <strong>{Math.round((job.progress || 0) * 100)}%</strong>
+              <div>
+                <b>{ocrRecovery.statusLabel || ocrStatusLabel(job.status)}</b>
+                <span>{job.phase || `正在按“${qualityTierLabel(activeQualityTier)}”档处理`}</span>
+              </div>
+              <strong>{Math.round(ocrProgress.progress * 100)}%</strong>
             </div>
             <div className="process-track" role="progressbar" aria-label="OCR 进度"
-              aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round((job.progress || 0) * 100)}>
-              <span style={{ width: `${Math.round((job.progress || 0) * 100)}%` }} />
+              aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round(ocrProgress.progress * 100)}>
+              <span style={{ width: `${Math.round(ocrProgress.progress * 100)}%` }} />
             </div>
-            <div className="process-metrics">
-              {job.source_type === "pdf" && job.source_total > 0 && (
-                <span>源 PDF：共 {job.source_total} 页，本次 {totalPages} 页</span>
-              )}
-              <span>Token：{(job.cost?.total_tokens || job.usage?.total_tokens || 0).toLocaleString()}</span>
-              {jobUsesCodex && <span>引擎：Codex CLI（云端视觉）</span>}
-              <span>工作流：{qualityProfileLabel(activeQualityProfile)}</span>
-              {job.dpi > 0 && <span>渲染：{job.dpi} DPI</span>}
-              {jobUsesCodex && job.reasoning_effort && <span>推理强度：{job.reasoning_effort}</span>}
-              <span>费用：{jobUsesCodex
-                ? "Codex 订阅额度（非 API 计费）"
-                : job.cost?.estimated_cost_cny == null ? "暂无估价"
-                  : `约 ¥${job.cost.estimated_cost_cny < 0.01 ? job.cost.estimated_cost_cny.toFixed(4) : job.cost.estimated_cost_cny.toFixed(2)}`}</span>
-              {job.status === "done" && <span>本次 {totalPages}/{totalPages} 页全部完成</span>}
-              {job.status === "partial" && (
-                <span>已成功 {successfulPages}/{totalPages} 页，请重试失败页</span>
-              )}
-              {job.status === "error" && (
-                <span>{job.page > 0
-                  ? `${job.source_type === "pdf" ? `处理停止于原第 ${job.page} 页` : "图片处理已停止"} · ${job.current_index || processedPages}/${totalPages}`
-                  : "处理已停止，可重新开始"}</span>
-              )}
-              {job.status === "paused" && (
-                <span>{job.page > 0
-                  ? `${job.source_type === "pdf" ? `已暂停在原第 ${job.page} 页` : "图片任务已暂停"} · ${job.current_index || processedPages}/${totalPages}`
-                  : "任务已暂停"}</span>
-              )}
-              {job.status === "pausing" && (
-                <span>{job.page > 0
-                  ? `${job.source_type === "pdf" ? `正在完成原第 ${job.page} 页` : "正在完成图片识别"} · 完成后安全暂停`
-                  : "正在进入安全暂停点"}</span>
-              )}
-              {job.status === "running" && job.page > 0 && (
-                <span>{job.source_type === "pdf"
-                  ? `原第 ${job.page} 页 · ${job.current_index || 1}/${totalPages}`
-                  : "正在处理图片 · 1/1"}</span>
-              )}
+            <div className="ocr-progress-grid" aria-label="OCR 实时统计">
+              <span><small>当前页</small><b>{ocrProgress.currentPages.length
+                ? ocrProgress.currentPages.map((page) => `P${page}`).join("、") : "等待中"}</b></span>
+              <span><small>成功</small><b>{ocrProgress.success}/{ocrProgress.total}</b></span>
+              <span><small>自动重试</small><b>{ocrProgress.retryPages}</b></span>
+              <span><small>待确认</small><b>{ocrProgress.needsReview}</b></span>
+              <span><small>处理中</small><b>{ocrProgress.active}</b></span>
+              <span><small>待处理</small><b>{ocrProgress.pending}</b></span>
+            </div>
+            <div className="ocr-speed-line">
+              <span>平均速度：<b>{formatPagesPerMinute(ocrProgress.averageRate)}</b></span>
+              <span>最近一分钟：<b>{formatPagesPerMinute(ocrProgress.recentRate)}</b></span>
+              <span>预计剩余：<b>{formatOcrDuration(ocrProgress.etaSeconds)}</b></span>
+              {ocrProgress.concurrency != null && <span>并行：<b>{ocrProgress.concurrency}</b></span>}
+              {ocrProgress.dpi != null && <span>当前清晰度：<b>{ocrProgress.dpi} DPI</b></span>}
+              {ocrProgress.rateLimited && <span className="warning">服务限流，已自动降速</span>}
             </div>
             {job.error && <p className="process-error-message">{job.error}</p>}
             <div className="ocr-control-row">
@@ -1493,6 +1415,16 @@ export default function Ocr({ onImport, onOpenSettings }) {
                   onClick={() => controlOcr("resume")}
                 >
                   {controlAction === "resume" ? "正在继续……" : "▶ 继续识别"}
+                </button>
+              )}
+              {ocrRecovery.canResumeIncomplete && (
+                <button
+                  className="primary"
+                  type="button"
+                  disabled={Boolean(controlAction) || retryBusy || rawSaving || job.saving || job.importing}
+                  onClick={() => controlOcr("resume")}
+                >
+                  {controlAction === "resume" ? "正在继续未完成页面……" : `▶ ${ocrRecovery.actionLabel}`}
                 </button>
               )}
               {["partial", "error"].includes(job.status) && failedPageNums.length > 0 && (
@@ -1521,57 +1453,87 @@ export default function Ocr({ onImport, onOpenSettings }) {
         )}
         {job && <QualityGateCard job={job} onSelectPage={selectPage} />}
         <div className="status">{msg}</div>
-        {job?.status === "done" && (
-          <div className="ocr-import-options">
-            <label>
-              <span>结构化整理方式</span>
-              <select
-                value={importMode}
-                disabled={importingProject}
-                onChange={(event) => setImportMode(event.target.value)}
-              >
-                <option value="ai">AI 深度整理（默认，重点维护）</option>
-                <option value="rule">旧规则兼容模式（不再主动优化）</option>
-              </select>
-            </label>
-            <div className="template-choice frozen-template" aria-label="本任务成品版式">
-              <span>本任务成品版式</span>
-              <b>{selectedOutputPreset.label}</b>
+        {terminalOcr && (
+          <section className={`ocr-completion ${ocrRecovery.complete ? "complete" : "issues"}`}>
+            <div className="ocr-completion-heading">
+              <div>
+                <h3>{ocrRecovery.title || "OCR 状态待确认"}</h3>
+                <p>{ocrRecovery.detail || "已有页面记录均已保留。"}</p>
+              </div>
+              <span>{ocrArtifacts.compileStatus || "等待编译状态"}</span>
             </div>
-            <small>
-              {importMode === "ai"
-                ? "AI 会判断章节层级、删除 OCR 粘贴的目录页并插入真正的 \\tableofcontents，同时校正定理与证明边界。AI 不可用时会明确停止，不会悄悄换成规则结果。"
-                : "旧规则模式仅为已有项目保留，不使用额外 AI 调用，也不再作为主要整理流程。"}
-              {" "}{selectedOutputPreset.description} 成品版式只决定结构化结果的外观，不表示逐页复刻原书，也不构成准确率或出版就绪证明；安全检查未通过时导出物会明确标记 UNVERIFIED 警告。
-            </small>
-          </div>
-        )}
-        {(job?.status === "done" || job?.status === "partial") && (
-          <div className="row">
-            {job.status === "done" && (
-              <button
-                className="primary"
-                disabled={importingProject || rawSaving || retryBusy || Boolean(controlAction) || qualityImportBlocked}
-                onClick={importProject}
-              >
-                {importingProject
-                  ? "正在创建项目……"
-                  : qualityImportBlocked
-                    ? "页级质量门未通过，暂不能进入审阅"
-                    : `进入${importMode === "ai" ? " AI 深度" : "规则"}整理（保留原始 OCR）`}
-              </button>
+            <div className="ocr-result-metrics">
+              <span><small>总耗时</small><b>{formatOcrDuration(ocrProgress.elapsedSeconds)}</b></span>
+              <span><small>平均速度</small><b>{formatPagesPerMinute(ocrProgress.averageRate)}</b></span>
+              <span><small>自动重试页</small><b>{ocrProgress.retryPages}</b></span>
+              <span><small>待确认页</small><b>{ocrProgress.needsReview}</b></span>
+              <span><small>未完成页</small><b>{ocrRecovery.incompleteCount}</b></span>
+              <span><small>编译状态</small><b>{ocrArtifacts.compileStatus || "暂无记录"}</b></span>
+            </div>
+            <div className="ocr-artifact-grid" aria-label="OCR 最终产物">
+              {[ocrArtifacts.source, ocrArtifacts.raw, ocrArtifacts.baselineTex, ocrArtifacts.baselinePdf].map((artifact) => (
+                <div key={artifact.label} className={artifact.available ? "available" : "pending"}>
+                  <span>{artifact.available ? "✓" : "·"}</span>
+                  <b>{artifact.label}</b>
+                  {artifact.url
+                    ? <a href={artifact.url} target="_blank" rel="noreferrer">打开 / 下载</a>
+                    : <small>{artifact.available ? "已保存" : "本任务暂无此产物"}</small>}
+                </div>
+              ))}
+            </div>
+            {issuePages.length > 0 && (
+              <div className="ocr-issue-pages">
+                <b>问题页：</b>
+                {issuePages.slice(0, 20).map((page) => {
+                  const pending = ocrPagePresentation(job.pages?.[page]).pending;
+                  return (
+                    <button
+                      type="button"
+                      key={page}
+                      disabled={pending}
+                      title={pending ? "此页尚未处理；请使用“继续未完成页面”" : "查看本页"}
+                      onClick={() => selectPage(page)}
+                    >
+                      P{page}{pending ? "（待继续）" : ""}
+                    </button>
+                  );
+                })}
+                {issuePages.length > 20 && <span>另有 {issuePages.length - 20} 页</span>}
+              </div>
             )}
-            <button className="primary" type="button" disabled={rawSaving || retryBusy || Boolean(controlAction)} onClick={saveRawResult}>
-              {rawSaving ? "正在保存……" : "保存 OCR 工程 ZIP（TEX+图片）"}{job.status === "partial" ? "（不完整）" : ""}
-            </button>
-            <button type="button" disabled={retryBusy || Boolean(controlAction)} onClick={copyRawResult}>一键复制原始 OCR</button>
-            <button type="button" disabled={retryBusy || Boolean(controlAction)} onClick={browserDownloadRaw}>浏览器下载 OCR 工程 ZIP（备用）</button>
-            {rawSaved && <button type="button" onClick={openDownloadFolder}>打开保存位置</button>}
-            {job.status === "partial" && <span className="warning">请重试失败页后再进入结构化审阅。</span>}
-            {qualityImportBlocked && (
-              <span className="warning">出版审校页级质量门未通过；请点击上方页码检查并重试。保存 OCR 工程不受影响。</span>
-            )}
-          </div>
+            <div className="ocr-result-actions">
+              {ocrRecovery.canResumeIncomplete && (
+                <button
+                  className="primary"
+                  disabled={retryBusy || rawSaving || Boolean(controlAction) || job.saving || job.importing}
+                  onClick={() => controlOcr("resume")}
+                >
+                  {controlAction === "resume" ? "正在继续未完成页面……" : ocrRecovery.actionLabel}
+                </button>
+              )}
+              {job.status === "done" && (
+                <button className="primary" disabled={importingProject || rawSaving || retryBusy || Boolean(controlAction)} onClick={importProject}>
+                  {importingProject ? "正在打开项目……" : "AI 全自动整理"}
+                </button>
+              )}
+              {failedPageNums.length > 0 && (
+                <button className="primary" disabled={retryBusy || rawSaving || Boolean(controlAction)} onClick={retryFailedPages}>
+                  {retryingFailed ? "正在重新排队……" : `重试问题页（${failedPageNums.length}）`}
+                </button>
+              )}
+              {ocrArtifacts.raw.available && (
+                <>
+                  <a className="button-link" href={`/api/ocr/jobs/${job.id}/result`} download>下载原稿 TEX</a>
+                  <button type="button" disabled={rawSaving || retryBusy || Boolean(controlAction)} onClick={saveRawResult}>
+                    {rawSaving ? "正在保存……" : "保存 OCR 工程 ZIP"}
+                  </button>
+                  <button type="button" disabled={retryBusy || Boolean(controlAction)} onClick={copyRawResult}>复制原稿 TEX</button>
+                  <button type="button" disabled={retryBusy || Boolean(controlAction)} onClick={browserDownloadRaw}>备用下载 ZIP</button>
+                </>
+              )}
+              {rawSaved && <button type="button" onClick={openDownloadFolder}>打开所在文件夹</button>}
+            </div>
+          </section>
         )}
         {job && ["done", "partial", "error"].includes(job.status) && (
           <div className="row">
@@ -1584,12 +1546,13 @@ export default function Ocr({ onImport, onOpenSettings }) {
           <aside className="col tree" aria-label="OCR 页面列表">
             {pageNums.map((n) => {
               const p = job.pages[n];
+              const pageView = ocrPagePresentation(p);
               return (
                 <button
                   type="button"
                   key={n}
-                  className={`tree-item d-${p.status} ${current === n ? "active" : ""} ${p.status === "pending" ? "disabled" : ""}`}
-                  disabled={p.status === "pending"}
+                  className={`tree-item d-${String(pageView.state).toLowerCase()} ${current === n ? "active" : ""} ${pageView.pending ? "disabled" : ""}`}
+                  disabled={pageView.pending}
                   aria-pressed={previewMode === "page" && current === n}
                   aria-label={`${job.source_type === "pdf" ? `原 PDF 第 ${n} 页` : "OCR 图片"}，任务 ${p.task_index || 1}/${totalPages}`}
                   onClick={() => selectPage(n)}
@@ -1597,13 +1560,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
                   <span className="badge">{job.source_type === "pdf" ? `原 P${n}` : `P${n}`}</span>
                   <span className="page-task-index">{p.task_index || 1}/{totalPages}</span>
                   <span className="m">
-                    {p.retrying ? "重试中" : p.status === "done" ? (
-                      p.low_conf ? "⚠ 低置信" :
-                        p.needs_review ? "⚠ 待复核" :
-                          qualityRetryPageSet.has(n) ? "⚠ 质量门" : "OK"
-                    ) :
-                      p.status === "error" ? "失败，可重试" :
-                        p.status === "pending" ? "等待处理" : "处理中"}
+                    {qualityRetryPageSet.has(n) && pageView.success ? "待确认" : pageView.label}
                   </span>
                 </button>
               );
@@ -1639,7 +1596,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
                 >
                   {focusLivePreview ? "显示页列表" : "专注预览"}
                 </button>
-                {current != null && job.pages?.[current]?.status !== "pending" && (
+                {current != null && !ocrPagePresentation(job.pages?.[current]).pending && (
                   <button type="button" onClick={() => selectPage(current)}>
                     检查{job.source_type === "pdf" ? `原第 ${current} 页` : "图片"}
                   </button>
@@ -1667,7 +1624,7 @@ export default function Ocr({ onImport, onOpenSettings }) {
                 <b>{job.source_type === "pdf" ? `原第 ${current} 页` : "图片"} LaTeX
                   {currentTaskIndex > 0 && ` · ${currentTaskIndex}/${totalPages}`}</b>
                 <button type="button" onClick={() => setPreviewMode("live")}>回到实时结果</button>
-                {(job.pages[current]?.status === "error"
+                {(ocrPagePresentation(job.pages[current]).failed
                   || job.pages[current]?.low_conf
                   || job.pages[current]?.needs_review
                   || qualityRetryPageSet.has(current)) && (

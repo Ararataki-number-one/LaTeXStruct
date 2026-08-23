@@ -23,7 +23,12 @@ from urllib.parse import urlsplit
 from ..providers import api_provider
 from .parser import Document
 from .patch import Decision
-from .prompts import build_decide_system, build_decide_user, build_meta
+from .prompts import (
+    build_decide_system,
+    build_decide_user,
+    build_meta,
+    resolve_candidate_boundary_anchor,
+)
 from .scanner import Candidate
 from .legalize import _next_stop_line, theorem_requires_boundary_singleton
 
@@ -457,6 +462,7 @@ def parse_decisions(
     windows: Dict[str, Tuple[int, int]],
     doc: Document,
     incomplete_windows: Optional[set] = None,
+    structured_envs: Optional[Collection[str]] = None,
 ) -> Tuple[List[Decision], List[dict], List[dict]]:
     """校验 AI 输出并转换为 Decision；越界/非法项转入歧义清单。"""
     decisions: List[Decision] = []
@@ -559,11 +565,41 @@ def parse_decisions(
                     "reason": "候选正文超过 AI 安全窗口，无法证明环境完整，已保守保留",
                 })
                 continue
-            body = _span(item.get("body_span") or {}, lo, hi)
-            if body is None:
-                ambiguous.append({"candidate_id": cid, "line": c.span.start_line,
-                                  "reason": "body_span 缺失或越出上下文范围，保守保留"})
-                continue
+            # New responses select an opaque, host-signed endpoint.  The host
+            # recomputes it against the current document and restores the span;
+            # model-provided line numbers cannot override it.  If an anchor is
+            # present but invalid, do not silently fall back to body_span.
+            anchor_value = item.get("end_anchor_id")
+            resolved_anchor = None
+            if anchor_value not in (None, ""):
+                if isinstance(anchor_value, str):
+                    resolved_anchor = resolve_candidate_boundary_anchor(
+                        doc,
+                        c,
+                        (lo, hi),
+                        anchor_value,
+                        structured_envs,
+                    )
+                if resolved_anchor is None:
+                    ambiguous.append({
+                        "candidate_id": cid,
+                        "line": c.span.start_line,
+                        "reason": (
+                            "end_anchor_id 不是该候选当前文档的宿主边界锚点"
+                            "（可能伪造、过期或跨候选），保守保留"
+                        ),
+                    })
+                    continue
+                body = (c.span.start_line, resolved_anchor.end_line)
+            else:
+                body = _span(item.get("body_span") or {}, lo, hi)
+                if body is None:
+                    ambiguous.append({
+                        "candidate_id": cid,
+                        "line": c.span.start_line,
+                        "reason": "body_span 缺失或越出上下文范围，保守保留",
+                    })
+                    continue
             if not (body[0] <= c.span.start_line <= body[1]):
                 ambiguous.append({"candidate_id": cid, "line": c.span.start_line,
                                   "reason": "body_span 未包含候选标题，保守保留"})
@@ -610,6 +646,15 @@ def parse_decisions(
                         "title_prefix": strip_prefix,
                         "title_line_old": title_line_old,
                         "title_line_new": title_line_new,
+                        "end_anchor_id": (
+                            resolved_anchor.anchor_id if resolved_anchor else ""
+                        ),
+                        "end_anchor_line": (
+                            resolved_anchor.end_line if resolved_anchor else None
+                        ),
+                        "end_anchor_span_sha256": (
+                            resolved_anchor.span_sha256 if resolved_anchor else ""
+                        ),
                     },
                 )
             )
@@ -758,6 +803,7 @@ def decide_candidates(
             windows,
             doc,
             incomplete_windows=incomplete_windows,
+            structured_envs=ctx.existing_envs,
         )
         decisions.extend(ds)
         ambiguous.extend(am)

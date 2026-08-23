@@ -424,7 +424,7 @@ def build_report(
             page = item.get("page") or item.get("source_page")
             source_label = (
                 "原始图片"
-                if source_visual.get("source_type") == "image"
+                if source_visual.get("source_type") in {"image", "images"}
                 else "源 PDF"
             )
             where = (

@@ -33,6 +33,7 @@ from .ocrstruct import (
     is_ocr_document,
     parse_ocr_metadata,
 )
+from .ocr_sources import MULTI_IMAGE_DERIVATION_ID
 from .patch import (
     AMSTHM_BLOCK,
     AppliedPatch,
@@ -132,8 +133,8 @@ def _verify_source_visual_provenance(
         issues.append("视觉来源 provenance schema 缺失或不受支持")
 
     source_type = str(raw.get("source_type") or "").strip().lower()
-    if source_type not in {"image", "pdf"}:
-        issues.append("原始上传类型必须明确为 image 或 pdf")
+    if source_type not in {"image", "images", "pdf"}:
+        issues.append("原始上传类型必须明确为 image、images 或 pdf")
         source_type = ""
 
     original_hash = str(raw.get("original_upload_sha256") or "").strip().lower()
@@ -176,6 +177,8 @@ def _verify_source_visual_provenance(
     expected_derivation = (
         IMAGE_TO_VISUAL_PDF_DERIVATION_ID
         if source_type == "image"
+        else MULTI_IMAGE_DERIVATION_ID
+        if source_type == "images"
         else PDF_IDENTITY_VISUAL_DERIVATION_ID
         if source_type == "pdf"
         else ""
@@ -184,6 +187,65 @@ def _verify_source_visual_provenance(
         issues.append("视觉 PDF derivation 标识缺失或与原始上传类型矛盾")
     if source_type == "image" and derived is not True:
         issues.append("图片输入必须明确记录为派生视觉 PDF")
+    source_images: List[dict] = []
+    original_image_count = 0
+    derived_from_source_sha256 = str(
+        raw.get("derived_from_source_sha256") or ""
+    ).strip().lower()
+    if source_type == "images":
+        if derived is not True:
+            issues.append("多图片输入必须明确记录为派生视觉 PDF")
+        raw_images = raw.get("source_images")
+        if not isinstance(raw_images, list) or len(raw_images) < 2:
+            issues.append("多图片输入缺少宿主冻结的有序源图片清单")
+            raw_images = []
+        for index, raw_image in enumerate(raw_images, 1):
+            if not isinstance(raw_image, dict):
+                issues.append(f"多图片输入第 {index} 项不是有效记录")
+                continue
+            order = raw_image.get("order")
+            filename = str(raw_image.get("original_filename") or "")
+            image_hash = str(raw_image.get("sha256") or "").strip().lower()
+            image_size = raw_image.get("bytes")
+            valid = True
+            if isinstance(order, bool) or order != index:
+                issues.append(f"多图片输入第 {index} 项顺序无效")
+                valid = False
+            if (
+                not filename
+                or filename in {".", ".."}
+                or "/" in filename
+                or "\\" in filename
+                or any(ord(char) < 32 or ord(char) == 127 for char in filename)
+            ):
+                issues.append(f"多图片输入第 {index} 项原始文件名无效")
+                valid = False
+            if re.fullmatch(r"[0-9a-f]{64}", image_hash) is None:
+                issues.append(f"多图片输入第 {index} 项 SHA-256 无效")
+                valid = False
+            if (
+                isinstance(image_size, bool)
+                or not isinstance(image_size, int)
+                or image_size <= 0
+            ):
+                issues.append(f"多图片输入第 {index} 项 byte count 无效")
+                valid = False
+            if valid:
+                source_images.append({
+                    "order": order,
+                    "original_filename": filename,
+                    "bytes": image_size,
+                    "sha256": image_hash,
+                })
+        count_raw = raw.get("original_image_count")
+        if isinstance(count_raw, bool) or not isinstance(count_raw, int):
+            issues.append("多图片输入的原始图片数量无效")
+        else:
+            original_image_count = count_raw
+            if count_raw != len(raw_images) or count_raw < 2:
+                issues.append("多图片输入的原始图片数量与有序清单不一致")
+        if derived_from_source_sha256 != original_hash:
+            issues.append("多图片视觉 PDF 未绑定到原始来源 ZIP SHA-256")
     if source_type == "pdf":
         if derived is not False:
             issues.append("PDF 输入必须明确记录为原始 bytes 直接用于视觉比对")
@@ -201,6 +263,12 @@ def _verify_source_visual_provenance(
         "derivation_id": derivation_id,
         "issues": issues,
     })
+    if source_type == "images":
+        result.update({
+            "derived_from_source_sha256": derived_from_source_sha256,
+            "original_image_count": original_image_count,
+            "source_images": source_images,
+        })
     return result
 
 
@@ -1186,7 +1254,7 @@ def run_pipeline(
     template_name = template_label(template) if template else ""
     if template:
         visual_geometry_policy = GEOMETRY_POLICY_TEMPLATE_REFLOW
-    elif source_visual_provenance_info.get("source_type") == "image":
+    elif source_visual_provenance_info.get("source_type") in {"image", "images"}:
         visual_geometry_policy = GEOMETRY_POLICY_DERIVED_IMAGE
     else:
         visual_geometry_policy = GEOMETRY_POLICY_STRICT_SOURCE
@@ -2082,7 +2150,8 @@ def run_pipeline(
                     source_pdf_page_range,
                     preview_status=preview_status,
                     source_geometry_authoritative=(
-                        source_visual_provenance_info.get("source_type") != "image"
+                        source_visual_provenance_info.get("source_type")
+                        not in {"image", "images"}
                         # An explicit layout-changing template owns the output
                         # paper geometry.  The source size remains evidence and
                         # must be closed by the page model, but cannot be a hard
@@ -2142,7 +2211,8 @@ def run_pipeline(
                     deterministic_report=deterministic.to_dict(),
                     source_label=(
                         "SOURCE IMAGE"
-                        if source_visual_provenance_info.get("source_type") == "image"
+                        if source_visual_provenance_info.get("source_type")
+                        in {"image", "images"}
                         else "SOURCE PDF"
                     ),
                     candidate_scope=visual_candidate_scope,
@@ -2168,11 +2238,15 @@ def run_pipeline(
                     visual_loop_info["unresolved"].extend(visual_audit.unresolved)
                     break
                 if not visual_audit.suggestions:
+                    expected_visual_review_pages = sum(
+                        page.candidate_page is not None
+                        for page in deterministic.pages
+                    )
                     visual_loop_info["checked"] = visual_audit.checked
                     visual_loop_info["ok"] = bool(
                         visual_audit.checked
                         and visual_audit.ok
-                        and visual_audit.page_count == deterministic.compared_page_count
+                        and visual_audit.page_count == expected_visual_review_pages
                     )
                     if not visual_loop_info["ok"]:
                         visual_loop_info["unresolved"].append({
