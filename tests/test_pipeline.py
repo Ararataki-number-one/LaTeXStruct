@@ -127,6 +127,111 @@ def test_ocr_compile_before_log_uses_exact_raw_ocr_stage():
     assert result.verification["compile_before"]["log"] == "compiled"
 
 
+def test_ocr_partial_raw_pdf_is_hash_bound_and_exposed_for_persistence():
+    metadata = encode_ocr_metadata(
+        [{"level": 0, "title": "Overview", "page": 1}],
+        "article",
+        [1],
+        False,
+    )
+    raw_ocr = "\n".join([
+        r"\documentclass{article}",
+        r"\begin{document}",
+        metadata,
+        "Overview",
+        "Raw OCR body.",
+        r"\end{document}",
+    ])
+    raw_pdf = b"%PDF-real-raw-partial-capture"
+    current_pdf = b"%PDF-real-current-capture"
+    calls = []
+
+    def fake_compile(text, **kwargs):
+        calls.append((text, dict(kwargs)))
+        if len(calls) == 1:
+            result = {
+                "available": True,
+                "ok": False,
+                "pages": 2,
+                "errors": ["Missing $ inserted. @l.95"],
+                "log": "Output written on main.pdf (2 pages).\n! Missing $ inserted.",
+                "preview_status": "PARTIAL_COMPILED",
+                "process_status": "FAILED",
+                "return_code": 1,
+                "fatal_line": 95,
+                "passes_requested": 1,
+                "passes_completed": 1,
+            }
+            if kwargs.get("include_pdf"):
+                result["pdf_bytes"] = raw_pdf
+            return result
+        result = {
+            "available": True,
+            "ok": True,
+            "pages": 1,
+            "errors": [],
+            "log": "Output written on main.pdf (1 page).",
+            "preview_status": "COMPILED",
+            "process_status": "SUCCESS",
+            "return_code": 0,
+            "fatal_line": None,
+            "passes_requested": 1,
+            "passes_completed": 1,
+        }
+        if kwargs.get("include_pdf"):
+            result["pdf_bytes"] = current_pdf
+        return result
+
+    with patch(
+        "latexstruct.core.compilecheck.compile_latex",
+        side_effect=fake_compile,
+    ):
+        result = run_pipeline(
+            raw_ocr,
+            mode="rule",
+            compile_check=True,
+            capture_compile_artifact=True,
+        )
+
+    assert len(calls) == 2
+    assert calls[0][0] == raw_ocr
+    assert calls[0][1]["include_pdf"] is True
+    assert calls[1][1]["include_pdf"] is True
+    assert result.raw_compiled_pdf == raw_pdf
+    assert result.raw_compiled_pdf_name == "partial-compiled.pdf"
+    assert result.raw_compiled_tex == raw_ocr
+    assert result.compiled_pdf == current_pdf
+    assert "pdf_bytes" not in result.verification["compile_before"]
+    assert "pdf_bytes" not in result.verification["compile_after"]
+    assert result.verification["raw_preview_state"] == "PARTIAL_COMPILED"
+
+    raw_record = result.verification["compile_before"]
+    raw_artifact = result.verification["raw_preview_artifact"]
+    assert raw_record["engine"] == "xelatex"
+    assert raw_record["passes_attempted"] == 1
+    assert raw_record["exit_code"] == 1
+    assert raw_record["page_count"] == 2
+    assert raw_record["pdf_sha256"] == hashlib.sha256(raw_pdf).hexdigest()
+    assert raw_record["fatal_line"] == 95
+    assert raw_record["fatal_error"] == "Missing $ inserted. @l.95"
+    assert raw_record["log_path"] == "audit/compile_raw.log"
+    assert raw_record["compile_input_sha256"] == raw_artifact[
+        "compile_input_sha256"
+    ]
+    for field_name in (
+        "engine",
+        "passes_attempted",
+        "exit_code",
+        "page_count",
+        "pdf_sha256",
+        "compile_input_sha256",
+        "fatal_line",
+        "fatal_error",
+        "log_path",
+    ):
+        assert raw_artifact[field_name] == raw_record[field_name]
+
+
 def test_pipeline_separates_captured_pdf_from_json_verification():
     before = {
         "available": True,

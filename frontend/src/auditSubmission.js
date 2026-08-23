@@ -34,6 +34,7 @@ const RUN_STATUS_LABELS = {
 const VERIFICATION_STATUS_LABELS = {
   VERIFIED: "机器验证通过",
   UNVERIFIED: "未通过完整机器验证",
+  NOT_RUN: "尚未运行机器验证",
   NOT_AVAILABLE: "无机器验证结果",
   UNKNOWN: "验证状态未知",
 };

@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -19,6 +20,7 @@ import threading
 import zipfile
 from pathlib import Path, PurePosixPath
 from unittest.mock import patch
+from urllib.parse import unquote
 
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -164,9 +166,9 @@ def _logical_manifest_paths(manifest: dict) -> set[str]:
     for item in manifest["artifacts"]:
         paths.add(item["path"])
         paths.update(
-            alias["path"]
+            alias["logical_path"]
             for alias in item.get("aliases", [])
-            if alias.get("path")
+            if alias.get("logical_path")
         )
     return paths
 
@@ -232,12 +234,28 @@ def test_audit_submission_routes_publish_lightweight_then_standard_zip():
         assert ready["is_latest"] is True
         assert ready["historical"] is False
         assert ready["download_url"]
+        assert ready["archive_filename"] == ready["filename"]
+        assert ready["saved_filename"] == ready["filename"]
+        filename_parts = ready["archive_filename"][:-4].split("__")
+        assert len(filename_parts) == 5
+        assert filename_parts[:2] == ["尚未运行", "ANALYSIS_REVIEW_ONLY"]
+        assert re.fullmatch(r"\d{8}T\d{6}Z", filename_parts[2])
+        assert filename_parts[4] == "SUCCESS"
+        audit_store = AuditSubmissionStore(srv.get_store()._dir(pid))
+        frozen = audit_store.load_snapshot(ready["snapshot_id"])
+        assert filename_parts[3] == frozen.run_id
         assert (downloads / ready["filename"]).is_file()
 
         downloaded = client.get(ready["download_url"])
         assert downloaded.status_code == 200, downloaded.text
         assert downloaded.headers["x-latexstruct-submission-id"] == ready["submission_id"]
         assert downloaded.headers["x-latexstruct-stale"] == "false"
+        disposition = downloaded.headers["content-disposition"]
+        marker = "filename*=utf-8''"
+        assert marker in disposition.lower()
+        assert unquote(
+            disposition[disposition.lower().index(marker) + len(marker):]
+        ) == ready["archive_filename"]
         with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
             names = set(archive.namelist())
             assert CONTROL_FILES.issubset(names)
@@ -292,6 +310,63 @@ def test_audit_submission_routes_publish_lightweight_then_standard_zip():
         newest = client.get(f"/api/projects/{pid}/audit-submission/latest").json()
         assert newest["latest"]["submission_id"] == ready["submission_id"]
         assert newest["latest"]["bundle_state"] == "ZIP_READY"
+
+
+def test_latest_keeps_exact_collision_safe_saved_filename():
+    with WorkspaceTmp() as tmp:
+        client = _client(tmp)
+        pid = _create_processed_project(client, name="同秒重复生成")
+        downloads = Path(tmp) / "downloads" / "LaTeXStruct"
+        canonical = (
+            "同秒重复生成__ANALYSIS_REVIEW_ONLY__20260823T120000Z__"
+            "rule-fixed__SUCCESS.zip"
+        )
+        with (
+            patch(
+                "latexstruct.server.downloads.download_root",
+                return_value=downloads,
+            ),
+            patch(
+                "latexstruct.server.app.build_audit_zip_filename",
+                return_value=canonical,
+            ),
+        ):
+            first_response = client.post(
+                f"/api/projects/{pid}/audit-submission",
+                json={"profile": "quick"},
+            )
+            second_response = client.post(
+                f"/api/projects/{pid}/audit-submission",
+                json={"profile": "full"},
+            )
+
+        assert first_response.status_code == 201, first_response.text
+        assert second_response.status_code == 201, second_response.text
+        first = first_response.json()["submission"]
+        second = second_response.json()["submission"]
+        assert first["archive_filename"] == canonical
+        assert first["saved_filename"] == canonical
+        assert second["archive_filename"] == canonical
+        assert second["saved_filename"] != canonical
+        assert second["saved_filename"].endswith(" (1).zip")
+        assert second["filename"] == second["saved_filename"]
+        assert (downloads / first["saved_filename"]).is_file()
+        assert (downloads / second["saved_filename"]).is_file()
+
+        latest_response = client.get(
+            f"/api/projects/{pid}/audit-submission/latest"
+        )
+        assert latest_response.status_code == 200, latest_response.text
+        latest = latest_response.json()["latest"]
+        assert latest["submission_id"] == second["submission_id"]
+        assert latest["archive_filename"] == canonical
+        assert latest["saved_filename"] == second["saved_filename"]
+        assert latest["filename"] == second["saved_filename"]
+        assert latest["folder"] == "下载/LaTeXStruct"
+
+        downloaded = client.get(latest["download_url"])
+        assert downloaded.status_code == 200
+        assert canonical in unquote(downloaded.headers["content-disposition"])
 
 
 def test_review_state_marks_ready_bundle_stale_and_regeneration_replaces_latest():
@@ -479,7 +554,7 @@ def test_failed_run_keeps_partial_stage_error_and_can_generate_unverified_zip():
                 for item in manifest["artifacts"]
                 if item["path"] == "stages/10_rule_analyzed.tex"
                 or any(
-                    alias.get("path") == "stages/10_rule_analyzed.tex"
+                    alias.get("logical_path") == "stages/10_rule_analyzed.tex"
                     for alias in item.get("aliases", [])
                 )
             )

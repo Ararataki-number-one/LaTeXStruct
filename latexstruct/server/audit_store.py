@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
 import shutil
+import stat
 import threading
+import unicodedata
 import uuid
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -45,6 +49,7 @@ SNAPSHOT_STORAGE_SCHEMA = "latexstruct-audit-snapshot-store-v1"
 SUBMISSION_STORAGE_SCHEMA = "latexstruct-audit-submission-store-v1"
 LATEST_POINTER_SCHEMA = "latexstruct-audit-latest-pointer-v1"
 STALE_RECORD_SCHEMA = "latexstruct-audit-stale-record-v1"
+SAVED_DOWNLOAD_RECORD_SCHEMA = "latexstruct-audit-saved-download-v1"
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _WINDOWS_ABSOLUTE_RE = re.compile(r"(?i)(?<![A-Za-z0-9_])[A-Z]:[\\/][^\r\n\t\"']+")
@@ -66,6 +71,15 @@ _WINDOWS_DEVICE_STEMS = frozenset({
     *(f"lpt{index}" for index in range(1, 10)),
 })
 _CONTROL_FILES = (README_PATH, SHORT_PROMPT_PATH, FULL_PROMPT_PATH, MANIFEST_PATH)
+_MINIMAL_FAILURE_CONTROL_FILES = (README_PATH, MANIFEST_PATH)
+_MINIMAL_FAILURE_MEMBERS = frozenset({
+    README_PATH,
+    MANIFEST_PATH,
+    "audit/packaging-error.json",
+    "audit/packaging-integrity.json",
+    "audit/error.log",
+})
+_SHA256SUMS_PATH = "audit/SHA256SUMS"
 _COMMIT_LOCKS_GUARD = threading.Lock()
 _COMMIT_LOCKS: dict[str, threading.RLock] = {}
 
@@ -104,6 +118,272 @@ def _portable_path(value: str) -> str:
     ):
         raise ValueError(f"snapshot artifact path is not portable: {value!r}")
     return path.as_posix()
+
+
+def _strict_archive_path(value: object) -> str:
+    """Validate one ZIP/member path without applying a lossy normalization."""
+    raw = str(value or "")
+    if "\\" in raw:
+        raise ValueError(f"audit ZIP member uses a non-portable separator: {raw!r}")
+    portable = _portable_path(raw)
+    if portable != raw:
+        raise ValueError(f"audit ZIP member path is not canonical: {raw!r}")
+    for part in PurePosixPath(portable).parts:
+        if part != part.rstrip(" ."):
+            raise ValueError(f"audit ZIP member has an unsafe trailing character: {raw!r}")
+        stem = part.rstrip(" .").split(".", 1)[0].casefold()
+        if stem in _WINDOWS_DEVICE_STEMS:
+            raise ValueError(f"audit ZIP member uses a reserved Windows device: {raw!r}")
+    return portable
+
+
+def _archive_collision_key(path: str) -> str:
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+def _validate_file_namespace(files: Mapping[str, bytes]) -> dict[str, bytes]:
+    normalized: dict[str, bytes] = {}
+    collision_keys: dict[str, str] = {}
+    for raw_name, raw_data in files.items():
+        name = _strict_archive_path(raw_name)
+        key = _archive_collision_key(name)
+        previous = collision_keys.get(key)
+        if previous is not None:
+            raise ValueError(
+                f"audit ZIP member has a case-insensitive collision: {previous!r} and {name!r}"
+            )
+        collision_keys[key] = name
+        normalized[name] = bytes(raw_data)
+    return normalized
+
+
+def _is_minimal_failure_status(packaging_status: object, package_status: object) -> bool:
+    return (
+        str(getattr(packaging_status, "value", packaging_status) or "").upper()
+        == "FAILED"
+        or str(getattr(package_status, "value", package_status) or "").upper()
+        == "INVALID"
+    )
+
+
+def _required_control_files(packaging_status: object, package_status: object) -> tuple[str, ...]:
+    if _is_minimal_failure_status(packaging_status, package_status):
+        return _MINIMAL_FAILURE_CONTROL_FILES
+    return _CONTROL_FILES
+
+
+def _manifest_identity_expectations(result: object) -> dict[str, str]:
+    manifest = result.manifest
+    return {
+        "submission_id": str(result.submission_id),
+        "snapshot_id": str(result.snapshot_id),
+        "snapshot_fingerprint": str(result.snapshot_fingerprint),
+        "generated_at": str(result.generated_at),
+        "workflow": str(manifest.workflow.value),
+        "source_run_status": str(manifest.source_run_status.value),
+        "terminal_status": str(manifest.terminal_status.value),
+        "verification_status": str(manifest.verification_status.value),
+        "packaging_status": str(manifest.packaging_status.value),
+        "audit_package_status": str(manifest.audit_package_status.value),
+        "depth": str(manifest.depth.value),
+    }
+
+
+def _validate_manifest_and_sums(
+    files: Mapping[str, bytes],
+    *,
+    require_sha256sums: bool,
+    expected_identity: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Bind physical members, the manifest and SHA256SUMS to the same bytes."""
+    try:
+        manifest = json.loads(files[MANIFEST_PATH].decode("utf-8-sig"))
+    except KeyError:
+        raise ValueError("audit ZIP is missing submission_manifest.json") from None
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        raise ValueError("audit ZIP submission_manifest.json is unreadable") from None
+    if not isinstance(manifest, dict):
+        raise ValueError("audit ZIP submission_manifest.json must contain an object")
+
+    if expected_identity is not None:
+        for field_name, expected in expected_identity.items():
+            actual = manifest.get(field_name)
+            # source_run_status was introduced after terminal_status and is the
+            # only identity field old manifests may legitimately omit.
+            if field_name == "source_run_status" and actual is None:
+                actual = manifest.get("terminal_status")
+            if str(actual or "") != str(expected):
+                raise ValueError(
+                    f"audit ZIP manifest {field_name} conflicts with its submission result"
+                )
+
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise ValueError("audit ZIP manifest has no physical artifact declaration list")
+    declared: dict[str, Mapping[str, object]] = {}
+    declared_keys: dict[str, str] = {}
+    alias_rows: list[Mapping[str, object]] = []
+    for raw_record in artifacts:
+        if not isinstance(raw_record, Mapping):
+            raise ValueError("audit ZIP manifest contains a malformed artifact declaration")
+        path = _strict_archive_path(raw_record.get("path"))
+        key = _archive_collision_key(path)
+        if key in declared_keys:
+            raise ValueError("audit ZIP manifest declares a duplicate or case-colliding path")
+        declared_keys[key] = path
+        declared[path] = raw_record
+        aliases = raw_record.get("aliases")
+        if aliases is None:
+            aliases = ()
+        if not isinstance(aliases, (list, tuple)):
+            raise ValueError("audit ZIP manifest artifact aliases must be a list")
+        for alias in aliases:
+            if not isinstance(alias, Mapping):
+                raise ValueError("audit ZIP manifest contains a malformed alias")
+            if "path" in alias or "physical_path" in alias:
+                raise ValueError("audit ZIP alias must not claim a physical path")
+            alias_rows.append(alias)
+
+    if set(declared) != set(files):
+        missing = sorted(set(declared) - set(files))
+        undeclared = sorted(set(files) - set(declared))
+        raise ValueError(
+            "audit ZIP actual members conflict with manifest declarations "
+            f"(missing={missing}, undeclared={undeclared})"
+        )
+
+    for path, record in declared.items():
+        role = str(record.get("artifact_role") or "")
+        # The manifest and checksum file are self-referential controls.  Their
+        # records intentionally use placeholder byte metadata; all other
+        # physical artifacts must bind directly to their declared bytes.
+        if role in {"SUBMISSION_MANIFEST", "SHA256SUMS"}:
+            continue
+        digest = str(record.get("bytes_sha256") or "")
+        byte_count = record.get("byte_count")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"audit ZIP manifest has an invalid SHA-256 for {path}")
+        if byte_count != len(files[path]) or not hmac.compare_digest(
+            digest, _sha256(files[path])
+        ):
+            raise ValueError(f"audit ZIP member failed its manifest hash/size check: {path}")
+
+    member_keys = {_archive_collision_key(name): name for name in files}
+    for alias in alias_rows:
+        logical_path = _strict_archive_path(alias.get("logical_path"))
+        canonical_path = _strict_archive_path(alias.get("canonical_path"))
+        if _archive_collision_key(logical_path) in member_keys:
+            raise ValueError("audit ZIP alias logical_path incorrectly names a physical member")
+        if canonical_path not in declared:
+            raise ValueError("audit ZIP alias canonical_path does not name a physical member")
+        if alias.get("deduplicated") is not True:
+            raise ValueError("audit ZIP alias is not marked as deduplicated")
+
+    minimal_failure = _is_minimal_failure_status(
+        manifest.get("packaging_status"), manifest.get("audit_package_status")
+    )
+    required_controls = _required_control_files(
+        manifest.get("packaging_status"), manifest.get("audit_package_status")
+    )
+    missing_controls = [name for name in required_controls if name not in files]
+    if missing_controls:
+        raise ValueError(f"audit ZIP is missing required control files: {missing_controls}")
+    if minimal_failure:
+        missing_failure = sorted(_MINIMAL_FAILURE_MEMBERS - set(files))
+        if missing_failure:
+            raise ValueError(
+                f"minimal failure audit ZIP is missing failure evidence: {missing_failure}"
+            )
+
+    if _SHA256SUMS_PATH not in files:
+        if require_sha256sums and not minimal_failure:
+            raise ValueError("audit ZIP is missing audit/SHA256SUMS")
+        return manifest
+    try:
+        text = files[_SHA256SUMS_PATH].decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("audit ZIP SHA256SUMS is not UTF-8") from None
+    sums: dict[str, str] = {}
+    sum_keys: dict[str, str] = {}
+    for line in text.splitlines():
+        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+        if match is None:
+            raise ValueError("audit ZIP SHA256SUMS contains a malformed line")
+        digest, raw_path = match.groups()
+        path = _strict_archive_path(raw_path)
+        key = _archive_collision_key(path)
+        if key in sum_keys:
+            raise ValueError("audit ZIP SHA256SUMS contains a duplicate path")
+        sum_keys[key] = path
+        sums[path] = digest
+    expected_sum_paths = set(files) - {_SHA256SUMS_PATH}
+    if set(sums) != expected_sum_paths:
+        raise ValueError("audit ZIP SHA256SUMS does not cover every non-self physical member")
+    for path, expected_digest in sums.items():
+        if not hmac.compare_digest(expected_digest, _sha256(files[path])):
+            raise ValueError(f"audit ZIP SHA256SUMS failed verification: {path}")
+    return manifest
+
+
+def _validate_audit_zip(
+    data: bytes,
+    *,
+    expected_files: Mapping[str, bytes] | None = None,
+    expected_controls: Mapping[str, bytes] | None = None,
+    expected_identity: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Read every member and validate namespace, manifest and checksums."""
+    if not data:
+        raise ValueError("generated audit ZIP is empty")
+    extracted: dict[str, bytes] = {}
+    collision_keys: dict[str, str] = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(data), "r") as archive:
+            for info in archive.infolist():
+                if info.is_dir():
+                    raise ValueError("audit ZIP contains an undeclared directory member")
+                if info.flag_bits & 0x1:
+                    raise ValueError("audit ZIP contains an encrypted member")
+                mode = info.external_attr >> 16
+                file_type = stat.S_IFMT(mode)
+                if file_type not in {0, stat.S_IFREG}:
+                    raise ValueError("audit ZIP contains a non-regular member")
+                name = _strict_archive_path(info.filename)
+                key = _archive_collision_key(name)
+                if key in collision_keys:
+                    raise ValueError(
+                        "audit ZIP contains duplicate or case-insensitively colliding members"
+                    )
+                collision_keys[key] = name
+                if expected_files is not None and name in expected_files:
+                    if info.file_size != len(expected_files[name]):
+                        raise ValueError(f"audit ZIP member size conflicts with generated bytes: {name}")
+                with archive.open(info, "r") as handle:
+                    extracted[name] = handle.read()
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, RuntimeError) as exc:
+        raise ValueError("generated audit ZIP is unreadable") from exc
+
+    extracted = _validate_file_namespace(extracted)
+    if expected_files is not None:
+        normalized_expected = _validate_file_namespace(expected_files)
+        if set(extracted) != set(normalized_expected):
+            raise ValueError("audit ZIP members do not match generated submission files")
+        for name, expected in normalized_expected.items():
+            if not hmac.compare_digest(extracted[name], expected):
+                raise ValueError(f"audit ZIP member bytes changed during packaging: {name}")
+    if expected_controls is not None:
+        normalized_controls = _validate_file_namespace(expected_controls)
+        for name, expected in normalized_controls.items():
+            actual = extracted.get(name)
+            if actual is None or not hmac.compare_digest(actual, expected):
+                raise ValueError(
+                    f"audit ZIP control differs from its committed copy: {name}"
+                )
+    return _validate_manifest_and_sums(
+        extracted,
+        require_sha256sums=True,
+        expected_identity=expected_identity,
+    )
 
 
 def _redact_descriptor_text(value: str) -> str:
@@ -186,7 +466,12 @@ def _machine_verification_summary(value: Mapping[str, object]) -> dict[str, obje
         # produce VERIFIED after this descriptor is loaded.
         "safe_to_export": value.get("safe_to_export") is True,
     }
-    for key in ("export_blocked", "preview_state", "audit_terminal_status"):
+    for key in (
+        "export_blocked",
+        "preview_state",
+        "raw_preview_state",
+        "audit_terminal_status",
+    ):
         if key in value:
             result[key] = _safe_descriptor_value(value.get(key))
     for key in ("checks", "failures"):
@@ -204,7 +489,23 @@ def _machine_verification_summary(value: Mapping[str, object]) -> dict[str, obje
             for name in (
                 "available", "ok", "pages", "errors", "preview_status",
                 "process_status", "return_code", "fatal_line", "timed_out",
-                "checked", "unverified",
+                "checked", "unverified", "engine", "passes_attempted",
+                "exit_code", "page_count", "pdf_sha256",
+                "compile_input_sha256", "fatal_error", "log_path",
+            )
+            if name in record
+        }))
+    for key in ("preview_artifact", "raw_preview_artifact"):
+        record = value.get(key)
+        if not isinstance(record, Mapping):
+            continue
+        result[key] = _safe_descriptor_value(_bounded_status_value({
+            name: record.get(name)
+            for name in (
+                "status", "filename", "sha256", "bytes", "engine",
+                "passes_attempted", "exit_code", "page_count", "pdf_sha256",
+                "compile_input_sha256", "fatal_line", "fatal_error", "log_path",
+                "tex_sha256", "tex_lf_normalized_sha256",
             )
             if name in record
         }))
@@ -226,6 +527,8 @@ class StoredAuditSubmission:
     workflow: str
     terminal_status: str
     verification_status: str
+    packaging_status: str
+    audit_package_status: str
     depth: str
     state: str
     relative_directory: str
@@ -246,6 +549,8 @@ class StoredAuditSubmission:
             "workflow": self.workflow,
             "terminal_status": self.terminal_status,
             "verification_status": self.verification_status,
+            "packaging_status": self.packaging_status,
+            "audit_package_status": self.audit_package_status,
             "depth": self.depth,
             "state": self.state,
             "relative_directory": self.relative_directory,
@@ -367,6 +672,14 @@ class AuditSubmissionStore:
             "template": _redact_descriptor_text(str(snapshot.template)),
             "page_range": _redact_descriptor_text(str(snapshot.page_range)),
             "metadata": _safe_descriptor_value(thaw_json(snapshot.metadata)),
+            "stages": _safe_descriptor_value({
+                name: execution.to_dict()
+                for name, execution in snapshot.stages.items()
+            }),
+            "source_pdf": _safe_descriptor_value(
+                snapshot.source_pdf.to_dict() if snapshot.source_pdf else None
+            ),
+            "provenance": _safe_descriptor_value(snapshot.provenance.to_dict()),
             "artifacts": artifact_rows,
         }
         descriptor["descriptor_sha256"] = _descriptor_sha256(descriptor)
@@ -430,6 +743,9 @@ class AuditSubmissionStore:
             template=descriptor.get("template") or "none",
             page_range=descriptor.get("page_range") or "all",
             metadata=descriptor.get("metadata") or {},
+            stages=descriptor.get("stages") or {},
+            source_pdf=descriptor.get("source_pdf"),
+            provenance=descriptor.get("provenance") or {},
         )
         if snapshot.current_fingerprint != descriptor.get("current_fingerprint"):
             raise ValueError("stored snapshot current-artifact fingerprint is inconsistent")
@@ -446,6 +762,27 @@ class AuditSubmissionStore:
         force_latest: bool = False,
     ) -> StoredAuditSubmission:
         submission_id = _safe_id(result.submission_id, "submission id")
+        files = _validate_file_namespace(result.files)
+        expected_identity = _manifest_identity_expectations(result)
+        _validate_manifest_and_sums(
+            files,
+            require_sha256sums=zip_filename is not None,
+            expected_identity=expected_identity,
+        )
+        control_files = _required_control_files(
+            result.manifest.packaging_status,
+            result.manifest.audit_package_status,
+        )
+        zip_digest = ""
+        if zip_filename is not None:
+            _validate_audit_zip(
+                result.zip_bytes,
+                expected_files=files,
+                expected_identity=expected_identity,
+            )
+            zip_digest = _sha256(result.zip_bytes)
+            if not hmac.compare_digest(zip_digest, str(result.zip_sha256 or "")):
+                raise ValueError("generated audit ZIP SHA-256 conflicts with its result")
         relative_directory = f"submissions/{submission_id}"
         target = self._root / "submissions" / submission_id
         if target.exists():
@@ -454,8 +791,8 @@ class AuditSubmissionStore:
         stage = self._root / f".submission-{submission_id}-{uuid.uuid4().hex}.tmp"
         stage.mkdir(parents=True, exist_ok=False)
         try:
-            for name in _CONTROL_FILES:
-                data = result.files.get(name)
+            for name in control_files:
+                data = files.get(name)
                 if data is None:
                     raise ValueError(f"generated audit submission is missing {name}")
                 path = stage / PurePosixPath(name)
@@ -474,18 +811,21 @@ class AuditSubmissionStore:
                 "generated_at": result.generated_at,
                 "workflow": result.manifest.workflow.value,
                 "terminal_status": result.manifest.terminal_status.value,
-                "verification_status": result.manifest.verification_status,
+                "verification_status": result.manifest.verification_status.value,
+                "packaging_status": result.manifest.packaging_status.value,
+                "audit_package_status": result.manifest.audit_package_status.value,
                 "depth": result.manifest.depth.value,
                 "state": "READY" if zip_filename is not None else "LIGHTWEIGHT",
                 "relative_directory": relative_directory,
                 "zip_relative_path": zip_relative_path,
-                "zip_sha256": result.zip_sha256 if zip_filename is not None else "",
+                "zip_sha256": zip_digest if zip_filename is not None else "",
                 "zip_bytes": len(result.zip_bytes) if zip_filename is not None else 0,
+                "control_files": list(control_files),
                 "control_sha256": {
-                    name: _sha256(result.files[name]) for name in _CONTROL_FILES
+                    name: _sha256(files[name]) for name in control_files
                 },
                 "control_bytes": {
-                    name: len(result.files[name]) for name in _CONTROL_FILES
+                    name: len(files[name]) for name in control_files
                 },
             }
             descriptor["descriptor_sha256"] = _descriptor_sha256(descriptor)
@@ -663,8 +1003,25 @@ class AuditSubmissionStore:
         control_sizes = descriptor.get("control_bytes")
         if not isinstance(control_hashes, dict) or not isinstance(control_sizes, dict):
             raise ValueError("audit submission has no complete control-file commit record")
+        expected_controls = _required_control_files(
+            descriptor.get("packaging_status") or "SUCCESS",
+            descriptor.get("audit_package_status") or "VALID",
+        )
+        recorded_controls = descriptor.get("control_files")
+        if recorded_controls is None:
+            # v1 descriptors predate the explicit list and always committed the
+            # four normal controls.
+            control_files = _CONTROL_FILES
+        elif isinstance(recorded_controls, list):
+            control_files = tuple(str(name) for name in recorded_controls)
+        else:
+            raise ValueError("audit submission has an invalid control-file list")
+        if control_files != expected_controls:
+            raise ValueError("audit submission control-file set conflicts with package status")
+        if set(control_hashes) != set(control_files) or set(control_sizes) != set(control_files):
+            raise ValueError("audit submission control-file commit record is ambiguous")
         directory = self._root / "submissions" / submission_id
-        for name in _CONTROL_FILES:
+        for name in control_files:
             expected_hash = str(control_hashes.get(name) or "")
             expected_size = control_sizes.get(name)
             path = directory / PurePosixPath(name)
@@ -694,6 +1051,10 @@ class AuditSubmissionStore:
             workflow=str(descriptor["workflow"]),
             terminal_status=str(descriptor["terminal_status"]),
             verification_status=str(descriptor["verification_status"]),
+            packaging_status=str(descriptor.get("packaging_status") or "SUCCESS"),
+            audit_package_status=str(
+                descriptor.get("audit_package_status") or "VALID"
+            ),
             depth=str(descriptor["depth"]),
             state=str(descriptor["state"]),
             relative_directory=str(descriptor["relative_directory"]),
@@ -719,6 +1080,63 @@ class AuditSubmissionStore:
         if pointer.get("schema") != LATEST_POINTER_SCHEMA:
             raise ValueError("unsupported latest-audit pointer schema")
         return self.get_submission(str(pointer.get("submission_id") or ""))
+
+    def record_saved_download(self, submission_id: str, filename: str) -> None:
+        """Remember the exact collision-safe filename written to Downloads.
+
+        The immutable submission descriptor continues to describe the canonical
+        archive stored inside the project.  This small sidecar records only the
+        basename of the user-facing copy, never its absolute host path.
+        """
+        submission = self.get_submission(submission_id)
+        if not submission.zip_relative_path or not submission.zip_sha256:
+            raise ValueError("audit submission has no ZIP to record as downloaded")
+        raw_name = str(filename or "").strip()
+        from .downloads import safe_download_filename
+
+        safe_name = safe_download_filename(raw_name, default="LaTeXStruct-AI-audit.zip")
+        if safe_name != raw_name or not safe_name.casefold().endswith(".zip"):
+            raise ValueError("saved audit ZIP filename is not a safe basename")
+        record = {
+            "schema": SAVED_DOWNLOAD_RECORD_SCHEMA,
+            "submission_id": submission.submission_id,
+            "snapshot_id": submission.snapshot_id,
+            "zip_sha256": submission.zip_sha256,
+            "saved_filename": safe_name,
+            "recorded_at": datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            ).replace("+00:00", "Z"),
+        }
+        self._atomic_write(
+            self._root / "saved-downloads" / f"{submission.submission_id}.json",
+            _json_bytes(record),
+        )
+
+    def saved_download_filename(self, submission_id: str) -> str:
+        """Return the verified user-facing basename, or ``""`` when absent."""
+        submission = self.get_submission(submission_id)
+        path = self._root / "saved-downloads" / f"{submission.submission_id}.json"
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return ""
+        if record.get("schema") != SAVED_DOWNLOAD_RECORD_SCHEMA:
+            raise ValueError("unsupported audit saved-download record schema")
+        if (
+            record.get("submission_id") != submission.submission_id
+            or record.get("snapshot_id") != submission.snapshot_id
+            or not hmac.compare_digest(
+                str(record.get("zip_sha256") or ""), submission.zip_sha256
+            )
+        ):
+            raise ValueError("audit saved-download record conflicts with submission")
+        raw_name = str(record.get("saved_filename") or "")
+        from .downloads import safe_download_filename
+
+        safe_name = safe_download_filename(raw_name, default="LaTeXStruct-AI-audit.zip")
+        if safe_name != raw_name or not safe_name.casefold().endswith(".zip"):
+            raise ValueError("audit saved-download record has an unsafe filename")
+        return safe_name
 
     def submission_freshness(
         self,
@@ -840,4 +1258,27 @@ class AuditSubmissionStore:
         data = target.read_bytes()
         if _sha256(data) != submission.zip_sha256 or len(data) != submission.zip_bytes:
             raise ValueError("stored audit ZIP failed its hash/size check")
+        _validate_audit_zip(
+            data,
+            expected_controls={
+                name: (target.parent / PurePosixPath(name)).read_bytes()
+                for name in _required_control_files(
+                    submission.packaging_status,
+                    submission.audit_package_status,
+                )
+            },
+            expected_identity={
+                "submission_id": submission.submission_id,
+                "snapshot_id": submission.snapshot_id,
+                "snapshot_fingerprint": submission.snapshot_fingerprint,
+                "generated_at": submission.generated_at,
+                "workflow": submission.workflow,
+                "source_run_status": submission.terminal_status,
+                "terminal_status": submission.terminal_status,
+                "verification_status": submission.verification_status,
+                "packaging_status": submission.packaging_status,
+                "audit_package_status": submission.audit_package_status,
+                "depth": submission.depth,
+            },
+        )
         return target

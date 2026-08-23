@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import threading
+import zipfile
+from dataclasses import replace
 
 import pytest
 
+import latexstruct.core.audit_submission as audit_submission_module
 import latexstruct.server.audit_store as audit_store_module
 from latexstruct.core.audit_schema import (
     ArtifactRole,
@@ -17,7 +22,9 @@ from latexstruct.core.audit_submission import (
     FULL_PROMPT_PATH,
     MANIFEST_PATH,
     README_PATH,
+    SHA256SUMS_PATH,
     SHORT_PROMPT_PATH,
+    build_audit_submission,
     make_audit_artifact,
 )
 from latexstruct.server.audit_store import AuditSubmissionStore
@@ -34,12 +41,12 @@ def _snapshot(
         ArtifactRole.CURRENT_TEX,
         b"current" + suffix,
         parent_artifact_ids=(source.artifact_id,),
-        metadata={"local_path": r"C:\Users\ZQY\input.tex"} if path_in_metadata else {},
+        metadata={"local_path": r"C:\Users\FixtureUser\input.tex"} if path_in_metadata else {},
     )
     duplicate = make_audit_artifact(ArtifactRole.STAGE_SOURCE_TEX, b"source" + suffix)
     metadata = {
-        "source_path": "/home/zqy/input.tex",
-        "workspace": "/workspace/zqy/project",
+        "source_path": "/home/fixture/input.tex",
+        "workspace": "/workspace/fixture/project",
         "id_token": "identity-secret",
         "ANTHROPIC_API_KEY": "anthropic-secret",
         "email": "codex-user@example.test",
@@ -56,12 +63,12 @@ def _snapshot(
         machine_verification={
             "safe_to_export": False,
             "compile": {
-                "log_path": r"C:\Users\ZQY\AppData\Local\Temp\compile.log"
+                "log_path": r"C:\Users\FixtureUser\AppData\Local\Temp\compile.log"
                 if path_in_metadata
                 else "compile.log"
             },
         },
-        blockers=(r"检查 C:\Users\ZQY\input.tex",) if path_in_metadata else ("compile",),
+        blockers=(r"检查 C:\Users\FixtureUser\input.tex",) if path_in_metadata else ("compile",),
         model="codex",
         app_version="1.2.6",
         template="elegantbook",
@@ -75,6 +82,21 @@ def store(tmp_path):
     project = tmp_path / "中文项目"
     project.mkdir()
     return AuditSubmissionStore(project)
+
+
+def _zip_payload(files, *, extra_members=()):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+        for name, data in extra_members:
+            archive.writestr(name, data)
+    return output.getvalue()
+
+
+def _zip_members(data):
+    with zipfile.ZipFile(io.BytesIO(data), "r") as archive:
+        return {info.filename: archive.read(info) for info in archive.infolist()}
 
 
 def test_snapshot_persists_deeply_with_content_addressed_blob_reuse(store):
@@ -100,9 +122,9 @@ def test_snapshot_descriptor_redacts_absolute_paths_and_sensitive_location_field
     snapshot_id = store.save_snapshot(_snapshot(path_in_metadata=True))
     descriptor_path = store.root / "snapshots" / f"{snapshot_id}.json"
     text = descriptor_path.read_text(encoding="utf-8")
-    assert r"C:\Users\ZQY" not in text
-    assert "/home/zqy" not in text
-    assert "/workspace/zqy" not in text
+    assert r"C:\Users\FixtureUser" not in text
+    assert "/home/fixture" not in text
+    assert "/workspace/fixture" not in text
     assert "identity-secret" not in text
     assert "anthropic-secret" not in text
     assert "codex-user@example.test" not in text
@@ -154,6 +176,59 @@ def test_snapshot_descriptor_keeps_only_bounded_machine_verification_summary(sto
     assert "huge_private_record" not in verification
     assert len(verification["checks"]) == 100
     assert max(len(item["message"]) for item in verification["checks"]) == 2000
+
+
+def test_snapshot_keeps_hash_bound_partial_compile_metadata(store):
+    source = make_audit_artifact(ArtifactRole.SOURCE_TEX, b"source")
+    compile_metadata = {
+        "engine": "xelatex",
+        "passes_attempted": 1,
+        "exit_code": 1,
+        "page_count": 2,
+        "pdf_sha256": "a" * 64,
+        "compile_input_sha256": "b" * 64,
+        "fatal_line": 95,
+        "fatal_error": "Missing $ inserted.",
+        "log_path": "audit/compile_raw.log",
+    }
+    snapshot = RunSnapshot(
+        project_id="project",
+        run_id="partial-compile",
+        workflow=AuditWorkflow.OCR_ANALYSIS_REVIEW,
+        terminal_status=TerminalStatus.UNVERIFIED,
+        captured_at="2026-08-22T00:00:00Z",
+        artifacts=(source,),
+        machine_verification={
+            "safe_to_export": False,
+            "raw_preview_state": "PARTIAL_COMPILED",
+            "compile_before": {
+                "available": True,
+                "ok": False,
+                "preview_status": "PARTIAL_COMPILED",
+                **compile_metadata,
+            },
+            "raw_preview_artifact": {
+                "status": "PARTIAL_COMPILED",
+                "filename": "LATEXSTRUCT-ARTIFACTS/partial.pdf",
+                "sha256": "a" * 64,
+                "bytes": 123,
+                **compile_metadata,
+            },
+        },
+    )
+
+    loaded = store.load_snapshot(store.save_snapshot(snapshot))
+
+    assert loaded.machine_verification["raw_preview_state"] == "PARTIAL_COMPILED"
+    assert dict(loaded.machine_verification["compile_before"]) == {
+        "available": True,
+        "ok": False,
+        "preview_status": "PARTIAL_COMPILED",
+        **compile_metadata,
+    }
+    raw_artifact = loaded.machine_verification["raw_preview_artifact"]
+    for field_name, value in compile_metadata.items():
+        assert raw_artifact[field_name] == value
 
 
 def test_snapshot_is_idempotent_but_cannot_be_overwritten(store):
@@ -376,6 +451,146 @@ def test_download_rechecks_zip_hash_and_size(store):
     path = store.download_path(submission.submission_id)
     path.write_bytes(b"tampered")
     with pytest.raises(ValueError, match="hash/size"):
+        store.download_path(submission.submission_id)
+
+
+def test_minimal_failure_bundle_commits_without_prompt_controls(store, monkeypatch):
+    snapshot = _snapshot()
+    failed_artifact_id = snapshot.artifacts[0].artifact_id
+
+    class FailedGateResult:
+        def to_dict(self):
+            return {
+                "schema_version": "latexstruct-audit-packaging-integrity-v1",
+                "packaging_status": "FAILED",
+                "audit_package_status": "INVALID",
+                "valid": False,
+                "checked_tex_artifact_count": 3,
+                "failed_tex_artifact_count": 1,
+                "artifacts": [],
+                "failures": [{
+                    "artifact_id": failed_artifact_id,
+                    "path": "inputs/source.tex",
+                    "code": "math_token_conservation_failed",
+                }],
+            }
+
+    monkeypatch.setattr(
+        audit_submission_module.AuditPackagingIntegrityGate,
+        "finalize",
+        lambda _self: FailedGateResult(),
+    )
+    store.save_snapshot(snapshot)
+    submission = store.generate_zip(snapshot.snapshot_id)
+
+    assert submission.packaging_status == "FAILED"
+    assert submission.audit_package_status == "INVALID"
+    directory = store.root / submission.relative_directory
+    assert not (directory / SHORT_PROMPT_PATH).exists()
+    assert not (directory / FULL_PROMPT_PATH).exists()
+    descriptor = json.loads((directory / "submission.json").read_text(encoding="utf-8"))
+    assert descriptor["control_files"] == [README_PATH, MANIFEST_PATH]
+    members = set(_zip_members(store.download_path(submission.submission_id).read_bytes()))
+    assert {
+        README_PATH,
+        MANIFEST_PATH,
+        "audit/packaging-error.json",
+        "audit/packaging-integrity.json",
+        "audit/error.log",
+    } <= members
+    assert SHORT_PROMPT_PATH not in members
+    assert FULL_PROMPT_PATH not in members
+
+
+@pytest.mark.parametrize(
+    ("extra_name", "message"),
+    [
+        ("../escape.txt", "portable"),
+        ("INPUTS/SOURCE.TEX", "colliding"),
+    ],
+)
+def test_generate_zip_rejects_traversal_and_case_colliding_members(
+    store, monkeypatch, extra_name, message
+):
+    snapshot = _snapshot()
+    store.save_snapshot(snapshot)
+    result = build_audit_submission(snapshot)
+    damaged_zip = _zip_payload(
+        result.files,
+        extra_members=((extra_name, b"not declared"),),
+    )
+    damaged = replace(
+        result,
+        zip_bytes=damaged_zip,
+        zip_sha256=hashlib.sha256(damaged_zip).hexdigest(),
+    )
+    monkeypatch.setattr(audit_store_module, "build_audit_submission", lambda *_a, **_k: damaged)
+
+    with pytest.raises(ValueError, match=message):
+        store.generate_zip(snapshot.snapshot_id)
+
+
+def test_generate_zip_rejects_member_not_declared_by_manifest(store, monkeypatch):
+    snapshot = _snapshot()
+    store.save_snapshot(snapshot)
+    result = build_audit_submission(snapshot)
+    files = dict(result.files)
+    files["audit/undeclared.txt"] = b"not in manifest"
+    damaged_zip = _zip_payload(files)
+    damaged = replace(
+        result,
+        files=files,
+        zip_bytes=damaged_zip,
+        zip_sha256=hashlib.sha256(damaged_zip).hexdigest(),
+    )
+    monkeypatch.setattr(audit_store_module, "build_audit_submission", lambda *_a, **_k: damaged)
+
+    with pytest.raises(ValueError, match="manifest declarations"):
+        store.generate_zip(snapshot.snapshot_id)
+
+
+def test_generate_zip_recomputes_every_sha256sums_entry(store, monkeypatch):
+    snapshot = _snapshot()
+    store.save_snapshot(snapshot)
+    result = build_audit_submission(snapshot)
+    files = dict(result.files)
+    one_path = next(name for name in files if name != SHA256SUMS_PATH)
+    files[SHA256SUMS_PATH] = f"{'0' * 64}  {one_path}\n".encode()
+    damaged_zip = _zip_payload(files)
+    damaged = replace(
+        result,
+        files=files,
+        zip_bytes=damaged_zip,
+        zip_sha256=hashlib.sha256(damaged_zip).hexdigest(),
+    )
+    monkeypatch.setattr(audit_store_module, "build_audit_submission", lambda *_a, **_k: damaged)
+
+    with pytest.raises(ValueError, match="SHA256SUMS"):
+        store.generate_zip(snapshot.snapshot_id)
+
+
+def test_download_rechecks_internal_manifest_after_outer_hash_matches(store):
+    snapshot = _snapshot()
+    store.save_snapshot(snapshot)
+    submission = store.generate_zip(snapshot.snapshot_id)
+    zip_path = store.download_path(submission.submission_id)
+    members = _zip_members(zip_path.read_bytes())
+    members[README_PATH] += b"\ntampered inside ZIP\n"
+    damaged_zip = _zip_payload(members)
+    zip_path.write_bytes(damaged_zip)
+
+    directory = store.root / submission.relative_directory
+    descriptor_path = directory / "submission.json"
+    descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+    descriptor["zip_sha256"] = hashlib.sha256(damaged_zip).hexdigest()
+    descriptor["zip_bytes"] = len(damaged_zip)
+    descriptor["descriptor_sha256"] = audit_store_module._descriptor_sha256(descriptor)
+    descriptor_path.write_text(
+        json.dumps(descriptor, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="committed copy"):
         store.download_path(submission.submission_id)
 
 

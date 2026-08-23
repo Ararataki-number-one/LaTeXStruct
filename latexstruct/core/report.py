@@ -358,7 +358,14 @@ def build_report(
     cb = verification.get("compile_before")
     ca = verification.get("compile_after")
     if cb and ca and cb.get("available"):
-        L.append("- 编译校验（xelatex）：")
+        compile_engines = []
+        for record in (cb, ca):
+            engine = str(record.get("engine") or "xelatex").strip()
+            if engine.lower().endswith(".exe"):
+                engine = engine[:-4]
+            if engine and engine not in compile_engines:
+                compile_engines.append(engine)
+        L.append(f"- 编译校验（{' / '.join(compile_engines)}）：")
         L.append(
             f"  - 整理前：{'成功 ' + str(cb.get('pages')) + ' 页' if cb.get('ok') else '失败 ' + '; '.join(cb.get('errors', [])[:2])}"
         )

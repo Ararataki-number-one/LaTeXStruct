@@ -21,14 +21,14 @@ import uuid
 import zipfile
 from copy import deepcopy
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Dict, Optional
+from pathlib import Path, PurePosixPath
+from typing import Dict, Literal, Optional
 from weakref import WeakValueDictionary
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from ..config import AppConfig, load_config, save_config
 from ..core.audit_schema import (
@@ -38,6 +38,15 @@ from ..core.audit_schema import (
     AuditWorkflow,
     RunSnapshot,
     TerminalStatus,
+)
+from ..core.audit_evidence import (
+    build_metrics,
+    build_outline_evidence,
+    build_report_json,
+    issues_csv_bytes,
+    project_dependency_path,
+    structured_blockers,
+    template_manifest,
 )
 from ..core.audit_submission import make_audit_artifact
 from ..core.invariants import IMG_RE
@@ -68,6 +77,7 @@ from ..core.runbundle import (
 )
 from ..providers import list_provider_presets
 from ..store import ProjectStore
+from .audit_filename import build_audit_zip_filename
 from .process_jobs import ProcessJobManager, ProcessingCancelled
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -1774,6 +1784,7 @@ def _snapshot_ocr_bundle_job(job: dict) -> dict:
         "backend": str(job.get("backend") or "unknown"),
         "model": str(job.get("model") or ""),
         "reasoning_effort": str(job.get("reasoning_effort") or ""),
+        "created": job.get("created"),
         "producer_identity": deepcopy(
             job.get("producer_identity")
             if isinstance(job.get("producer_identity"), dict)
@@ -2551,6 +2562,15 @@ class ConfigRequest(BaseModel):
     keyring: Optional[bool] = None
 
 
+class ConfigConnectionTestRequest(BaseModel):
+    """一次性 API 连通性探测；密钥只在本次请求内存中使用。"""
+
+    role: Literal["decide", "review", "ocr"]
+    base_url: str = Field(min_length=1, max_length=2048)
+    model: str = Field(min_length=1, max_length=256)
+    api_key: Optional[SecretStr] = None
+
+
 def _normalized_previous_version(value: str) -> str:
     match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?", (value or "").strip())
     if not match:
@@ -3057,7 +3077,7 @@ def create_app(updated_from: str = "") -> FastAPI:
             ) from None
 
     def _persist_compile_preview(pid: str, result) -> None:
-        """Persist only a PDF already validated by the compile-artifact layer."""
+        """Persist hash-bound current and raw-OCR PDFs beyond compiler temp dirs."""
         from ..core.preview import (
             COMPILED,
             PARTIAL_COMPILED,
@@ -3066,43 +3086,95 @@ def create_app(updated_from: str = "") -> FastAPI:
             preview_storage_filename,
         )
 
-        payload = getattr(result, "compiled_pdf", b"")
-        display_name = str(getattr(result, "compiled_pdf_name", "") or "")
-        if not isinstance(payload, (bytes, bytearray, memoryview)) or not payload:
-            return
         allowed = {
             preview_descriptor(COMPILED).filename,
             preview_descriptor(PARTIAL_COMPILED).filename,
         }
-        if display_name not in allowed or not bytes(payload).startswith(b"%PDF-"):
-            raise ValueError("编译预览工件格式无效，已阻止保存")
-        evidence = (getattr(result, "verification", {}) or {}).get(
-            "preview_artifact"
-        )
-        digest = sha256_bytes(bytes(payload))
-        status = str(evidence.get("status") or "") if isinstance(evidence, dict) else ""
-        if (
-            not isinstance(evidence, dict)
-            or evidence.get("sha256") != digest
-            or evidence.get("display_filename") != display_name
-            or evidence.get("filename") != preview_artifact_path(status, digest)
-        ):
-            raise ValueError("编译预览工件与验证记录不一致，已阻止保存")
-        compiled_tex = str(getattr(result, "compiled_tex", "") or "")
-        if evidence.get("tex_sha256") != sha256_bytes(compiled_tex.encode("utf-8")):
-            raise ValueError("编译预览工件与候选 TEX 不一致，已阻止保存")
         from ..core.compilecheck import build_compile_input_manifest
 
-        compile_inputs = build_compile_input_manifest(
-            compiled_tex,
-            dict(getattr(result, "compiled_extra_files", {}) or {}),
+        specifications = (
+            (
+                "compiled_pdf",
+                "compiled_pdf_name",
+                "compiled_tex",
+                "compiled_extra_files",
+                "preview_artifact",
+                "compile_after",
+            ),
+            (
+                "raw_compiled_pdf",
+                "raw_compiled_pdf_name",
+                "raw_compiled_tex",
+                "raw_compiled_extra_files",
+                "raw_preview_artifact",
+                "compile_before",
+            ),
         )
-        if evidence.get("compile_inputs") != compile_inputs:
-            raise ValueError("编译预览工件与完整编译输入集不一致，已阻止保存")
-        storage_name = preview_storage_filename(status, digest)
-        get_store()._atomic_write_bytes(
-            get_store()._dir(pid), storage_name, bytes(payload)
-        )
+        verification = getattr(result, "verification", {}) or {}
+        for (
+            payload_field,
+            display_field,
+            tex_field,
+            extra_field,
+            evidence_key,
+            compile_key,
+        ) in specifications:
+            payload = getattr(result, payload_field, b"")
+            if not isinstance(payload, (bytes, bytearray, memoryview)) or not payload:
+                continue
+            payload = bytes(payload)
+            display_name = str(getattr(result, display_field, "") or "")
+            if display_name not in allowed or not payload.startswith(b"%PDF-"):
+                raise ValueError("编译预览工件格式无效，已阻止保存")
+            evidence = verification.get(evidence_key)
+            digest = sha256_bytes(payload)
+            status = (
+                str(evidence.get("status") or "")
+                if isinstance(evidence, dict)
+                else ""
+            )
+            if (
+                not isinstance(evidence, dict)
+                or evidence.get("sha256") != digest
+                or evidence.get("pdf_sha256") != digest
+                or evidence.get("display_filename") != display_name
+                or evidence.get("filename") != preview_artifact_path(status, digest)
+                or int(evidence.get("page_count") or 0) <= 0
+            ):
+                raise ValueError("编译预览工件与验证记录不一致，已阻止保存")
+            compile_record = verification.get(compile_key)
+            if not isinstance(compile_record, dict):
+                raise ValueError("编译预览缺少机器编译记录，已阻止保存")
+            for field_name in (
+                "engine",
+                "passes_attempted",
+                "exit_code",
+                "page_count",
+                "pdf_sha256",
+                "compile_input_sha256",
+                "fatal_line",
+                "fatal_error",
+                "log_path",
+            ):
+                if evidence.get(field_name) != compile_record.get(field_name):
+                    raise ValueError("编译预览元数据与机器编译记录不一致，已阻止保存")
+            compiled_tex = str(getattr(result, tex_field, "") or "")
+            if evidence.get("tex_sha256") != sha256_bytes(compiled_tex.encode("utf-8")):
+                raise ValueError("编译预览工件与候选 TEX 不一致，已阻止保存")
+            compile_inputs = build_compile_input_manifest(
+                compiled_tex,
+                dict(getattr(result, extra_field, {}) or {}),
+            )
+            if (
+                evidence.get("compile_inputs") != compile_inputs
+                or evidence.get("compile_input_sha256")
+                != compile_inputs.get("manifest_sha256")
+            ):
+                raise ValueError("编译预览工件与完整编译输入集不一致，已阻止保存")
+            storage_name = preview_storage_filename(status, digest)
+            get_store()._atomic_write_bytes(
+                get_store()._dir(pid), storage_name, payload
+            )
 
     def _compile_preview_package_entry(
         pid: str,
@@ -3263,6 +3335,8 @@ def create_app(updated_from: str = "") -> FastAPI:
             "last-failed-draft.tex",
             "last-failure-report.md",
             "last-failure.json",
+            "ocr-source.pdf",
+            "original-files.zip",
         )
         rows = []
         marker_payloads = []
@@ -3298,6 +3372,34 @@ def create_app(updated_from: str = "") -> FastAPI:
             payload = (directory / name).read_bytes()
             rows.append({
                 "path": name,
+                "present": True,
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            })
+        try:
+            meta_state = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, TypeError, ValueError):
+            meta_state = {}
+        resource_paths = {
+            str(item.get("path") or "")
+            for group in (meta_state.get("ocr_resources") or {}).values()
+            if isinstance(group, list)
+            for item in group
+            if isinstance(item, dict) and str(item.get("path") or "")
+        }
+        from ..core.project import safe_project_relpath
+
+        for raw_path in sorted(resource_paths):
+            try:
+                relative = safe_project_relpath(raw_path)
+                candidate = (directory / Path(relative)).resolve()
+                candidate.relative_to(directory.resolve())
+                payload = candidate.read_bytes()
+            except (OSError, ValueError):
+                rows.append({"path": raw_path, "present": False})
+                continue
+            rows.append({
+                "path": relative,
                 "present": True,
                 "size": len(payload),
                 "sha256": hashlib.sha256(payload).hexdigest(),
@@ -3403,14 +3505,6 @@ def create_app(updated_from: str = "") -> FastAPI:
                 parents=(source_artifact,),
                 media_type="application/x-tex; charset=utf-8",
             )
-            add_artifact(
-                ArtifactRole.RAW_OCR_PREVIEW,
-                source_bytes,
-                parents=(raw_artifact,),
-                path="previews/raw-ocr-source-preview.txt",
-                media_type="text/plain; charset=utf-8",
-                preview_status="SOURCE_PREVIEW",
-            )
         else:
             source_artifact = add_artifact(
                 ArtifactRole.SOURCE_TEX,
@@ -3460,8 +3554,22 @@ def create_app(updated_from: str = "") -> FastAPI:
         reviewed_text = str(
             getattr(pipeline_result, "reviewed_tex", "") or ""
         ) or captured_stage_text("ai_reviewed")
+        review_verification = (
+            getattr(pipeline_result, "verification", None)
+            if pipeline_result is not None else None
+        ) or capture.get("verification") or {}
+        recorded_ai_review = (
+            review_verification.get("ai_review")
+            if isinstance(review_verification, dict) else None
+        )
+        review_output_authorized = bool(
+            isinstance(recorded_ai_review, dict)
+            and recorded_ai_review.get("checked") is True
+        )
+        if not review_output_authorized:
+            reviewed_text = ""
         reviewed_artifact = None
-        if reviewed_text:
+        if reviewed_text and review_output_authorized:
             reviewed_artifact = add_artifact(
                 ArtifactRole.AI_REVIEWED_TEX,
                 reviewed_text,
@@ -3469,8 +3577,23 @@ def create_app(updated_from: str = "") -> FastAPI:
                 media_type="application/x-tex; charset=utf-8",
             )
 
+        pipeline_compiled_pdf = bytes(
+            getattr(pipeline_result, "compiled_pdf", b"")
+            if pipeline_result is not None
+            else b""
+        )
         if pipeline_result is not None:
-            if terminal_status is TerminalStatus.SUCCESS:
+            # When a real PDF exists, CURRENT_TEX must be the exact candidate
+            # materialized for that PDF.  Export newline restoration is useful
+            # for ordinary TEX downloads but is not the compile-input authority.
+            if pipeline_compiled_pdf.startswith(b"%PDF-") and str(
+                getattr(pipeline_result, "compiled_tex", "") or ""
+            ):
+                # The audit CURRENT_TEX is the exact main.tex materialized for
+                # CURRENT_PREVIEW.  Ordinary TEX/project exports continue to use
+                # export_text/result and are intentionally unchanged.
+                current_text = str(pipeline_result.compiled_tex)
+            elif terminal_status is TerminalStatus.SUCCESS:
                 current_text = str(
                     getattr(pipeline_result, "export_text", "")
                     or getattr(pipeline_result, "result", "")
@@ -3518,6 +3641,84 @@ def create_app(updated_from: str = "") -> FastAPI:
         verification.setdefault("safe_to_export", False)
         verification["audit_terminal_status"] = terminal_status.value
 
+        compile_metadata_fields = (
+            "engine",
+            "passes_attempted",
+            "exit_code",
+            "page_count",
+            "pdf_sha256",
+            "compile_input_sha256",
+            "fatal_line",
+            "fatal_error",
+            "log_path",
+        )
+
+        def preview_metadata(
+            record_key: str,
+            evidence_key: str,
+            compile_input_manifest_path: str,
+        ) -> dict:
+            record = verification.get(record_key)
+            evidence = verification.get(evidence_key)
+            metadata = {}
+            for field_name in compile_metadata_fields:
+                if isinstance(evidence, dict) and field_name in evidence:
+                    metadata[field_name] = deepcopy(evidence[field_name])
+                elif isinstance(record, dict) and field_name in record:
+                    metadata[field_name] = deepcopy(record[field_name])
+            if metadata.get("compile_input_sha256"):
+                metadata["compile_input_manifest_path"] = compile_input_manifest_path
+            return metadata
+
+        raw_compiled_pdf = b""
+        if meta.get("kind") == "ocr":
+            raw_preview_status = str(
+                verification.get("raw_preview_state") or "SOURCE_PREVIEW"
+            ).upper()
+            if raw_preview_status not in {
+                "COMPILED", "PARTIAL_COMPILED", "SOURCE_PREVIEW"
+            }:
+                raw_preview_status = "SOURCE_PREVIEW"
+            raw_compiled_pdf = bytes(
+                getattr(pipeline_result, "raw_compiled_pdf", b"")
+                if pipeline_result is not None
+                else capture.get("raw_compiled_pdf") or b""
+            )
+            raw_evidence = verification.get("raw_preview_artifact")
+            raw_digest = hashlib.sha256(raw_compiled_pdf).hexdigest()
+            if (
+                raw_preview_status in {"COMPILED", "PARTIAL_COMPILED"}
+                and raw_compiled_pdf.startswith(b"%PDF-")
+                and isinstance(raw_evidence, dict)
+                and raw_evidence.get("sha256") == raw_digest
+                and int(raw_evidence.get("page_count") or 0) > 0
+            ):
+                add_artifact(
+                    ArtifactRole.RAW_OCR_PREVIEW,
+                    raw_compiled_pdf,
+                    parents=(raw_artifact,),
+                    media_type="application/pdf",
+                    preview_status=raw_preview_status,
+                    metadata=preview_metadata(
+                        "compile_before",
+                        "raw_preview_artifact",
+                        "audit/compile-input-raw-manifest.json",
+                    ),
+                )
+            elif raw_preview_status == "SOURCE_PREVIEW":
+                add_artifact(
+                    ArtifactRole.RAW_OCR_PREVIEW,
+                    source_bytes,
+                    parents=(raw_artifact,),
+                    path="previews/raw-ocr-source-preview.txt",
+                    media_type="text/plain; charset=utf-8",
+                    preview_status="SOURCE_PREVIEW",
+                )
+            # A declared compiled/partial preview with missing or mismatched bytes
+            # intentionally has no fallback artifact.  The audit package gate can
+            # then report the expected RAW_OCR_PREVIEW as missing instead of
+            # misrepresenting a source rendering as the recorded compilation.
+
         preview_status = str(
             verification.get("preview_state")
             or capture.get("preview_state")
@@ -3525,14 +3726,15 @@ def create_app(updated_from: str = "") -> FastAPI:
         ).upper()
         if preview_status not in {"COMPILED", "PARTIAL_COMPILED", "SOURCE_PREVIEW"}:
             preview_status = "SOURCE_PREVIEW"
-        compiled_pdf = bytes(
-            getattr(pipeline_result, "compiled_pdf", b"")
-            or capture.get("compiled_pdf")
-            or b""
-        )
+        compiled_pdf = bytes(pipeline_compiled_pdf or capture.get("compiled_pdf") or b"")
+        current_evidence = verification.get("preview_artifact")
+        current_digest = hashlib.sha256(compiled_pdf).hexdigest()
         if (
             preview_status in {"COMPILED", "PARTIAL_COMPILED"}
             and compiled_pdf.startswith(b"%PDF-")
+            and isinstance(current_evidence, dict)
+            and current_evidence.get("sha256") == current_digest
+            and int(current_evidence.get("page_count") or 0) > 0
         ):
             add_artifact(
                 ArtifactRole.CURRENT_PREVIEW,
@@ -3540,10 +3742,13 @@ def create_app(updated_from: str = "") -> FastAPI:
                 parents=(current_artifact,),
                 media_type="application/pdf",
                 preview_status=preview_status,
+                metadata=preview_metadata(
+                    "compile_after",
+                    "preview_artifact",
+                    "audit/compile-input-manifest.json",
+                ),
             )
-        else:
-            preview_status = "SOURCE_PREVIEW"
-            verification["preview_state"] = preview_status
+        elif preview_status == "SOURCE_PREVIEW":
             add_artifact(
                 ArtifactRole.CURRENT_PREVIEW,
                 current_text,
@@ -3551,6 +3756,249 @@ def create_app(updated_from: str = "") -> FastAPI:
                 path="previews/current-source-preview.txt",
                 media_type="text/plain; charset=utf-8",
                 preview_status=preview_status,
+            )
+        # As with raw OCR, a declared compiled/partial preview is never replaced
+        # by SOURCE_PREVIEW merely because its immutable PDF is missing.  Omitting
+        # the role preserves the discrepancy for the package completeness gate.
+
+        # Freeze the exact raw/current non-system compile closures.  These
+        # audit-only copies never change the ordinary TEX/project ZIP exports.
+        from ..core.compilecheck import (
+            build_compile_input_manifest,
+            prepare_compile_inputs,
+        )
+
+        template_payload = None
+
+        def capture_compile_closure(
+            *,
+            candidate_tex: str,
+            extra_files: dict[str, bytes],
+            main_artifact,
+            preview_evidence: dict | None,
+            manifest_role: str,
+            manifest_path: str,
+            scope: str,
+        ) -> tuple[list, list[dict], bool]:
+            if not candidate_tex:
+                return [], [], False
+            prepared_inputs = prepare_compile_inputs(candidate_tex, extra_files)
+            base_manifest = build_compile_input_manifest(candidate_tex, extra_files)
+            recorded_hash = str(
+                (preview_evidence or {}).get("compile_input_sha256") or ""
+            )
+            complete = not recorded_hash or hmac.compare_digest(
+                recorded_hash, str(base_manifest.get("manifest_sha256") or "")
+            )
+            completeness_reasons = [] if complete else [
+                "captured compile closure hash does not match preview evidence"
+            ]
+            assets = []
+            packaged_files: list[dict] = []
+            for relative, payload in sorted(prepared_inputs.items()):
+                digest = hashlib.sha256(payload).hexdigest()
+                if relative == "main.tex":
+                    packaged_files.append({
+                        "path": relative,
+                        "packaged_path": main_artifact.path,
+                        "artifact_role": main_artifact.artifact_role,
+                        "artifact_id": main_artifact.artifact_id,
+                        "parent_artifact_ids": list(main_artifact.parent_artifact_ids),
+                        "bytes": len(payload),
+                        "bytes_sha256": digest,
+                        "required_for_compile": True,
+                        "source": f"host-captured {scope} compile candidate",
+                    })
+                    if digest != main_artifact.bytes_sha256:
+                        complete = False
+                        completeness_reasons.append(
+                            "main artifact bytes differ from the captured compile candidate"
+                        )
+                    continue
+                base_path = project_dependency_path(relative)
+                if scope == "raw":
+                    base_path = (
+                        PurePosixPath("project")
+                        / "raw"
+                        / PurePosixPath(base_path).relative_to("project")
+                    ).as_posix()
+                asset = add_artifact(
+                    ArtifactRole.PROJECT_FILE,
+                    payload,
+                    parents=(main_artifact,),
+                    path=base_path,
+                    media_type=(
+                        "application/x-tex"
+                        if Path(relative).suffix.lower()
+                        in {".tex", ".ltx", ".bib", ".cls", ".sty"}
+                        else "application/octet-stream"
+                    ),
+                    metadata={
+                        "compile_scope": scope,
+                        "compile_relative_path": relative,
+                        "required_for_compile": True,
+                        "source": f"captured {scope} compile input closure",
+                    },
+                )
+                assets.append(asset)
+                packaged_files.append({
+                    "path": relative,
+                    "packaged_path": base_path,
+                    "artifact_path": base_path,
+                    "artifact_role": ArtifactRole.PROJECT_FILE,
+                    "artifact_id": asset.artifact_id,
+                    "parent_artifact_ids": [main_artifact.artifact_id],
+                    "bytes": len(payload),
+                    "bytes_sha256": digest,
+                    "required_for_compile": True,
+                    "source": f"captured {scope} compile input closure",
+                })
+            manifest_payload = {
+                **base_manifest,
+                "compile_scope": scope,
+                "main_artifact_id": main_artifact.artifact_id,
+                "main_artifact_path": main_artifact.path,
+                "preview_artifact_sha256": (
+                    (preview_evidence or {}).get("sha256")
+                ),
+                "recorded_compile_input_sha256": recorded_hash or None,
+                "packaged_files": packaged_files,
+                "complete": complete,
+                "completeness_reasons": completeness_reasons,
+            }
+            add_artifact(
+                manifest_role,
+                _audit_json_bytes(manifest_payload),
+                parents=(main_artifact, *assets),
+                path=manifest_path,
+                media_type="application/json",
+            )
+            return assets, packaged_files, complete
+
+        compiled_tex = str(
+            getattr(pipeline_result, "compiled_tex", "") or ""
+            if pipeline_result is not None else ""
+        )
+        compiled_extra_files = dict(
+            getattr(pipeline_result, "compiled_extra_files", {}) or {}
+            if pipeline_result is not None else {}
+        )
+        if not compiled_tex and isinstance(current_evidence, dict):
+            normalized_current = current_text.replace("\r\n", "\n").replace("\r", "\n")
+            expected_tex_hash = str(
+                current_evidence.get("tex_lf_normalized_sha256") or ""
+            )
+            if expected_tex_hash and hmac.compare_digest(
+                hashlib.sha256(normalized_current.encode("utf-8")).hexdigest(),
+                expected_tex_hash,
+            ):
+                compiled_tex = normalized_current
+                if meta.get("kind") == "ocr":
+                    try:
+                        compiled_extra_files = _verified_ocr_resource_bytes(
+                            directory, meta.get("ocr_resources") or {}
+                        )
+                    except ValueError:
+                        compiled_extra_files = {}
+
+        current_assets, current_packaged_files, _current_closure_complete = (
+            capture_compile_closure(
+                candidate_tex=compiled_tex,
+                extra_files=compiled_extra_files,
+                main_artifact=current_artifact,
+                preview_evidence=(
+                    current_evidence if isinstance(current_evidence, dict) else None
+                ),
+                manifest_role=ArtifactRole.COMPILE_INPUT_MANIFEST,
+                manifest_path="audit/compile-input-manifest.json",
+                scope="current",
+            )
+        )
+
+        raw_compiled_tex = str(
+            getattr(pipeline_result, "raw_compiled_tex", "") or ""
+            if pipeline_result is not None else ""
+        )
+        raw_extra_files = dict(
+            getattr(pipeline_result, "raw_compiled_extra_files", {}) or {}
+            if pipeline_result is not None else {}
+        )
+        raw_evidence = verification.get("raw_preview_artifact")
+        if not raw_compiled_tex and isinstance(raw_evidence, dict):
+            normalized_raw = source_text.replace("\r\n", "\n").replace("\r", "\n")
+            expected_raw_hash = str(
+                raw_evidence.get("tex_lf_normalized_sha256") or ""
+            )
+            if expected_raw_hash and hmac.compare_digest(
+                hashlib.sha256(normalized_raw.encode("utf-8")).hexdigest(),
+                expected_raw_hash,
+            ):
+                raw_compiled_tex = normalized_raw
+                try:
+                    raw_extra_files = _verified_ocr_resource_bytes(
+                        directory, meta.get("ocr_resources") or {}
+                    )
+                except ValueError:
+                    raw_extra_files = {}
+        if raw_compiled_pdf.startswith(b"%PDF-"):
+            capture_compile_closure(
+                candidate_tex=raw_compiled_tex,
+                extra_files=raw_extra_files,
+                main_artifact=raw_artifact,
+                preview_evidence=(raw_evidence if isinstance(raw_evidence, dict) else None),
+                manifest_role=ArtifactRole.RAW_COMPILE_INPUT_MANIFEST,
+                manifest_path="audit/compile-input-raw-manifest.json",
+                scope="raw",
+            )
+
+        template_assets = [
+            row
+            for row in current_packaged_files
+            if str(row.get("path", "")).lower().endswith(
+                (".cls", ".sty", ".def", ".cfg", ".clo")
+            )
+        ]
+        if template_assets:
+            template_id = str(meta.get("template") or "none")
+            template_version = None
+            if any(row.get("path") == "elegantbook.cls" for row in template_assets):
+                from ..elegantbook import (
+                    ELEGANTBOOK_VERSION,
+                    LICENSE_FILENAME,
+                    elegantbook_license_bytes,
+                )
+
+                template_id = "elegantbook"
+                template_version = ELEGANTBOOK_VERSION
+                license_payload = elegantbook_license_bytes()
+                license_path = f"project/LICENSES/{LICENSE_FILENAME}"
+                license_artifact = add_artifact(
+                    ArtifactRole.PROJECT_FILE,
+                    license_payload,
+                    parents=tuple(current_assets),
+                    path=license_path,
+                    media_type="text/plain; charset=utf-8",
+                    metadata={
+                        "required_for_compile": False,
+                        "license_for": "elegantbook.cls",
+                        "source": "vendored ElegantBook license",
+                    },
+                )
+                current_assets.append(license_artifact)
+                for row in template_assets:
+                    if row.get("path") == "elegantbook.cls":
+                        row["license_path"] = license_path
+            template_payload = template_manifest(
+                template_id=template_id,
+                template_version=template_version,
+                assets=template_assets,
+            )
+            add_artifact(
+                ArtifactRole.TEMPLATE_MANIFEST,
+                _audit_json_bytes(template_payload),
+                parents=tuple(current_assets),
+                path="audit/template-manifest.json",
+                media_type="application/json",
             )
 
         info = capture.get("info") if isinstance(capture.get("info"), dict) else {}
@@ -3564,6 +4012,168 @@ def create_app(updated_from: str = "") -> FastAPI:
             decisions_payload = deepcopy(info.get("decision_cache") or [])
             decision_items = deepcopy(info.get("items") or [])
             report_md = str(capture.get("report_md") or "")
+
+        safe_error = str(error or capture.get("error") or "").strip()
+        ai_review = verification.get("ai_review")
+        ai_review = ai_review if isinstance(ai_review, dict) else {}
+        review_checked = ai_review.get("checked") is True
+        requested_stages = {
+            AuditWorkflow.ANALYSIS_REVIEW_ONLY: {"analysis", "review"},
+            AuditWorkflow.OCR_ONLY: {"ocr"},
+            AuditWorkflow.OCR_ANALYSIS_REVIEW: {"ocr", "analysis", "review"},
+            AuditWorkflow.TEMPLATE_CONVERSION: {"analysis", "review", "template"},
+            AuditWorkflow.MULTIFILE_PROJECT: {"analysis", "review"},
+        }[workflow]
+
+        def stage_record(name: str, completed: bool, *, checked=None) -> dict:
+            if name not in requested_stages:
+                return {"status": "NOT_REQUESTED"}
+            if completed:
+                return {
+                    "status": "COMPLETED",
+                    **({"checked": bool(checked)} if checked is not None else {}),
+                }
+            if name == "review" and ai_review.get("skipped") is True:
+                return {
+                    "status": "SKIPPED",
+                    "checked": False,
+                    "reason": str(ai_review.get("reason") or "AI review was skipped"),
+                }
+            if terminal_status is TerminalStatus.CANCELLED:
+                return {
+                    "status": "CANCELLED",
+                    "reason": "source run was cancelled before this stage completed",
+                }
+            if terminal_status is TerminalStatus.FAILED:
+                return {
+                    "status": "FAILED",
+                    "reason": safe_error or "source run failed before this stage completed",
+                }
+            return {
+                "status": "SKIPPED",
+                "reason": (
+                    "AI review was not executed"
+                    if name == "review"
+                    else "host did not capture a completed stage output"
+                ),
+                **({"checked": False} if name == "review" else {}),
+            }
+
+        template_gate = verification.get("template")
+        template_gate = template_gate if isinstance(template_gate, dict) else {}
+        stages = {
+            "ocr": stage_record("ocr", meta.get("kind") == "ocr"),
+            "analysis": stage_record("analysis", analyzed_artifact is not None),
+            "review": stage_record(
+                "review", reviewed_artifact is not None and review_checked,
+                checked=review_checked,
+            ),
+            "template": stage_record(
+                "template",
+                template_gate.get("applied") is True,
+            ),
+        }
+
+        source_info = meta.get("ocr_source") or {}
+        source_pdf_info = None
+        if source_artifact is not None and source_artifact.artifact_role == ArtifactRole.SOURCE_PDF:
+            recorded_page_count = int(source_info.get("source_pages") or 0)
+            try:
+                from ..ocr import pdf_page_count_bytes
+
+                actual_page_count = pdf_page_count_bytes(source_artifact.data)
+            except (ImportError, RuntimeError, ValueError):
+                actual_page_count = recorded_page_count
+            source_page_count = int(actual_page_count or recorded_page_count or 0)
+            selected_start = int(source_info.get("selected_start") or 1)
+            selected_end = int(
+                source_info.get("selected_end")
+                or source_page_count
+                or selected_start
+            )
+            selected_pages = list(range(selected_start, selected_end + 1))
+            source_pdf_info = {
+                "page_count": source_page_count or None,
+                "selected_page_range": {
+                    "start": selected_start,
+                    "end": selected_end,
+                    "pages": selected_pages,
+                },
+            }
+
+        outline = meta.get("ocr_outline")
+        outline = outline if isinstance(outline, list) else []
+        if source_pdf_info is not None:
+            selected_outline_pages = set(
+                source_pdf_info["selected_page_range"]["pages"]
+            )
+
+            def outline_is_selected(item: object) -> bool:
+                if not isinstance(item, dict):
+                    return False
+                try:
+                    return int(item.get("page") or 0) in selected_outline_pages
+                except (TypeError, ValueError):
+                    return False
+
+            outline = [item for item in outline if outline_is_selected(item)]
+        outline_evidence = build_outline_evidence(
+            outline, current_text, verification
+        )
+        resource_info = meta.get("ocr_resources") or {}
+        verified_resources: dict[str, bytes] = {}
+        if meta.get("kind") == "ocr":
+            try:
+                verified_resources = _verified_ocr_resource_bytes(
+                    directory,
+                    resource_info,
+                    include_source_pages=True,
+                    include_formula_crops=True,
+                )
+            except ValueError as exc:
+                verification["audit_resource_capture"] = {
+                    "complete": False,
+                    "error": str(exc),
+                    "declared_source_pages": len(resource_info.get("source_pages") or []),
+                    "declared_assets": len(resource_info.get("assets") or []),
+                    "declared_formula_crops": len(resource_info.get("formula_crops") or []),
+                }
+            else:
+                verification["audit_resource_capture"] = {
+                    "complete": True,
+                    "captured_files": len(verified_resources),
+                }
+        blocker_rows = structured_blockers(
+            verification.get("failures") or (), error=safe_error
+        )
+        resource_capture = verification.get("audit_resource_capture")
+        if (
+            isinstance(resource_capture, dict)
+            and resource_capture.get("complete") is False
+        ):
+            blocker_rows.extend(structured_blockers([{
+                "id": "ocr-audit-resource-capture",
+                "severity": "P1",
+                "module": "evidence",
+                "summary": "OCR 页图、图片或公式裁片未能按记录哈希完整冻结",
+                "action": "恢复缺失资源并重新生成终态快照",
+                "acceptance": "audit_resource_capture.complete == true",
+            }]))
+        if verification.get("safe_to_export") is not True and not blocker_rows:
+            blocker_rows = structured_blockers([{
+                "id": "machine-verification-not-passed",
+                "severity": "P0",
+                "module": "verification",
+                "summary": "当前运行没有绑定完整通过的机器验证记录",
+                "action": "重新运行并通过全部机器检查",
+                "acceptance": "verification_status == VERIFIED",
+            }])
+        metrics_payload = build_metrics(
+            source_pdf=source_pdf_info,
+            outline_evidence=outline_evidence,
+            verification=verification,
+            current_tex=current_text,
+        )
         if not report_md:
             report_md = (
                 "# LaTeXStruct 运行审计记录\n\n"
@@ -3577,6 +4187,37 @@ def create_app(updated_from: str = "") -> FastAPI:
             report_md,
             parents=(current_artifact,),
             media_type="text/markdown; charset=utf-8",
+        )
+        add_artifact(
+            ArtifactRole.REPORT_JSON,
+            _audit_json_bytes(build_report_json(
+                source_run_status=terminal_status.value,
+                verification_status=(
+                    "VERIFIED"
+                    if verification.get("safe_to_export") is True
+                    else "UNVERIFIED"
+                ),
+                stages=stages,
+                blockers=blocker_rows,
+                metrics=metrics_payload,
+            )),
+            parents=(current_artifact, report_artifact),
+            path="audit/report.json",
+            media_type="application/json",
+        )
+        add_artifact(
+            ArtifactRole.ISSUES_CSV,
+            issues_csv_bytes(blocker_rows, decision_items),
+            parents=(current_artifact, report_artifact),
+            path="audit/issues.csv",
+            media_type="text/csv; charset=utf-8",
+        )
+        add_artifact(
+            ArtifactRole.METRICS,
+            _audit_json_bytes(metrics_payload),
+            parents=(current_artifact, report_artifact),
+            path="audit/metrics.json",
+            media_type="application/json",
         )
         add_artifact(
             ArtifactRole.VERIFICATION,
@@ -3629,25 +4270,13 @@ def create_app(updated_from: str = "") -> FastAPI:
                     parents=(raw_artifact,),
                     media_type="text/plain; charset=utf-8",
                 )
-            outline = meta.get("ocr_outline")
-            if not isinstance(outline, list):
-                outline = []
-            add_artifact(
-                ArtifactRole.OUTLINE,
-                _audit_json_bytes({"outline": outline}),
-                parents=(source_artifact,),
-                media_type="application/json",
-            )
-            resource_info = meta.get("ocr_resources") or {}
-            try:
-                verified_resources = _verified_ocr_resource_bytes(
-                    directory,
-                    resource_info,
-                    include_source_pages=True,
-                    include_formula_crops=True,
+            if outline_evidence is not None:
+                add_artifact(
+                    ArtifactRole.OUTLINE,
+                    _audit_json_bytes(outline_evidence),
+                    parents=(source_artifact,),
+                    media_type="application/json",
                 )
-            except ValueError:
-                verified_resources = {}
             for index, item in enumerate(resource_info.get("source_pages") or [], 1):
                 rel = str(item.get("path") or "")
                 payload = verified_resources.get(rel)
@@ -3714,7 +4343,6 @@ def create_app(updated_from: str = "") -> FastAPI:
                         ),
                     )
 
-        safe_error = str(error or capture.get("error") or "").strip()
         if safe_error or terminal_status in {
             TerminalStatus.FAILED, TerminalStatus.CANCELLED, TerminalStatus.PARTIAL,
         }:
@@ -3729,19 +4357,13 @@ def create_app(updated_from: str = "") -> FastAPI:
                 media_type="application/json",
             )
 
-        blockers = []
-        for item in verification.get("failures") or []:
-            if isinstance(item, dict):
-                message = str(item.get("summary") or item.get("label") or "").strip()
-                if message:
-                    blockers.append(message)
-        if safe_error:
-            blockers.append(safe_error)
-        from .. import __version__
-
         cfg = capture.get("config_snapshot")
-        if meta.get("kind") == "ocr":
-            model = str((meta.get("ocr_processing") or {}).get("model") or "unknown")
+        ocr_processing = meta.get("ocr_processing")
+        ocr_processing = ocr_processing if isinstance(ocr_processing, dict) else {}
+        if workflow is AuditWorkflow.OCR_ONLY and str(
+            ocr_processing.get("model") or ""
+        ):
+            model = str(ocr_processing["model"])
         elif meta.get("mode") != "ai":
             model = "rule-engine"
         elif cfg is not None:
@@ -3752,12 +4374,152 @@ def create_app(updated_from: str = "") -> FastAPI:
             ) or "unknown"
         else:
             model = "unknown"
-        source_info = meta.get("ocr_source") or {}
-        selected_start = int(source_info.get("selected_start") or 1)
-        selected_end = int(source_info.get("selected_end") or selected_start)
         page_range = (
-            f"{selected_start}-{selected_end}" if meta.get("kind") == "ocr" else "all"
+            (
+                f"{source_pdf_info['selected_page_range']['start']}-"
+                f"{source_pdf_info['selected_page_range']['end']}"
+            )
+            if source_pdf_info is not None
+            else "all"
         )
+
+        def model_identity(role: str, stage_name: str) -> dict:
+            stage_status = stages[stage_name]["status"]
+            if role == "ocr":
+                processing = ocr_processing
+                backend = str(processing.get("backend") or "") or None
+                role_model = str(processing.get("model") or "") or None
+                provider = None
+            elif meta.get("mode") != "ai":
+                backend, provider, role_model = "rule-engine", "local", "rule-engine"
+            elif cfg is not None:
+                backend = str(getattr(cfg, "analysis_backend", "") or "") or None
+                if backend == "codex_cli":
+                    provider = "openai-codex"
+                    role_model = str(getattr(cfg, "codex_model", "") or "") or None
+                else:
+                    from urllib.parse import urlsplit
+
+                    base_url = str(
+                        getattr(cfg, f"{role}_base_url", "") or ""
+                    )
+                    provider = urlsplit(base_url).hostname or None
+                    role_model = str(
+                        getattr(cfg, f"{role}_model", "") or ""
+                    ) or None
+            else:
+                backend = provider = role_model = None
+            invoked = stage_status == "COMPLETED"
+            known = invoked and bool(backend or role_model)
+            return {
+                "backend": backend if known else None,
+                "provider": provider if known else None,
+                "model": role_model if known else None,
+                "status": stage_status if known else "UNKNOWN",
+                "stage_status": stage_status,
+                **({
+                    "configured_backend": backend,
+                    "configured_provider": provider,
+                    "configured_model": role_model,
+                } if not known and (backend or provider or role_model) else {}),
+                **({
+                    "reason": (
+                        "stage did not persist an invoked model identity"
+                        if backend or role_model
+                        else "legacy run did not persist model identity"
+                    )
+                } if not known else {}),
+            }
+
+        if isinstance(capture.get("producer_identity"), dict):
+            producer_identity = {
+                key: str(capture["producer_identity"].get(key) or "unknown")
+                for key in ("app_version", "build_id", "commit", "prompt_version")
+            }
+        elif pipeline_result is not None:
+            producer_identity = _runtime_provenance_identity(
+                PROMPT_VERSION if meta.get("mode") == "ai" else "not-used"
+            )
+        else:
+            producer_identity = _stored_producer_identity(info)
+        producer_known = producer_identity.get("app_version") != "unknown"
+        provenance = {
+            "runtime": {
+                "app_version": (
+                    producer_identity.get("app_version") if producer_known else None
+                ),
+                "git_commit": (
+                    producer_identity.get("commit")
+                    if producer_identity.get("commit") != "unknown"
+                    else None
+                ),
+                "build_id": (
+                    producer_identity.get("build_id")
+                    if producer_identity.get("build_id") != "unknown"
+                    else None
+                ),
+                "dirty": None,
+                "python_version": sys.version.split()[0] if producer_known else None,
+                "platform": sys.platform if producer_known else None,
+                "started_at": (
+                    _audit_iso_timestamp(
+                        capture.get("started")
+                        if capture.get("started") is not None
+                        else capture.get("created")
+                    )
+                    if capture.get("started") is not None
+                    or capture.get("created") is not None
+                    else None
+                ),
+                "finished_at": (
+                    _audit_iso_timestamp(capture.get("finished"))
+                    if capture.get("finished") is not None
+                    else None
+                ),
+                "identity_status": "RECORDED" if producer_known else "UNKNOWN",
+                **({
+                    "reason": "legacy run did not persist producer identity"
+                } if not producer_known else {}),
+            },
+            "models": {
+                "ocr": model_identity("ocr", "ocr"),
+                "decision": model_identity("decide", "analysis"),
+                "review": model_identity("review", "review"),
+            },
+            "prompts": {
+                "ocr_prompt_version": (
+                    str((meta.get("ocr_processing") or {}).get("prompt_version") or "")
+                    or None
+                ),
+                "decision_prompt_version": (
+                    producer_identity.get("prompt_version")
+                    if stages["analysis"]["status"] == "COMPLETED"
+                    and producer_identity.get("prompt_version") != "unknown"
+                    else None
+                ),
+                "review_prompt_version": (
+                    producer_identity.get("prompt_version")
+                    if stages["review"]["status"] == "COMPLETED"
+                    and producer_identity.get("prompt_version") != "unknown"
+                    else None
+                ),
+                "decision_schema_version": None,
+                "review_schema_version": None,
+            },
+            "template": {
+                "id": str(meta.get("template") or "none"),
+                "version": (
+                    template_payload.get("template_version")
+                    if isinstance(template_payload, dict)
+                    else None
+                ),
+                "asset_manifest_sha256": (
+                    template_payload.get("asset_manifest_sha256")
+                    if isinstance(template_payload, dict)
+                    else None
+                ),
+            },
+        }
         return RunSnapshot(
             project_id=pid,
             run_id=str(run_id),
@@ -3766,9 +4528,9 @@ def create_app(updated_from: str = "") -> FastAPI:
             captured_at=_audit_iso_timestamp(capture.get("finished") or time.time()),
             artifacts=tuple(artifacts),
             machine_verification=verification,
-            blockers=tuple(blockers),
+            blockers=tuple(blocker_rows),
             model=model,
-            app_version=__version__,
+            app_version=str(producer_identity.get("app_version") or "unknown"),
             template=str(meta.get("template") or "none"),
             page_range=page_range,
             metadata={
@@ -3778,6 +4540,9 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "preview_status": preview_status,
                 "host_state_fingerprint": _audit_host_state_fingerprint(pid),
             },
+            stages=stages,
+            source_pdf=source_pdf_info,
+            provenance=provenance,
         )
 
     def _project_audit_store(pid: str):
@@ -3881,6 +4646,7 @@ def create_app(updated_from: str = "") -> FastAPI:
         the project store and the hash-bound compiled preview when one exists.
         """
         record = _current_record(pid)
+        directory = Path(record["directory"])
         info = deepcopy(record.get("info") or {})
         result_bytes = bytes(record.get("result") or b"")
         compiled_pdf = b""
@@ -3893,6 +4659,34 @@ def create_app(updated_from: str = "") -> FastAPI:
         verification = info.get("verification")
         if not isinstance(verification, dict):
             verification = {}
+        raw_compiled_pdf = b""
+        raw_evidence = verification.get("raw_preview_artifact")
+        if isinstance(raw_evidence, dict):
+            from ..core.preview import (
+                COMPILED,
+                PARTIAL_COMPILED,
+                preview_storage_filename,
+            )
+
+            raw_status = str(raw_evidence.get("status") or "")
+            raw_digest = str(raw_evidence.get("sha256") or "")
+            if raw_status in {COMPILED, PARTIAL_COMPILED} and re.fullmatch(
+                r"[0-9a-f]{64}", raw_digest
+            ):
+                candidate = directory / preview_storage_filename(
+                    raw_status, raw_digest
+                )
+                try:
+                    payload = candidate.read_bytes()
+                except OSError:
+                    payload = b""
+                if (
+                    payload.startswith(b"%PDF-")
+                    and hmac.compare_digest(
+                        hashlib.sha256(payload).hexdigest(), raw_digest
+                    )
+                ):
+                    raw_compiled_pdf = payload
         return {
             "info": info,
             "verification": deepcopy(verification),
@@ -3900,6 +4694,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "utf-8", errors="replace"
             ),
             "compiled_pdf": compiled_pdf,
+            "raw_compiled_pdf": raw_compiled_pdf,
             "preview_state": str(
                 verification.get("preview_state")
                 or preview_state_from_verification(verification)
@@ -4431,6 +5226,14 @@ def create_app(updated_from: str = "") -> FastAPI:
         zip_filename = (
             Path(stored.zip_relative_path).name if stored.zip_relative_path else None
         )
+        try:
+            saved_filename = audit_store.saved_download_filename(
+                stored.submission_id
+            ) or None
+        except (OSError, TypeError, ValueError):
+            # The optional Downloads sidecar must never make the immutable
+            # package unreadable.  Omit an untrusted local-copy claim instead.
+            saved_filename = None
         preview_state = str(
             snapshot.metadata.get("preview_status") or "SOURCE_PREVIEW"
         )
@@ -4445,8 +5248,10 @@ def create_app(updated_from: str = "") -> FastAPI:
             ),
             "artifact_count": len(manifest.get("artifacts") or []),
             "snapshot_artifact_count": len(snapshot.artifacts),
-            "filename": zip_filename,
-            "folder": "下载/LaTeXStruct" if zip_filename else None,
+            "filename": saved_filename or zip_filename,
+            "archive_filename": zip_filename,
+            "saved_filename": saved_filename,
+            "folder": "下载/LaTeXStruct" if saved_filename else None,
             "short_prompt": short_prompt,
             "download_url": (
                 f"/api/projects/{pid}/audit-submission/"
@@ -4673,7 +5478,13 @@ def create_app(updated_from: str = "") -> FastAPI:
             sanitize_sensitive=body.sanitize_sensitive,
         )
         project = get_store().get(pid) or {}
-        filename = f"{project.get('name') or pid}-AI-audit.zip"
+        snapshot = audit_store.load_snapshot(latest.snapshot_id)
+        filename = build_audit_zip_filename(
+            project_name=project.get("name") or pid,
+            workflow=snapshot.workflow,
+            run_id=snapshot.run_id,
+            source_status=snapshot.terminal_status,
+        )
         current_fingerprint = (
             latest.snapshot_fingerprint
             if frozen_snapshot
@@ -4691,6 +5502,7 @@ def create_app(updated_from: str = "") -> FastAPI:
         from .downloads import save_unique_download
 
         saved = save_unique_download(canonical_zip.read_bytes(), canonical_zip.name)
+        audit_store.record_saved_download(stored.submission_id, saved.name)
         # Saving the user-facing copy can overlap the OCR child's terminal
         # commit.  Re-read both records under the store's commit lock so the
         # response cannot publish a now-historic ZIP as the current package.
@@ -4704,6 +5516,8 @@ def create_app(updated_from: str = "") -> FastAPI:
         # explicit so the client never replaces the true latest card with it.
         summary["is_latest"] = is_latest
         summary["historical"] = not is_latest
+        summary["archive_filename"] = canonical_zip.name
+        summary["saved_filename"] = saved.name
         summary["filename"] = saved.name
         summary["folder"] = "下载/LaTeXStruct"
         summary["effective_options"] = {
@@ -5800,6 +6614,86 @@ def create_app(updated_from: str = "") -> FastAPI:
         from ..core.codex_cli import codex_status
 
         return codex_status()
+
+    @app.post("/api/config/test-connection")
+    def test_config_connection(req: ConfigConnectionTestRequest):
+        """用最小模型请求验证地址、密钥和模型，且绝不持久化请求内容。"""
+        from ..config import _api_authority
+        from ..core.ai import LLMClient, LLMError, RoleConfig
+
+        role = req.role
+        base_url = req.base_url.strip().rstrip("/")
+        model = req.model.strip()
+        requested_authority = _api_authority(base_url, allow_loopback_http=True)
+        if requested_authority is None:
+            raise HTTPException(
+                400,
+                "API Base URL 必须是有效的 HTTPS 地址（仅本机 loopback 允许 HTTP）",
+            )
+        if not model:
+            raise HTTPException(400, "请选择要测试的模型")
+
+        cfg = get_config()
+        if role == "ocr":
+            saved_role = cfg.to_ocr_config().role
+        else:
+            ai_config = cfg.to_ai_config()
+            saved_role = ai_config.decide if role == "decide" else ai_config.review
+        saved_base_url = str(saved_role.base_url or "").strip()
+        saved_authority = _api_authority(saved_base_url, allow_loopback_http=True)
+        supplied_key = req.api_key.get_secret_value().strip() if req.api_key else ""
+        # 前端展示用占位符永远不能被当成真实凭据发给供应商。
+        if supplied_key in {"已配置", "已配置(系统凭据)"}:
+            supplied_key = ""
+        selected_key = supplied_key
+        if not selected_key:
+            if not saved_authority or requested_authority != saved_authority:
+                raise HTTPException(
+                    400,
+                    f"{role} 的 API 地址已改变，请先填写该地址对应的新 API Key",
+                )
+            # Use the exact same safe, same-authority fallback as real OCR and
+            # analysis runs.  AppConfig never reuses a credential across API
+            # authorities, and the requested endpoint was checked above.
+            selected_key = str(saved_role.api_key or "").strip()
+        if not selected_key:
+            raise HTTPException(400, f"{role} 尚未配置可用于测试的 API Key")
+
+        client = LLMClient(
+            RoleConfig(
+                base_url=base_url,
+                model=model,
+                api_key=selected_key,
+                timeout=20.0,
+                max_tokens=16,
+                max_retries=0,
+                retry_delay=0.0,
+            )
+        )
+        try:
+            client.chat_json(
+                "You are a connection probe. Return only one valid JSON object.",
+                'Return exactly {"ok":true}.',
+            )
+        except LLMError as exc:
+            # LLMClient 已执行供应商错误脱敏；这里再按本次实际密钥做最后一道清理，
+            # 也覆盖测试替身或未来客户端实现直接抛出密钥的情况。
+            detail = str(exc).replace(selected_key, "[已隐藏]")
+            detail = re.sub(
+                r"sk-(?:ws-|sp-)?[A-Za-z0-9._-]{8,}", "[已隐藏]", detail
+            ).strip()[:400]
+            raise HTTPException(502, detail or "模型连接测试失败") from None
+
+        message = "连接成功；API 地址、密钥和模型均可用"
+        if role == "ocr":
+            message += "（本次仅验证基础请求，实际 OCR 仍要求模型支持图片输入）"
+        return {
+            "ok": True,
+            "role": role,
+            "model": model,
+            "message": message,
+            "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
 
     @app.put("/api/config")
     def put_cfg(req: ConfigRequest):
@@ -7038,6 +7932,12 @@ def create_app(updated_from: str = "") -> FastAPI:
                 "reasoning_effort": str(import_snapshot.get("reasoning_effort") or ""),
                 "dpi": int(import_snapshot.get("dpi") or 0),
                 "target_template": template,
+                "prompt_version": str(
+                    (import_snapshot.get("producer_identity") or {}).get(
+                        "prompt_version"
+                    )
+                    or ""
+                ),
             }
             get_store()._write_json(str(project_dir), "meta.json", meta)
             ocr_terminal = (
@@ -7051,6 +7951,10 @@ def create_app(updated_from: str = "") -> FastAPI:
                 f"ocr-{jid}",
                 workflow_override=AuditWorkflow.OCR_ONLY,
                 capture={
+                    "producer_identity": deepcopy(
+                        import_snapshot.get("producer_identity") or {}
+                    ),
+                    "created": import_snapshot.get("created"),
                     "verification": {
                         "safe_to_export": False,
                         "ocr_quality": final_quality,

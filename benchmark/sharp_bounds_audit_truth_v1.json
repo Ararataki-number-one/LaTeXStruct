@@ -1,0 +1,42 @@
+{
+  "schema": "latexstruct-sharp-bounds-audit-truth-v1",
+  "source_pdf": {
+    "bytes_sha256": "7c2514f15a8565cda741f385a51679790fec0f240f3c2458e7e0e64cecb01a8a",
+    "byte_count": 263763,
+    "page_count": 17,
+    "selected_page_range": {
+      "start": 1,
+      "end": 17,
+      "pages": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+    }
+  },
+  "outline": [
+    {"level": 0, "title": "Heading", "page": 1, "status": "REJECTED", "reason": "generic same-page placeholder"},
+    {"level": 0, "title": "1. Introduction", "page": 1, "status": "ACCEPTED", "matched_command": "\\chapter{Introduction}"},
+    {"level": 0, "title": "2. The number of independent sets in graphs with small nontrivial eigenvalues", "page": 3, "status": "ACCEPTED", "matched_command": "\\chapter{The number of independent sets in graphs with small nontrivial eigenvalues}"},
+    {"level": 0, "title": "3. Tight bounds for Ramsey numbers", "page": 6, "status": "ACCEPTED", "matched_command": "\\chapter{Tight bounds for Ramsey numbers}"},
+    {"level": 1, "title": "3.1. Triangles", "page": 7, "status": "ACCEPTED", "matched_command": "\\section{Triangles}"},
+    {"level": 1, "title": "3.2. Bipartite graphs and 4-cycles", "page": 9, "status": "ACCEPTED", "matched_command": "\\section{Bipartite graphs and \\(4\\)-cycles}"},
+    {"level": 1, "title": "3.3. Complete bipartite graphs", "page": 11, "status": "ACCEPTED", "matched_command": "\\section{Complete bipartite graphs}"},
+    {"level": 1, "title": "3.4. Additional even cycles", "page": 14, "status": "ACCEPTED", "matched_command": "\\section{Additional even cycles}"},
+    {"level": 0, "title": "4. Concluding remarks", "page": 15, "status": "ACCEPTED", "matched_command": "\\chapter{Concluding remarks}"},
+    {"level": 0, "title": "References", "page": 16, "status": "ACCEPTED", "matched_command": "\\begin{thebibliography}"}
+  ],
+  "outline_total": 10,
+  "outline_accepted": 9,
+  "outline_rejected": 1,
+  "outline_unresolved": 0,
+  "raw_ocr_preview": {
+    "status": "PARTIAL_COMPILED",
+    "page_count": 2,
+    "compile_input_sha256": "95db395145cc7888603ebadfec2162271aa70bb89fcb8db751548b5926d5537f"
+  },
+  "current_preview": {
+    "status": "COMPILED",
+    "page_count": 17,
+    "compile_input_sha256": "a2462956e1410b5dec705c011d8b94c20ce1ce79cf4535d3075c96d6c2e406b0"
+  },
+  "required_raw_tex_token": "u\\in V:\\lvert N(u)\\cap B\\rvert",
+  "required_current_tex_token": "u\\in V:\\lvert N(u)\\cap B_i\\rvert",
+  "forbidden_tex_token": "<LOCAL_PATH>(u)"
+}
