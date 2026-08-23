@@ -71,19 +71,51 @@ jobs:
           # TeX Live 元数据中声明全部运行时依赖，OCR_PREAMBLE 也会直接加载
           # 数学、表格和 TikZ-CD 包；因此必须显式安装并在后面逐文件验证。
           # bbm.sty 属于 bbm-macros，而其字体属于 bbm，两者均需安装。
-          & $tlmgr.FullName install xetex elegantbook amsmath amsfonts amscls geometry tcolorbox etoolbox graphics titlesec fancyhdr etoc caption microtype algorithms algorithmicx kvoptions float bbm bbm-macros fontspec tikzfill setspace csquotes hyperref tools comment newtx psnfss tex-gyre ctex anyfontsize esint xcolor colortbl mwe blindtext enumitem footmisc jknapltx booktabs multirow fancyvrb makecell lipsum hologo appendix pgf tikz-cd apptools manfnt manfnt-font knuth-lib bbding adforn listings listingsutf8 incgraph tocloft pdfcol ltxcmds stmaryrd biblatex iftex environ logreq trimspaces adjustbox mdframed paratype unicode-math stix2-otf wasysym thmtools pdfpages bookmark
+          & $tlmgr.FullName install xetex elegantbook amsmath amsfonts amscls geometry tcolorbox etoolbox graphics titlesec fancyhdr etoc caption microtype algorithms algorithmicx kvoptions float bbm bbm-macros fontspec tikzfill setspace csquotes hyperref tools comment newtx psnfss tex-gyre ctex anyfontsize esint xcolor colortbl mwe blindtext enumitem footmisc jknapltx rsfs fontname booktabs multirow fancyvrb makecell lipsum hologo appendix pgf tikz-cd apptools manfnt manfnt-font knuth-lib bbding adforn fixtounicode listings listingsutf8 incgraph tocloft pdfcol ltxcmds stmaryrd biblatex iftex environ logreq trimspaces adjustbox mdframed paratype unicode-math stix2-otf wasysym thmtools pdfpages bookmark
           if ($LASTEXITCODE -ne 0) { Write-Error "TinyTeX 依赖安装失败"; exit 1 }
           $kpsewhich = Join-Path $bin 'kpsewhich.exe'
           $xelatex = Join-Path $bin 'xelatex.exe'
           if (-not (Test-Path $kpsewhich)) { Write-Error "TinyTeX 缺少 kpsewhich"; exit 1 }
           if (-not (Test-Path $xelatex)) { Write-Error "TinyTeX 缺少 xelatex"; exit 1 }
-          foreach ($file in @('elegantbook.cls', 'amsmath.sty', 'amssymb.sty', 'amsthm.sty', 'tcolorbox.sty', 'etoolbox.sty', 'titlesec.sty', 'fancyhdr.sty', 'etoc.sty', 'caption.sty', 'microtype.sty', 'algorithm.sty', 'algpseudocode.sty', 'kvoptions.sty', 'float.sty', 'bbm.sty', 'bbm10.mf', 'fontspec.sty', 'tikzfill.image.sty', 'setspace.sty', 'csquotes.sty', 'hyperref.sty', 'ltxcmds.sty', 'ctex.sty', 'xeCJK.sty', 'FandolSong-Regular.otf', 'esint.sty', 'stmaryrd.sty', 'booktabs.sty', 'multirow.sty', 'tikz.sty', 'tikzlibrarycd.code.tex', 'biblatex.sty', 'logreq.sty', 'newtxmath.sty', 'TeXGyreTermesX-Regular.otf', 'texgyreheros-regular.otf', 'STIXTwoMath-Regular.otf', 'enumitem.sty', 'footmisc.sty', 'makecell.sty', 'appendix.sty', 'apptools.sty', 'pifont.sty', 'manfnt.sty', 'manfnt.pfb', 'manfnt.tfm', 'bbding.sty', 'adforn.sty', 'listings.sty', 'listingsutf8.sty', 'incgraph.sty', 'tocloft.sty', 'pdfcol.sty', 'trimspaces.sty', 'adjustbox.sty', 'mdframed.sty', 'paratype.sty', 'unicode-math.sty', 'wasysym.sty', 'tabularx.sty', 'thmtools.sty', 'pdfpages.sty', 'bookmark.sty', 'colortbl.sty')) {
+          foreach ($file in @('elegantbook.cls', 'amsmath.sty', 'amssymb.sty', 'amsthm.sty', 'tcolorbox.sty', 'etoolbox.sty', 'titlesec.sty', 'fancyhdr.sty', 'etoc.sty', 'caption.sty', 'microtype.sty', 'algorithm.sty', 'algpseudocode.sty', 'kvoptions.sty', 'float.sty', 'bbm.sty', 'bbm10.mf', 'fontspec.sty', 'tikzfill.image.sty', 'setspace.sty', 'csquotes.sty', 'hyperref.sty', 'ltxcmds.sty', 'ctex.sty', 'xeCJK.sty', 'FandolSong-Regular.otf', 'esint.sty', 'stmaryrd.sty', 'rsfs10.tfm', 'texfonts.map', 'booktabs.sty', 'multirow.sty', 'tikz.sty', 'tikzlibrarycd.code.tex', 'biblatex.sty', 'logreq.sty', 'newtxmath.sty', 'TeXGyreTermesX-Regular.otf', 'texgyreheros-regular.otf', 'STIXTwoMath-Regular.otf', 'enumitem.sty', 'footmisc.sty', 'makecell.sty', 'appendix.sty', 'apptools.sty', 'pifont.sty', 'manfnt.sty', 'manfnt.pfb', 'manfnt.tfm', 'bbding.sty', 'adforn.sty', 'fixtounicode.sty', 'listings.sty', 'listingsutf8.sty', 'incgraph.sty', 'tocloft.sty', 'pdfcol.sty', 'trimspaces.sty', 'adjustbox.sty', 'mdframed.sty', 'paratype.sty', 'unicode-math.sty', 'wasysym.sty', 'tabularx.sty', 'thmtools.sty', 'pdfpages.sty', 'bookmark.sty', 'colortbl.sty')) {
             $resolved = & $kpsewhich $file
             if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($resolved)) {
               Write-Error "TinyTeX 依赖缺失: $file"; exit 1
             }
             Write-Host "TinyTeX 依赖就绪: $file -> $resolved"
           }
+          # GitHub Windows Server 不提供 SimSun/SimHei 等 CTeX 的默认 Windows
+          # 字体。通过 CTeX 官方 ctexopts.cfg 入口只修改 CI 的默认字体集；
+          # 用户源码显式传入的 fontset 选项仍会在其后覆盖这个默认值。
+          $ctexCiRoot = Join-Path $env:GITHUB_WORKSPACE '.github\ci'
+          $texInputs = ($ctexCiRoot -replace '\\', '/') + '//;'
+          $env:TEXINPUTS = $texInputs
+          Add-Content $env:GITHUB_ENV "TEXINPUTS=$texInputs"
+          $expectedCtexOpts = [IO.Path]::GetFullPath((Join-Path $ctexCiRoot 'ctexopts.cfg'))
+          $resolvedCtexOpts = & $kpsewhich 'ctexopts.cfg'
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($resolvedCtexOpts)) {
+            Write-Error 'CI ctexopts.cfg 未被 TeX 发现'; exit 1
+          }
+          if ([IO.Path]::GetFullPath($resolvedCtexOpts.Trim()) -ne $expectedCtexOpts) {
+            Write-Error "CTeX 配置来源错误: $resolvedCtexOpts"; exit 1
+          }
+          # XeTeX treats backslashes inside a command-line input path as TeX
+          # control-sequence markers, so pass the absolute path with slashes.
+          $probeTex = ((Join-Path $ctexCiRoot 'ctex-font-probe.tex') -replace '\\', '/')
+          $probeDir = Join-Path $env:RUNNER_TEMP 'ctex-font-probe'
+          New-Item -ItemType Directory -Force -Path $probeDir | Out-Null
+          $probeDirTeX = ($probeDir -replace '\\', '/')
+          & $xelatex -halt-on-error -interaction=nonstopmode -file-line-error `
+            "-output-directory=$probeDirTeX" $probeTex
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $probeDir 'ctex-font-probe.pdf'))) {
+            Write-Error 'CTeX/Fandol 中文编译探针失败'; exit 1
+          }
+          $probeLog = Get-Content -LiteralPath (Join-Path $probeDir 'ctex-font-probe.log') -Raw
+          if ($probeLog -notmatch 'ctex-fontset-fandol\.def' -or `
+              $probeLog -match 'ctex-fontset-windows\.def') {
+            Write-Error 'CTeX 未使用可移植的 Fandol 字体集'; exit 1
+          }
+          Write-Host 'CTeX/Fandol 中文编译探针通过'
       - name: 运行全部测试套件
         shell: pwsh
         run: |

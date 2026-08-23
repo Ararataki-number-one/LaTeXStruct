@@ -135,6 +135,9 @@ def test_ci_installs_texlive_distribution_packages():
         "tikz-cd",
         "manfnt-font",
         "knuth-lib",
+        "rsfs",
+        "fontname",
+        "fixtounicode",
         "pdfcol",
         "ltxcmds",
         "stmaryrd",
@@ -187,6 +190,9 @@ def test_ci_installs_texlive_distribution_packages():
         "texgyreheros-regular.otf",
         "manfnt.pfb",
         "manfnt.tfm",
+        "rsfs10.tfm",
+        "texfonts.map",
+        "fixtounicode.sty",
         "listingsutf8.sty",
         "incgraph.sty",
         "pdfcol.sty",
@@ -199,6 +205,36 @@ def test_ci_installs_texlive_distribution_packages():
     ):
         assert f"'{filename}'" in workflow
     assert workflow.index("安装 TinyTeX（Compile CI）") < workflow.index(
+        "python -m pytest -q"
+    )
+
+
+def test_ci_ctex_default_is_portable_and_probe_is_fail_closed():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    workflow_path = os.path.join(root, ".github", "workflows", "build.yml")
+    ctexopts_path = os.path.join(root, ".github", "ci", "ctexopts.cfg")
+    probe_path = os.path.join(root, ".github", "ci", "ctex-font-probe.tex")
+
+    with open(workflow_path, encoding="utf-8") as f:
+        workflow = f.read()
+    with open(ctexopts_path, encoding="utf-8") as f:
+        ctexopts = f.read()
+    with open(probe_path, encoding="utf-8") as f:
+        probe = f.read()
+
+    assert "\\ExplSyntaxOn" in ctexopts
+    assert "\\ctex_set:nn { option } { fontset = fandol }" in ctexopts
+    assert "\\ExplSyntaxOff" in ctexopts
+    assert "fontset = windows" not in ctexopts
+    assert "\\usepackage{ctex}" in probe
+    assert "中文字体编译探针" in probe
+    assert 'Add-Content $env:GITHUB_ENV "TEXINPUTS=$texInputs"' in workflow
+    assert "kpsewhich 'ctexopts.cfg'" in workflow
+    assert "ctex-font-probe.pdf" in workflow
+    assert "ctex-fontset-fandol\\.def" in workflow
+    assert "ctex-fontset-windows\\.def" in workflow
+    assert "CTeX/Fandol 中文编译探针通过" in workflow
+    assert workflow.index("CTeX/Fandol 中文编译探针通过") < workflow.index(
         "python -m pytest -q"
     )
 
