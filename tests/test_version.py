@@ -107,18 +107,47 @@ def test_ci_installs_texlive_distribution_packages():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, ".github", "workflows", "build.yml"), encoding="utf-8") as f:
         workflow = f.read()
+    install_line = next(
+        line.strip()
+        for line in workflow.splitlines()
+        if line.strip().startswith("& $tlmgr.FullName install ")
+    )
+    installed_packages = set(install_line.split()[3:])
     assert (
         "install xetex elegantbook amsmath amsfonts amscls geometry tcolorbox "
         "etoolbox graphics" in workflow
     )
-    assert workflow.index("update --self") < workflow.index("install xetex elegantbook")
+    for package in (
+        "kvoptions",
+        "float",
+        "bbm",
+        "bbm-macros",
+        "fontspec",
+        "tikzfill",
+    ):
+        assert package in installed_packages
+    install_index = workflow.index("install xetex elegantbook")
+    verify_index = workflow.index("foreach ($file in @(")
+    pytest_index = workflow.index("python -m pytest -q")
+    assert workflow.index("update --self") < install_index < verify_index < pytest_index
     assert "TinyTeX 包管理器更新失败" in workflow
     assert "titlesec" in workflow
     assert "install amsmath amssymb amsthm" not in workflow
     assert "kpsewhich.exe" in workflow
-    assert "amsthm.sty" in workflow and "amssymb.sty" in workflow
-    assert "etoolbox.sty" in workflow and "titlesec.sty" in workflow
-    assert "elegantbook.cls" in workflow
+    for filename in (
+        "elegantbook.cls",
+        "amssymb.sty",
+        "amsthm.sty",
+        "etoolbox.sty",
+        "titlesec.sty",
+        "kvoptions.sty",
+        "float.sty",
+        "bbm.sty",
+        "bbm10.mf",
+        "fontspec.sty",
+        "tikzfill.image.sty",
+    ):
+        assert f"'{filename}'" in workflow
     assert workflow.index("安装 TinyTeX（Compile CI）") < workflow.index(
         "python -m pytest -q"
     )
