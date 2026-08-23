@@ -1154,3 +1154,87 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   white-space: nowrap;
 }
 .compact-actions button { margin-right: 4px; padding: 4px 8px; font-size: 12px; }
+
+.process-stage-trail {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 10px 0;
+  padding: 0;
+  list-style: none;
+}
+.process-stage-trail li {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 7px;
+  border: 1px solid #e2e8f0;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.7);
+}
+.process-stage-trail .stage-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #cbd5e1;
+}
+.process-stage-trail li > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+.process-stage-trail b {
+  overflow: hidden;
+  color: #334155;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.process-stage-trail small { color: #64748b; font-size: 10px; }
+.process-stage-trail .stage-completed { border-color: #bbf7d0; background: #f0fdf4; }
+.process-stage-trail .stage-completed .stage-dot { background: #22c55e; }
+.process-stage-trail .stage-current { border-color: #93c5fd; background: #eff6ff; }
+.process-stage-trail .stage-current .stage-dot { background: #2563eb; box-shadow: 0 0 0 3px #dbeafe; }
+.process-stage-trail .stage-failed { border-color: #fecaca; background: #fef2f2; }
+.process-stage-trail .stage-failed .stage-dot { background: #dc2626; }
+.process-stage-trail .stage-skipped { opacity: 0.72; }
+.process-current-action small {
+  display: block;
+  margin-top: 3px;
+  color: #64748b;
+}
+.quality-stage-summary {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.28);
+}
+.quality-stage-summary h4 { margin: 0 0 7px; color: #172554; font-size: 12px; }
+.quality-stage {
+  margin-top: 5px;
+  padding: 6px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.72);
+}
+.quality-stage summary {
+  display: flex;
+  cursor: pointer;
+  justify-content: space-between;
+  gap: 8px;
+  color: #334155;
+  font-size: 11px;
+}
+.quality-stage summary b { flex: 0 0 auto; }
+.quality-stage p { margin: 5px 0 0; color: #475569; font-size: 11px; }
+.quality-stage small { display: block; margin-top: 3px; color: #64748b; font-size: 10px; }
+.quality-passed { border-color: #bbf7d0; background: #f0fdf4; }
+.quality-passed summary b { color: #166534; }
+.quality-failed { border-color: #fecaca; background: #fef2f2; }
+.quality-failed summary b { color: #b91c1c; }
+.quality-skipped summary b { color: #64748b; }
+
+@media (max-width: 900px) {
+  .process-stage-trail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

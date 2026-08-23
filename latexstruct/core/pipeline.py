@@ -18,12 +18,20 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .ai import AIConfig, AI_KINDS, LLMError, build_text_client, decide_candidates
+from .ai import (
+    ALLOWED_WRAP_ENVS,
+    AIConfig,
+    AI_KINDS,
+    LLMError,
+    build_text_client,
+    decide_candidates,
+)
 from .parser import detect_newline, line_starts, normalize_newlines, offset_to_line, parse_latex
 from .ocrstruct import (
     build_ocr_structure_ops,
     check_ocr_structure,
     is_ocr_document,
+    parse_ocr_metadata,
 )
 from .patch import (
     AMSTHM_BLOCK,
@@ -43,6 +51,11 @@ from .rules import RuleConfig, build_rule_decisions
 from .scanner import _declared_theorem_envs, scan
 from .semantic_ir import build_ocr_semantic_ops
 from .verify import check_display_tag_safety, compare_braces, compare_env_balance, known_issues
+from .visual_quality import (
+    GEOMETRY_POLICY_DERIVED_IMAGE,
+    GEOMETRY_POLICY_STRICT_SOURCE,
+    GEOMETRY_POLICY_TEMPLATE_REFLOW,
+)
 
 DOC_CLASS_RE = re.compile(r"\\documentclass(?:\[[^\]]*\])?\s*\{([^{}]*)\}")
 DETERMINISTIC_SEMANTIC_ANCHOR_KEY = "_deterministic_semantic_anchor"
@@ -52,6 +65,122 @@ OCR_EXPLICIT_FORMAL_STYLE_RE = re.compile(
     r"|\{\s*\\(?:bfseries|itshape|slshape|scshape)\b"
     r")"
 )
+
+VISUAL_SOURCE_PROVENANCE_SCHEMA = "latexstruct-visual-source-provenance-v1"
+IMAGE_TO_VISUAL_PDF_DERIVATION_ID = (
+    "latexstruct.raster-image-to-single-page-visual-pdf.v1"
+)
+PDF_IDENTITY_VISUAL_DERIVATION_ID = "latexstruct.original-pdf-as-visual-source.v1"
+
+
+def _verify_source_visual_provenance(
+    source_pdf_bytes: bytes,
+    supplied: Optional[dict],
+) -> Dict:
+    """Bind host-recorded upload provenance to the exact visual PDF bytes.
+
+    The core never invents an original-upload hash.  Missing or contradictory
+    host facts remain visible and fail closed whenever visual source bytes were
+    supplied to the pipeline.
+    """
+    visual_bytes = bytes(source_pdf_bytes or b"")
+    actual_visual_hash = (
+        hashlib.sha256(visual_bytes).hexdigest() if visual_bytes else ""
+    )
+    result = {
+        "schema": VISUAL_SOURCE_PROVENANCE_SCHEMA,
+        "checked": bool(visual_bytes),
+        "ok": not bool(visual_bytes),
+        "source_type": "",
+        "original_upload_bytes": 0,
+        "original_upload_sha256": "",
+        "visual_pdf_bytes": len(visual_bytes),
+        "visual_pdf_sha256": actual_visual_hash,
+        "visual_pdf_is_derived": None,
+        "derivation_id": "",
+        "issues": [],
+    }
+    if not visual_bytes:
+        return result
+
+    issues: List[str] = []
+    raw = supplied if isinstance(supplied, dict) else {}
+    if not raw:
+        issues.append("缺少宿主冻结的原始上传哈希与视觉 PDF 派生记录")
+    if raw.get("schema") != VISUAL_SOURCE_PROVENANCE_SCHEMA:
+        issues.append("视觉来源 provenance schema 缺失或不受支持")
+
+    source_type = str(raw.get("source_type") or "").strip().lower()
+    if source_type not in {"image", "pdf"}:
+        issues.append("原始上传类型必须明确为 image 或 pdf")
+        source_type = ""
+
+    original_hash = str(raw.get("original_upload_sha256") or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", original_hash) is None:
+        issues.append("原始上传 bytes SHA-256 缺失或无效")
+        original_hash = ""
+
+    original_size_raw = raw.get("original_upload_bytes")
+    if isinstance(original_size_raw, bool):
+        original_size = 0
+    else:
+        try:
+            original_size = int(original_size_raw)
+        except (TypeError, ValueError):
+            original_size = 0
+    if original_size <= 0:
+        issues.append("原始上传 byte count 缺失或无效")
+        original_size = 0
+
+    recorded_visual_hash = str(raw.get("visual_pdf_sha256") or "").strip().lower()
+    if recorded_visual_hash != actual_visual_hash:
+        issues.append("记录的视觉 PDF SHA-256 与实际 pipeline 输入不一致")
+    recorded_visual_size = raw.get("visual_pdf_bytes")
+    if isinstance(recorded_visual_size, bool):
+        recorded_visual_size = -1
+    try:
+        recorded_visual_size = int(recorded_visual_size)
+    except (TypeError, ValueError):
+        recorded_visual_size = -1
+    if recorded_visual_size != len(visual_bytes):
+        issues.append("记录的视觉 PDF byte count 与实际 pipeline 输入不一致")
+    if not visual_bytes.startswith(b"%PDF-"):
+        issues.append("视觉比对输入不是可识别的 PDF bytes")
+
+    derived = raw.get("visual_pdf_is_derived")
+    if not isinstance(derived, bool):
+        issues.append("是否派生必须由宿主明确记录为布尔值")
+        derived = None
+    derivation_id = str(raw.get("derivation_id") or "").strip()
+    expected_derivation = (
+        IMAGE_TO_VISUAL_PDF_DERIVATION_ID
+        if source_type == "image"
+        else PDF_IDENTITY_VISUAL_DERIVATION_ID
+        if source_type == "pdf"
+        else ""
+    )
+    if not expected_derivation or derivation_id != expected_derivation:
+        issues.append("视觉 PDF derivation 标识缺失或与原始上传类型矛盾")
+    if source_type == "image" and derived is not True:
+        issues.append("图片输入必须明确记录为派生视觉 PDF")
+    if source_type == "pdf":
+        if derived is not False:
+            issues.append("PDF 输入必须明确记录为原始 bytes 直接用于视觉比对")
+        if original_hash and original_hash != actual_visual_hash:
+            issues.append("PDF 输入的原始上传哈希与视觉 PDF 哈希不一致")
+        if original_size and original_size != len(visual_bytes):
+            issues.append("PDF 输入的原始 byte count 与视觉 PDF 不一致")
+
+    result.update({
+        "ok": not issues,
+        "source_type": source_type,
+        "original_upload_bytes": original_size,
+        "original_upload_sha256": original_hash,
+        "visual_pdf_is_derived": derived,
+        "derivation_id": derivation_id,
+        "issues": issues,
+    })
+    return result
 
 
 @dataclass
@@ -155,7 +284,7 @@ def build_preamble_decision(
     else:
         required_envs = {
             d.env for d in decisions
-            if d.action == "wrap" and d.env in known_envs
+            if d.action in {"wrap", "change-env"} and d.env in known_envs
         }
         needs_proof = any(d.action == "wrap" and d.env == "proof" for d in decisions)
     missing_envs = required_envs - ctx.existing_envs
@@ -290,6 +419,11 @@ def _merge_semantic_anchors(
 def _interval(d: Decision) -> Tuple[int, int]:
     if d.action == "wrap" and d.body_span:
         return d.body_span
+    if d.action in {"change-env", "unwrap"}:
+        return (
+            int(d.payload.get("begin_line", 0) or 0),
+            int(d.payload.get("end_line", 0) or 0),
+        )
     if d.action == "move-boundary":
         a = d.payload.get("old_end_line", 0)
         b = d.payload.get("new_end_line", 0)
@@ -360,6 +494,27 @@ def _apply_decisions(doc, decisions: List[Decision], ctx: PatchContext, ambiguou
             _restore_proof_qed_metadata(d, candidate, doc)
             _adapt_elegantbook_theorem_env(d, candidate, ctx)
             unsafe_reason = _unsafe_numbered_theorem_reason(d, candidate, ctx)
+        if not unsafe_reason and d.action in {
+            "wrap",
+            "move-boundary",
+            "convert-to-exercise-env",
+            "merge-bilingual-title",
+            "none",
+        }:
+            _start, _end, unsafe_reason = _current_candidate_action_span(
+                d,
+                candidate,
+                ctx,
+                line_count=len(doc.text.split("\n")),
+            )
+            if not unsafe_reason:
+                # Fresh rule/model output is host-bound only after the common
+                # legalizer has fixed its final range.  This exact digest is
+                # persisted with the decision and is mandatory on cache reuse.
+                d.payload = dict(d.payload or {})
+                d.payload["source_sha256"] = _semantic_span_hash(
+                    doc, (_start, _end)
+                )
         if unsafe_reason:
             item = {
                 "candidate_id": d.candidate_id,
@@ -423,6 +578,325 @@ def _candidate_for_decision(decision: Decision, candidates_by_id: dict):
     if candidate is None and decision.candidate_id.startswith("review-missed-"):
         candidate = candidates_by_id.get(decision.candidate_id[len("review-missed-"):])
     return candidate
+
+
+_REUSABLE_DECISION_ACTIONS = frozenset({
+    "wrap",
+    "change-env",
+    "unwrap",
+    "move-boundary",
+    "convert-to-exercise-env",
+    "merge-bilingual-title",
+    "none",
+})
+
+
+def _current_environment_for_reused_decision(
+    decision: Decision,
+    candidate,
+    formal_inventory,
+):
+    environments_by_id = {
+        environment.id: environment for environment in formal_inventory.environments
+    }
+    if decision.candidate_id in environments_by_id:
+        return environments_by_id[decision.candidate_id]
+    if decision.candidate_id.startswith("visual:"):
+        environment_id = decision.candidate_id[len("visual:"):]
+        payload = decision.payload if isinstance(decision.payload, dict) else {}
+        if str(payload.get("visual_inventory_id") or "") != environment_id:
+            return None
+        return environments_by_id.get(environment_id)
+    if candidate is None or candidate.kind != "formal-audit":
+        return None
+    payload = candidate.payload if isinstance(candidate.payload, dict) else {}
+    environment_id = str(payload.get("environment_id") or "")
+    return environments_by_id.get(environment_id)
+
+
+def _exact_line_number(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _exact_line_list(value) -> Optional[List[int]]:
+    if not isinstance(value, (list, tuple)):
+        return None
+    result = [_exact_line_number(item) for item in value]
+    if any(item is None for item in result):
+        return None
+    return result
+
+
+def _current_candidate_action_span(
+    decision: Decision,
+    candidate,
+    ctx: PatchContext,
+    *,
+    line_count: int,
+) -> Tuple[int, int, str]:
+    """Return the exact current-source span owned by a reusable action.
+
+    Every coordinate and semantic field is compared with the current scanner
+    candidate.  Nothing is repaired from cached payload data here: a mismatch
+    is an invalid cache entry and must fail closed.
+    """
+
+    if candidate is None:
+        return 0, 0, "未绑定当前 scanner candidate ID"
+    payload = decision.payload if isinstance(decision.payload, dict) else {}
+    action = decision.action
+
+    if action == "wrap":
+        if candidate.kind not in {"theorem-like", "proof"}:
+            return 0, 0, f"{candidate.kind} 候选不允许 wrap"
+        if candidate.kind == "proof":
+            if decision.env != "proof":
+                return 0, 0, "proof 候选只能绑定 proof 环境"
+        elif (
+            not decision.env
+            or decision.env.removesuffix("*") not in ALLOWED_WRAP_ENVS
+            or (
+                candidate.env_hint
+                and decision.env.removesuffix("*")
+                != candidate.env_hint.removesuffix("*")
+            )
+        ):
+            return 0, 0, "wrap 环境与当前标题关键词/安全白名单不一致"
+        if (
+            not isinstance(decision.body_span, (list, tuple))
+            or len(decision.body_span) != 2
+        ):
+            return 0, 0, "wrap 缺少精确 body_span"
+        start = _exact_line_number(decision.body_span[0])
+        end = _exact_line_number(decision.body_span[1])
+        if (
+            start != candidate.span.start_line
+            or end is None
+            or end < candidate.span.end_line
+            or end > line_count
+        ):
+            return 0, 0, "wrap 范围未精确绑定当前 scanner 候选"
+        return start, end, ""
+
+    if action == "move-boundary":
+        if candidate.kind != "scope-fix" or candidate.rule_id not in {
+            "env-body-outside",
+            "env-missing-display",
+        }:
+            return 0, 0, "当前候选没有可证明的边界移动证据"
+        old_end = _exact_line_number(payload.get("old_end_line"))
+        new_end = _exact_line_number(payload.get("new_end_line"))
+        expected_old = candidate.span.end_line
+        expected_new = candidate.payload.get("next_end_line")
+        expected_env = str(
+            candidate.payload.get("env_name") or candidate.env_hint or ""
+        )
+        if (
+            old_end != expected_old
+            or new_end != expected_new
+            or decision.env != expected_env
+            or old_end is None
+            or new_end is None
+            or not (1 <= old_end < new_end <= line_count)
+        ):
+            return 0, 0, "move-boundary 坐标或环境与当前 scanner 证据不一致"
+        return old_end, new_end, ""
+
+    if action == "convert-to-exercise-env":
+        if candidate.kind != "exercise-section":
+            return 0, 0, "当前候选不是习题节"
+        items = _exact_line_list(payload.get("item_lines"))
+        expected_items = _exact_line_list(candidate.payload.get("item_lines"))
+        if (
+            items is None
+            or expected_items is None
+            or items != expected_items
+            or len(items) < 2
+            or items != sorted(set(items))
+            or not all(1 <= item <= line_count for item in items)
+            or decision.env != ctx.exercise_env
+        ):
+            return 0, 0, "习题条目、范围或环境与当前 scanner 候选不一致"
+        return items[0], items[-1], ""
+
+    if action == "merge-bilingual-title":
+        if candidate.kind != "bilingual-title" or decision.env:
+            return 0, 0, "当前候选不是可合并的双语标题"
+        expected = candidate.payload
+        section_line = _exact_line_number(payload.get("section_line"))
+        box_lines = _exact_line_list(payload.get("box_lines"))
+        expected_box = _exact_line_list(expected.get("box_lines"))
+        if (
+            section_line != expected.get("section_line")
+            or str(payload.get("section_cmd") or "")
+            != str(expected.get("section_cmd") or "")
+            or str(payload.get("en_title") or "")
+            != str(expected.get("en_title") or "")
+            or str(payload.get("cn_title") or "")
+            != str(expected.get("cn_title") or "")
+            or box_lines is None
+            or box_lines != expected_box
+            or len(box_lines) != 2
+            or not (1 <= section_line <= line_count)
+            or not (1 <= box_lines[0] <= box_lines[1] <= line_count)
+        ):
+            return 0, 0, "双语标题字段或范围与当前 scanner 候选不一致"
+        return min(section_line, box_lines[0]), max(
+            section_line, box_lines[1]
+        ), ""
+
+    if action == "none":
+        if decision.env or decision.body_span or decision.title_span:
+            return 0, 0, "none 决策不得携带修改范围或目标环境"
+        return candidate.span.start_line, candidate.span.end_line, ""
+
+    return 0, 0, f"动作 {action!r} 不是 scanner candidate 动作"
+
+
+def _validate_reused_decisions(
+    decisions: List[Decision],
+    candidates_by_id: dict,
+    formal_inventory,
+    doc,
+    ctx: PatchContext,
+    current_rule_decisions: List[Decision],
+) -> Tuple[List[Decision], List[dict]]:
+    """Rebind untrusted cached decisions to this exact scan and inventory.
+
+    Cached preamble edits are discarded and regenerated later.  Every other
+    decision must own a current scanner candidate; existing-environment edits
+    may instead own the current immutable FormalEnvironment ID.  Missing hashes
+    or legacy coordinates are surfaced for manual review rather than guessed.
+    """
+
+    accepted: List[Decision] = []
+    invalid: List[dict] = []
+    seen_ids: set[str] = set()
+
+    def exact_current_rule_wrap(decision: Decision) -> bool:
+        """Recognize only the host's freshly reconstructed rule decision.
+
+        Some deterministic rule ranges intentionally use stronger source
+        evidence than the generic model-range legalizer.  They remain cache
+        compatible only when every semantic field equals the decision rebuilt
+        from *this* scan; a persisted ``source='rule'`` label has no authority.
+        """
+
+        for current in current_rule_decisions:
+            if (
+                current.candidate_id == decision.candidate_id
+                and current.action == "wrap"
+                and decision.action == "wrap"
+                and tuple(current.body_span or ()) == tuple(decision.body_span or ())
+                and current.env.removesuffix("*")
+                == decision.env.removesuffix("*")
+            ):
+                return True
+        return False
+
+    for decision in decisions:
+        if decision.action == "preamble-add":
+            continue
+        candidate = _candidate_for_decision(decision, candidates_by_id)
+        environment = None
+        reason = ""
+        if decision.action not in _REUSABLE_DECISION_ACTIONS:
+            reason = f"动作 {decision.action!r} 不在可复用白名单"
+        elif not decision.candidate_id:
+            reason = "缺少当前 scanner/formal inventory ID"
+        elif decision.candidate_id in seen_ids:
+            reason = "同一当前 scanner/formal inventory ID 出现重复缓存决策"
+        elif decision.action in {"change-env", "unwrap"}:
+            environment = _current_environment_for_reused_decision(
+                decision,
+                candidate,
+                formal_inventory,
+            )
+            payload = decision.payload if isinstance(decision.payload, dict) else {}
+            if environment is None:
+                reason = "未绑定当前 scanner formal-audit 或 FormalEnvironment ID"
+            elif str(payload.get("old_env") or "") != environment.original_env:
+                reason = "original_env 与当前 formal inventory 不一致"
+            elif (
+                _exact_line_number(payload.get("begin_line")) != environment.start_line
+                or _exact_line_number(payload.get("end_line")) != environment.end_line
+            ):
+                reason = "begin/end 与当前 formal inventory 精确范围不一致"
+            elif str(payload.get("source_sha256") or "").strip().lower() != (
+                environment.source_sha256
+            ):
+                reason = "source_sha256 与当前 formal inventory 不一致或缺失"
+            elif decision.action == "change-env" and (
+                decision.env not in ALLOWED_WRAP_ENVS
+                or decision.env.removesuffix("*")
+                == environment.original_env.removesuffix("*")
+            ):
+                reason = "change-env 目标环境不在白名单或与原环境相同"
+            elif decision.action == "unwrap" and decision.env:
+                reason = "unwrap 不允许携带目标环境"
+        elif candidate is None:
+            reason = "未绑定当前 scanner candidate ID"
+        else:
+            # Re-run the current host legalizer on a probe.  Cached ``source``
+            # labels are untrusted, and a range that the legalizer would alter
+            # is not the exact range that was previously reviewed.
+            if decision.action == "wrap" and not exact_current_rule_wrap(decision):
+                from .legalize import legalize_decisions
+
+                probe = copy.deepcopy(decision)
+                original_span = tuple(decision.body_span or ())
+                legalize_decisions(
+                    doc,
+                    [probe],
+                    candidates_by_id,
+                    ctx.existing_envs,
+                    force=True,
+                )
+                legalize_error = str(
+                    getattr(probe, "_legalize_error", "") or ""
+                )
+                if legalize_error:
+                    reason = f"当前 legalizer 拒绝该 wrap：{legalize_error}"
+                elif tuple(probe.body_span or ()) != original_span:
+                    reason = "缓存 wrap 范围不是当前 legalizer 的精确合法范围"
+            if not reason:
+                start, end, reason = _current_candidate_action_span(
+                    decision,
+                    candidate,
+                    ctx,
+                    line_count=len(doc.text.split("\n")),
+                )
+            if not reason:
+                expected_hash = _semantic_span_hash(doc, (start, end))
+                supplied_hash = str(
+                    (decision.payload or {}).get("source_sha256") or ""
+                ).strip().lower()
+                if supplied_hash != expected_hash:
+                    reason = "source_sha256 与当前精确动作范围不一致或缺失"
+
+        if reason:
+            line = (
+                candidate.span.start_line
+                if candidate is not None
+                else environment.start_line
+                if environment is not None
+                else (_interval(decision)[0] or 1)
+            )
+            invalid.append({
+                "candidate_id": decision.candidate_id,
+                "line": line,
+                "action": decision.action,
+                "reason": f"缓存决策未通过当前源绑定：{reason}",
+            })
+            continue
+        seen_ids.add(decision.candidate_id)
+        accepted.append(decision)
+    return accepted, invalid
 
 
 def _normalize_theorem_wrap_start(decision: Decision, candidate) -> str:
@@ -557,6 +1031,12 @@ def run_pipeline(
     compile_project_main_rel: str = None,
     capture_compile_artifact: bool = False,
     known_structured_envs=None,
+    source_pdf_bytes: bytes = b"",
+    source_pdf_page_range=None,
+    source_visual_provenance: Optional[dict] = None,
+    quality_loop: bool = False,
+    visual_client=None,
+    ocr_project: bool = False,
 ) -> PipelineResult:
     def control():
         if control_callback:
@@ -571,19 +1051,182 @@ def run_pipeline(
     source_newline = detect_newline(text)
     source_text = normalize_newlines(text)
     text = source_text
+    # The host already knows whether an imported project came from OCR.  Keep
+    # the historical text heuristic for direct/library callers, but never let
+    # an explicitly declared OCR project downgrade itself by losing or hiding
+    # the metadata marker in its TEX payload.  AI OCR always owns the complete
+    # compile/render/visual gate; callers cannot disable it accidentally.
+    explicit_ocr_project = ocr_project is True
+    if explicit_ocr_project and mode == "ai":
+        quality_loop = True
+    source_visual_provenance_info = _verify_source_visual_provenance(
+        source_pdf_bytes,
+        source_visual_provenance,
+    )
+    frozen_ocr_metadata = parse_ocr_metadata(source_text)
+
+    def explicit_page_numbers(value: object) -> Optional[Tuple[int, ...]]:
+        """Normalize the host-frozen source-page selector for contract checks.
+
+        ``()`` means that the host omitted a selector and the embedded metadata
+        may be used.  ``None`` means that a selector was supplied but malformed.
+        """
+        if value is None:
+            return ()
+        raw_pages = None
+        if isinstance(value, dict):
+            raw_pages = value.get("pages")
+            if raw_pages is None and {"start", "end"} <= set(value):
+                raw_pages = (value.get("start"), value.get("end"))
+        else:
+            raw_pages = value
+        if not isinstance(raw_pages, (list, tuple)) or not raw_pages:
+            return None
+        if len(raw_pages) == 2 and not isinstance(value, dict):
+            try:
+                start, end = (int(raw_pages[0]), int(raw_pages[1]))
+            except (TypeError, ValueError):
+                return None
+            if (
+                isinstance(raw_pages[0], bool)
+                or isinstance(raw_pages[1], bool)
+                or start < 1
+                or end < start
+            ):
+                return None
+            return tuple(range(start, end + 1))
+        if (
+            isinstance(value, dict)
+            and value.get("pages") is None
+            and len(raw_pages) == 2
+        ):
+            try:
+                start, end = (int(raw_pages[0]), int(raw_pages[1]))
+            except (TypeError, ValueError):
+                return None
+            if (
+                isinstance(raw_pages[0], bool)
+                or isinstance(raw_pages[1], bool)
+                or start < 1
+                or end < start
+            ):
+                return None
+            return tuple(range(start, end + 1))
+        pages: List[int] = []
+        for raw_page in raw_pages:
+            if isinstance(raw_page, bool):
+                return None
+            try:
+                page = int(raw_page)
+            except (TypeError, ValueError):
+                return None
+            if page < 1 or page in pages:
+                return None
+            pages.append(page)
+        return tuple(pages)
+
+    ocr_project_contract_required = bool(explicit_ocr_project and mode == "ai")
+    ocr_project_contract_issues: List[str] = []
+    metadata_pages = tuple(frozen_ocr_metadata.get("pages") or ())
+    host_pages = explicit_page_numbers(source_pdf_page_range)
+    if ocr_project_contract_required:
+        if not frozen_ocr_metadata:
+            ocr_project_contract_issues.append(
+                "OCR AI 项目缺少有效的 LaTeXStruct OCR metadata"
+            )
+        elif not metadata_pages:
+            ocr_project_contract_issues.append("OCR metadata 缺少不可变源页清单")
+        if not source_pdf_bytes:
+            ocr_project_contract_issues.append("OCR AI 项目缺少不可变原始视觉输入")
+        elif source_visual_provenance_info.get("ok") is not True:
+            ocr_project_contract_issues.append(
+                "OCR AI 项目的原始上传与视觉 PDF provenance 不完整"
+            )
+        if host_pages is None:
+            ocr_project_contract_issues.append("OCR 宿主源页范围记录无效")
+        elif host_pages and metadata_pages and host_pages != metadata_pages:
+            ocr_project_contract_issues.append(
+                "OCR metadata 页清单与宿主冻结的源页范围不一致"
+            )
+    ocr_project_contract = {
+        "required": ocr_project_contract_required,
+        "checked": explicit_ocr_project,
+        "ok": not ocr_project_contract_issues,
+        "explicit_ocr_project": explicit_ocr_project,
+        "metadata_present": bool(frozen_ocr_metadata),
+        "metadata_pages": list(metadata_pages),
+        "host_pages": list(host_pages or ()),
+        "source_evidence_present": bool(source_pdf_bytes),
+        "issues": ocr_project_contract_issues,
+    }
     from .template import normalize_template_id, template_label
 
     template = normalize_template_id(template)
     template_name = template_label(template) if template else ""
+    if template:
+        visual_geometry_policy = GEOMETRY_POLICY_TEMPLATE_REFLOW
+    elif source_visual_provenance_info.get("source_type") == "image":
+        visual_geometry_policy = GEOMETRY_POLICY_DERIVED_IMAGE
+    else:
+        visual_geometry_policy = GEOMETRY_POLICY_STRICT_SOURCE
     ocr_structure_notes: List[dict] = []
     ocr_structure_patches: List[AppliedPatch] = []
+    ocr_equation_evidence_patches: List[AppliedPatch] = []
+    ocr_equation_evidence_report = {
+        "checked": False,
+        "upgraded": False,
+        "ok": True,
+        "status": "not_requested",
+        "evidence_count": 0,
+        "evidence": [],
+        "issues": [],
+        "source_pdf_sha256": "",
+    }
     ocr_semantic_notes: List[dict] = []
     ocr_semantic_patches: List[AppliedPatch] = []
     ocr_semantic_report = {
         "checked": False, "ok": True, "issues": [], "operations": 0,
     }
-    ocr_semantic_lock_enabled = is_ocr_document(text)
+    ocr_semantic_lock_enabled = explicit_ocr_project or is_ocr_document(text)
     if ocr_semantic_lock_enabled:
+        if source_pdf_bytes:
+            emit("equation-evidence", 0.03, "正在用原始视觉输入复验公式编号位置")
+            from .equation_evidence import build_legacy_equation_evidence_ops
+
+            evidence_ops, evidence_result = build_legacy_equation_evidence_ops(
+                text,
+                source_pdf_bytes,
+            )
+            ocr_equation_evidence_report = evidence_result.to_dict()
+            if evidence_ops:
+                evidence_lines = text.split("\n")
+                evidence_planned, evidence_rejected = validate_ops(
+                    evidence_lines,
+                    [(
+                        Decision(candidate_id="ocr-equation-evidence", action="none"),
+                        evidence_ops,
+                    )],
+                )
+                if not evidence_rejected:
+                    upgraded, ocr_equation_evidence_patches, _ = apply_patches(
+                        evidence_lines,
+                        evidence_planned,
+                    )
+                    text = "\n".join(upgraded)
+                else:
+                    reason = (
+                        "公式编号证据 metadata 补丁无法复验："
+                        f"{evidence_rejected[0].error}"
+                    )
+                    ocr_equation_evidence_report.update({
+                        "ok": False,
+                        "upgraded": False,
+                        "status": "patch_rejected",
+                    })
+                    ocr_equation_evidence_report.setdefault("issues", []).append({
+                        "line": 1,
+                        "reason": reason,
+                    })
         emit("outline", 0.035, "正在根据 PDF 大纲校正章节与目录")
         ocr_ops, ocr_structure_notes = build_ocr_structure_ops(text)
         if ocr_ops:
@@ -670,6 +1313,9 @@ def run_pipeline(
     emit("scan", 0.17, "正在扫描定理、证明与章节候选")
     ctx = _build_context(doc, known_structured_envs)
     scan_res = scan(doc, pack, structured_envs=ctx.existing_envs)
+    from .formal_inventory import inventory_document
+
+    formal_inventory = inventory_document(doc, structured_envs=ctx.existing_envs)
     candidates_by_id = {c.id: c for c in scan_res.candidates}
     semantic_anchors: List[Decision] = []
     locked_semantic_ids = set()
@@ -696,15 +1342,64 @@ def run_pipeline(
     ambiguous: List[dict] = []
     ai_notes: List[dict] = []
     review_info: Dict = {}
+    second_review_enabled = bool(
+        mode == "ai" and (ai_config is None or ai_config.review_enabled)
+    )
+    full_review_requested = bool(quality_loop and mode == "ai")
+    full_review_info: Dict = {
+        "checked": False,
+        "ok": not full_review_requested,
+        "enabled": second_review_enabled,
+        "requested": full_review_requested,
+        "schema": "latexstruct-full-document-review-v1",
+        "inventory": formal_inventory.as_dict(),
+        "invalid": [],
+        "escalations": [],
+        "chunks": [],
+    }
+    if full_review_requested and not second_review_enabled:
+        full_review_info.update({
+            "status": "USER_DISABLED",
+            "skip_reason": "user-disabled",
+            "status_message": "用户未启用第二遍复查",
+        })
+    full_review_locked_ids: set[str] = set()
     ai_degraded = False
     ai_usage: Dict = {}
     decisions_reused = decisions_override is not None
+    reused_decision_validation: Dict = {
+        "checked": decisions_reused,
+        "ok": True,
+        "submitted": len(decisions_override or []) if decisions_reused else 0,
+        "accepted": 0,
+        "invalid": [],
+    }
 
     if decisions_reused:
-        decisions = copy.deepcopy(decisions_override or [])
+        cached_decisions = copy.deepcopy(decisions_override or [])
+        current_rule_decisions, _current_rule_ambiguous = build_rule_decisions(
+            doc,
+            scan_res,
+            rule_config,
+            pack=pack,
+        )
+        decisions, reuse_invalid = _validate_reused_decisions(
+            cached_decisions,
+            candidates_by_id,
+            formal_inventory,
+            doc,
+            ctx,
+            current_rule_decisions,
+        )
         ambiguous = copy.deepcopy(ambiguous_override or [])
+        ambiguous.extend(reuse_invalid)
         ai_notes = copy.deepcopy(ai_notes_override or [])
         review_info = {"reused": True}
+        reused_decision_validation.update({
+            "ok": not reuse_invalid,
+            "accepted": len(decisions),
+            "invalid": copy.deepcopy(reuse_invalid),
+        })
     elif mode == "ai":
         deterministic_kinds = {"bilingual-title", "exercise-section"}
         rule_decisions, ambiguous = build_rule_decisions(doc, scan_res, rule_config, kinds=deterministic_kinds, pack=pack)
@@ -826,6 +1521,81 @@ def run_pipeline(
             if str(item.get("candidate_id", "") or "") not in locked_semantic_ids
         ]
 
+    quality_review_client = None
+    if (
+        quality_loop
+        and mode == "ai"
+        and second_review_enabled
+        and not ai_degraded
+    ):
+        from .full_review import (
+            reconcile_full_review_decisions,
+            run_full_document_review,
+        )
+
+        cfg = ai_config or AIConfig()
+        quality_review_client = review_client or build_text_client(cfg, "review")
+        emit(
+            "full-review",
+            0.55,
+            "正在逐行独立盘点全文，而不是只复查初次候选",
+            inventory=formal_inventory.as_dict().get("counts", {}),
+        )
+
+        def full_review_progress(state):
+            ai_usage["full_document_review"] = state.get("usage", {})
+            total = max(1, int(state.get("total") or 1))
+            emit(
+                "full-review",
+                0.55 + 0.04 * int(state.get("done") or 0) / total,
+                f"全文独立复核 {state.get('done', 0)}/{total} 个分段",
+                usage={
+                    "decide": ai_usage.get("decide", {}),
+                    "full_document_review": state.get("usage", {}),
+                },
+            )
+
+        full_result = run_full_document_review(
+            quality_review_client,
+            doc,
+            formal_inventory,
+            candidates_by_id,
+            cfg,
+            progress_callback=full_review_progress,
+            control_callback=control,
+        )
+        decisions = reconcile_full_review_decisions(decisions, full_result)
+        # A source-derived OCR semantic anchor is stronger than a model verdict.
+        # Full-document review still has to inspect and answer the item, but it
+        # cannot replace the canonical, hash-bound span with a newly selected
+        # range.  Reinsert those anchors before any later review stage.
+        if semantic_anchors:
+            decisions = _merge_semantic_anchors(decisions, semantic_anchors)
+        ai_notes = [
+            note for note in ai_notes
+            if str(note.get("candidate_id") or "")
+            not in set(full_result.preserved_candidate_ids)
+        ] + list(full_result.notes)
+        for item in full_result.invalid + full_result.escalations:
+            candidate_id = str(
+                item.get("candidate_id") or item.get("item_id") or ""
+            )
+            candidate = candidates_by_id.get(candidate_id)
+            ambiguous.append({
+                "candidate_id": candidate_id if candidate is not None else "",
+                "inventory_id": candidate_id,
+                "line": int(item.get("line") or 1),
+                "reason": str(item.get("reason") or "全文独立复核未完成")[:300],
+            })
+        full_review_info = full_result.to_dict()
+        full_review_info.update({
+            "enabled": True,
+            "requested": True,
+            "status": "COMPLETED" if full_result.checked else "INCOMPLETE",
+        })
+        full_review_locked_ids = set(full_result.reviewed_candidate_ids)
+        ai_usage["full_document_review"] = full_result.usage
+
     # Revalidate cached/model ranges before deriving theorem declarations.  A
     # v1.2.1 cache may not know about newly locked OCR formal entries, so its
     # old preamble cannot be trusted to contain every required environment.
@@ -894,9 +1664,19 @@ def run_pipeline(
     active_locked_semantic_ids = {
         decision.candidate_id for decision in active_semantic_anchors
     }
+    active_full_review_decisions = [
+        copy.deepcopy(decision) for decision in decisions
+        if decision.source == "full-review"
+    ]
+    active_full_review_decision_ids = {
+        decision.candidate_id for decision in active_full_review_decisions
+    }
     reviewable_applied = [
         patch for patch in applied
         if patch.decision.candidate_id not in active_locked_semantic_ids
+        and patch.decision.candidate_id not in full_review_locked_ids
+        and patch.decision.candidate_id not in active_full_review_decision_ids
+        and patch.decision.candidate_id in candidates_by_id
     ]
     review_executed = False
 
@@ -911,12 +1691,20 @@ def run_pipeline(
     ):
         review_executed = True
         cfg = ai_config or AIConfig()
-        rclient = review_client or build_text_client(cfg, "review")
+        rclient = (
+            quality_review_client
+            or review_client
+            or build_text_client(cfg, "review")
+        )
         # 漏报抽查：AI 判定"无需处理"的候选一并交复查复核（可 missed-extra 反悔）
-        review_ambiguous = list(ambiguous) + [
+        review_ambiguous = [
+            item for item in ambiguous
+            if str(item.get("candidate_id") or "") not in full_review_locked_ids
+        ] + [
             {"candidate_id": n.get("candidate_id", ""), "line": n.get("line", 1),
              "reason": "AI 判定无需处理，请复核是否漏包：" + str(n.get("reason", ""))[:80]}
             for n in ai_notes
+            if str(n.get("candidate_id") or "") not in full_review_locked_ids
         ]
         try:
             def review_progress(state):
@@ -937,11 +1725,17 @@ def run_pipeline(
             review_decisions = [
                 decision for decision in decisions
                 if decision.candidate_id not in active_locked_semantic_ids
+                and decision.candidate_id not in full_review_locked_ids
+                and decision.candidate_id not in active_full_review_decision_ids
             ]
 
             def review_apply(review_ds):
                 full_decisions = _merge_semantic_anchors(
                     review_ds,
+                    active_full_review_decisions,
+                )
+                full_decisions = _merge_semantic_anchors(
+                    full_decisions,
                     active_semantic_anchors,
                 )
                 review_out, review_applied, review_rejected, review_dropped = (
@@ -961,14 +1755,20 @@ def run_pipeline(
                     [
                         patch for patch in review_applied
                         if patch.decision.candidate_id not in active_locked_semantic_ids
+                        and patch.decision.candidate_id
+                        not in active_full_review_decision_ids
                     ],
                     [
                         patch for patch in review_rejected
                         if patch.decision.candidate_id not in active_locked_semantic_ids
+                        and patch.decision.candidate_id
+                        not in active_full_review_decision_ids
                     ],
                     [
                         item for item in review_dropped
                         if item[0].candidate_id not in active_locked_semantic_ids
+                        and item[0].candidate_id
+                        not in active_full_review_decision_ids
                     ],
                 )
 
@@ -988,6 +1788,8 @@ def run_pipeline(
                     str(note.get("candidate_id", "") or "")
                     for note in ai_notes
                     if str(note.get("candidate_id", "") or "")
+                    and str(note.get("candidate_id", "") or "")
+                    not in full_review_locked_ids
                 },
             )
             out = review_info["out"]
@@ -995,6 +1797,10 @@ def run_pipeline(
             rejected = review_info["rejected"]
             decisions = _merge_semantic_anchors(
                 review_info["decisions"],
+                active_full_review_decisions,
+            )
+            decisions = _merge_semantic_anchors(
+                decisions,
                 active_semantic_anchors,
             )
             # wrong-env / missed-extra 可能改变最终需要的定理环境。初次决策前
@@ -1114,6 +1920,338 @@ def run_pipeline(
             ) from None
 
     result_text = "\n".join(out)
+    visual_loop_required = bool(
+        quality_loop
+        and mode == "ai"
+        and ocr_semantic_lock_enabled
+    )
+    visual_loop_info: Dict = {
+        "schema": "latexstruct-compile-render-visual-repair-v1",
+        "required": visual_loop_required,
+        "geometry_policy": visual_geometry_policy,
+        "checked": False,
+        "ok": not visual_loop_required,
+        "rounds": [],
+        "repair_count": 0,
+        "invalid": [],
+        "unresolved": [],
+    }
+    if visual_loop_required and ocr_project_contract.get("ok") is not True:
+        visual_loop_info["unresolved"].extend({
+            "round": 0,
+            "reason": issue,
+        } for issue in ocr_project_contract.get("issues", []))
+    quality_loop_compile_cache = None
+    if (
+        visual_loop_required
+        and not visual_loop_info["unresolved"]
+        and not source_pdf_bytes
+    ):
+        visual_loop_info["unresolved"].append({
+            "round": 0,
+            "reason": "OCR 核心质量闭环缺少不可变源 PDF，不能跳过逐页视觉复核",
+        })
+    elif (
+        visual_loop_required
+        and not visual_loop_info["unresolved"]
+        and compile_project_main_rel
+    ):
+        visual_loop_info["unresolved"].append({
+            "round": 0,
+            "reason": "OCR 文件夹工程尚不能建立唯一源页映射，已阻止伪装为视觉闭环完成",
+        })
+    elif visual_loop_required:
+        if source_pdf_page_range is None and not visual_loop_info["unresolved"]:
+            frozen_pages = list(
+                (parse_ocr_metadata(transformed_source_text) or {}).get("pages")
+                or []
+            )
+            if frozen_pages:
+                source_pdf_page_range = {"pages": frozen_pages}
+            else:
+                visual_loop_info["unresolved"].append({
+                    "round": 0,
+                    "reason": "OCR metadata 没有可复验的源页范围",
+                })
+        if visual_loop_info["unresolved"]:
+            source_pdf_page_range = None
+        else:
+            # A visual loop without a real compiler artifact is not a quality loop.
+            # Force capture for the immutable final evidence even when the caller did
+            # not explicitly request a preview.
+            compile_check = True
+            capture_compile_artifact = True
+            emit("quality-compile", 0.82, "正在编译全文并逐页视觉复核")
+            from .compilecheck import compile_latex
+            from .quality_loop import reconcile_visual_repairs
+            from .visual_quality import (
+                CANDIDATE_SCOPE_REFLOW,
+                CANDIDATE_SCOPE_SELECTED_RANGE,
+                VisualQualityStatus,
+                evaluate_visual_quality,
+            )
+            from .visual_review import audit_compiled_pages
+
+            # The explicit text-review opt-out also forbids reusing a supplied
+            # review client as the visual client.  OCR hosts provide a distinct
+            # visual client, so compile/render/visual evidence can still run.
+            vclient = visual_client
+            if vclient is None and second_review_enabled:
+                vclient = quality_review_client or review_client
+            if not callable(getattr(vclient, "chat_vision_json_bytes", None)):
+                raise LLMError(
+                    "核心质量闭环需要支持图片输入的视觉模型；"
+                    "当前配置只能完成文字分析，未保存未经逐页复核的结果"
+                )
+            visual_candidate_scope = (
+                CANDIDATE_SCOPE_REFLOW
+                if visual_geometry_policy == GEOMETRY_POLICY_TEMPLATE_REFLOW
+                else CANDIDATE_SCOPE_SELECTED_RANGE
+            )
+            visual_loop_info["candidate_scope"] = visual_candidate_scope
+
+            max_repairs = 2
+            for round_index in range(1, max_repairs + 2):
+                control()
+                compiled_round = compile_latex(
+                    result_text,
+                    extra_files=compile_extra_files,
+                    include_pdf=True,
+                )
+                candidate_pdf = compiled_round.get("pdf_bytes", b"")
+                if not isinstance(candidate_pdf, (bytes, bytearray, memoryview)):
+                    candidate_pdf = b""
+                candidate_pdf = bytes(candidate_pdf)
+                compile_public = {
+                    key: value for key, value in compiled_round.items()
+                    if key != "pdf_bytes"
+                }
+                round_record = {
+                    "round": round_index,
+                    "tex_sha256": hashlib.sha256(
+                        result_text.encode("utf-8")
+                    ).hexdigest(),
+                    "compile": compile_public,
+                    "deterministic": {},
+                    "ai_audit": {},
+                    "repair_ids": [],
+                }
+                visual_loop_info["rounds"].append(round_record)
+                preview_status = str(compiled_round.get("preview_status") or "")
+                if (
+                    compiled_round.get("available") is not True
+                    or compiled_round.get("ok") is not True
+                    or preview_status != "COMPILED"
+                    or not candidate_pdf
+                ):
+                    visual_loop_info["unresolved"].append({
+                        "round": round_index,
+                        "reason": "没有得到完整、成功且可逐页复核的 LaTeX 编译 PDF",
+                    })
+                    quality_loop_compile_cache = (
+                        result_text,
+                        compiled_round,
+                        dict(compile_extra_files or {}),
+                    )
+                    break
+
+                deterministic = evaluate_visual_quality(
+                    source_pdf_bytes,
+                    candidate_pdf,
+                    source_pdf_page_range,
+                    preview_status=preview_status,
+                    source_geometry_authoritative=(
+                        source_visual_provenance_info.get("source_type") != "image"
+                        # An explicit layout-changing template owns the output
+                        # paper geometry.  The source size remains evidence and
+                        # must be closed by the page model, but cannot be a hard
+                        # corruption error merely because the requested target
+                        # uses a different stock size.
+                        and not bool(template)
+                    ),
+                    geometry_policy=visual_geometry_policy,
+                    candidate_scope=visual_candidate_scope,
+                )
+                round_record["deterministic"] = deterministic.to_dict()
+                if deterministic.status in {
+                    VisualQualityStatus.FAIL,
+                    VisualQualityStatus.UNAVAILABLE,
+                }:
+                    visual_loop_info["unresolved"].append({
+                        "round": round_index,
+                        "reason": (
+                            "确定性逐页检查发现缺页、空白、乱码、异常尺寸、"
+                            "源页复用或渲染不可用"
+                        ),
+                        "status": deterministic.status.value,
+                    })
+                    quality_loop_compile_cache = (
+                        result_text,
+                        compiled_round,
+                        dict(compile_extra_files or {}),
+                    )
+                    break
+
+                def visual_progress(state):
+                    total = max(1, int(state.get("total") or 1))
+                    emit(
+                        "quality-visual",
+                        0.825 + 0.045 * int(state.get("done") or 0) / total,
+                        f"逐页视觉复核 {state.get('done', 0)}/{total} 页",
+                        usage={
+                            **ai_usage,
+                            "visual_review": state.get("usage", {}),
+                        },
+                    )
+
+                visual_audit = audit_compiled_pages(
+                    vclient,
+                    source_pdf_bytes=source_pdf_bytes,
+                    candidate_pdf_bytes=candidate_pdf,
+                    page_range=source_pdf_page_range,
+                    source_text=transformed_source_text,
+                    inventory=formal_inventory,
+                    deterministic_report=deterministic.to_dict(),
+                    source_label=(
+                        "SOURCE IMAGE"
+                        if source_visual_provenance_info.get("source_type") == "image"
+                        else "SOURCE PDF"
+                    ),
+                    candidate_scope=visual_candidate_scope,
+                    progress_callback=visual_progress,
+                    control_callback=control,
+                )
+                round_record["ai_audit"] = visual_audit.to_dict()
+                ai_usage["visual_review"] = visual_audit.usage
+                quality_loop_compile_cache = (
+                    result_text,
+                    compiled_round,
+                    dict(compile_extra_files or {}),
+                )
+                if visual_audit.invalid or visual_audit.unresolved:
+                    visual_loop_info["invalid"].extend(visual_audit.invalid)
+                    visual_loop_info["unresolved"].extend(visual_audit.unresolved)
+                    break
+                if not visual_audit.suggestions:
+                    visual_loop_info["checked"] = visual_audit.checked
+                    visual_loop_info["ok"] = bool(
+                        visual_audit.checked
+                        and visual_audit.ok
+                        and visual_audit.page_count == deterministic.compared_page_count
+                    )
+                    if not visual_loop_info["ok"]:
+                        visual_loop_info["unresolved"].append({
+                            "round": round_index,
+                            "reason": "视觉复核页数或最终结论不完整",
+                        })
+                    break
+                if round_index > max_repairs:
+                    visual_loop_info["unresolved"].append({
+                        "round": round_index,
+                        "reason": "两轮定点修复后仍有视觉结构问题",
+                    })
+                    break
+
+                plan = reconcile_visual_repairs(
+                    decisions,
+                    visual_audit.suggestions,
+                    source_text=transformed_source_text,
+                    inventory=formal_inventory,
+                    candidates_by_id=candidates_by_id,
+                )
+                if not plan.ok:
+                    visual_loop_info["invalid"].extend(plan.invalid)
+                    break
+                repaired_decisions = [
+                    decision for decision in plan.decisions
+                    if decision.action != "preamble-add"
+                ]
+                repaired_pre = build_preamble_decision(
+                    doc,
+                    ctx,
+                    [
+                        decision for decision in repaired_decisions
+                        if not getattr(decision, "_legalize_error", "")
+                    ],
+                )
+                if repaired_pre is not None:
+                    repaired_decisions.append(repaired_pre)
+                repaired_out, repaired_applied, repaired_rejected, repaired_dropped = (
+                    _apply_decisions(
+                        doc,
+                        repaired_decisions,
+                        ctx,
+                        ambiguous,
+                        candidates_by_id=candidates_by_id,
+                    )
+                )
+                repaired_text = "\n".join(repaired_out)
+                visual_action_ids = {
+                    decision.candidate_id for decision in repaired_decisions
+                    if decision.source == "visual-review"
+                }
+                failed_visual_actions = {
+                    patch.decision.candidate_id for patch in repaired_rejected
+                    if patch.decision.source == "visual-review"
+                } | {
+                    decision.candidate_id for decision, _reason in repaired_dropped
+                    if decision.source == "visual-review"
+                }
+                applied_visual_actions = {
+                    patch.decision.candidate_id for patch in repaired_applied
+                    if patch.decision.source == "visual-review"
+                }
+                if (
+                    repaired_text == result_text
+                    or failed_visual_actions
+                    or not visual_action_ids.issubset(applied_visual_actions)
+                ):
+                    visual_loop_info["invalid"].append({
+                        "round": round_index,
+                        "reason": "视觉定点修复未能完整通过可逆补丁安全门",
+                        "failed_candidate_ids": sorted(failed_visual_actions),
+                    })
+                    break
+                decisions = repaired_decisions
+                out = repaired_out
+                applied = repaired_applied
+                rejected = repaired_rejected
+                result_text = repaired_text
+                round_record["repair_ids"] = list(plan.repair_ids)
+                visual_loop_info["repair_count"] += len(plan.repair_ids)
+                if plan.preserved_candidate_ids:
+                    preserved_set = set(plan.preserved_candidate_ids)
+                    ambiguous = [
+                        item for item in ambiguous
+                        if str(item.get("candidate_id") or "") not in preserved_set
+                    ]
+                    ai_notes = [
+                        item for item in ai_notes
+                        if str(item.get("candidate_id") or "") not in preserved_set
+                    ] + [
+                        {
+                            "candidate_id": candidate_id,
+                            "line": candidates_by_id[candidate_id].span.start_line,
+                            "reason": "逐页视觉复核确认该新增环境属于多套，已可逆撤销",
+                            "confidence": 0.98,
+                            "source": "visual-review",
+                        }
+                        for candidate_id in plan.preserved_candidate_ids
+                        if candidate_id in candidates_by_id
+                    ]
+
+    final_document = parse_latex(result_text)
+    final_context = _build_context(final_document, known_structured_envs)
+    final_formal_inventory = inventory_document(
+        final_document,
+        structured_envs=final_context.existing_envs,
+    )
+    final_formal_blockers = [
+        finding.as_dict() for finding in final_formal_inventory.findings
+        if finding.kind in {"missing", "wrong-env", "overwide", "duplicate"}
+    ]
+    final_formal_safe = bool(not quality_loop or not final_formal_blockers)
+
     emit(
         "draft", 0.84, "结构化草稿已生成，正在执行安全检查",
         preview=result_text,
@@ -1133,7 +2271,11 @@ def run_pipeline(
         "content_invariant": content_invariant(
             source_text.split("\n"),
             out,
-            ocr_structure_patches + ocr_semantic_patches + template_patches + applied,
+            ocr_equation_evidence_patches
+            + ocr_structure_patches
+            + ocr_semantic_patches
+            + template_patches
+            + applied,
         ),
         "env_balance": compare_env_balance(transformed_source_text, result_text),
         "braces": compare_braces(transformed_source_text, result_text),
@@ -1146,6 +2288,9 @@ def run_pipeline(
         "known_issues": known_issues(result_text),
         "display_tags": check_display_tag_safety(result_text),
         "ocr_structure": check_ocr_structure(result_text),
+        "ocr_project_contract": ocr_project_contract,
+        "ocr_equation_source_evidence": ocr_equation_evidence_report,
+        "source_visual_provenance": source_visual_provenance_info,
         "ocr_semantic_ir": ocr_semantic_report,
         "template": {
             "ok": template_safe,
@@ -1155,9 +2300,14 @@ def run_pipeline(
             ],
         },
         "resources": check_image_resources(result_text, resource_root),
+        "formal_inventory": formal_inventory.as_dict(),
+        "final_formal_inventory": final_formal_inventory.as_dict(),
+        "full_document_review": full_review_info,
+        "visual_quality_loop": visual_loop_info,
         "ai_degraded": ai_degraded,
         "ai_usage": ai_usage,
         "decisions_reused": decisions_reused,
+        "reused_decision_validation": reused_decision_validation,
         "compile_required": bool(require_compile),
         "compile_required_when_available": bool(
             require_compile_when_available or template_applied
@@ -1232,7 +2382,22 @@ def run_pipeline(
             == "latexstruct.core.compilecheck"
             and getattr(compile_latex, "__name__", "") == "compile_latex"
         )
-        if compile_impl_is_parallel_safe:
+        if quality_loop_compile_cache is not None:
+            cached_text, cached_compile, cached_files = quality_loop_compile_cache
+            if cached_text != result_text:
+                raise ValueError("视觉闭环编译缓存与最终候选 TEX 不一致")
+            before_result = compile_snapshot(
+                compile_before_text,
+                capture_pdf=bool(
+                    capture_compile_artifact and ocr_semantic_lock_enabled
+                ),
+            )
+            after_result = (
+                cached_compile,
+                result_text,
+                cached_files,
+            )
+        elif compile_impl_is_parallel_safe:
             # Both snapshots use isolated temporary directories and immutable
             # inputs, so running the real compiler processes together removes
             # a full compile latency from the interactive critical path.
@@ -1501,6 +2666,7 @@ def run_pipeline(
         not missing_decision_ids
         and not unresolved_items
         and not residual_formal_ids
+        and reused_decision_validation["ok"]
     )
     verification["structure_decisions"] = {
         "ok": structure_safe,
@@ -1512,6 +2678,9 @@ def run_pipeline(
         ),
         "missing_ids": missing_decision_ids,
         "manual_required": len(unresolved_items),
+        "invalid_reused_decisions": len(
+            reused_decision_validation.get("invalid") or []
+        ),
         "formal_total": len(ocr_formal_candidate_ids),
         "formal_wrapped": len(ocr_formal_candidate_ids & applied_wrap_ids),
         "formal_residual_ids": residual_formal_ids,
@@ -1538,6 +2707,34 @@ def run_pipeline(
     }
     from .runbundle import preview_state_from_verification
 
+    equation_evidence_safe = bool(
+        not source_pdf_bytes
+        or ocr_equation_evidence_report.get("ok") is True
+    )
+    source_visual_provenance_safe = bool(
+        not source_pdf_bytes
+        or source_visual_provenance_info.get("ok") is True
+    )
+    full_review_required = bool(full_review_requested and second_review_enabled)
+    full_review_safe = bool(
+        not full_review_required
+        or (
+            full_review_info.get("checked") is True
+            and full_review_info.get("ok") is True
+            and not full_review_info.get("invalid")
+            and not full_review_info.get("escalations")
+        )
+    )
+    visual_loop_safe = bool(
+        not visual_loop_required
+        or (
+            visual_loop_info.get("checked") is True
+            and visual_loop_info.get("ok") is True
+            and not visual_loop_info.get("invalid")
+            and not visual_loop_info.get("unresolved")
+        )
+    )
+
     verification["preview_state"] = preview_state_from_verification(verification)
     ok = (
         verification["content_invariant"]
@@ -1546,11 +2743,17 @@ def run_pipeline(
         and verification["invariants"]["ok"]
         and verification["display_tags"]["ok"]
         and verification["ocr_structure"]["ok"]
+        and verification["ocr_project_contract"]["ok"]
+        and equation_evidence_safe
+        and source_visual_provenance_safe
         and verification["ocr_semantic_ir"]["ok"]
         and template_safe
         and resources_safe
         and compile_safe
         and structure_safe
+        and final_formal_safe
+        and full_review_safe
+        and visual_loop_safe
         and review_safe
     )
     verification["checks"] = [
@@ -1575,6 +2778,24 @@ def run_pipeline(
             "skipped": not verification["ocr_structure"]["checked"],
         },
         {
+            "id": "ocr-project-contract",
+            "label": "OCR AI 运行已绑定显式项目类型、metadata、源页与视觉证据",
+            "ok": verification["ocr_project_contract"]["ok"],
+            "skipped": not verification["ocr_project_contract"]["required"],
+        },
+        {
+            "id": "ocr-equation-source-evidence",
+            "label": "公式编号已绑定原始视觉输入的页内位置与整页渲染证据",
+            "ok": equation_evidence_safe,
+            "skipped": not bool(source_pdf_bytes),
+        },
+        {
+            "id": "source-visual-provenance",
+            "label": "原始上传与视觉 PDF 哈希及派生关系可复验",
+            "ok": source_visual_provenance_safe,
+            "skipped": not bool(source_pdf_bytes),
+        },
+        {
             "id": "ocr-semantic-ir",
             "label": "OCR 公式编号、前置信息与参考文献证据闭环",
             "ok": verification["ocr_semantic_ir"]["ok"],
@@ -1593,15 +2814,55 @@ def run_pipeline(
             "skipped": not verification["resources"]["checked"],
         },
         {
+            "id": "reused-decisions",
+            "label": "缓存决策已绑定当前 scanner、formal inventory 与源哈希",
+            "ok": reused_decision_validation["ok"],
+            "skipped": not decisions_reused,
+        },
+        {
             "id": "structure-decisions",
             "label": "所有结构候选均有唯一且无需人工兜底的结论",
             "ok": structure_safe,
+        },
+        {
+            "id": "full-document-review",
+            "label": "独立复核覆盖全文与全部现有 formal 环境",
+            # ``None`` is deliberate for an explicit opt-out: this gate is
+            # neutral/skipped, not a successful review.  Consumers that only
+            # inspect ``ok`` therefore cannot render a false passed state.
+            "ok": (
+                None
+                if full_review_requested and not second_review_enabled
+                else full_review_safe
+            ),
+            "skipped": not full_review_required,
+            **(
+                {
+                    "reason": "用户未启用第二遍复查",
+                    "skip_reason": "user-disabled",
+                }
+                if full_review_requested and not second_review_enabled
+                else {}
+            ),
+        },
+        {
+            "id": "final-formal-inventory",
+            "label": "最终 TEX 已重新盘点且无漏套、错套、多套或重复 formal 环境",
+            "ok": final_formal_safe,
+            "skipped": not quality_loop,
+            "blockers": len(final_formal_blockers),
         },
         {
             "id": "ai-review",
             "label": "AI 复查完整且无未解决项",
             "ok": review_safe,
             "skipped": not review_checked,
+        },
+        {
+            "id": "compile-render-visual-repair",
+            "label": "真实编译、逐页视觉复核与定点修复闭环",
+            "ok": visual_loop_safe,
+            "skipped": not visual_loop_required,
         },
         {"id": "compile", "label": (
             "编译器可用时结果必须成功"

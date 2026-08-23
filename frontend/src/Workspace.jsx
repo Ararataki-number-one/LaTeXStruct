@@ -5,6 +5,11 @@ import { DiffEditor, Editor, loader } from "@monaco-editor/react";
 import { api } from "./api";
 import AuditSubmissionPanel from "./AuditSubmissionPanel";
 import {
+  buildProcessStageTrail,
+  describeProcessPhase,
+  summarizeVerificationStages,
+} from "./processStatus";
+import {
   blockAuditForPendingTask,
   clearAuditClientStale,
   forceAuditSubmissionStale,
@@ -60,6 +65,9 @@ function processIssueGuidance(job) {
   if (/api\s*key|api\s*base|base\s*url|endpoint|鉴权|认证|unauthori[sz]ed|forbidden|http\s*(401|403)|模型|\bmodel\b/i.test(detail)) {
     return "请打开顶部“设置”，检查服务商、API Key 和模型后再重试。";
   }
+  if (/full.?review|全文独立复核|逐页视觉|quality.?visual|缺页|空白页|页面映射|final.?formal|漏套|错套|多套|范围过宽|重复环境/i.test(detail)) {
+    return "请展开下方“质量闭环与最终结构清单”，先定位具体页码或行号；未解决项不会被当作检查通过。";
+  }
   if (/编译|compile|latexmk|xelatex|pdflatex|lualatex|安全检查|公式|数学|label|ref|引用|图片路径|正文变化|回退/i.test(detail)) {
     return "请查看下方安全检查，修复标记的问题后再点击“重新分析”。";
   }
@@ -99,6 +107,50 @@ function VerificationFailures({ failures = [], persisted = false }) {
       )) : (
         <small>失败详情暂时不可用；请点击“重新分析”重试，原项目仍保持不变。</small>
       )}
+    </div>
+  );
+}
+
+function ProcessStageTrail({ job }) {
+  const stages = buildProcessStageTrail(job);
+  const stateLabels = {
+    completed: "已完成",
+    current: "进行中",
+    failed: "未通过",
+    skipped: "未运行",
+    pending: "等待中",
+  };
+  return (
+    <ol className="process-stage-trail" aria-label="处理阶段">
+      {stages.map((stage) => (
+        <li key={stage.id} className={`stage-${stage.state}`} title={stage.help}>
+          <span aria-hidden="true" className="stage-dot" />
+          <span><b>{stage.label}</b><small>{stateLabels[stage.state]}</small></span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function VerificationStageSummary({ verification }) {
+  if (!verification) return null;
+  const rows = summarizeVerificationStages(verification);
+  const stateLabels = { passed: "通过", failed: "未通过", skipped: "未运行" };
+  return (
+    <div className="quality-stage-summary" aria-label="质量闭环与最终结构清单">
+      <h4>质量闭环与最终结构清单</h4>
+      {rows.map((row) => (
+        <details key={row.id} className={`quality-stage quality-${row.state}`} open={row.state === "failed"}>
+          <summary>
+            <span>{row.label}</span>
+            <b>{stateLabels[row.state] || row.state}</b>
+          </summary>
+          <p>{row.summary}</p>
+          {row.details.slice(0, 8).map((detail, index) => (
+            <small key={`${row.id}-${index}`}>• {detail}</small>
+          ))}
+        </details>
+      ))}
     </div>
   );
 }
@@ -914,7 +966,9 @@ export default function Workspace({ pid, onOpenSettings }) {
     ? job.result.failures
     : Array.isArray(failedAttemptDetails.failures)
       ? failedAttemptDetails.failures
-      : [];
+      : Array.isArray(verification?.failures)
+        ? verification.failures
+        : [];
   const safeToExport = verification?.safe_to_export === true;
   const reviewComplete = applied.length === 0 || reviewedCount === applied.length;
   const projectStateReady = projectLoaded && activePidRef.current === pid;
@@ -944,6 +998,10 @@ export default function Workspace({ pid, onOpenSettings }) {
   const usesCodexSubscription = analysisBackend === "codex_cli";
   const processedCandidateCount = Number(job?.processed_candidates || 0);
   const candidateTotal = Number(job?.candidate_total || 0);
+  const currentPhase = describeProcessPhase(
+    job?.phase,
+    job?.phase_label || job?.message,
+  );
   const priceText = usesCodexSubscription
     ? "Codex 订阅额度（非 API 计费）"
     : estimatedCny == null
@@ -1284,7 +1342,7 @@ export default function Workspace({ pid, onOpenSettings }) {
                   job.status === "error" ? "处理未完成" : job.status === "cancelled" ? "已取消" :
                   job.status === "pausing" ? "正在安全暂停" : job.status === "cancelling" ? "正在取消" :
                   job.status === "committing" ? "正在安全保存" : "正在处理"}</b>
-                <span>{job.phase_label || job.message}</span>
+                <span>{currentPhase.label}</span>
               </div>
               <strong>{Math.round((job.progress || 0) * 100)}%</strong>
             </div>
@@ -1298,6 +1356,7 @@ export default function Workspace({ pid, onOpenSettings }) {
             >
               <span style={{ width: `${Math.round((job.progress || 0) * 100)}%` }} />
             </div>
+            <ProcessStageTrail job={job} />
             <div className="process-metrics">
               {usesCodexSubscription && <span>引擎：Codex CLI（ChatGPT 订阅）</span>}
               <span>Token：{tokenTotal.toLocaleString()}</span>
@@ -1314,6 +1373,7 @@ export default function Workspace({ pid, onOpenSettings }) {
             </div>
             <p className="process-current-action">
               当前动作：{job.phase_label || job.message || "等待下一安全批次"}
+              <small>{currentPhase.help}</small>
             </p>
             {job.events?.length > 0 && (
               <ol className="process-events">
@@ -1517,6 +1577,7 @@ export default function Workspace({ pid, onOpenSettings }) {
                 ))}
               </ul>
             ) : <p className="muted">完成分析后，这里会逐项显示公式、引用、图片路径和编译安全检查。</p>}
+            <VerificationStageSummary verification={verification} />
           </section>
         </div>
         <details className="report-panel">

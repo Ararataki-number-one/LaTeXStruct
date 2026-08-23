@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import socket
@@ -150,6 +151,49 @@ class LLMClient:
         self._add_provider_options(payload)
         raw = self._post_chat(payload, "视觉模型调用")
         return self._message_text(raw)
+
+    def chat_vision_json_bytes(
+        self,
+        system: str,
+        user_text: str,
+        image_bytes: bytes,
+        schema: dict = None,
+    ) -> Tuple[dict, Dict]:
+        """Run a bounded visual JSON classifier on one host-produced image."""
+        del schema  # OpenAI-compatible endpoints use JSON mode, then host validation.
+        if not isinstance(image_bytes, (bytes, bytearray)) or not image_bytes:
+            raise LLMError("视觉 JSON 输入为空")
+        payload_bytes = bytes(image_bytes)
+        if payload_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            mime = "image/png"
+        elif payload_bytes.startswith(b"\xff\xd8\xff"):
+            mime = "image/jpeg"
+        else:
+            raise LLMError("视觉 JSON 输入必须是 PNG 或 JPEG")
+        image_data_uri = (
+            f"data:{mime};base64,"
+            + base64.b64encode(payload_bytes).decode("ascii")
+        )
+        self.last_usage = {}
+        payload = {
+            "model": self.cfg.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": image_data_uri}},
+                        {"type": "text", "text": user_text},
+                    ],
+                },
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "max_tokens": self._max_tokens(),
+        }
+        self._add_provider_options(payload)
+        raw = self._post_chat(payload, "视觉 JSON 复核")
+        return self._parse_json(self._message_text(raw)), self.last_usage
 
     def _endpoint_url(self) -> str:
         base = (self.cfg.base_url or "").strip().rstrip("/")

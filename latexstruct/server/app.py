@@ -56,7 +56,12 @@ from ..core.ocr_quality import (
     normalize_ocr_quality_profile,
 )
 from ..core.parser import parse_latex
-from ..core.pipeline import run_pipeline
+from ..core.pipeline import (
+    IMAGE_TO_VISUAL_PDF_DERIVATION_ID,
+    PDF_IDENTITY_VISUAL_DERIVATION_ID,
+    VISUAL_SOURCE_PROVENANCE_SCHEMA,
+    run_pipeline,
+)
 from ..core.prompts import PROMPT_VERSION
 from ..core.provenance import (
     PROVENANCE_MANIFEST_NAME,
@@ -2017,6 +2022,122 @@ def _verified_ocr_source_bytes(
     }
     public_record["path"] = rel
     return rel, data, public_record
+
+
+def _quality_loop_inputs(
+    project_dir: Path,
+    project: dict,
+    *,
+    mode: str,
+    provenance_out: dict | None = None,
+) -> tuple[bool, bytes, tuple[int, int] | None]:
+    """Bind an AI run to its immutable OCR PDF and recorded page range.
+
+    A non-OCR project never receives PDF bytes, even if unrelated metadata is
+    present.  AI OCR runs fail closed when the immutable source is unavailable;
+    rule-only legacy runs may continue without visual evidence.
+    """
+    if provenance_out is not None:
+        provenance_out.clear()
+    quality_loop = mode == "ai"
+    if project.get("kind") != "ocr":
+        return quality_loop, b"", None
+
+    verified = _verified_ocr_source_bytes(
+        project_dir,
+        project.get("ocr_source") or {},
+        required=quality_loop,
+    )
+    if verified is None:
+        return quality_loop, b"", None
+    _rel, source_bytes, source_record = verified
+    original_source_bytes = source_bytes
+
+    def record_provenance(visual_pdf_bytes: bytes, *, derived: bool) -> None:
+        if provenance_out is None:
+            return
+        source_type = str(source_record.get("source_type") or "").strip().lower()
+        provenance_out.update({
+            "schema": VISUAL_SOURCE_PROVENANCE_SCHEMA,
+            "source_type": source_type,
+            "original_upload_bytes": len(original_source_bytes),
+            "original_upload_sha256": hashlib.sha256(
+                original_source_bytes
+            ).hexdigest(),
+            "visual_pdf_bytes": len(visual_pdf_bytes),
+            "visual_pdf_sha256": hashlib.sha256(visual_pdf_bytes).hexdigest(),
+            "visual_pdf_is_derived": derived,
+            "derivation_id": (
+                IMAGE_TO_VISUAL_PDF_DERIVATION_ID
+                if derived
+                else PDF_IDENTITY_VISUAL_DERIVATION_ID
+            ),
+        })
+    try:
+        import pymupdf
+    except ImportError:
+        raise ValueError("PDF 视觉校验器不可用，已阻止 OCR 质量闭环") from None
+
+    source_type = str(source_record.get("source_type") or "")
+    if source_type != "pdf":
+        # A one-page image remains the immutable visual source.  Wrap its exact
+        # bytes in an in-memory one-page PDF so the core can use one page-pair
+        # protocol without pretending a SOURCE_PREVIEW was compiled output.
+        image_document = None
+        image_pixmap = None
+        try:
+            image_pixmap = pymupdf.Pixmap(source_bytes)
+            if image_pixmap.width <= 0 or image_pixmap.height <= 0:
+                raise ValueError
+            image_document = pymupdf.open()
+            image_page = image_document.new_page(
+                width=float(image_pixmap.width),
+                height=float(image_pixmap.height),
+            )
+            image_page.insert_image(image_page.rect, stream=source_bytes)
+            source_bytes = image_document.tobytes(garbage=4, deflate=True)
+        except Exception:
+            raise ValueError(
+                "OCR 原始图片无法建立不可变逐页视觉证据，已阻止质量闭环"
+            ) from None
+        finally:
+            if image_document is not None:
+                image_document.close()
+            image_pixmap = None
+        record_provenance(source_bytes, derived=True)
+        return quality_loop, source_bytes, (1, 1)
+
+    document = None
+    try:
+        document = pymupdf.open(stream=source_bytes, filetype="pdf")
+        actual_page_count = int(document.page_count)
+    except Exception:
+        raise ValueError("OCR 原始 PDF 无法解析，已阻止质量闭环") from None
+    finally:
+        if document is not None:
+            document.close()
+
+    def page_number(field: str, label: str) -> int:
+        raw = source_record.get(field)
+        if isinstance(raw, bool):
+            raise ValueError(f"OCR {label}记录无效，已阻止质量闭环")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"OCR {label}记录无效，已阻止质量闭环") from None
+        if value < 1:
+            raise ValueError(f"OCR {label}记录无效，已阻止质量闭环")
+        return value
+
+    recorded_page_count = page_number("source_pages", "总页数")
+    if recorded_page_count != actual_page_count:
+        raise ValueError("OCR 原始 PDF 页数与不可变快照不一致，已阻止质量闭环")
+    selected_start = page_number("selected_start", "起始页")
+    selected_end = page_number("selected_end", "结束页")
+    if selected_start > selected_end or selected_end > actual_page_count:
+        raise ValueError("OCR 页范围超出不可变原始 PDF，已阻止质量闭环")
+    record_provenance(source_bytes, derived=False)
+    return quality_loop, source_bytes, (selected_start, selected_end)
 
 
 def _verified_ocr_resource_bytes(
@@ -5850,6 +5971,16 @@ def create_app(updated_from: str = "") -> FastAPI:
             compile_project_main_rel = str(graph.get("main_rel") or "")
             if not compile_project_main_rel:
                 raise ValueError("文件夹工程主文件记录缺失，无法执行可靠的编译比较")
+        source_visual_provenance = {}
+        quality_loop, source_pdf_bytes, source_pdf_page_range = _quality_loop_inputs(
+            Path(get_store()._dir(pid)),
+            p,
+            mode=mode,
+            provenance_out=source_visual_provenance,
+        )
+        visual_client = None
+        if quality_loop and source_pdf_bytes:
+            visual_client, _visual_model, _visual_backend = _build_ocr_client(cfg)
         latest_draft = {"text": ""}
 
         def capture_progress(phase, progress, message, data):
@@ -5906,6 +6037,14 @@ def create_app(updated_from: str = "") -> FastAPI:
             compile_extra_files=compile_extra_files,
             compile_project_main_rel=compile_project_main_rel,
             capture_compile_artifact=True,
+            source_pdf_bytes=source_pdf_bytes,
+            source_pdf_page_range=source_pdf_page_range,
+            source_visual_provenance=source_visual_provenance or None,
+            quality_loop=quality_loop,
+            visual_client=visual_client,
+            # ``kind`` is immutable host state.  The core must not infer away
+            # OCR semantics merely because a damaged/raw TEX lost its marker.
+            ocr_project=is_ocr_project,
         )
         extra_verification = {}
         encoding_error = ""

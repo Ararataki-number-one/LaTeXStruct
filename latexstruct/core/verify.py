@@ -225,6 +225,13 @@ _FAILURE_ACTIONS = {
     "images": "图片引用发生变化，已禁止保存；请检查 includegraphics 路径",
     "display-math": "按提示行号修正展示公式边界或改用 equation/align 环境",
     "outline": "重新运行 AI 结构化；目录必须由 \\tableofcontents 生成，章节使用标准 LaTeX 命令",
+    "ocr-project-contract": (
+        "从当前 OCR 项目重新运行；恢复宿主冻结的 metadata、源页范围、"
+        "原始上传及其 SHA-256 provenance，不能把 OCR 项目改作普通 TEX 绕过门禁"
+    ),
+    "source-visual-provenance": (
+        "从项目中冻结的原始 OCR 上传重新运行；不要复用外部转换或已改变的视觉 PDF"
+    ),
     "template": "保持原排版，或仅对 article/report/book/ctex 文档明确选择 ElegantBook 后重试",
     "resources": "重新从原 PDF 导入以提取图片；仍缺失时请把列出的图片加入项目 images 目录",
     "compile": "根据首条编译错误及行号修正后重试；原项目和上一次安全结果均未覆盖",
@@ -283,6 +290,18 @@ def verification_failures(verification: Dict) -> List[Dict]:
             details = list((verification.get("display_tags") or {}).get("issues") or [])
         elif check_id == "outline":
             details = list((verification.get("ocr_structure") or {}).get("issues") or [])
+        elif check_id == "ocr-project-contract":
+            issues = list(
+                (verification.get("ocr_project_contract") or {}).get("issues")
+                or []
+            )
+            details = [{"reason": _safe_failure_text(item)} for item in issues[:20]]
+        elif check_id == "source-visual-provenance":
+            issues = list(
+                (verification.get("source_visual_provenance") or {}).get("issues")
+                or []
+            )
+            details = [{"reason": _safe_failure_text(item)} for item in issues[:20]]
         elif check_id == "template":
             details = list((verification.get("template") or {}).get("issues") or [])
             if details:

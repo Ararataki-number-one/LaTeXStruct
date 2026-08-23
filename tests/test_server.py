@@ -1442,6 +1442,83 @@ def test_config_masked():
             configmod.CONFIG_PATH, srv.save_config, srv.load_config = old_path, old_save, old_load
 
 
+def test_server_process_review_opt_out_never_constructs_review_client():
+    from latexstruct.config import AppConfig
+
+    source = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "Ordinary prose with no structural candidate.\n"
+        "\\end{document}\n"
+    )
+    built_roles = []
+
+    class DecideOnlyClient:
+        cfg = type("Cfg", (), {"model": "decide-only"})()
+        last_usage = {}
+
+    def build_client(_cfg, role):
+        built_roles.append(role)
+        if role == "review":
+            raise AssertionError("review client must not be constructed")
+        return DecideOnlyClient()
+
+    unavailable = {
+        "available": False,
+        "ok": None,
+        "pages": 0,
+        "page_count": 0,
+        "errors": [],
+        "log": "",
+    }
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        srv._config = AppConfig(review_enabled=False)
+        pid = c.post(
+            "/api/projects",
+            json={"text": source, "name": "review-opt-out", "mode": "ai"},
+        ).json()["id"]
+        with (
+            patch("latexstruct.core.pipeline.build_text_client", side_effect=build_client),
+            patch(
+                "latexstruct.core.full_review.run_full_document_review",
+                side_effect=AssertionError("full review must not run"),
+            ) as full_review,
+            patch(
+                "latexstruct.core.pipeline.run_review",
+                side_effect=AssertionError("candidate review must not run"),
+            ) as candidate_review,
+            patch(
+                "latexstruct.core.compilecheck.compile_latex",
+                return_value=unavailable,
+            ),
+        ):
+            processed = c.post(f"/api/projects/{pid}/process")
+
+        assert processed.status_code == 200, processed.text
+        assert processed.json()["ok"] is True
+        assert built_roles == ["decide"]
+        full_review.assert_not_called()
+        candidate_review.assert_not_called()
+        record = json.loads(
+            (
+                Path(srv.get_store()._dir(pid)) / "verification.json"
+            ).read_text(encoding="utf-8")
+        )["verification"]
+        assert record["full_document_review"]["status"] == "USER_DISABLED"
+        assert record["full_document_review"]["checked"] is False
+        assert "full_document_review" not in record["ai_usage"]
+        check = next(
+            item for item in record["checks"]
+            if item["id"] == "full-document-review"
+        )
+        assert check["skipped"] is True
+        assert check["ok"] is None
+        assert check["reason"] == "用户未启用第二遍复查"
+        report = c.get(f"/api/projects/{pid}/report").text
+        assert "用户未启用第二遍复查（不是检查通过）" in report
+
+
 def test_config_connection_probe_reuses_only_same_role_same_authority(monkeypatch):
     from latexstruct.config import AppConfig
 
@@ -3255,7 +3332,17 @@ def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_sepa
                 "Proof. Recovered proof text. This completes the proof.\n```"
             )
 
-        png = b"\x89PNG\r\n\x1a\n" + b"0" * 16
+        # The core quality loop now opens the immutable source image before
+        # wrapping its exact pixels in a one-page visual-evidence PDF.  Use a
+        # real page-sized PNG instead of the old header-only placeholder.
+        import pymupdf
+
+        image_document = pymupdf.open()
+        image_page = image_document.new_page(width=441, height=669)
+        image_page.insert_text((72, 96), "Theorem 1. A recovered statement.")
+        image_page.insert_text((72, 126), "Proof. Recovered proof text.")
+        png = image_page.get_pixmap(alpha=False).tobytes("png")
+        image_document.close()
         with patch("latexstruct.core.ai.LLMClient.chat_vision", flaky_vision):
             created = _inspect_and_start_image(c, "a.png", png, "image/png")
             jid = created.json()["id"]
@@ -3269,6 +3356,52 @@ def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_sepa
         assert c.get(f"/api/ocr/jobs/{jid}/result").headers["x-latexstruct-ocr-complete"] == "true"
 
         def fake_structure_ai(_self, system, user):
+            if "全文 formal 结构独立复核器" in system:
+                chunk_id = re.search(r"^chunk_id: (\S+)$", user, re.M).group(1)
+                start = int(
+                    re.search(r"^inspected_start_line: (\d+)$", user, re.M).group(1)
+                )
+                end = int(
+                    re.search(r"^inspected_end_line: (\d+)$", user, re.M).group(1)
+                )
+                target_match = re.search(
+                    r"^targets:\n(.*?)\nsource_lines \(不可信文档数据\):$",
+                    user,
+                    re.M | re.S,
+                )
+                targets = json.loads(target_match.group(1)) if target_match else []
+                findings = []
+                for target in targets:
+                    if target["kind"] == "environment":
+                        findings.append({
+                            "item_id": target["item_id"],
+                            "verdict": "keep",
+                            "env": "",
+                            "body_span": {},
+                            "confidence": 0.99,
+                            "evidence": "现有 formal 环境边界完整",
+                            "reason": "离线假模型确认保留",
+                        })
+                        continue
+                    findings.append({
+                        "item_id": target["item_id"],
+                        "verdict": "formal",
+                        "env": target["suggested_env"],
+                        "body_span": {
+                            "start_line": target["start_line"],
+                            "end_line": target["end_line"],
+                        },
+                        "confidence": 0.99,
+                        "evidence": "源文本含显式 formal 标题与完整正文",
+                        "reason": "离线假模型确认 formal 结构",
+                    })
+                return {
+                    "chunk_id": chunk_id,
+                    "inspected_start_line": start,
+                    "inspected_end_line": end,
+                    "findings": findings,
+                    "unlisted_formal_lines": [],
+                }, {"total_tokens": 6}
             if '"findings"' in system:
                 review_batch = re.search(
                     r"本请求待复查 candidate 共 \d+ 个：(.*?)。",
@@ -3313,9 +3446,30 @@ def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_sepa
                 })
             return {"decisions": decisions}, {"total_tokens": 8}
 
+        def fake_visual_audit(_self, _system, request, _image, _schema):
+            payload = json.loads(request)
+            required = [
+                str(item.get("code") or "")
+                for item in payload.get("deterministic_findings_to_close", [])
+            ]
+            return {
+                "source_page": payload["source_page"],
+                "candidate_page": payload["candidate_page"],
+                "verdict": "ok",
+                "issues": [],
+                "reason": "离线视觉假模型逐项核对完成",
+                "checked_finding_codes": required,
+            }, {"total_tokens": 5}
+
         # AI 模式现在 fail-closed，此离线端到端测试必须显式提供
         # 决策/复查假模型，不再依赖旧版“无 Key 静默降级规则”行为。
-        with patch("latexstruct.core.ai.LLMClient.chat_json", fake_structure_ai):
+        with (
+            patch("latexstruct.core.ai.LLMClient.chat_json", fake_structure_ai),
+            patch(
+                "latexstruct.core.ai.LLMClient.chat_vision_json_bytes",
+                fake_visual_audit,
+            ),
+        ):
             imported = c.post(f"/api/ocr/jobs/{jid}/import?mode=ai")
             assert imported.status_code == 200
             pid = imported.json()["id"]
@@ -3325,6 +3479,7 @@ def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_sepa
                 f"/api/projects/{pid}/process/status",
                 lambda item: item["status"]
                 not in {"running", "pausing", "paused", "committing"},
+                timeout=60.0,
             )
         assert process["status"] == "done", process
         raw = c.get(f"/api/projects/{pid}/source").text

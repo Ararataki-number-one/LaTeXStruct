@@ -6,6 +6,10 @@ __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
+.test-tmp/
+.pytest-tmp-*/
+pytest-of-*/
+tests/.pytest-tmp-*/
 frontend/node_modules/
 latexstruct/server/static-react/
 
@@ -20,6 +24,7 @@ jobs*.json
 dbgz.txt
 job.log
 tests/ls-*/
+ls-*/
 
 # 书稿语料不入库（用户私有材料）
 corpus/

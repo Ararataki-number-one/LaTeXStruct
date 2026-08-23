@@ -276,6 +276,7 @@ class ScanResult:
     candidates: List[Candidate]
     skipped: List[dict]
     stats: Dict[str, int]
+    formal_inventory: Dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +289,7 @@ def scan(
     pack=None,
     structured_envs: Optional[Collection[str]] = None,
 ) -> ScanResult:
+    from .formal_inventory import inventory_document
     from .ruleset import load_pack
 
     rp = load_pack(pack)
@@ -358,7 +360,7 @@ def scan(
             continue
         if envs & BOX_ENVS:
             # 盒子内的标题行：多为英文条目的中文翻译辅助文本，按设计硬排除但记录跳过
-            if match_title(b.text):
+            if match_title(b.text) or match_proof(first):
                 skipped.append(
                     {"line": b.span.start_line, "kind": "box-title",
                      "reason": "位于 tcolorbox/mdframed 内（疑似英文条目的中文翻译，保守不动）"}
@@ -546,10 +548,198 @@ def scan(
                 payload={"env_name": b.name},
             )
 
+    # The patch-oriented pass above deliberately starts at paragraph heads.
+    # Reconcile it against a separate full-document inventory so a formal
+    # heading on line 2+ of a paragraph cannot silently disappear from the
+    # coverage denominator.  Findings whose exact source is patch-safe become
+    # ordinary candidates.  Existing-environment anomalies, boxes, and unknown
+    # wrappers remain explicit ``formal-audit`` blockers: no rule or model is
+    # allowed to guess a repair for them.
+    formal_inventory = inventory_document(
+        doc,
+        structured_envs=custom_theorem_envs,
+    )
+    anchors_by_id = {item.id: item for item in formal_inventory.anchors}
+    blocks_by_id = {block.id: block for block in doc.blocks}
+    source_lines = doc.text.split("\n")
+    anchors_by_block: Dict[int, List] = {}
+    for inventory_anchor in formal_inventory.anchors:
+        if inventory_anchor.block_id is not None:
+            anchors_by_block.setdefault(inventory_anchor.block_id, []).append(
+                inventory_anchor
+            )
+    next_anchor_start_by_id: Dict[str, int] = {}
+    for block_anchors in anchors_by_block.values():
+        ordered = sorted(block_anchors, key=lambda item: (item.start_line, item.id))
+        for current_anchor, next_anchor in zip(ordered, ordered[1:]):
+            if next_anchor.start_line > current_anchor.start_line:
+                next_anchor_start_by_id[current_anchor.id] = next_anchor.start_line
+
+    def line_span(start_line: int, end_line: int) -> Span:
+        start = doc.line_starts[start_line - 1]
+        end = doc.line_starts[end_line - 1] + len(source_lines[end_line - 1])
+        return Span(start_line, end_line, start, end)
+
+    covered = {
+        (candidate.kind, candidate.span.start_line)
+        for candidate in candidates
+        if candidate.kind in {"theorem-like", "proof"}
+    }
+    accounted_box_lines = {
+        int(item["line"])
+        for item in skipped
+        if item.get("kind") == "box-title" and item.get("line")
+    }
+    for finding in formal_inventory.findings:
+        anchor = anchors_by_id.get(finding.anchor_id)
+        expected_kind = (
+            "proof"
+            if anchor is not None and anchor.suggested_env == "proof"
+            else "theorem-like"
+        )
+        if (
+            finding.kind == "missing"
+            and anchor is not None
+            and (expected_kind, anchor.start_line) in covered
+        ):
+            continue
+        if (
+            finding.kind == "missing"
+            and anchor is not None
+            and anchor.in_box
+            and (
+                anchor.start_line in accounted_box_lines
+                or anchor.wrapper == "plain"
+            )
+        ):
+            # Existing bilingual-title logic already records a bounded, known
+            # title inside the translation box as an intentional hard skip;
+            # plain proof/remark labels in those boxes follow the same legacy
+            # policy.  Unknown macro wrappers remain blockers.  Every item is
+            # still retained in ``formal_inventory`` as source evidence.
+            continue
+
+        made_patchable_candidate = False
+        if finding.kind == "missing" and anchor is not None:
+            block = blocks_by_id.get(anchor.block_id)
+            envs = set(anchor.in_env)
+            patch_safe = bool(
+                block is not None
+                and block.kind == "para"
+                and not anchor.in_box
+                and not envs & PROTECTED_ENVS
+                and not envs & skip_envs
+            )
+            if patch_safe:
+                end_line = max(anchor.end_line, block.span.end_line)
+                next_anchor_start = next_anchor_start_by_id.get(anchor.id)
+                if next_anchor_start is not None:
+                    # A parser paragraph may contain two adjacent styled formal
+                    # headings (for example a one-line theorem followed directly
+                    # by ``Proof.``).  Each inventory candidate must stop before
+                    # the next immutable anchor; otherwise both spans overlap and
+                    # the safety resolver correctly rejects them together.
+                    end_line = min(end_line, next_anchor_start - 1)
+                end_line = max(anchor.end_line, end_line)
+                fragment = "\n".join(
+                    source_lines[anchor.start_line - 1:end_line]
+                )
+                span = line_span(anchor.start_line, end_line)
+                if expected_kind == "theorem-like":
+                    title = match_title(fragment)
+                    if title is not None:
+                        (
+                            kind_env,
+                            num,
+                            prefix,
+                            remainder,
+                            title_line_old,
+                            title_line_new,
+                        ) = title
+                        title_text, _multiline = _title_probe(fragment)
+                        add(
+                            kind="theorem-like",
+                            rule_id="formal-inventory-bare-title",
+                            block_id=block.id,
+                            span=span,
+                            title_text=title_text,
+                            env_hint=kind_env,
+                            confidence=0.85 if num else 0.7,
+                            payload={
+                                "keyword": kind_env,
+                                "number": num,
+                                "title_prefix": prefix,
+                                "title_remainder": remainder,
+                                "title_line_old": title_line_old,
+                                "title_line_new": title_line_new,
+                                "in_env": tuple(envs),
+                                "section_path": block.section_path,
+                                "text": fragment,
+                                "formal_anchor_id": anchor.id,
+                                "formal_finding_id": finding.id,
+                                "source_sha256": anchor.source_sha256,
+                            },
+                        )
+                        made_patchable_candidate = True
+                else:
+                    first = _first_nonempty_line(fragment)
+                    if match_proof(first):
+                        strip, arg, remainder, title_line_old, title_line_new = (
+                            _proof_metadata(first)
+                        )
+                        add(
+                            kind="proof",
+                            rule_id="formal-inventory-proof-start",
+                            block_id=block.id,
+                            span=span,
+                            title_text=first,
+                            env_hint="proof",
+                            confidence=0.9,
+                            payload={
+                                "in_env": tuple(envs),
+                                "section_path": block.section_path,
+                                "text": fragment,
+                                "strip_prefix": strip,
+                                "proof_arg": arg,
+                                "title_remainder": remainder,
+                                "title_line_old": title_line_old,
+                                "title_line_new": title_line_new,
+                                "formal_anchor_id": anchor.id,
+                                "formal_finding_id": finding.id,
+                                "source_sha256": anchor.source_sha256,
+                            },
+                        )
+                        made_patchable_candidate = True
+        if made_patchable_candidate:
+            continue
+
+        audit_payload = finding.as_dict()
+        if anchor is not None:
+            audit_payload["anchor"] = anchor.as_dict()
+        add(
+            kind="formal-audit",
+            rule_id=f"formal-inventory-{finding.kind}",
+            block_id=anchor.block_id if anchor is not None else None,
+            span=line_span(finding.start_line, finding.end_line),
+            title_text=(
+                anchor.raw_text
+                if anchor is not None
+                else f"{finding.kind}: {finding.reason}"
+            ),
+            env_hint=finding.suggested_env,
+            confidence=1.0,
+            payload=audit_payload,
+        )
+
     stats: Dict[str, int] = {}
     for c in candidates:
         stats[c.kind] = stats.get(c.kind, 0) + 1
-    return ScanResult(candidates=candidates, skipped=skipped, stats=stats)
+    return ScanResult(
+        candidates=candidates,
+        skipped=skipped,
+        stats=stats,
+        formal_inventory=formal_inventory.as_dict(),
+    )
 
 
 # ---------------------------------------------------------------------------

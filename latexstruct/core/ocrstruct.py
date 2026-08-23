@@ -26,6 +26,12 @@ META_RE = re.compile(r"^% LaTeXStruct-OCR-Metadata:\s*([A-Za-z0-9_=-]+)\s*$", re
 EQUATION_TAG_LABEL_RE = re.compile(r"^[0-9]{1,4}[A-Za-z]?$")
 EQUATION_TAG_EVIDENCE_STATUS = "source_geometry_and_active_match"
 EQUATION_TAG_EVIDENCE_VERIFIER = "pdf_geometry_plus_full_page_visual_and_active_latex"
+LEGACY_EQUATION_TAG_EVIDENCE_STATUS = (
+    "source_geometry_full_page_render_and_literal_match"
+)
+LEGACY_EQUATION_TAG_EVIDENCE_VERIFIER = (
+    "pdf_text_geometry_plus_full_page_render_and_literal_latex"
+)
 PAGE_RE = re.compile(r"^\s*%\s*Page\s+(\d+)\s*$", re.I)
 PAGE_BREAK_RE = re.compile(r"^\s*%===\s*PAGE BREAK\s*===", re.I)
 DOCUMENTCLASS_RE = re.compile(
@@ -185,12 +191,21 @@ def _clean_equation_tag_evidence(
             label = label[1:-1]
         evidence_id = str(item.get("evidence_id") or "").strip()[:100]
         bbox = item.get("bbox_normalized")
+        provenance_pair = (item.get("status"), item.get("verifier"))
         if (
             not EQUATION_TAG_LABEL_RE.fullmatch(label)
             or not evidence_id
             or evidence_id in seen_ids
-            or item.get("status") != EQUATION_TAG_EVIDENCE_STATUS
-            or item.get("verifier") != EQUATION_TAG_EVIDENCE_VERIFIER
+            or provenance_pair not in {
+                (
+                    EQUATION_TAG_EVIDENCE_STATUS,
+                    EQUATION_TAG_EVIDENCE_VERIFIER,
+                ),
+                (
+                    LEGACY_EQUATION_TAG_EVIDENCE_STATUS,
+                    LEGACY_EQUATION_TAG_EVIDENCE_VERIFIER,
+                ),
+            }
             or not isinstance(bbox, (list, tuple))
             or len(bbox) != 4
         ):
@@ -206,15 +221,33 @@ def _clean_equation_tag_evidence(
         ):
             continue
         seen_ids.add(evidence_id)
-        cleaned.append({
+        record = {
             "page": page,
             "label": label,
             "evidence_id": evidence_id,
             "bbox_normalized": [round(value, 6) for value in coords],
             "source": str(item.get("source") or "")[:80],
-            "status": EQUATION_TAG_EVIDENCE_STATUS,
-            "verifier": EQUATION_TAG_EVIDENCE_VERIFIER,
-        })
+            "status": str(item.get("status")),
+            "verifier": str(item.get("verifier")),
+        }
+        if provenance_pair == (
+            LEGACY_EQUATION_TAG_EVIDENCE_STATUS,
+            LEGACY_EQUATION_TAG_EVIDENCE_VERIFIER,
+        ):
+            render_sha256 = str(item.get("page_render_sha256") or "").lower()
+            source_sha256 = str(item.get("source_pdf_sha256") or "").lower()
+            literal_sha256 = str(item.get("literal_inventory_sha256") or "").lower()
+            if not all(
+                re.fullmatch(r"[0-9a-f]{64}", value)
+                for value in (render_sha256, source_sha256, literal_sha256)
+            ):
+                continue
+            record.update({
+                "page_render_sha256": render_sha256,
+                "source_pdf_sha256": source_sha256,
+                "literal_inventory_sha256": literal_sha256,
+            })
+        cleaned.append(record)
     return cleaned
 
 

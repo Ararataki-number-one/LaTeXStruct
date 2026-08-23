@@ -1,0 +1,68 @@
+{
+  "schema": "latexstruct-sharp-bounds-fresh-e2e-truth-v1",
+  "sample": {
+    "source_pdf": {
+      "bytes_sha256": "7c2514f15a8565cda741f385a51679790fec0f240f3c2458e7e0e64cecb01a8a",
+      "byte_count": 263763,
+      "page_count": 17
+    },
+    "raw_ocr_tex": {
+      "bytes_sha256": "e6dc2f57cf5aeb62dfde58f919e75971cf0dcf44980b64ea412d32e560d4ef07",
+      "byte_count": 45694
+    }
+  },
+  "generation_contract": {
+    "allowed_input_roles": [
+      "SOURCE_PDF",
+      "RAW_OCR_TEX"
+    ],
+    "forbidden_path_fragments": [
+      "output/tex/sharp-bounds-latexstruct",
+      "c5900780-43e6-408c-9d10-8397540b8430",
+      "352ecd75-bfac-451d-86c1-24659881c4aa",
+      "sharp_current_recompile_v127",
+      "sharp_bounds_audit_acceptance_v127",
+      "previews/current.pdf"
+    ],
+    "forbidden_artifact_sha256": {
+      "historical_ai_analyzed_tex": [
+        "3ea414109e2ba68a8e9f94f2315891c7bdbab0fec80de070deba0bc3cf77ca78",
+        "273a36456bb25e33cd263db93dac3624c9c81db0cda4647de8312152f21d44ce"
+      ],
+      "historical_repaired_tex": [
+        "c0da49e97c45408ab47a30241d789fa0de1e68948bee6a8a20265d16abada603",
+        "baac31ae9dcb215255f873883de7e54753776353c6c0b497c5e40b159176bf87"
+      ],
+      "historical_current_pdf": [
+        "3ac953339633ff6865ed5071f0ae4b520b80660e4bfd42005e187b74936eac52",
+        "13823682cbb0830aaafb7b70e69ac153a1a0bd763e2ab59ee5ada6a251803532"
+      ]
+    }
+  },
+  "quality_gates": {
+    "structure_f1_threshold": 0.95,
+    "formal_item_count": 19,
+    "outline_node_count": 9,
+    "toc_required": true,
+    "equations": {
+      "labels": ["1", "2", "3", "4", "5", "6"],
+      "require_active_tags": true,
+      "tag_side": "left"
+    },
+    "bibliography": {
+      "bibitem_count": 27,
+      "require_thebibliography": true
+    },
+    "body_token_conservation": true,
+    "compile": {
+      "required": true,
+      "page_count": 17,
+      "require_exact_tex_hash_binding": true
+    },
+    "visual": {
+      "render_all_pages": true,
+      "minimum_ink_ratio": 0.0005,
+      "maximum_ink_ratio": 0.75
+    }
+  }
+}

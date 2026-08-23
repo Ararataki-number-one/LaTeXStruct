@@ -2,8 +2,9 @@
 """AI 决策 span 合法化。
 
 真实书稿 AI 实测发现：决策模型给出的 body_span 经常把图注/翻译框/后续叙述段错包进
-定理范围（复查要花大量 token 纠正）。本模块在补丁应用前对 **source=="ai"** 的 wrap
-决策做确定性收缩；复查/缓存复用的 AI 决策也重新通过同一安全门，规则模式决策不动：
+定理范围（复查要花大量 token 纠正）。本模块在补丁应用前对普通 AI、候选复查和
+全文独立复核给出的 wrap 决策统一执行确定性边界校验；缓存复用可强制让任何来源标签
+（包括伪装成 rule）重新通过同一安全门：
 
 - 起点固定为候选标题段起点（不早于标题）；
 - 终点收缩到"下一停点"之前（下一定理类标题/节标题/另一证明起始）；
@@ -868,10 +869,15 @@ def legalize_decisions(
     decisions,
     candidates_by_id: Dict,
     structured_envs: Optional[Collection[str]] = None,
+    *,
+    force: bool = False,
 ) -> None:
     for d in decisions:
-        if d.source not in {"ai", "review"}:
-            continue  # 规则决策使用自身的确定性范围扩展；AI/复查/复用统一复验
+        if not force and d.source not in {"ai", "review", "full-review"}:
+            # Fresh rule decisions are host-produced deterministic ranges.  A
+            # persisted decision may only take this path after the pipeline's
+            # forced cache validation has already legalized the exact range.
+            continue
         cand = candidates_by_id.get(d.candidate_id)
         if cand is None:
             continue

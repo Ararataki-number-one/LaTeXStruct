@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Per-proof duplicate-QED regression tests."""
 
+import copy
 import os
 import sys
 
@@ -21,30 +22,20 @@ from latexstruct.core.patch import (  # noqa: E402
     content_invariant,
 )
 from latexstruct.core.pipeline import run_pipeline  # noqa: E402
-from latexstruct.core.scanner import scan  # noqa: E402
 from latexstruct.core.template import FAITHFULBOOK  # noqa: E402
 
 
-def _decisions_for_all_candidates(source: str):
-    decisions = []
-    for candidate in scan(parse_latex(source)).candidates:
-        if candidate.kind == "proof":
-            # These deliberately hostile values prove that pipeline metadata is
-            # re-derived from source rather than trusted from AI/cache payloads.
-            claimed = not bool("square" in candidate.payload.get("text", ""))
-            decisions.append(
-                Decision(
-                    candidate_id=candidate.id,
-                    action="wrap",
-                    env="proof",
-                    body_span=(candidate.span.start_line, candidate.span.end_line),
-                    source="ai",
-                    payload={SUPPRESS_AUTO_QED_PAYLOAD_KEY: claimed},
-                )
-            )
-        else:
-            decisions.append(
-                Decision(candidate_id=candidate.id, action="none", source="ai")
+def _decisions_for_all_candidates(source: str, template: str = ""):
+    # Reuse the exact hash-bound cache produced by the current pipeline.  The
+    # test then tampers only with private QED metadata, proving that this field
+    # is re-derived without weakening source/range cache binding.
+    first = run_pipeline(source, mode="rule", template=template)
+    assert first.ok, first.report_md
+    decisions = copy.deepcopy(first.decisions)
+    for decision in decisions:
+        if decision.action == "wrap" and decision.env.removesuffix("*") == "proof":
+            decision.payload[SUPPRESS_AUTO_QED_PAYLOAD_KEY] = not bool(
+                "square" in decision.reason.casefold()
             )
     return decisions
 
@@ -123,7 +114,9 @@ def test_faithfulbook_black_qed_style_uses_the_same_local_suppression_and_compil
         source,
         mode="ai",
         template=FAITHFULBOOK,
-        decisions_override=_decisions_for_all_candidates(source),
+        decisions_override=_decisions_for_all_candidates(
+            source, template=FAITHFULBOOK
+        ),
     )
 
     assert result.ok, result.report_md

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -42,6 +43,17 @@ AMSTHM_BLOCK = [
 # group(1) 表示星号（无编号），group(2) 是环境名。
 NEW_THEOREM_RE = re.compile(r"\\newtheorem\s*(\*)?\s*\{([^{}]+)\}")
 
+# Keep this host-side patch whitelist equal to ``ai.ALLOWED_WRAP_ENVS`` without
+# importing ``ai`` (which imports Decision from this module).  The patch engine
+# is the final untrusted-cache boundary, so callers cannot bypass the model
+# parser's whitelist by constructing Decision objects directly.
+ALLOWED_FORMAL_TARGET_ENVS = frozenset({
+    "theorem", "lemma", "proposition", "corollary", "definition",
+    "remark", "example", "conjecture", "problem", "claim", "proof",
+    "question", "fact", "observation", "note", "exercise",
+})
+LATEX_ENV_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9@:_*-]*$")
+
 ITEM_PREFIX_RE = re.compile(r"^(\s*\d+\.\s*)")
 
 # Private, deterministic payload metadata.  The pipeline always removes any
@@ -61,7 +73,7 @@ LOCAL_QED_SUPPRESS_LINE = (
 @dataclass
 class Decision:
     candidate_id: str
-    action: str  # wrap | move-boundary | convert-to-exercise-env | merge-bilingual-title | preamble-add | none
+    action: str  # wrap | change-env | unwrap | move-boundary | convert-to-exercise-env | merge-bilingual-title | preamble-add | none
     env: str = ""
     title_span: Optional[Tuple[int, int]] = None
     body_span: Optional[Tuple[int, int]] = None
@@ -141,6 +153,77 @@ def build_ops(decision: Decision, lines: List[str], ctx: PatchContext) -> Tuple[
         elif prefix and lines[bs - 1].startswith(prefix):
             ops.append(PendingOp("replace_prefix", bs, old=prefix, new=""))
         return ops, ""
+
+    if a in {"change-env", "unwrap"}:
+        begin_raw = decision.payload.get("begin_line", 0)
+        end_raw = decision.payload.get("end_line", 0)
+        try:
+            if isinstance(begin_raw, bool) or isinstance(end_raw, bool):
+                raise ValueError("boolean line number")
+            begin_line = int(begin_raw or 0)
+            end_line = int(end_raw or 0)
+        except (TypeError, ValueError, OverflowError):
+            return [], f"{a} 的现有环境范围无效"
+        old_env = str(decision.payload.get("old_env", "") or "")
+        if not (
+            old_env
+            and LATEX_ENV_NAME_RE.fullmatch(old_env)
+            and 1 <= begin_line < end_line <= len(lines)
+        ):
+            return [], f"{a} 的现有环境范围无效"
+        expected_hash = str(
+            decision.payload.get("source_sha256", "") or ""
+        ).strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None:
+            return [], f"{a} 缺少当前源环境的有效 SHA-256"
+        actual_hash = hashlib.sha256(
+            "\n".join(lines[begin_line - 1:end_line]).encode("utf-8")
+        ).hexdigest()
+        if actual_hash != expected_hash:
+            return [], f"{a} 的源环境哈希与清单不一致"
+        begin_old = lines[begin_line - 1]
+        end_old = lines[end_line - 1]
+        begin_match = re.fullmatch(
+            rf"(?P<indent>\s*)\\begin\{{{re.escape(old_env)}\}}"
+            r"(?P<tail>\s*(?:\[[^\[\]\n]*\])?\s*(?:%[^\n]*)?)",
+            begin_old,
+        )
+        end_match = re.fullmatch(
+            rf"(?P<indent>\s*)\\end\{{{re.escape(old_env)}\}}"
+            r"(?P<tail>\s*(?:%[^\n]*)?)",
+            end_old,
+        )
+        if begin_match is None or end_match is None:
+            return [], (
+                f"{a} 只允许修改独占一行且可复验的 "
+                f"\\begin{{{old_env}}}/\\end{{{old_env}}}"
+            )
+        if a == "unwrap":
+            if decision.env:
+                return [], "unwrap 不允许携带目标环境"
+            return [
+                PendingOp("delete_line", begin_line, old=begin_old),
+                PendingOp("delete_line", end_line, old=end_old),
+            ], ""
+        new_env = str(decision.env or "")
+        if new_env not in ALLOWED_FORMAL_TARGET_ENVS:
+            return [], "change-env 的目标环境不在安全白名单"
+        if new_env == old_env:
+            return [], "change-env 缺少不同于原环境的目标环境"
+        begin_new = (
+            begin_match.group("indent")
+            + f"\\begin{{{new_env}}}"
+            + begin_match.group("tail")
+        )
+        end_new = (
+            end_match.group("indent")
+            + f"\\end{{{new_env}}}"
+            + end_match.group("tail")
+        )
+        return [
+            PendingOp("replace_line", begin_line, old=begin_old, new=begin_new),
+            PendingOp("replace_line", end_line, old=end_old, new=end_new),
+        ], ""
 
     if a == "move-boundary":
         old_end = decision.payload.get("old_end_line", 0)

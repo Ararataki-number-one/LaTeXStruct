@@ -119,6 +119,9 @@ def test_ci_installs_texlive_distribution_packages():
     assert "amsthm.sty" in workflow and "amssymb.sty" in workflow
     assert "etoolbox.sty" in workflow and "titlesec.sty" in workflow
     assert "elegantbook.cls" in workflow
+    assert workflow.index("安装 TinyTeX（Compile CI）") < workflow.index(
+        "python -m pytest -q"
+    )
 
 
 def test_frontend_preserves_standard_tex_and_freezes_ocr_quality_and_template():
@@ -323,6 +326,12 @@ def test_release_build_safety_guards():
     assert "[string]$h.build_id -eq $env:GITHUB_RUN_ID" in workflow
     assert "[string]$health.commit -eq $env:GITHUB_SHA.ToLowerInvariant()" in workflow
     assert 'pyinstaller "Pillow>=10,<12"' in workflow
+    assert re.search(
+        r"working-directory: frontend.*?npm ci --no-audit --no-fund.*?"
+        r"npm test.*?npm run build",
+        workflow,
+        re.S,
+    )
     assert "安装版没有提供 React 工作台" in workflow
     assert "React 资源名未带内容哈希" in workflow
     assert "http://127.0.0.1:8099$assetPath" in workflow
@@ -333,7 +342,7 @@ def test_release_build_safety_guards():
     assert "v1.1.4" not in workflow
     assert "name: LaTeXStruct-v${{ env.APP_VERSION }}" in workflow
     assert "name: LaTeXStruct-${{ github.ref_name }}" not in workflow
-    assert "$previousVersion = '1.2.6'" in workflow
+    assert "$previousVersion = '1.2.7'" in workflow
     assert "$env:LATEXSTRUCT_SMOKE_PREVIOUS_VERSION = $previousVersion" in workflow
     assert "previous_version=os.environ['LATEXSTRUCT_SMOKE_PREVIOUS_VERSION']" in workflow
     assert "previous_version='1.2.2'" not in workflow

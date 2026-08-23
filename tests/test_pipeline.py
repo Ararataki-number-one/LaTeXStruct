@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """流水线端到端测试（规则模式 / 无 Key 降级）。"""
 
+import copy
 import hashlib
 import os
 import sys
@@ -11,7 +12,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from latexstruct.core.patch import Decision, PatchContext, build_ops  # noqa: E402
 from latexstruct.core.ocrstruct import encode_ocr_metadata  # noqa: E402
 from latexstruct.core.parser import parse_latex  # noqa: E402
-from latexstruct.core.pipeline import resolve_overlaps, run_pipeline  # noqa: E402
+from latexstruct.core.pipeline import (  # noqa: E402
+    _build_context,
+    resolve_overlaps,
+    run_pipeline,
+)
 from latexstruct.core.rules import build_rule_decisions  # noqa: E402
 from latexstruct.core.scanner import scan  # noqa: E402
 
@@ -453,7 +458,225 @@ def test_existing_numbered_theorem_declaration_defers_explicit_source_number():
     assert reused.verification["safe_to_export"] is False
     assert reused.result == text
     assert reused.verification["decisions_reused"] is True
-    assert any("避免双编号" in item["reason"] for item in reused.ambiguous)
+    # The original unsafe decision was never applied and therefore never
+    # received a reusable source binding.  Reuse now stops at the stronger
+    # cache gate instead of relying on the later double-numbering guard.
+    assert reused.verification["reused_decision_validation"]["ok"] is False
+    assert any(
+        "source_sha256" in item["reason"] for item in reused.ambiguous
+    )
+
+
+def test_forged_cached_center_to_quote_without_hash_is_fail_closed():
+    text = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "\\begin{center}\n"
+        "ordinary prose\n"
+        "\\end{center}\n"
+        "\\end{document}"
+    )
+    forged = Decision(
+        candidate_id="cached-center",
+        action="change-env",
+        env="quote",
+        source="ai",
+        payload={
+            "old_env": "center",
+            "begin_line": 3,
+            "end_line": 5,
+        },
+    )
+
+    result = run_pipeline(text, mode="rule", decisions_override=[forged])
+
+    assert result.ok is False
+    assert result.result == text
+    assert result.applied == []
+    validation = result.verification["reused_decision_validation"]
+    assert validation["checked"] is True
+    assert validation["ok"] is False
+    assert validation["accepted"] == 0
+    assert validation["invalid"][0]["candidate_id"] == "cached-center"
+    assert result.verification["structure_decisions"][
+        "invalid_reused_decisions"
+    ] == 1
+    check = next(
+        item for item in result.verification["checks"]
+        if item["id"] == "reused-decisions"
+    )
+    assert check["ok"] is False and check["skipped"] is False
+
+
+def test_hash_bound_cached_change_env_rebinds_current_formal_inventory():
+    text = (
+        "\\documentclass{article}\n"
+        "\\usepackage{amsthm}\n"
+        "\\newtheorem*{lemma}{Lemma}\n"
+        "\\begin{document}\n"
+        "\\begin{lemma}\n"
+        "Theorem 1. Every graph has a vertex.\n"
+        "\\end{lemma}\n"
+        "\\end{document}"
+    )
+    document = parse_latex(text)
+    context = _build_context(document)
+    scanned = scan(document, structured_envs=context.existing_envs)
+    audit = next(
+        candidate for candidate in scanned.candidates
+        if candidate.kind == "formal-audit"
+        and candidate.payload.get("kind") == "wrong-env"
+    )
+    cached = Decision(
+        candidate_id=audit.id,
+        action="change-env",
+        env="theorem",
+        source="full-review",
+        payload={
+            "old_env": audit.payload["original_env"],
+            "begin_line": audit.payload["start_line"],
+            "end_line": audit.payload["end_line"],
+            "source_sha256": audit.payload["source_sha256"],
+        },
+    )
+
+    result = run_pipeline(text, mode="rule", decisions_override=[cached])
+
+    assert result.ok is True, result.report_md
+    assert r"\begin{theorem}" in result.result
+    assert r"\end{theorem}" in result.result
+    assert r"\begin{lemma}" not in result.result
+    assert result.verification["reused_decision_validation"] == {
+        "checked": True,
+        "ok": True,
+        "submitted": 1,
+        "accepted": 1,
+        "invalid": [],
+    }
+    assert result.verification["structure_decisions"][
+        "invalid_reused_decisions"
+    ] == 0
+
+
+def _source_span_sha256(text: str, start: int, end: int) -> str:
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return hashlib.sha256(
+        "\n".join(lines[start - 1:end]).encode("utf-8")
+    ).hexdigest()
+
+
+def test_pipeline_generated_hash_bound_rule_cache_remains_compatible():
+    text = (
+        "\\documentclass{article}\n\\begin{document}\n"
+        "Theorem 1. A cache-compatible statement.\n"
+        "\\end{document}\n"
+    )
+    first = run_pipeline(text, mode="rule")
+    assert first.ok, first.report_md
+    wrap = next(item for item in first.decisions if item.action == "wrap")
+    assert wrap.payload["source_sha256"] == _source_span_sha256(
+        text, *wrap.body_span
+    )
+
+    reused = run_pipeline(
+        text,
+        mode="rule",
+        decisions_override=first.decisions,
+        ambiguous_override=[],
+    )
+
+    assert reused.ok, reused.report_md
+    assert reused.result == first.result
+    assert reused.verification["reused_decision_validation"]["ok"] is True
+    assert reused.verification["reused_decision_validation"]["invalid"] == []
+
+
+def test_forged_rule_labeled_wrap_cannot_bypass_current_legalizer():
+    text = (
+        "\\documentclass{article}\n\\begin{document}\n"
+        "Theorem 1. First statement.\n\n"
+        "Lemma 2. Second statement.\n"
+        "\\end{document}\n"
+    )
+    first = run_pipeline(text, mode="rule")
+    assert first.ok, first.report_md
+    wraps = [item for item in first.decisions if item.action == "wrap"]
+    forged = copy.deepcopy(wraps[0])
+    forged.source = "rule"
+    forged.body_span = (forged.body_span[0], wraps[1].body_span[0])
+    forged.payload["source_sha256"] = _source_span_sha256(
+        text, *forged.body_span
+    )
+
+    result = run_pipeline(text, mode="rule", decisions_override=[forged])
+
+    assert result.ok is False
+    assert result.result == text
+    assert result.applied == []
+    invalid = result.verification["reused_decision_validation"]["invalid"]
+    assert len(invalid) == 1
+    assert "legalizer" in invalid[0]["reason"]
+
+
+def test_forged_cached_move_exercise_and_bilingual_actions_fail_closed():
+    text = read_sample("basic_book.tex")
+    first = run_pipeline(text, mode="rule")
+    assert first.ok, first.report_md
+    reused = run_pipeline(
+        text,
+        mode="rule",
+        decisions_override=first.decisions,
+        ambiguous_override=[],
+    )
+    assert reused.ok, reused.report_md
+    assert reused.result == first.result
+    assert reused.verification["reused_decision_validation"]["ok"] is True
+    decisions_by_action = {
+        item.action: item
+        for item in first.decisions
+        if item.action in {
+            "move-boundary",
+            "convert-to-exercise-env",
+            "merge-bilingual-title",
+        }
+    }
+    assert set(decisions_by_action) == {
+        "move-boundary",
+        "convert-to-exercise-env",
+        "merge-bilingual-title",
+    }
+
+    forged_move = copy.deepcopy(decisions_by_action["move-boundary"])
+    forged_move.payload["new_end_line"] += 1
+    start = min(
+        forged_move.payload["old_end_line"],
+        forged_move.payload["new_end_line"],
+    )
+    end = max(
+        forged_move.payload["old_end_line"],
+        forged_move.payload["new_end_line"],
+    )
+    forged_move.payload["source_sha256"] = _source_span_sha256(text, start, end)
+
+    forged_exercise = copy.deepcopy(
+        decisions_by_action["convert-to-exercise-env"]
+    )
+    forged_exercise.payload["item_lines"] = list(
+        reversed(forged_exercise.payload["item_lines"])
+    )
+
+    forged_title = copy.deepcopy(decisions_by_action["merge-bilingual-title"])
+    forged_title.payload["cn_title"] += "（伪造）"
+
+    for forged in (forged_move, forged_exercise, forged_title):
+        result = run_pipeline(text, mode="rule", decisions_override=[forged])
+        assert result.ok is False
+        assert result.result == text
+        assert result.applied == []
+        validation = result.verification["reused_decision_validation"]
+        assert validation["ok"] is False
+        assert validation["accepted"] == 0
+        assert len(validation["invalid"]) == 1
 
 
 def test_existing_starred_theorem_declaration_accepts_explicit_source_number():
@@ -995,7 +1218,7 @@ Plain OCR text.
     assert result.verification["safe_to_export"] is False
 
 
-def test_failed_before_and_after_with_patch_is_unverified_even_if_first_errors_match():
+def test_unbound_cached_patch_is_rejected_before_compile_comparison():
     text = (
         "\\documentclass{article}\n"
         "\\usepackage{amsthm}\n"
@@ -1034,16 +1257,14 @@ def test_failed_before_and_after_with_patch_is_unverified_even_if_first_errors_m
             decisions_override=[cached_wrap],
         )
 
-    assert result.applied
+    assert result.applied == []
     assert result.ok is False
     assert result.result == text
-    assert result.verification["compile"] == {
-        "ok": False,
-        "checked": True,
-        "unverified": True,
-    }
+    assert result.verification["reused_decision_validation"]["ok"] is False
+    assert result.verification["reused_decision_validation"]["invalid"][0][
+        "candidate_id"
+    ] == "cached-tabular-title"
     assert result.verification["safe_to_export"] is False
-    assert "首个错误相同不足以证明补丁未引入后续错误" in result.report_md
 
 
 def test_failed_identical_compile_without_patch_preserves_noop_path():

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """补丁引擎单元测试（pytest 兼容；也可直接 python tests/test_patch.py 运行）。"""
 
+import hashlib
 import os
 import sys
 
@@ -22,6 +23,12 @@ def run(lines, d, ctx=None):
     ops, err = build_ops(d, lines, ctx or PatchContext())
     assert not err, err
     return apply_patches(lines, [(d, ops)])
+
+
+def _span_sha256(lines, start, end):
+    return hashlib.sha256(
+        "\n".join(lines[start - 1:end]).encode("utf-8")
+    ).hexdigest()
 
 
 def test_wrap_basic():
@@ -180,6 +187,122 @@ def test_unrecorded_change_detected():
     bad = [AppliedPatch(decision=Decision(candidate_id="x", action="none"),
                         edits=[Edit("replace_line", 1, old="WRONG", new="A")])]
     assert not content_invariant(original, out, bad)
+
+
+def test_change_existing_environment_is_exact_and_reversible():
+    lines = [
+        r"\begin{document}",
+        r"\begin{theorem}[Sharp bound] % keep",
+        "Every graph has the property.",
+        r"\end{theorem} % keep",
+        r"\end{document}",
+    ]
+    decision = Decision(
+        candidate_id="existing-1",
+        action="change-env",
+        env="lemma",
+        payload={
+            "old_env": "theorem",
+            "begin_line": 2,
+            "end_line": 4,
+            "source_sha256": _span_sha256(lines, 2, 4),
+        },
+    )
+    ops, error = build_ops(decision, lines, PatchContext())
+    assert error == ""
+    out, applied, rejected = apply_patches(lines, [(decision, ops)])
+    assert rejected == []
+    assert out[1] == r"\begin{lemma}[Sharp bound] % keep"
+    assert out[3] == r"\end{lemma} % keep"
+    assert content_invariant(lines, out, applied)
+
+
+def test_unwrap_existing_environment_preserves_body_and_is_reversible():
+    lines = [
+        r"\begin{document}",
+        r"\begin{remark}",
+        "This is ordinary transition prose.",
+        r"\end{remark}",
+        r"\end{document}",
+    ]
+    decision = Decision(
+        candidate_id="existing-2",
+        action="unwrap",
+        payload={
+            "old_env": "remark",
+            "begin_line": 2,
+            "end_line": 4,
+            "source_sha256": _span_sha256(lines, 2, 4),
+        },
+    )
+    ops, error = build_ops(decision, lines, PatchContext())
+    assert error == ""
+    out, applied, rejected = apply_patches(lines, [(decision, ops)])
+    assert rejected == []
+    assert out == [
+        r"\begin{document}",
+        "This is ordinary transition prose.",
+        r"\end{document}",
+    ]
+    assert content_invariant(lines, out, applied)
+
+
+def test_existing_environment_edit_rejects_inline_begin_or_end():
+    lines = [
+        r"\begin{document}",
+        r"prefix \begin{theorem}",
+        "Statement.",
+        r"\end{theorem} suffix",
+        r"\end{document}",
+    ]
+    decision = Decision(
+        candidate_id="existing-3",
+        action="unwrap",
+        payload={
+            "old_env": "theorem",
+            "begin_line": 2,
+            "end_line": 4,
+            "source_sha256": _span_sha256(lines, 2, 4),
+        },
+    )
+    ops, error = build_ops(decision, lines, PatchContext())
+    assert ops == []
+    assert "独占一行" in error
+
+
+def test_existing_environment_edit_requires_current_source_hash():
+    lines = [r"\begin{center}", "ordinary prose", r"\end{center}"]
+    decision = Decision(
+        candidate_id="forged-center",
+        action="change-env",
+        env="theorem",
+        payload={"old_env": "center", "begin_line": 1, "end_line": 3},
+    )
+
+    ops, error = build_ops(decision, lines, PatchContext())
+
+    assert ops == []
+    assert "有效 SHA-256" in error
+
+
+def test_change_environment_rejects_target_outside_formal_whitelist():
+    lines = [r"\begin{remark}", "ordinary prose", r"\end{remark}"]
+    decision = Decision(
+        candidate_id="forged-remark",
+        action="change-env",
+        env="quote",
+        payload={
+            "old_env": "remark",
+            "begin_line": 1,
+            "end_line": 3,
+            "source_sha256": _span_sha256(lines, 1, 3),
+        },
+    )
+
+    ops, error = build_ops(decision, lines, PatchContext())
+
+    assert ops == []
+    assert "安全白名单" in error
 
 
 def main():
