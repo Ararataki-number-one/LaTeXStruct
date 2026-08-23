@@ -4,6 +4,12 @@ const TERMINAL_STATUSES = new Set(["done", "blocked", "error", "cancelled"]);
 
 export const PROCESS_STAGE_DEFINITIONS = Object.freeze([
   {
+    id: "preflight",
+    label: "输入证据检查",
+    phases: ["preflight"],
+    help: "核对冻结源文件、哈希、页数和选择范围，旧版已知元数据缺陷会留下迁移记录。",
+  },
+  {
     id: "inventory",
     label: "全文结构清点",
     phases: ["parse", "scan"],
@@ -54,6 +60,7 @@ export const PROCESS_STAGE_DEFINITIONS = Object.freeze([
 ]);
 
 const PHASE_COPY = Object.freeze({
+  preflight: ["正在核对输入证据", "验证冻结源文件、哈希、页数和选择范围。"],
   parse: ["正在读取全文结构", "解析章节、环境和不可修改区域。"],
   scan: ["正在建立 formal 清单", "逐行清点标题与既有环境。"],
   decide: ["正在判断结构候选", "每个候选必须获得唯一结论。"],
@@ -86,14 +93,24 @@ export function describeProcessPhase(phase, fallback = "") {
 
 export function buildProcessStageTrail(job = {}) {
   const events = Array.isArray(job.events) ? job.events : [];
-  const seen = new Set(events.map((event) => String(event?.phase || "")));
+  const businessEvents = events.filter((event) => event?.scope !== "finalization");
+  const reachedPhases = Array.isArray(job.reached_phases) ? job.reached_phases : [];
+  const seen = new Set([
+    ...reachedPhases.map((phase) => String(phase || "")),
+    ...businessEvents.map((event) => String(event?.phase || "")),
+  ]);
   const currentPhase = String(job.phase || "");
   const currentStage = stageForPhase(currentPhase);
   const status = String(job.status || "");
   let failedStage = null;
   if (FAILED_STATUSES.has(status) && !currentStage) {
-    const prior = [...events].reverse().find((event) => stageForPhase(String(event?.phase || "")));
-    failedStage = prior ? stageForPhase(String(prior.phase || "")) : null;
+    failedStage = stageForPhase(String(job.failure_phase || ""));
+    if (!failedStage) {
+      const prior = [...businessEvents]
+        .reverse()
+        .find((event) => stageForPhase(String(event?.phase || "")));
+      failedStage = prior ? stageForPhase(String(prior.phase || "")) : null;
+    }
   }
 
   return PROCESS_STAGE_DEFINITIONS.map((stage) => {

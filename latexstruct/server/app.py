@@ -288,8 +288,25 @@ OCR_CANONICAL_IMAGE_PATH_RE = re.compile(
 MAX_PRESERVED_OCR_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_PRESERVED_OCR_ASSET_BYTES = 100 * 1024 * 1024
 MAX_PRESERVED_SOURCE_PAGE_PREVIEWS = 8
+OCR_SOURCE_PAGE_COUNT_SCHEMA = "latexstruct-ocr-source-page-count-v2"
+OCR_LEGACY_PAGE_COUNT_REPAIR_ID = "pre-v1.2.9-import-snapshot-missing-source-total"
 OCR_PAGE_BREAK_RE = re.compile(r"(?m)^\s*%===\s*PAGE BREAK\s*===.*$")
 OCR_PAGE_MARKER_RE = re.compile(r"(?m)^\s*%\s*Page\s+(?P<page>\d+)\s*$", re.I)
+
+
+def _strict_page_number(value: object) -> int:
+    """Accept only a real positive integer or its canonical decimal spelling."""
+    if isinstance(value, bool):
+        raise ValueError("page number cannot be boolean")
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*", value):
+        number = int(value)
+    else:
+        raise ValueError("page number must be a positive integer")
+    if number < 1:
+        raise ValueError("page number must be positive")
+    return number
 
 
 def _runtime_provenance_identity(prompt_version: str) -> dict[str, str]:
@@ -1300,15 +1317,36 @@ def _ocr_bundle_bytes(job: dict, raw_tex: str) -> tuple[bytes, dict]:
         )
         stamped_raw = stamp_tex_provenance(raw_body, provenance)
         quality_report = assess_ocr_quality(verified_job, resources)
+        source_type = str(verified_job.get("source_type") or "")
+        source_total_raw = verified_job.get("source_total")
+        source_total = (
+            _strict_page_number(source_total_raw)
+            if source_total_raw is not None
+            else None
+        )
+        selected_start_raw = verified_job.get("selected_start")
+        selected_end_raw = verified_job.get("selected_end")
+        selected_start = (
+            _strict_page_number(selected_start_raw)
+            if selected_start_raw is not None
+            else 1
+        )
+        selected_end = (
+            _strict_page_number(selected_end_raw)
+            if selected_end_raw is not None
+            else selected_start
+        )
         manifest = {
             "format": "latexstruct-ocr-bundle-v1",
-            "source_type": str(verified_job.get("source_type") or ""),
+            "source_type": source_type,
+            # Very old in-memory result records did not retain this field.
+            # Keep their unverified raw-result export usable without inventing
+            # a PDF total; all new import snapshots require an exact integer.
+            "source_total": source_total,
             "source_sha256": source_sha256,
             "status": str(verified_job.get("status") or ""),
-            "selected_start": int(verified_job.get("selected_start") or 1),
-            "selected_end": int(
-                verified_job.get("selected_end") or verified_job.get("selected_start") or 1
-            ),
+            "selected_start": selected_start,
+            "selected_end": selected_end,
             "raw_revision": int(verified_job.get("raw_revision") or 0),
             "usage_revision": int(verified_job.get("usage_revision") or 0),
             "page_revision": int(verified_job.get("page_revision") or 0),
@@ -1781,6 +1819,14 @@ def _snapshot_ocr_bundle_job(job: dict) -> dict:
     """Copy only immutable/bundle-relevant OCR fields while holding the job lock."""
     return {
         "source_type": str(job.get("source_type") or ""),
+        # The original document total is distinct from selected_pages.  This
+        # field was accidentally omitted before v1.2.9, causing every imported
+        # multi-page PDF to be persisted as source_pages=1 even though the exact
+        # hash-bound PDF and selected range were retained.
+        # Keep the frozen value losslessly.  The persistence boundary below
+        # validates type/range and must be able to reject ``True`` or a missing
+        # total instead of silently turning either into a plausible page count.
+        "source_total": deepcopy(job.get("source_total")),
         "source_outline": deepcopy(job.get("source_outline") or []),
         "_source_sha256": str(job.get("_source_sha256") or ""),
         "target": str(job.get("target") or ""),
@@ -1797,9 +1843,9 @@ def _snapshot_ocr_bundle_job(job: dict) -> dict:
         ),
         "dpi": int(job.get("dpi") or 0),
         "output_template": str(job.get("output_template") or "faithfulbook"),
-        "selected_start": int(job.get("selected_start") or 1),
-        "selected_end": int(job.get("selected_end") or job.get("selected_start") or 1),
-        "selected_pages": [int(page) for page in (job.get("selected_pages") or [])],
+        "selected_start": deepcopy(job.get("selected_start")),
+        "selected_end": deepcopy(job.get("selected_end")),
+        "selected_pages": deepcopy(job.get("selected_pages") or []),
         "raw_revision": int(job.get("raw_revision") or 0),
         "usage_revision": int(job.get("usage_revision") or 0),
         "page_revision": int(job.get("page_revision") or 0),
@@ -1917,11 +1963,58 @@ def _preserve_original_ocr_source(job: dict, project_dir: Path) -> dict:
     if source_type == "pdf":
         if not data.startswith(b"%PDF-"):
             raise RuntimeError("原始 OCR PDF 内容已损坏")
+        from ..core.ai import LLMError
+        from ..ocr import pdf_page_count_bytes
+
+        try:
+            source_pages = pdf_page_count_bytes(data)
+        except (LLMError, ValueError) as exc:
+            raise RuntimeError("原始 OCR PDF 页数无法由冻结字节复算") from exc
+        frozen_total = job.get("source_total")
+        try:
+            frozen_total = _strict_page_number(frozen_total)
+        except ValueError:
+            raise RuntimeError("原始 OCR PDF 缺少有效的冻结总页数") from None
+        if frozen_total != source_pages:
+            raise RuntimeError("原始 OCR PDF 页数与启动快照不一致")
         extension = ".pdf"
     elif source_type == "image":
         extension = _raster_extension(data)
+        source_pages = 1
+        frozen_total = job.get("source_total")
+        try:
+            frozen_total = _strict_page_number(frozen_total)
+        except ValueError:
+            raise RuntimeError("原始 OCR 图片缺少有效的冻结页数") from None
+        if frozen_total != 1:
+            raise RuntimeError("原始 OCR 图片冻结页数无效")
     else:
         raise RuntimeError("原始 OCR 文件类型未知")
+    frozen_start = job.get("selected_start")
+    frozen_end = job.get("selected_end")
+    try:
+        selected_start = _strict_page_number(frozen_start)
+        selected_end = _strict_page_number(frozen_end)
+    except ValueError:
+        raise RuntimeError("原始 OCR 冻结页范围无效") from None
+    if (
+        selected_start < 1
+        or selected_start > selected_end
+        or selected_end > source_pages
+    ):
+        raise RuntimeError("原始 OCR 冻结页范围超出源文件")
+    frozen_selected_pages = job.get("selected_pages")
+    if not isinstance(frozen_selected_pages, (list, tuple)) or any(
+        isinstance(page, bool) for page in frozen_selected_pages
+    ):
+        raise RuntimeError("原始 OCR 冻结页集合无效")
+    try:
+        selected_pages = [_strict_page_number(page) for page in frozen_selected_pages]
+    except ValueError:
+        raise RuntimeError("原始 OCR 冻结页集合无效") from None
+    if selected_pages != list(range(selected_start, selected_end + 1)):
+        raise RuntimeError("原始 OCR 冻结页集合与起止范围不一致")
+
     destination = (project_dir / f"ocr-source{extension}").resolve()
     destination.relative_to(project_dir.resolve())
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
@@ -1947,9 +2040,11 @@ def _preserve_original_ocr_source(job: dict, project_dir: Path) -> dict:
         "bytes": len(data),
         "sha256": actual_hash,
         "source_type": source_type,
-        "source_pages": int(job.get("source_total") or 1),
-        "selected_start": int(job.get("selected_start") or 1),
-        "selected_end": int(job.get("selected_end") or job.get("selected_start") or 1),
+        "source_pages": source_pages,
+        "page_count_schema": OCR_SOURCE_PAGE_COUNT_SCHEMA,
+        "page_count_source": "host_reparsed_hash_bound_source",
+        "selected_start": selected_start,
+        "selected_end": selected_end,
         "immutable_evidence": has_frozen_hash,
         "reason": "" if has_frozen_hash else "legacy_job_without_frozen_hash",
     }
@@ -1984,7 +2079,11 @@ def _verified_ocr_source_bytes(
     except (ValueError, OSError):
         raise ValueError("OCR 原始来源文件丢失") from None
     expected_size = source_info.get("bytes")
-    if expected_size is None or int(expected_size) != len(data):
+    if (
+        isinstance(expected_size, bool)
+        or not isinstance(expected_size, int)
+        or expected_size != len(data)
+    ):
         raise ValueError("OCR 原始来源大小校验失败")
     expected_hash = str(source_info.get("sha256") or "").lower()
     if re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None or not hmac.compare_digest(
@@ -2013,6 +2112,9 @@ def _verified_ocr_source_bytes(
             "sha256",
             "source_type",
             "source_pages",
+            "page_count_schema",
+            "page_count_source",
+            "legacy_page_count_repair",
             "selected_start",
             "selected_end",
             "immutable_evidence",
@@ -2022,6 +2124,154 @@ def _verified_ocr_source_bytes(
     }
     public_record["path"] = rel
     return rel, data, public_record
+
+
+def _repair_legacy_ocr_source_page_count(
+    project_dir: Path,
+    project: dict,
+) -> dict | None:
+    """Return a repaired OCR source record only for the proven legacy defect.
+
+    The old importer retained the exact PDF bytes, size, SHA-256 and page range,
+    but dropped ``source_total`` while constructing its private import snapshot.
+    ``_preserve_original_ocr_source`` then persisted the fallback value 1.  A
+    repair is therefore allowed only for the legacy schema, the sentinel value
+    1, a hash/size-verified PDF, and a *previously committed immutable* audit
+    snapshot that independently records the same bytes as an N-page source.
+    Every other mismatch remains fail-closed.
+    """
+    if project.get("kind") != "ocr":
+        return None
+    source_info = project.get("ocr_source")
+    if not isinstance(source_info, dict):
+        return None
+    if (
+        source_info.get("source_type") != "pdf"
+        or source_info.get("immutable_evidence") is not True
+        or "page_count_schema" in source_info
+        or "legacy_page_count_repair" in source_info
+    ):
+        return None
+    recorded = source_info.get("source_pages")
+    raw_start = source_info.get("selected_start")
+    raw_end = source_info.get("selected_end")
+    try:
+        recorded = _strict_page_number(recorded)
+        selected_start = _strict_page_number(raw_start)
+        selected_end = _strict_page_number(raw_end)
+    except ValueError:
+        return None
+    if recorded != 1 or selected_start < 1 or selected_start > selected_end:
+        return None
+
+    verified = _verified_ocr_source_bytes(project_dir, source_info, required=True)
+    if verified is None:  # pragma: no cover - required=True cannot return None
+        return None
+    _rel, source_bytes, verified_record = verified
+    try:
+        import pymupdf
+
+        document = pymupdf.open(stream=source_bytes, filetype="pdf")
+        try:
+            actual_page_count = int(document.page_count)
+        finally:
+            document.close()
+    except Exception:
+        return None
+    if actual_page_count <= 1 or selected_end > actual_page_count:
+        return None
+
+    # Do not infer a repair from mutable project metadata plus the current PDF.
+    # The latest committed submission is loaded through the public store API,
+    # which verifies its descriptor, control files, content-addressed blobs,
+    # artifact identities and snapshot fingerprint before returning anything.
+    latest_pointer = project_dir / "audit-submissions" / "latest.json"
+    if latest_pointer.is_symlink() or not latest_pointer.is_file():
+        return None
+    try:
+        from .audit_store import AuditSubmissionStore
+
+        audit_store = AuditSubmissionStore(project_dir)
+        latest = audit_store.latest()
+        if latest is None:
+            return None
+        authority = audit_store.load_snapshot(latest.snapshot_id)
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
+    if (
+        str(authority.project_id) != str(project.get("id") or "")
+        or not hmac.compare_digest(
+            authority.current_fingerprint,
+            latest.snapshot_fingerprint,
+        )
+        or authority.workflow
+        not in {AuditWorkflow.OCR_ONLY, AuditWorkflow.OCR_ANALYSIS_REVIEW}
+        or str(authority.metadata.get("project_kind") or "") != "ocr"
+        or authority.source_pdf is None
+        or authority.source_pdf.page_count != actual_page_count
+    ):
+        return None
+    authority_range = authority.source_pdf.selected_page_range
+    expected_pages = tuple(range(selected_start, selected_end + 1))
+    if (
+        authority_range.start != selected_start
+        or authority_range.end != selected_end
+        or authority_range.pages != expected_pages
+    ):
+        return None
+    source_artifacts = [
+        artifact
+        for artifact in authority.artifacts
+        if artifact.artifact_role == ArtifactRole.SOURCE_PDF
+    ]
+    if len(source_artifacts) != 1:
+        return None
+    frozen_source = source_artifacts[0]
+    if frozen_source.data != source_bytes:
+        return None
+    frozen_meta = frozen_source.metadata
+    frozen_pages = frozen_meta.get("source_pages")
+    frozen_start = frozen_meta.get("selected_start")
+    frozen_end = frozen_meta.get("selected_end")
+    frozen_bytes = frozen_meta.get("bytes")
+    if isinstance(frozen_bytes, bool) or not isinstance(frozen_bytes, int):
+        return None
+    try:
+        frozen_pages = _strict_page_number(frozen_pages)
+        frozen_start = _strict_page_number(frozen_start)
+        frozen_end = _strict_page_number(frozen_end)
+    except ValueError:
+        return None
+    if (
+        frozen_meta.get("source_type") != "pdf"
+        or frozen_meta.get("immutable_evidence") is not True
+        or "page_count_schema" in frozen_meta
+        or "legacy_page_count_repair" in frozen_meta
+        or frozen_pages != 1
+        or frozen_start != selected_start
+        or frozen_end != selected_end
+        or frozen_bytes != len(source_bytes)
+        or not hmac.compare_digest(
+            str(frozen_meta.get("sha256") or "").lower(),
+            verified_record["sha256"],
+        )
+    ):
+        return None
+
+    repaired = deepcopy(source_info)
+    repaired.update({
+        "source_pages": actual_page_count,
+        "page_count_schema": OCR_SOURCE_PAGE_COUNT_SCHEMA,
+        "page_count_source": "host_reparsed_hash_bound_pdf_and_immutable_run_snapshot",
+        "legacy_page_count_repair": {
+            "migration_id": OCR_LEGACY_PAGE_COUNT_REPAIR_ID,
+            "from": 1,
+            "to": actual_page_count,
+            "source_sha256": verified_record["sha256"],
+            "authority_snapshot_id": authority.snapshot_id,
+        },
+    })
+    return repaired
 
 
 def _quality_loop_inputs(
@@ -2119,14 +2369,10 @@ def _quality_loop_inputs(
 
     def page_number(field: str, label: str) -> int:
         raw = source_record.get(field)
-        if isinstance(raw, bool):
-            raise ValueError(f"OCR {label}记录无效，已阻止质量闭环")
         try:
-            value = int(raw)
-        except (TypeError, ValueError):
+            value = _strict_page_number(raw)
+        except ValueError:
             raise ValueError(f"OCR {label}记录无效，已阻止质量闭环") from None
-        if value < 1:
-            raise ValueError(f"OCR {label}记录无效，已阻止质量闭环")
         return value
 
     recorded_page_count = page_number("source_pages", "总页数")
@@ -5931,7 +6177,39 @@ def create_app(updated_from: str = "") -> FastAPI:
                           progress_callback=None, control_callback=None, commit_callback=None,
                           config_snapshot: Optional[AppConfig] = None,
                           audit_capture: Optional[dict] = None):
+        def preflight_progress(progress: float, message: str) -> None:
+            if audit_capture is not None:
+                audit_capture.setdefault("events", []).append({
+                    "at": time.time(),
+                    "phase": "preflight",
+                    "message": message,
+                })
+                audit_capture["events"] = audit_capture["events"][-80:]
+            if progress_callback:
+                progress_callback("preflight", progress, message, {})
+
+        preflight_progress(0.01, "正在核对不可变输入快照")
+        if control_callback:
+            control_callback()
         p = get_store().get(pid)
+        project_dir = Path(get_store()._dir(pid))
+        repaired_source = _repair_legacy_ocr_source_page_count(project_dir, p)
+        if repaired_source is not None:
+            meta_path = project_dir / "meta.json"
+            stored_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if stored_meta.get("ocr_source") != p.get("ocr_source"):
+                raise ValueError("OCR 项目元数据在页数迁移期间发生改变，已阻止处理")
+            stored_meta["ocr_source"] = repaired_source
+            _project_audit_store(pid).invalidate_before_state_change(
+                lambda: get_store()._write_json(
+                    str(project_dir),
+                    "meta.json",
+                    stored_meta,
+                ),
+                "OCR 原始 PDF 页数记录已由不可变快照迁移",
+            )
+            p = get_store().get(pid)
+            preflight_progress(0.015, "已按不可变审计快照修复旧版页数记录")
         text = get_store().read_source(pid)
         # Background tasks receive the complete settings snapshot captured when the
         # user started them.  A later settings save must not change either their
@@ -6319,9 +6597,16 @@ def create_app(updated_from: str = "") -> FastAPI:
                         "audit_submission",
                         0.99,
                         "正在冻结终态并生成 AI 审计轻量材料",
-                        {},
+                        {"scope": "finalization"},
                     )
                 _persist_terminal_audit_snapshot(pid, snapshot)
+                if progress_callback:
+                    progress_callback(
+                        "audit_submission",
+                        1.0,
+                        "终态审计材料已保存",
+                        {"scope": "finalization"},
+                    )
                 return result
             except ProcessingCancelled as exc:
                 audit_capture["finished"] = time.time()
@@ -6338,9 +6623,16 @@ def create_app(updated_from: str = "") -> FastAPI:
                         "audit_submission",
                         0.99,
                         "正在保存取消前已有阶段和错误记录",
-                        {},
+                        {"scope": "finalization"},
                     )
                 _persist_terminal_audit_snapshot(pid, snapshot)
+                if progress_callback:
+                    progress_callback(
+                        "audit_submission",
+                        1.0,
+                        "取消任务审计材料已保存",
+                        {"scope": "finalization"},
+                    )
                 raise
             except Exception as exc:
                 audit_capture["finished"] = time.time()
@@ -6357,9 +6649,16 @@ def create_app(updated_from: str = "") -> FastAPI:
                         "audit_submission",
                         0.99,
                         "正在保存失败前已有阶段和错误记录",
-                        {},
+                        {"scope": "finalization"},
                     )
                 _persist_terminal_audit_snapshot(pid, snapshot)
+                if progress_callback:
+                    progress_callback(
+                        "audit_submission",
+                        1.0,
+                        "失败任务审计材料已保存",
+                        {"scope": "finalization"},
+                    )
                 raise
             finally:
                 _end_pipeline_run()

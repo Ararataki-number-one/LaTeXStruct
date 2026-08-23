@@ -12,10 +12,23 @@ from fastapi.testclient import TestClient
 from latexstruct.server import app as server
 from latexstruct.server.audit_store import AuditSubmissionStore
 
+pymupdf = pytest.importorskip("pymupdf")
+
 
 _ONE_PIXEL_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+
+
+def _pdf_bytes(page_count: int) -> bytes:
+    document = pymupdf.open()
+    try:
+        for page_number in range(1, page_count + 1):
+            page = document.new_page(width=300, height=420)
+            page.insert_text((36, 54), f"source page {page_number}")
+        return document.tobytes(garbage=4, deflate=True)
+    finally:
+        document.close()
 
 
 def _terminal_job(job_id: str, *, low_conf: bool = False) -> dict:
@@ -117,6 +130,7 @@ def test_bundle_manifest_binds_source_processing_and_resource_quality(tmp_path):
     data, manifest = server._ocr_bundle_bytes(job, job["raw_tex"])
 
     assert manifest["source_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert manifest["source_total"] == 1
     assert manifest["processing"] == {
         "profile": "publication",
         "transcription_source": "full_page_visual_plus_bounded_pdf_evidence",
@@ -144,10 +158,15 @@ def test_bundle_manifest_binds_source_processing_and_resource_quality(tmp_path):
 
 def test_original_ocr_pdf_is_preserved_as_hash_bound_project_evidence(tmp_path):
     source = tmp_path / "upload.pdf"
-    source.write_bytes(b"%PDF-1.7\nimmutable-source-evidence")
+    source.write_bytes(_pdf_bytes(3))
     project = tmp_path / "project"
     project.mkdir()
     job = _terminal_job("d" * 32)
+    job.update({
+        "source_total": 3,
+        "selected_end": 3,
+        "selected_pages": [1, 2, 3],
+    })
     job["target"] = str(source)
     job["_source_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
 
@@ -157,8 +176,113 @@ def test_original_ocr_pdf_is_preserved_as_hash_bound_project_evidence(tmp_path):
     assert stored.read_bytes() == source.read_bytes()
     assert record["path"] == "ocr-source.pdf"
     assert record["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
-    assert record["source_pages"] == 1
+    assert record["source_pages"] == 3
+    assert record["page_count_schema"] == server.OCR_SOURCE_PAGE_COUNT_SCHEMA
+    assert record["page_count_source"] == "host_reparsed_hash_bound_source"
     assert record["immutable_evidence"] is True
+
+
+def test_original_ocr_pdf_rejects_frozen_page_count_mismatch(tmp_path):
+    source = tmp_path / "upload.pdf"
+    source.write_bytes(_pdf_bytes(3))
+    project = tmp_path / "project"
+    project.mkdir()
+    job = _terminal_job("9" * 32)
+    job.update({
+        "target": str(source),
+        "source_total": 4,
+        "_source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    })
+
+    with pytest.raises(RuntimeError, match="页数与启动快照不一致"):
+        server._preserve_original_ocr_source(job, project)
+
+    assert list(project.glob("ocr-source.*")) == []
+
+
+def test_original_ocr_pdf_rejects_missing_frozen_page_count(tmp_path):
+    source = tmp_path / "upload.pdf"
+    source.write_bytes(_pdf_bytes(3))
+    project = tmp_path / "project"
+    project.mkdir()
+    job = _terminal_job("7" * 32)
+    job.update({
+        "target": str(source),
+        "selected_end": 3,
+        "selected_pages": [1, 2, 3],
+        "_source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    })
+    job.pop("source_total")
+
+    with pytest.raises(RuntimeError, match="缺少有效的冻结总页数"):
+        server._preserve_original_ocr_source(job, project)
+
+    assert list(project.glob("ocr-source.*")) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("source_total", 3.9, "缺少有效的冻结总页数"),
+        ("selected_start", 1.9, "冻结页范围无效"),
+        ("selected_end", 3.9, "冻结页范围无效"),
+        ("selected_pages", [1, 2.9, 3], "冻结页集合无效"),
+    ],
+)
+def test_original_ocr_pdf_rejects_fractional_frozen_page_metadata(
+    tmp_path,
+    field,
+    value,
+    message,
+):
+    source = tmp_path / "upload.pdf"
+    source.write_bytes(_pdf_bytes(3))
+    project = tmp_path / "project"
+    project.mkdir()
+    job = _terminal_job("5" * 32)
+    job.update({
+        "target": str(source),
+        "source_total": 3,
+        "selected_end": 3,
+        "selected_pages": [1, 2, 3],
+        "_source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        field: value,
+    })
+
+    with pytest.raises(RuntimeError, match=message):
+        server._preserve_original_ocr_source(job, project)
+
+    assert list(project.glob("ocr-source.*")) == []
+
+
+def test_private_ocr_import_snapshot_retains_original_document_total():
+    job = _terminal_job("8" * 32)
+    job.update({"source_total": 17, "selected_end": 17})
+
+    snapshot = server._snapshot_ocr_bundle_job(job)
+    job["source_total"] = 1
+
+    assert snapshot["source_total"] == 17
+
+
+@pytest.mark.parametrize("field", ["selected_start", "selected_end"])
+def test_private_ocr_import_snapshot_does_not_hide_boolean_page_range(field, tmp_path):
+    source = tmp_path / "upload.pdf"
+    source.write_bytes(_pdf_bytes(1))
+    project = tmp_path / "project"
+    project.mkdir()
+    job = _terminal_job("6" * 32)
+    job.update({
+        "target": str(source),
+        "_source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        field: True,
+    })
+
+    snapshot = server._snapshot_ocr_bundle_job(job)
+
+    assert snapshot[field] is True
+    with pytest.raises(RuntimeError, match="冻结页范围无效"):
+        server._preserve_original_ocr_source(snapshot, project)
 
 
 def test_original_source_rejects_changed_upload_before_project_copy(tmp_path):

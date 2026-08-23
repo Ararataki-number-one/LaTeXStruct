@@ -93,8 +93,20 @@ class ProcessJobManager:
                     "codex_cli" if analysis_backend == "codex_cli" else "api"
                 ),
                 "events": [{"at": now, "phase": "queued", "message": "任务已创建"}],
+                # Events are intentionally bounded for polling.  Keep a small
+                # independent first-seen phase ledger so long OCR/book runs do
+                # not make completed early stages appear to have never run.
+                "reached_phases": ["queued"],
                 "result": None,
                 "error": "",
+                # Terminal audit packaging is a separate finalization track.
+                # It must never replace the business phase/progress that tells
+                # the user where processing actually stopped.
+                "finalization_phase": "",
+                "finalization_progress": None,
+                "finalization_message": "",
+                "failure_phase": "",
+                "failure_progress": None,
                 # Host-produced immutable stage snapshots.  They are kept out
                 # of public polling payloads and are consumed only by the audit
                 # submission builder after the task reaches a terminal state.
@@ -203,11 +215,46 @@ class ProcessJobManager:
             if not job or job.get("status") in TERMINAL_STATUSES:
                 return
             data = data or {}
+            if data.get("scope") == "finalization":
+                # Persisting the terminal RunSnapshot/lightweight audit files
+                # happens after the business pipeline has either completed or
+                # raised.  Keep that activity observable without making an
+                # early preflight failure look like a 99% pipeline failure.
+                try:
+                    bounded_progress = min(1.0, max(0.0, float(progress)))
+                except (TypeError, ValueError):
+                    bounded_progress = 0.0
+                previous_progress = job.get("finalization_progress")
+                if isinstance(previous_progress, (int, float)):
+                    bounded_progress = max(float(previous_progress), bounded_progress)
+                job["finalization_phase"] = str(phase or "finalization")
+                job["finalization_progress"] = round(bounded_progress, 4)
+                job["finalization_message"] = str(message or "")
+                now = time.time()
+                job["updated"] = now
+                last = job["events"][-1] if job["events"] else {}
+                if (
+                    last.get("phase") != phase
+                    or last.get("message") != message
+                    or last.get("scope") != "finalization"
+                ):
+                    job["events"].append({
+                        "at": now,
+                        "phase": phase,
+                        "message": message,
+                        "scope": "finalization",
+                    })
+                    job["events"] = job["events"][-40:]
+                self._changed.notify_all()
+                return
             previous_safe_to_export = job.get("safe_to_export")
             job["phase"] = phase
             job["phase_label"] = message
             job["message"] = message
             job["progress"] = round(max(job.get("progress", 0.0), min(1.0, progress)), 4)
+            reached_phases = job.setdefault("reached_phases", [])
+            if phase and phase not in reached_phases:
+                reached_phases.append(phase)
             preserve_failed_draft = bool(
                 (data.get("safe_to_export") is False or previous_safe_to_export is False)
                 and phase in {"report", "ready"}
@@ -323,6 +370,9 @@ class ProcessJobManager:
             job["phase_label"] = "正在保存已验证结果"
             job["message"] = "安全检查已完成，正在原子保存"
             job["progress"] = max(0.99, job.get("progress", 0.0))
+            reached_phases = job.setdefault("reached_phases", [])
+            if "commit" not in reached_phases:
+                reached_phases.append("commit")
             job["updated"] = time.time()
             self._changed.notify_all()
 
@@ -340,6 +390,9 @@ class ProcessJobManager:
                 if passed else str(result.get("failure_summary") or "安全检查未通过；失败草稿已保留供检查")[:500]
             )
             job["progress"] = 1.0
+            reached_phases = job.setdefault("reached_phases", [])
+            if job["phase"] not in reached_phases:
+                reached_phases.append(job["phase"])
             job["result"] = result
             preview_state = str(result.get("preview_state") or "SOURCE_PREVIEW")
             job["preview_state"] = (
@@ -376,6 +429,15 @@ class ProcessJobManager:
             job = self._jobs.get(jid)
             if not job:
                 return
+            if not job.get("failure_phase"):
+                job["failure_phase"] = str(job.get("phase") or "queued")
+                try:
+                    job["failure_progress"] = round(
+                        min(1.0, max(0.0, float(job.get("progress") or 0.0))),
+                        4,
+                    )
+                except (TypeError, ValueError):
+                    job["failure_progress"] = 0.0
             job["status"] = "error"
             job["phase"] = "error"
             job["phase_label"] = "处理未完成"

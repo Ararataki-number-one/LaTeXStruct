@@ -617,6 +617,37 @@ def test_mark_outdated_submissions_compares_immutable_fingerprint(store):
     assert store.get_submission(current.submission_id).stale_reason == "current TeX changed"
 
 
+def test_state_change_invalidates_every_package_before_mutation(store):
+    snapshot = _snapshot()
+    lightweight = store.create_lightweight(snapshot)
+    archive = store.generate_zip(snapshot.snapshot_id)
+    observed = {}
+
+    def mutate():
+        observed["lightweight"] = store.get_submission(lightweight.submission_id)
+        observed["archive"] = store.get_submission(archive.submission_id)
+
+    marked = store.invalidate_before_state_change(mutate, "source metadata changed")
+
+    assert set(marked) == {lightweight.submission_id, archive.submission_id}
+    assert observed["lightweight"].stale is True
+    assert observed["archive"].stale is True
+    assert observed["lightweight"].current_fingerprint == ""
+    assert observed["archive"].current_fingerprint == ""
+
+
+def test_failed_state_change_remains_fail_closed_with_stale_package(store):
+    submission = store.create_lightweight(_snapshot())
+
+    def fail():
+        raise OSError("simulated metadata write failure")
+
+    with pytest.raises(OSError, match="simulated metadata write failure"):
+        store.invalidate_before_state_change(fail, "source metadata changed")
+
+    assert store.get_submission(submission.submission_id).stale is True
+
+
 def test_mark_outdated_skips_corrupt_history_without_weakening_direct_reads(store):
     first = store.create_lightweight(_snapshot(suffix=b"-old"))
     first_control = (

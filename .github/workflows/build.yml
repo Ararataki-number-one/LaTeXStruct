@@ -292,7 +292,7 @@ jobs:
         run: |
           # 只需在发布时更换这一处基线。测试下面的完整链路：
           # schedule_installer_after_exit -> 旧应用退出 -> 安装 -> 新应用重启。
-          $previousVersion = '1.2.7'
+          $previousVersion = '1.2.8'
           $previousTag = "v$previousVersion"
           $headers = @{
             'User-Agent' = 'latexstruct-upgrade-smoke'

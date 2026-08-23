@@ -143,3 +143,71 @@ def test_progress_is_monotonic_and_preview_is_private_from_status():
 
     manager.update(job["id"], "newer", 0.95, "正文变化", {"preview": "newer draft"})
     assert manager.preview_snapshot(job) == ("newer draft", 3)
+
+
+def test_terminal_audit_finalization_does_not_replace_business_failure_position():
+    manager = ProcessJobManager()
+    job = manager.create("project-preflight-failure", "source")
+    manager.update(job["id"], "preflight", 0.01, "正在核对不可变输入快照")
+
+    manager.update(
+        job["id"],
+        "audit_submission",
+        0.99,
+        "正在保存失败前已有阶段和错误记录",
+        {"scope": "finalization"},
+    )
+    during_finalization = manager.public(job)
+    assert during_finalization["phase"] == "preflight"
+    assert during_finalization["progress"] == 0.01
+    assert during_finalization["message"] == "正在核对不可变输入快照"
+    assert during_finalization["finalization_phase"] == "audit_submission"
+    assert during_finalization["finalization_progress"] == 0.99
+    assert during_finalization["finalization_message"] == "正在保存失败前已有阶段和错误记录"
+    assert during_finalization["events"][-1]["scope"] == "finalization"
+
+    manager.fail(job["id"], "OCR 原始 PDF 页数与不可变快照不一致")
+    failed = manager.public(job)
+    assert failed["phase"] == "error"
+    assert failed["progress"] == 0.01
+    assert failed["failure_phase"] == "preflight"
+    assert failed["failure_progress"] == 0.01
+
+
+def test_commit_failure_records_commit_as_the_real_failure_position():
+    manager = ProcessJobManager()
+    job = manager.create("project-commit-failure", "source")
+    manager.update(job["id"], "report", 0.96, "正在汇总报告")
+    manager.begin_commit(job["id"])
+    manager.update(
+        job["id"],
+        "audit_submission",
+        0.99,
+        "正在保存失败前已有阶段和错误记录",
+        {"scope": "finalization"},
+    )
+
+    manager.fail(job["id"], "保存失败")
+    failed = manager.public(job)
+    assert failed["failure_phase"] == "commit"
+    assert failed["failure_progress"] == 0.99
+    assert failed["progress"] == 0.99
+
+
+def test_reached_phase_ledger_survives_bounded_event_history():
+    manager = ProcessJobManager()
+    job = manager.create("project-long-run", "source")
+    manager.update(job["id"], "preflight", 0.01, "输入检查", {})
+    for index in range(50):
+        manager.update(
+            job["id"],
+            "decide",
+            0.02 + (index / 100),
+            f"候选 {index}",
+            {},
+        )
+
+    state = manager.public(job)
+    assert len(state["events"]) == 40
+    assert all(event["phase"] != "preflight" for event in state["events"])
+    assert state["reached_phases"] == ["queued", "preflight", "decide"]

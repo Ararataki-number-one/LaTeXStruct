@@ -2763,6 +2763,8 @@ def test_zip_import_strips_wrapper_and_defers_processing():
         )
         assert state["status"] == "done", state
         assert state["result"]["ok"] is True
+        assert state["finalization_progress"] == 1.0
+        assert state["finalization_message"] == "终态审计材料已保存"
         exported = c.get(f"/api/projects/{pid}/export-folder")
         assert exported.status_code == 200
         with zipfile.ZipFile(io.BytesIO(exported.content)) as zf:
@@ -2981,6 +2983,56 @@ def test_task_error_hides_internal_json_runtime_type():
     assert "更新到最新版本" in message
 
 
+def test_background_preflight_failure_keeps_one_percent_business_progress():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        pid = c.post(
+            "/api/projects",
+            json={"text": SAMPLE, "name": "preflight-failure", "mode": "rule"},
+        ).json()["id"]
+        with patch.object(srv, "run_pipeline", side_effect=RuntimeError("simulated preflight failure")):
+            assert c.post(f"/api/projects/{pid}/process/start").status_code == 200
+            state = _wait_for_json(
+                c,
+                f"/api/projects/{pid}/process/status",
+                lambda item: item["status"] in {"done", "blocked", "error", "cancelled"},
+            )
+
+        assert state["status"] == "error", state
+        assert state["phase"] == "error"
+        assert state["progress"] == 0.01
+        assert state["failure_phase"] == "preflight"
+        assert state["failure_progress"] == 0.01
+        assert state["finalization_phase"] == "audit_submission"
+        assert state["finalization_progress"] == 1.0
+        assert state["finalization_message"] == "失败任务审计材料已保存"
+
+
+def test_background_cancellation_finishes_audit_finalization_track():
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        pid = c.post(
+            "/api/projects",
+            json={"text": SAMPLE, "name": "cancel-finalization", "mode": "rule"},
+        ).json()["id"]
+        with patch.object(
+            srv,
+            "run_pipeline",
+            side_effect=srv.ProcessingCancelled("simulated cancellation"),
+        ):
+            assert c.post(f"/api/projects/{pid}/process/start").status_code == 200
+            state = _wait_for_json(
+                c,
+                f"/api/projects/{pid}/process/status",
+                lambda item: item["status"] in {"done", "blocked", "error", "cancelled"},
+            )
+
+        assert state["status"] == "cancelled", state
+        assert state["finalization_phase"] == "audit_submission"
+        assert state["finalization_progress"] == 1.0
+        assert state["finalization_message"] == "取消任务审计材料已保存"
+
+
 def test_background_commit_failure_never_reports_one_hundred_percent():
     with WorkspaceTmp() as tmp:
         c = _client(tmp)
@@ -3000,6 +3052,11 @@ def test_background_commit_failure_never_reports_one_hundred_percent():
         assert state["status"] == "error", state
         assert state["phase"] == "error"
         assert state["progress"] == 0.99
+        assert state["failure_phase"] == "commit"
+        assert state["failure_progress"] == 0.99
+        assert state["finalization_phase"] == "audit_submission"
+        assert state["finalization_progress"] == 1.0
+        assert state["finalization_message"] == "失败任务审计材料已保存"
         assert c.get(f"/api/projects/{pid}/result").status_code == 404
 
 

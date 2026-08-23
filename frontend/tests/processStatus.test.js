@@ -9,6 +9,10 @@ import {
 
 
 test("quality stages use plain-language labels and expose the current stage", () => {
+  assert.deepEqual(describeProcessPhase("preflight"), {
+    label: "正在核对输入证据",
+    help: "验证冻结源文件、哈希、页数和选择范围。",
+  });
   assert.deepEqual(describeProcessPhase("full-review"), {
     label: "正在全文独立复核",
     help: "检查初次扫描未发现的漏套、错套和多套。",
@@ -31,6 +35,44 @@ test("quality stages use plain-language labels and expose the current stage", ()
   assert.equal(trail.find((stage) => stage.id === "quality-visual").state, "current");
   assert.equal(trail.find((stage) => stage.id === "quality-compile").state, "completed");
   assert.equal(trail.find((stage) => stage.id === "final-inventory").state, "pending");
+});
+
+
+test("a preflight exception marks the input gate failed instead of every core stage unrun", () => {
+  const trail = buildProcessStageTrail({
+    status: "error",
+    phase: "error",
+    failure_phase: "preflight",
+    failure_progress: 0.01,
+    events: [
+      { phase: "queued" },
+      { phase: "preflight" },
+      { phase: "audit_submission", scope: "finalization" },
+      { phase: "error" },
+    ],
+  });
+
+  assert.equal(trail.find((stage) => stage.id === "preflight").state, "failed");
+  assert.equal(trail.find((stage) => stage.id === "inventory").state, "skipped");
+  assert.equal(trail.find((stage) => stage.id === "gate").state, "skipped");
+});
+
+
+test("bounded event history cannot erase an early completed stage", () => {
+  const trail = buildProcessStageTrail({
+    status: "error",
+    phase: "error",
+    failure_phase: "quality-compile",
+    reached_phases: ["queued", "preflight", "parse", "scan", "decide", "quality-compile"],
+    events: Array.from({ length: 40 }, (_, index) => ({
+      phase: "quality-compile",
+      message: `compile ${index}`,
+    })),
+  });
+
+  assert.equal(trail.find((stage) => stage.id === "preflight").state, "completed");
+  assert.equal(trail.find((stage) => stage.id === "inventory").state, "completed");
+  assert.equal(trail.find((stage) => stage.id === "quality-compile").state, "failed");
 });
 
 

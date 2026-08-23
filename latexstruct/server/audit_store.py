@@ -25,7 +25,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from ..core.audit_schema import (
     AuditArtifact,
@@ -1243,6 +1243,55 @@ class AuditSubmissionStore:
                     )
                     marked.append(submission.submission_id)
         return tuple(marked)
+
+    def invalidate_before_state_change(
+        self,
+        mutation: Callable[[], None],
+        reason: str,
+    ) -> tuple[str, ...]:
+        """Stale every intact package before an externally stored state change.
+
+        The audit commit lock stays held through ``mutation`` so a concurrent
+        ZIP cannot become fresh between invalidation and the host's atomic
+        metadata write.  Invalidation deliberately happens first: a crash may
+        conservatively leave an unchanged project with stale packages, but can
+        never leave changed host state pointing at a package still called
+        current.  The caller may safely retry because snapshots and ZIPs remain
+        immutable; only stale sidecars are written here.
+        """
+        if not callable(mutation):
+            raise TypeError("state change mutation must be callable")
+        reason = str(reason or "").strip()
+        if not reason:
+            raise ValueError("state change invalidation requires an explicit reason")
+        with self._commit_lock:
+            marked = []
+            directory = self._root / "submissions"
+            if directory.is_dir():
+                for child in sorted(directory.iterdir(), key=lambda path: path.name):
+                    if not child.is_dir() or not _SAFE_ID_RE.fullmatch(child.name):
+                        continue
+                    try:
+                        submission = self.get_submission(child.name)
+                    except (KeyError, OSError, TypeError, ValueError):
+                        continue
+                    if submission.stale:
+                        continue
+                    self._write_stale_record(
+                        submission_id=submission.submission_id,
+                        snapshot_fingerprint=submission.snapshot_fingerprint,
+                        # The mutation has not happened yet, so no immutable
+                        # post-change RunSnapshot exists whose fingerprint can
+                        # honestly be recorded.  An empty value is the
+                        # fail-closed representation of that deliberately
+                        # unknown future identity; the next terminal snapshot
+                        # will establish the new authoritative fingerprint.
+                        current_fingerprint="",
+                        reason=reason,
+                    )
+                    marked.append(submission.submission_id)
+            mutation()
+            return tuple(marked)
 
     def download_path(self, submission_id: str) -> Path:
         """Resolve a verified local ZIP path for FileResponse/streaming only."""
