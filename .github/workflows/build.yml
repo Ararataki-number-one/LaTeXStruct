@@ -67,16 +67,17 @@ jobs:
           & $tlmgr.FullName update --self
           if ($LASTEXITCODE -ne 0) { Write-Error "TinyTeX 包管理器更新失败"; exit 1 }
           # amssymb.sty 属于 amsfonts，amsthm.sty 属于 amscls；这里必须使用
-          # TeX Live 的发行包名，而不是 .sty 文件名。bbm.sty 属于 bbm-macros，
-          # 其字体属于 bbm，两者均需安装。TinyTeX-0 不会自动安装下列全部
-          # 运行时依赖，因此这里显式列出并在后面逐文件验证。
-          & $tlmgr.FullName install xetex elegantbook amsmath amsfonts amscls geometry tcolorbox etoolbox graphics titlesec fancyhdr etoc caption microtype algorithms algorithmicx kvoptions float bbm bbm-macros fontspec tikzfill
+          # TeX Live 的发行包名，而不是 .sty 文件名。ElegantBook 没有在
+          # TeX Live 元数据中声明全部运行时依赖，OCR_PREAMBLE 也会直接加载
+          # 数学、表格和 TikZ-CD 包；因此必须显式安装并在后面逐文件验证。
+          # bbm.sty 属于 bbm-macros，而其字体属于 bbm，两者均需安装。
+          & $tlmgr.FullName install xetex elegantbook amsmath amsfonts amscls geometry tcolorbox etoolbox graphics titlesec fancyhdr etoc caption microtype algorithms algorithmicx kvoptions float bbm bbm-macros fontspec tikzfill setspace csquotes hyperref tools comment newtx psnfss tex-gyre ctex anyfontsize esint xcolor colortbl mwe blindtext enumitem footmisc jknapltx booktabs multirow fancyvrb makecell lipsum hologo appendix pgf tikz-cd apptools manfnt manfnt-font knuth-lib bbding adforn listings listingsutf8 incgraph tocloft pdfcol ltxcmds stmaryrd biblatex iftex environ logreq trimspaces adjustbox mdframed paratype unicode-math stix2-otf wasysym thmtools pdfpages bookmark
           if ($LASTEXITCODE -ne 0) { Write-Error "TinyTeX 依赖安装失败"; exit 1 }
           $kpsewhich = Join-Path $bin 'kpsewhich.exe'
           $xelatex = Join-Path $bin 'xelatex.exe'
           if (-not (Test-Path $kpsewhich)) { Write-Error "TinyTeX 缺少 kpsewhich"; exit 1 }
           if (-not (Test-Path $xelatex)) { Write-Error "TinyTeX 缺少 xelatex"; exit 1 }
-          foreach ($file in @('elegantbook.cls', 'amsmath.sty', 'amssymb.sty', 'amsthm.sty', 'tcolorbox.sty', 'etoolbox.sty', 'titlesec.sty', 'fancyhdr.sty', 'etoc.sty', 'caption.sty', 'microtype.sty', 'algorithm.sty', 'algpseudocode.sty', 'kvoptions.sty', 'float.sty', 'bbm.sty', 'bbm10.mf', 'fontspec.sty', 'tikzfill.image.sty')) {
+          foreach ($file in @('elegantbook.cls', 'amsmath.sty', 'amssymb.sty', 'amsthm.sty', 'tcolorbox.sty', 'etoolbox.sty', 'titlesec.sty', 'fancyhdr.sty', 'etoc.sty', 'caption.sty', 'microtype.sty', 'algorithm.sty', 'algpseudocode.sty', 'kvoptions.sty', 'float.sty', 'bbm.sty', 'bbm10.mf', 'fontspec.sty', 'tikzfill.image.sty', 'setspace.sty', 'csquotes.sty', 'hyperref.sty', 'ltxcmds.sty', 'ctex.sty', 'xeCJK.sty', 'FandolSong-Regular.otf', 'esint.sty', 'stmaryrd.sty', 'booktabs.sty', 'multirow.sty', 'tikz.sty', 'tikzlibrarycd.code.tex', 'biblatex.sty', 'logreq.sty', 'newtxmath.sty', 'TeXGyreTermesX-Regular.otf', 'texgyreheros-regular.otf', 'STIXTwoMath-Regular.otf', 'enumitem.sty', 'footmisc.sty', 'makecell.sty', 'appendix.sty', 'apptools.sty', 'pifont.sty', 'manfnt.sty', 'manfnt.pfb', 'manfnt.tfm', 'bbding.sty', 'adforn.sty', 'listings.sty', 'listingsutf8.sty', 'incgraph.sty', 'tocloft.sty', 'pdfcol.sty', 'trimspaces.sty', 'adjustbox.sty', 'mdframed.sty', 'paratype.sty', 'unicode-math.sty', 'wasysym.sty', 'tabularx.sty', 'thmtools.sty', 'pdfpages.sty', 'bookmark.sty', 'colortbl.sty')) {
             $resolved = & $kpsewhich $file
             if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($resolved)) {
               Write-Error "TinyTeX 依赖缺失: $file"; exit 1
