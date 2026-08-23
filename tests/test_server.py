@@ -335,6 +335,142 @@ def test_export_package_carries_hash_bound_compiled_preview():
             assert artifact["sha256"] == hashlib.sha256(preview_pdf).hexdigest()
 
 
+def test_ocr_raw_partial_pdf_survives_temp_compile_and_enters_audit_snapshot():
+    from latexstruct.core.ocrstruct import encode_ocr_metadata
+    from latexstruct.core.preview import preview_storage_filename
+    from latexstruct.server.audit_store import AuditSubmissionStore
+
+    raw_pdf = b"%PDF-raw-partial-after-temp-cleanup"
+    current_pdf = b"%PDF-current-complete-after-temp-cleanup"
+    metadata = encode_ocr_metadata(
+        [{"level": 0, "title": "Overview", "page": 1}],
+        "article",
+        [1],
+        False,
+    )
+    raw_ocr = "\n".join([
+        r"\documentclass{article}",
+        r"\begin{document}",
+        metadata,
+        "Overview",
+        "Raw OCR body.",
+        r"\end{document}",
+    ])
+    calls = 0
+    captured_snapshots = []
+
+    def fake_compile(_text, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            result = {
+                "available": True,
+                "ok": False,
+                "pages": 2,
+                "errors": ["Missing $ inserted. @l.95"],
+                "log": "Output written on main.pdf (2 pages).\n! Missing $ inserted.",
+                "preview_status": "PARTIAL_COMPILED",
+                "process_status": "FAILED",
+                "return_code": 1,
+                "fatal_line": 95,
+                "passes_requested": 1,
+                "passes_completed": 1,
+            }
+            if kwargs.get("include_pdf"):
+                result["pdf_bytes"] = raw_pdf
+            return result
+        result = {
+            "available": True,
+            "ok": True,
+            "pages": 1,
+            "errors": [],
+            "log": "Output written on main.pdf (1 page).",
+            "preview_status": "COMPILED",
+            "process_status": "SUCCESS",
+            "return_code": 0,
+            "fatal_line": None,
+            "passes_requested": 1,
+            "passes_completed": 1,
+        }
+        if kwargs.get("include_pdf"):
+            result["pdf_bytes"] = current_pdf
+        return result
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        pid = srv.get_store().create(
+            raw_ocr,
+            "OCR partial persistence",
+            "rule",
+            "",
+            kind="ocr",
+        )
+        directory = Path(srv.get_store()._dir(pid))
+        meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+        meta.update({
+            "ocr_source": {"available": False},
+            "ocr_resources": {
+                "assets": [],
+                "source_pages": [],
+                "formula_crops": [],
+            },
+            "ocr_outline": [],
+            "ocr_processing": {"model": "test-vision-model"},
+        })
+        srv.get_store()._write_json(str(directory), "meta.json", meta)
+
+        with patch(
+            "latexstruct.core.compilecheck.compile_latex",
+            side_effect=fake_compile,
+        ), patch.object(
+            AuditSubmissionStore,
+            "persist_terminal_snapshot",
+            side_effect=lambda snapshot: captured_snapshots.append(snapshot),
+        ):
+            processed = c.post(f"/api/projects/{pid}/process")
+        assert processed.status_code == 200, processed.text
+        assert calls == 2
+
+        info_path = (
+            directory / "verification.json"
+            if (directory / "verification.json").is_file()
+            else directory / "last-failure.json"
+        )
+        persisted = json.loads(info_path.read_text(encoding="utf-8"))
+        verification = (
+            persisted["verification"]
+            if "verification" in persisted
+            else persisted["details"]["verification"]
+        )
+        raw_evidence = verification["raw_preview_artifact"]
+        raw_digest = hashlib.sha256(raw_pdf).hexdigest()
+        assert raw_evidence["status"] == "PARTIAL_COMPILED"
+        assert raw_evidence["page_count"] == 2
+        assert raw_evidence["pdf_sha256"] == raw_digest
+        assert raw_evidence["exit_code"] == 1
+        assert raw_evidence["fatal_line"] == 95
+        assert raw_evidence["log_path"] == "audit/compile_raw.log"
+        raw_storage = directory / preview_storage_filename(
+            "PARTIAL_COMPILED", raw_digest
+        )
+        assert raw_storage.read_bytes() == raw_pdf
+
+        assert len(captured_snapshots) == 1
+        snapshot = captured_snapshots[0]
+        raw_preview = next(
+            item
+            for item in snapshot.artifacts
+            if item.artifact_role == "RAW_OCR_PREVIEW"
+        )
+        assert raw_preview.preview_status == "PARTIAL_COMPILED"
+        assert raw_preview.data == raw_pdf
+        assert raw_preview.bytes_sha256 == raw_digest
+        assert raw_preview.metadata["page_count"] == 2
+        assert raw_preview.metadata["compile_input_sha256"] == raw_evidence[
+            "compile_input_sha256"
+        ]
+
+
 def test_export_package_rejects_preview_evidence_inconsistent_with_compile_status():
     preview_pdf = b"%PDF-inconsistent-preview-status"
 
@@ -1304,6 +1440,185 @@ def test_config_masked():
                     os.environ["DASHSCOPE_API_KEY"] = old_key
         finally:
             configmod.CONFIG_PATH, srv.save_config, srv.load_config = old_path, old_save, old_load
+
+
+def test_config_connection_probe_reuses_only_same_role_same_authority(monkeypatch):
+    from latexstruct.config import AppConfig
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        srv._config = AppConfig(
+            decide_base_url="https://saved.example.invalid/v1",
+            decide_model="saved-decide-model",
+            decide_api_key="decide-role-secret",
+            review_base_url="https://saved.example.invalid/v1",
+            review_model="saved-review-model",
+            review_api_key="review-role-secret",
+        )
+        captured = {}
+
+        def successful_probe(client, system, user):
+            captured.update(
+                base_url=client.cfg.base_url,
+                model=client.cfg.model,
+                api_key=client.cfg.api_key,
+                timeout=client.cfg.timeout,
+                max_tokens=client.cfg.max_tokens,
+                max_retries=client.cfg.max_retries,
+                system=system,
+                user=user,
+            )
+            return {"ok": True}, {"prompt_tokens": 1}
+
+        monkeypatch.setattr("latexstruct.core.ai.LLMClient.chat_json", successful_probe)
+        response = c.post(
+            "/api/config/test-connection",
+            json={
+                "role": "decide",
+                # 同 authority 的路径变化允许复用该角色自己的已保存密钥。
+                "base_url": "https://saved.example.invalid/v2",
+                "model": "candidate-model",
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["ok"] is True
+        assert response.json()["role"] == "decide"
+        assert response.json()["model"] == "candidate-model"
+        assert captured["api_key"] == "decide-role-secret"
+        assert captured["api_key"] != "review-role-secret"
+        assert captured["base_url"] == "https://saved.example.invalid/v2"
+        assert captured["timeout"] == 20.0
+        assert captured["max_tokens"] == 16
+        assert captured["max_retries"] == 0
+        assert "decide-role-secret" not in response.text
+        assert "review-role-secret" not in response.text
+        assert srv._config.decide_api_key == "decide-role-secret"
+        assert not os.path.exists(os.path.join(tmp, "config.json"))
+
+
+def test_config_connection_probe_rejects_cross_authority_without_new_key(monkeypatch):
+    from latexstruct.config import AppConfig
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        srv._config = AppConfig(
+            decide_base_url="https://saved.example.invalid/v1",
+            decide_model="saved-model",
+            decide_api_key="must-never-leave-saved-host",
+        )
+        calls = []
+
+        def should_not_run(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("跨 authority 且未给新 Key 时不应发出模型请求")
+
+        monkeypatch.setattr("latexstruct.core.ai.LLMClient.chat_json", should_not_run)
+        response = c.post(
+            "/api/config/test-connection",
+            json={
+                "role": "decide",
+                "base_url": "https://different.example.invalid/v1",
+                "model": "candidate-model",
+            },
+        )
+
+        assert response.status_code == 400
+        assert "新 API Key" in response.json()["detail"]
+        assert "must-never-leave-saved-host" not in response.text
+        assert calls == []
+
+
+def test_config_connection_probe_matches_runtime_same_authority_key_fallback(monkeypatch):
+    from latexstruct.config import AppConfig
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        srv._config = AppConfig(
+            decide_base_url="https://shared.example.invalid/v1",
+            decide_model="decide-model",
+            decide_api_key="one-shared-secret",
+            review_base_url="https://shared.example.invalid/review/v1",
+            review_model="review-model",
+            review_api_key="",
+            ocr_base_url="https://shared.example.invalid/vision/v1",
+            ocr_model="vision-model",
+            ocr_api_key="",
+        )
+        captured = []
+
+        def successful_probe(client, _system, _user):
+            captured.append((client.cfg.base_url, client.cfg.api_key))
+            return {"ok": True}, {"prompt_tokens": 1}
+
+        monkeypatch.setattr("latexstruct.core.ai.LLMClient.chat_json", successful_probe)
+        for role, path, model in (
+            ("review", "/review/candidate", "candidate-review"),
+            ("ocr", "/vision/candidate", "candidate-vision"),
+        ):
+            response = c.post(
+                "/api/config/test-connection",
+                json={
+                    "role": role,
+                    "base_url": f"https://shared.example.invalid{path}",
+                    "model": model,
+                },
+            )
+            assert response.status_code == 200, response.text
+
+        assert captured == [
+            ("https://shared.example.invalid/review/candidate", "one-shared-secret"),
+            ("https://shared.example.invalid/vision/candidate", "one-shared-secret"),
+        ]
+
+        # The same fallback credential must never follow a requested role to a
+        # different authority.
+        blocked = c.post(
+            "/api/config/test-connection",
+            json={
+                "role": "ocr",
+                "base_url": "https://other.example.invalid/v1",
+                "model": "candidate-vision",
+            },
+        )
+        assert blocked.status_code == 400
+        assert len(captured) == 2
+
+
+def test_config_connection_probe_uses_explicit_key_once_and_redacts_errors(monkeypatch):
+    from latexstruct.config import AppConfig
+    from latexstruct.core.ai import LLMError
+
+    with WorkspaceTmp() as tmp:
+        c = _client(tmp)
+        srv._config = AppConfig(
+            ocr_base_url="https://saved-vision.example.invalid/v1",
+            ocr_model="saved-vision-model",
+            ocr_api_key="stored-vision-secret",
+        )
+        one_time_secret = "qwen-one-time-secret-value"
+
+        def failed_probe(client, _system, _user):
+            assert client.cfg.api_key == one_time_secret
+            assert client.cfg.base_url == "https://new-vision.example.invalid/v1"
+            raise LLMError(f"供应商意外回显了 {one_time_secret}")
+
+        monkeypatch.setattr("latexstruct.core.ai.LLMClient.chat_json", failed_probe)
+        response = c.post(
+            "/api/config/test-connection",
+            json={
+                "role": "ocr",
+                "base_url": "https://new-vision.example.invalid/v1",
+                "model": "candidate-vision-model",
+                "api_key": one_time_secret,
+            },
+        )
+
+        assert response.status_code == 502
+        assert one_time_secret not in response.text
+        assert "[已隐藏]" in response.json()["detail"]
+        assert srv._config.ocr_api_key == "stored-vision-secret"
+        assert not os.path.exists(os.path.join(tmp, "config.json"))
 
 
 def test_config_host_change_and_save_failures_are_atomic():

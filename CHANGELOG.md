@@ -6,6 +6,28 @@
 
 ## Unreleased
 
+## v1.2.7（2026-08-23）
+
+- 修复 AI 审计包对 `V:\\lvert`、`C:\\mathcal` 等合法数学命令的路径误判；TeX、BibTeX、
+  类/样式文件和 TeX 差异改用证据驱动的专用脱敏器，只允许清理明确凭据、宿主已知路径及路径型
+  LaTeX 参数中的绝对路径，URL 与相对资源路径保持原样；
+- 新增打包后的内容守恒门与独立 `packaging_status` / `audit_package_status`，逐工件复算字节哈希、
+  正文顺序、数学 token、label/ref/cite、环境、花括号和命令；任何未授权变化均闭锁为最小失败包，
+  aliases、ZIP 成员、`SHA256SUMS` 与外层 ZIP 哈希可独立复算；
+- 正确保留失败编译留下的真实 `PARTIAL_COMPILED` PDF，并记录引擎、遍数、退出码、页数、输入与
+  PDF 哈希、致命行和日志；Windows 编译同时抑制 `xdvipdfmx.exe` 崩溃弹窗并安全尝试备用引擎，
+  已存在的部分 PDF 不再被源码预览替代；
+- 修复 AI review 阶段语义：manifest 和提示词以实际 stage execution map 为准；跳过审阅不会伪造
+  reviewed 文件或声称已审阅，相同输出则作为带 canonical path 的逻辑 alias 去重；
+- 修复 outline 与页数证据，导出真实 accepted/rejected 大纲、源 PDF 总页数和实际选择页集合；
+  空证据不再冒充有效材料，并新增结构化 blocker、`report.json`、`issues.csv` 与 `metrics.json`；
+- standard/full 包加入 ElegantBook 等非系统模板依赖、许可证、模板和编译输入清单，并补全按阶段
+  区分且不伪造旧运行身份的 runtime/model/prompt provenance；规范包含项目名、工作流、UTC 时间、
+  run ID 与源状态的审计 ZIP 文件名；
+- 重做“模型与 API 设置”界面，分别配置结构判断、AI 复查和图片/PDF OCR 的模型、Key、Base URL
+  与连接状态，同时保留 Codex CLI、本机凭据加密和高级覆盖；现有“导出 TEX”和“导出工程 ZIP”
+  行为保持不变。
+
 ## v1.2.6（2026-08-22）
 
 - 新增“一键生成 AI 审计提交包”：从宿主冻结的不可变运行快照整理 README、短/完整提示词、

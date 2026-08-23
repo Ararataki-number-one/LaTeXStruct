@@ -17,6 +17,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Dict, Optional
 
@@ -25,12 +27,81 @@ from .preview import SOURCE_PREVIEW, classify_compile_preview
 PAGES_RE = re.compile(r"Output written on .*\((\d+) pages?")
 ERROR_RE = re.compile(r"^! ", re.M)
 FATAL_LINE_RE = re.compile(r"^l\.(\d+)\s*(.*)$")
+XDV_DRIVER_CRASH_RE = re.compile(
+    r"(?:Error\s+-1073740777\s+\(driver return code\)|0xc0000417|"
+    r"xelatex(?:\.exe)?:\s*fwrite:\s*Broken pipe)",
+    re.I,
+)
+_XDV_DRIVER_CRASH_EXIT_CODE = 0xC0000417
+_XDV_DRIVER_CRASH_SIGNED_EXIT_CODE = _XDV_DRIVER_CRASH_EXIT_CODE - (1 << 32)
 
 COMPILE_SUCCEEDED = "SUCCESS"
 COMPILE_FAILED = "FAILED"
 COMPILE_TIMEOUT = "TIMEOUT"
 COMPILE_UNAVAILABLE = "UNAVAILABLE"
 COMPILE_INPUT_MANIFEST_SCHEMA = "latexstruct-compile-input-set-v1"
+
+# A broken TeX helper (notably ``xdvipdfmx.exe``) can otherwise display a
+# modal Windows "application error" dialog. Such a dialog blocks unattended
+# runs even though Python is correctly waiting for/capturing the compiler.
+# SetErrorMode is inherited by child processes, so keep the process-wide mode
+# active while any compiler invocation is running and restore it afterwards.
+_SEM_FAILCRITICALERRORS = 0x0001
+_SEM_NOGPFAULTERRORBOX = 0x0002
+_ERROR_MODE_LOCK = threading.Lock()
+_ERROR_MODE_USERS = 0
+_ERROR_MODE_ORIGINAL: Optional[int] = None
+
+
+def _set_windows_error_mode(mode: int) -> Optional[int]:
+    """Set the Win32 process error mode, returning the previous value."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        setter = kernel32.SetErrorMode
+        setter.argtypes = [ctypes.c_uint]
+        setter.restype = ctypes.c_uint
+        return int(setter(int(mode)))
+    except (AttributeError, OSError):
+        # Compilation remains usable on unusual Windows runtimes. Failure to
+        # install this UI guard is diagnostic-only; subprocess errors are still
+        # captured by the normal compile result below.
+        return None
+
+
+@contextmanager
+def _suppress_windows_child_crash_dialogs():
+    """Prevent compiler/helper crashes from opening blocking system dialogs."""
+    global _ERROR_MODE_ORIGINAL, _ERROR_MODE_USERS
+
+    enabled = os.name == "nt"
+    if enabled:
+        with _ERROR_MODE_LOCK:
+            if _ERROR_MODE_USERS == 0:
+                previous = _set_windows_error_mode(0)
+                if previous is None:
+                    enabled = False
+                else:
+                    _ERROR_MODE_ORIGINAL = previous
+                    _set_windows_error_mode(
+                        previous | _SEM_FAILCRITICALERRORS | _SEM_NOGPFAULTERRORBOX
+                    )
+            if enabled:
+                _ERROR_MODE_USERS += 1
+    try:
+        yield
+    finally:
+        if enabled:
+            with _ERROR_MODE_LOCK:
+                _ERROR_MODE_USERS -= 1
+                if _ERROR_MODE_USERS == 0:
+                    original = _ERROR_MODE_ORIGINAL
+                    _ERROR_MODE_ORIGINAL = None
+                    if original is not None:
+                        _set_windows_error_mode(original)
 
 # ``compile_latex`` owns these root-level paths in its private work directory.
 # Project uploads may legitimately contain old build products, but seeding one
@@ -60,6 +131,13 @@ COMPILE_RESERVED_ROOT_FILENAMES = frozenset({
 
 
 def find_xelatex() -> Optional[str]:
+    if os.environ.get("LATEXSTRUCT_DISABLE_LATEX", "").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return None
     exe = shutil.which("xelatex")
     if exe:
         return exe
@@ -70,6 +148,161 @@ def find_xelatex() -> Optional[str]:
         if os.path.exists(p):
             return p
     return None
+
+
+def find_lualatex() -> Optional[str]:
+    """Find the direct-PDF fallback used only after an xdvipdfmx crash."""
+    exe = shutil.which("lualatex")
+    if exe:
+        return exe
+    for p in (
+        r"C:\texlive\2026\bin\windows\lualatex.exe",
+        r"C:\Program Files\MiKTeX\miktex\bin\x64\lualatex.exe",
+    ):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def find_alternate_xelatex(primary: str) -> Optional[str]:
+    """Find a second installed XeLaTeX distribution after a driver crash."""
+    primary_key = os.path.normcase(os.path.abspath(str(primary)))
+    candidates: list[Path] = []
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if entry:
+            candidates.append(Path(entry, "xelatex.exe"))
+    texlive_root = Path(r"C:\texlive")
+    try:
+        candidates.extend(
+            sorted(
+                texlive_root.glob("*/bin/windows/xelatex.exe"),
+                reverse=True,
+            )
+        )
+    except OSError:
+        pass
+    seen = set()
+    for candidate in candidates:
+        try:
+            candidate_key = os.path.normcase(os.path.abspath(str(candidate)))
+        except OSError:
+            continue
+        if candidate_key == primary_key or candidate_key in seen:
+            continue
+        seen.add(candidate_key)
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _xdv_driver_crashed(return_code: Optional[int], log: str) -> bool:
+    """Recognize xdvipdfmx failures even when Windows emits no console text."""
+    if return_code is not None:
+        normalized = int(return_code)
+        if normalized in {
+            _XDV_DRIVER_CRASH_EXIT_CODE,
+            _XDV_DRIVER_CRASH_SIGNED_EXIT_CODE,
+        }:
+            return True
+        if normalized >= 0 and normalized & 0xFFFFFFFF == _XDV_DRIVER_CRASH_EXIT_CODE:
+            return True
+    return bool(XDV_DRIVER_CRASH_RE.search(str(log or "")))
+
+
+def _run_latex_engine(
+    executable: str,
+    *,
+    workdir: str,
+    timeout: int,
+    environment: dict[str, str],
+    passes_requested: int,
+    no_pdf: bool = False,
+) -> tuple[object, int, int, int]:
+    """Run one TeX engine deterministically for the requested pass count."""
+    process: object = None
+    return_code = 0
+    passes_attempted = 0
+    passes_completed = 0
+    for _ in range(passes_requested):
+        passes_attempted += 1
+        command = [
+            executable,
+            "-interaction=nonstopmode",
+            "-halt-on-error",
+        ]
+        if no_pdf:
+            command.append("-no-pdf")
+        command.append("main.tex")
+        try:
+            process = subprocess.run(
+                command,
+                cwd=workdir,
+                capture_output=True,
+                timeout=timeout,
+                env=environment,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # Preserve progress across the helper boundary; the caller still
+            # owns the public timeout result and any partial PDF evidence.
+            exc.latexstruct_passes_attempted = passes_attempted
+            exc.latexstruct_passes_completed = passes_completed
+            raise
+        return_code = int(process.returncode)
+        passes_completed += 1
+        if return_code != 0:
+            break
+    return process, return_code, passes_attempted, passes_completed
+
+
+def _clear_failed_engine_outputs(workdir: str) -> None:
+    """Remove only private compiler outputs before a clean fallback attempt."""
+    for name in COMPILE_RESERVED_ROOT_FILENAMES:
+        if name == "main.tex":
+            continue
+        try:
+            Path(workdir, name).unlink(missing_ok=True)
+        except OSError:
+            # A locked corrupt output will make the fallback fail normally; it
+            # must never make us delete anything outside the private workdir.
+            pass
+
+
+def _compiler_environment(workdir: str) -> dict[str, str]:
+    """Give TeX a private writable cache without changing user environment."""
+    environment = dict(os.environ)
+    candidates = []
+    app_data = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    if app_data:
+        candidates.append(Path(app_data, "LaTeXStruct", "cache", "texmf"))
+    temporary_root = Path(tempfile.gettempdir())
+    try:
+        temporary_is_cwd = temporary_root.resolve() == Path.cwd().resolve()
+    except OSError:
+        temporary_is_cwd = False
+    candidates.append(
+        Path.cwd() / ".test-tmp" / "texmf-cache"
+        if temporary_is_cwd
+        else temporary_root / "LaTeXStruct" / "texmf-cache"
+    )
+    candidates.append(Path(workdir, ".texmf-cache"))
+
+    cache_path = candidates[-1]
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=candidate):
+                pass
+        except OSError:
+            continue
+        cache_path = candidate
+        break
+    cache_value = str(cache_path)
+    # LuaTeX/fontconfig can fail before reading the document if the global TeX
+    # cache is read-only. A per-run cache is deterministic, private and removed
+    # together with the compile work directory.
+    environment["TEXMFVAR"] = cache_value
+    environment["TEXMFCACHE"] = cache_value
+    return environment
 
 
 def _sanitize_compile_log(log: str, workdir: str) -> str:
@@ -103,12 +336,39 @@ def _process_output_text(value: object) -> str:
 
 def _read_compile_log(workdir: str, process: object = None) -> str:
     log_path = os.path.join(workdir, "main.log")
+    file_log = ""
     if os.path.exists(log_path):
         with open(log_path, encoding="utf-8", errors="replace") as handle:
-            return handle.read()
+            file_log = handle.read()
     stdout = _process_output_text(getattr(process, "stdout", ""))
     stderr = _process_output_text(getattr(process, "stderr", ""))
-    return "\n".join(part for part in (stdout, stderr) if part)
+    parts = [file_log] if file_log else []
+    # XeLaTeX writes driver-process failures to its console after main.log is
+    # closed. Preserve those streams as evidence instead of silently returning
+    # only the apparently clean TeX log.
+    for label, stream in (("stdout", stdout), ("stderr", stderr)):
+        if not stream:
+            continue
+        if not file_log:
+            parts.extend((f"[compiler {label}]", stream))
+            continue
+        # Console output normally repeats almost all of main.log.  Appending
+        # it wholesale duplicates typeout markers and error messages, while
+        # the one class of evidence missing from main.log is the late
+        # xdvipdfmx/pipe crash. Preserve just those unique diagnostic lines.
+        diagnostics = []
+        for line in stream.splitlines():
+            cleaned = line.strip()
+            if (
+                cleaned
+                and XDV_DRIVER_CRASH_RE.search(cleaned)
+                and cleaned not in file_log
+                and cleaned not in diagnostics
+            ):
+                diagnostics.append(cleaned)
+        if diagnostics:
+            parts.extend((f"[compiler {label}]", "\n".join(diagnostics)))
+    return "\n".join(part for part in parts if part)
 
 
 def _compile_errors(log: str) -> tuple[list[str], Optional[int]]:
@@ -256,53 +516,156 @@ def compile_latex_artifact(
     exe = find_xelatex()
     if not exe:
         return {
+            "engine": "xelatex",
             "available": False,
             "ok": None,
             "process_status": COMPILE_UNAVAILABLE,
             "preview_status": SOURCE_PREVIEW,
             "pages": 0,
+            "page_count": 0,
             "logged_pages": 0,
             "errors": [],
+            "fatal_error": "",
             "log": "",
+            "log_path": "main.log",
             "pdf_bytes": b"",
+            "pdf_sha256": "",
             "return_code": None,
+            "exit_code": None,
             "fatal_line": None,
             "timed_out": False,
             "passes_requested": 0,
+            "passes_attempted": 0,
             "passes_completed": 0,
             "input_manifest": input_manifest,
+            "compile_input_sha256": input_manifest["manifest_sha256"],
         }
 
     workdir = tempfile.mkdtemp(prefix="ls-compile-")
     process = None
+    engine_exe = exe
+    fallback_notices: list[str] = []
     timed_out = False
     passes_requested = 2 if any(
         token in text
         for token in ("\\tableofcontents", "\\ref{", "\\pageref{", "\\cite{")
     ) else 1
+    passes_attempted = 0
     passes_completed = 0
     return_code: Optional[int] = None
     try:
         _write_materialized_compile_inputs(workdir, prepared_inputs)
+        compiler_environment = _compiler_environment(workdir)
         try:
-            for _ in range(passes_requested):
-                process = subprocess.run(
-                    [exe, "-interaction=nonstopmode", "-halt-on-error", "main.tex"],
-                    cwd=workdir,
-                    capture_output=True,
+            with _suppress_windows_child_crash_dialogs():
+                (
+                    process,
+                    return_code,
+                    passes_attempted,
+                    passes_completed,
+                ) = _run_latex_engine(
+                    exe,
+                    workdir=workdir,
                     timeout=timeout,
+                    environment=compiler_environment,
+                    passes_requested=passes_requested,
                 )
-                return_code = int(process.returncode)
-                passes_completed += 1
-                if return_code != 0:
-                    break
+                first_log = _read_compile_log(workdir, process)
+                fallback_engines: list[str] = []
+                if return_code != 0 and _xdv_driver_crashed(return_code, first_log):
+                    # LuaLaTeX writes PDF directly and avoids the failing
+                    # xdvipdfmx path entirely. Prefer it first; an independent
+                    # XeLaTeX installation remains a final compatibility
+                    # fallback when LuaLaTeX is unavailable or rejects the
+                    # otherwise valid XeLaTeX document.
+                    lua_exe = find_lualatex()
+                    alternate_xe = find_alternate_xelatex(exe)
+                    for candidate in (lua_exe, alternate_xe):
+                        if candidate and candidate not in fallback_engines:
+                            fallback_engines.append(candidate)
+                for fallback_index, fallback_exe in enumerate(fallback_engines):
+                    fallback_engine = (
+                        str(fallback_exe)
+                        .replace("\\", "/")
+                        .rsplit("/", 1)[-1]
+                    )
+                    fallback_is_xelatex = fallback_engine.casefold().startswith(
+                        "xelatex"
+                    )
+                    fallback_notices.append(
+                        "[LaTeXStruct] xdvipdfmx crashed with Windows exception "
+                        "0xc0000417; retried the unchanged compile input with "
+                        f"{fallback_engine} (fallback {fallback_index + 1}/"
+                        f"{len(fallback_engines)})."
+                    )
+                    _clear_failed_engine_outputs(workdir)
+                    engine_exe = fallback_exe
+                    fallback_environment = dict(compiler_environment)
+                    fallback_directory = str(Path(fallback_exe).parent)
+                    fallback_environment["PATH"] = os.pathsep.join(
+                        part
+                        for part in (
+                            fallback_directory,
+                            compiler_environment.get("PATH", ""),
+                        )
+                        if part
+                    )
+                    (
+                        process,
+                        return_code,
+                        passes_attempted,
+                        passes_completed,
+                    ) = _run_latex_engine(
+                        fallback_exe,
+                        workdir=workdir,
+                        timeout=timeout,
+                        environment=fallback_environment,
+                        passes_requested=passes_requested,
+                        no_pdf=fallback_is_xelatex,
+                    )
+                    if fallback_is_xelatex and Path(workdir, "main.xdv").is_file():
+                        tex_return_code = return_code
+                        driver_exe = str(
+                            Path(fallback_exe).with_name("xdvipdfmx.exe")
+                        )
+                        process = subprocess.run(
+                            [driver_exe, "-o", "main.pdf", "main.xdv"],
+                            cwd=workdir,
+                            capture_output=True,
+                            timeout=timeout,
+                            env=fallback_environment,
+                        )
+                        driver_return_code = int(process.returncode)
+                        return_code = (
+                            tex_return_code
+                            if tex_return_code not in (None, 0)
+                            else driver_return_code
+                        )
+                    if return_code == 0:
+                        break
         except subprocess.TimeoutExpired as exc:
             process = exc
             timed_out = True
             return_code = None
+            passes_attempted = int(
+                getattr(exc, "latexstruct_passes_attempted", passes_attempted)
+            )
+            passes_completed = int(
+                getattr(exc, "latexstruct_passes_completed", passes_completed)
+            )
 
         raw_log = _read_compile_log(workdir, process)
+        if fallback_notices:
+            raw_log = "\n".join((*fallback_notices, raw_log))
         log = _sanitize_compile_log(raw_log, workdir)
+        cache_path = compiler_environment.get("TEXMFCACHE", "")
+        if cache_path and not Path(cache_path).is_relative_to(Path(workdir)):
+            for variant in {
+                cache_path,
+                cache_path.replace("\\", "/"),
+                cache_path.replace("/", "\\"),
+            }:
+                log = re.sub(re.escape(variant), "<tex-cache>", log, flags=re.I)
         errors, fatal_line = _compile_errors(log)
         pdf_bytes, actual_pages = _valid_pdf_bytes(workdir)
         match = PAGES_RE.search(log)
@@ -322,27 +685,41 @@ def compile_latex_artifact(
             and not errors
         )
         preview_status = classify_compile_preview(ok=ok, pdf_bytes=pdf_bytes)
+        pdf_sha256 = hashlib.sha256(pdf_bytes).hexdigest() if pdf_bytes else ""
         process_status = (
             COMPILE_TIMEOUT
             if timed_out
             else COMPILE_SUCCEEDED if ok else COMPILE_FAILED
         )
         return {
+            # Store only the executable basename; a Windows path must remain
+            # private even when this code is inspected on another OS.
+            "engine": (
+                str(engine_exe).replace("\\", "/").rsplit("/", 1)[-1]
+                or "xelatex"
+            ),
             "available": True,
             "ok": ok,
             "process_status": process_status,
             "preview_status": preview_status,
             "pages": pages,
+            "page_count": pages,
             "logged_pages": logged_pages,
             "errors": errors,
+            "fatal_error": errors[0] if errors else "",
             "log": log,
+            "log_path": "main.log",
             "pdf_bytes": pdf_bytes,
+            "pdf_sha256": pdf_sha256,
             "return_code": return_code,
+            "exit_code": return_code,
             "fatal_line": fatal_line,
             "timed_out": timed_out,
             "passes_requested": passes_requested,
+            "passes_attempted": passes_attempted,
             "passes_completed": passes_completed,
             "input_manifest": input_manifest,
+            "compile_input_sha256": input_manifest["manifest_sha256"],
         }
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -363,24 +740,32 @@ def compile_latex(
     """
     artifact = compile_latex_artifact(text, timeout=timeout, extra_files=extra_files)
     result = {
+        "engine": artifact["engine"],
         "available": artifact["available"],
         "ok": artifact["ok"],
         # Preserve the legacy log-derived count while the artifact API exposes
         # only the page count of a PDF whose bytes were actually captured.
         "pages": artifact["pages"] or artifact.get("logged_pages", 0),
+        "page_count": artifact["page_count"],
         "errors": artifact["errors"],
+        "fatal_error": artifact["fatal_error"],
         "log": str(artifact["log"]),
+        "log_path": artifact["log_path"],
         # Additive JSON-safe evidence lets existing pipeline verification and a
         # future run-bundle exporter distinguish a real partial PDF from a source
         # fallback without embedding binary bytes in verification.json.
         "preview_status": artifact["preview_status"],
         "process_status": artifact["process_status"],
+        "pdf_sha256": artifact["pdf_sha256"],
         "return_code": artifact["return_code"],
+        "exit_code": artifact["exit_code"],
         "fatal_line": artifact["fatal_line"],
         "timed_out": artifact["timed_out"],
         "passes_requested": artifact["passes_requested"],
+        "passes_attempted": artifact["passes_attempted"],
         "passes_completed": artifact["passes_completed"],
         "input_manifest": artifact["input_manifest"],
+        "compile_input_sha256": artifact["compile_input_sha256"],
     }
     if include_pdf:
         result["pdf_bytes"] = bytes(artifact["pdf_bytes"])

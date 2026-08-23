@@ -77,6 +77,12 @@ class PipelineResult:
     compiled_tex: str = ""
     compiled_snapshot: str = ""
     compiled_extra_files: Dict[str, bytes] = field(default_factory=dict)
+    # OCR 原始转写的真实编译工件与最终稿分开保存；失败编译若已产生可读 PDF，
+    # 仍作为 PARTIAL_COMPILED 证据保留，不能被源码预览替代。
+    raw_compiled_pdf: bytes = b""
+    raw_compiled_pdf_name: str = ""
+    raw_compiled_tex: str = ""
+    raw_compiled_extra_files: Dict[str, bytes] = field(default_factory=dict)
     # Immutable, host-produced stage snapshots for the external audit bundle.
     # They are descriptive evidence only and never participate in patching or
     # verification decisions.
@@ -1166,6 +1172,12 @@ def run_pipeline(
     )
     compiled_pdf = b""
     compiled_pdf_name = ""
+    raw_compiled_pdf = b""
+    raw_compiled_pdf_name = ""
+    compiled_candidate_tex = ""
+    compiled_candidate_extra_files: Dict[str, bytes] = {}
+    compiled_before_tex = ""
+    compiled_before_extra_files: Dict[str, bytes] = {}
     if compile_check:
         emit("compile", 0.91, "正在比较编译结果")
         from .compilecheck import compile_latex
@@ -1230,6 +1242,9 @@ def run_pipeline(
                 before_future = executor.submit(
                     compile_snapshot,
                     compile_before_text,
+                    capture_pdf=bool(
+                        capture_compile_artifact and ocr_semantic_lock_enabled
+                    ),
                 )
                 after_future = executor.submit(
                     compile_snapshot,
@@ -1240,59 +1255,164 @@ def run_pipeline(
                 after_result = after_future.result()
         else:
             # Patched/custom compiler callables are not assumed thread-safe.
-            before_result = compile_snapshot(compile_before_text)
+            before_result = compile_snapshot(
+                compile_before_text,
+                capture_pdf=bool(
+                    capture_compile_artifact and ocr_semantic_lock_enabled
+                ),
+            )
             after_result = compile_snapshot(
                 result_text,
                 capture_pdf=capture_compile_artifact,
             )
         (
             verification["compile_before"],
-            _compiled_before_tex,
-            _compiled_before_extra_files,
+            compiled_before_tex,
+            compiled_before_extra_files,
         ) = before_result
         (
             verification["compile_after"],
             compiled_candidate_tex,
             compiled_candidate_extra_files,
         ) = after_result
-        captured = verification["compile_after"].pop("pdf_bytes", b"")
-        if isinstance(captured, (bytes, bytearray, memoryview)) and captured:
+
+        def normalize_compile_record(record: Dict, *, log_path: str) -> None:
+            """Fill the stable audit vocabulary without inventing success."""
+            record["engine"] = str(
+                record.get("engine")
+                or ("xelatex" if record.get("available") else "")
+            )
+            record["passes_attempted"] = int(
+                record.get("passes_attempted")
+                or record.get("passes_completed")
+                or 0
+            )
+            exit_code = record.get("exit_code", record.get("return_code"))
+            if exit_code is None and record.get("ok") is True:
+                exit_code = 0
+            record["exit_code"] = exit_code
+            record["page_count"] = int(
+                record.get("page_count") or record.get("pages") or 0
+            )
+            errors = record.get("errors")
+            record["fatal_error"] = str(
+                record.get("fatal_error")
+                or (
+                    errors[0]
+                    if isinstance(errors, list) and errors
+                    else ""
+                )
+            )
+            record["log_path"] = log_path
+            input_manifest = record.get("input_manifest")
+            if isinstance(input_manifest, dict):
+                record["compile_input_sha256"] = str(
+                    record.get("compile_input_sha256")
+                    or input_manifest.get("manifest_sha256")
+                    or ""
+                )
+            else:
+                record.setdefault("compile_input_sha256", "")
+            record.setdefault("pdf_sha256", "")
+
+        normalize_compile_record(
+            verification["compile_before"],
+            log_path=(
+                "audit/compile_raw.log"
+                if ocr_semantic_lock_enabled
+                else "audit/compile_source.log"
+            ),
+        )
+        normalize_compile_record(
+            verification["compile_after"],
+            log_path="audit/compile_current.log",
+        )
+        captured_before = verification["compile_before"].pop("pdf_bytes", b"")
+        captured_after = verification["compile_after"].pop("pdf_bytes", b"")
+
+        def bind_compile_preview(
+            record: Dict,
+            captured: object,
+            candidate_tex: str,
+            candidate_extra_files: Dict[str, bytes],
+            evidence_key: str,
+        ) -> tuple[bytes, str]:
+            if not isinstance(captured, (bytes, bytearray, memoryview)) or not captured:
+                return b"", ""
             from .preview import preview_descriptor
 
-            compiled_pdf = bytes(captured)
-            descriptor = preview_descriptor(
-                verification["compile_after"].get("preview_status")
-            )
-            compiled_pdf_name = descriptor.filename
-            compiled_pdf_sha256 = hashlib.sha256(compiled_pdf).hexdigest()
+            payload = bytes(captured)
+            descriptor = preview_descriptor(record.get("preview_status"))
+            payload_sha256 = hashlib.sha256(payload).hexdigest()
+            recorded_pdf_sha256 = str(record.get("pdf_sha256") or "")
+            if recorded_pdf_sha256 and recorded_pdf_sha256 != payload_sha256:
+                raise ValueError("编译 PDF 哈希与捕获工件不一致")
             from .compilecheck import build_compile_input_manifest
             from .preview import preview_artifact_path
 
             compile_inputs = build_compile_input_manifest(
-                compiled_candidate_tex, compiled_candidate_extra_files
+                candidate_tex, candidate_extra_files
             )
-            recorded_inputs = verification["compile_after"].get("input_manifest")
+            recorded_inputs = record.get("input_manifest")
             if recorded_inputs and recorded_inputs != compile_inputs:
                 raise ValueError("编译输入清单与实际候选不一致")
+            page_count = int(record.get("page_count") or record.get("pages") or 0)
+            if page_count <= 0:
+                raise ValueError("编译 PDF 没有可验证的页面，已阻止持久化")
+            record["page_count"] = page_count
+            record["pdf_sha256"] = payload_sha256
+            record["input_manifest"] = compile_inputs
+            record["compile_input_sha256"] = compile_inputs["manifest_sha256"]
 
-            verification["preview_artifact"] = {
+            verification[evidence_key] = {
                 **descriptor.as_dict(),
                 "display_filename": descriptor.filename,
                 "filename": preview_artifact_path(
-                    descriptor.status, compiled_pdf_sha256
+                    descriptor.status, payload_sha256
                 ),
-                "sha256": compiled_pdf_sha256,
-                "bytes": len(compiled_pdf),
+                "sha256": payload_sha256,
+                "bytes": len(payload),
+                "engine": record["engine"],
+                "passes_attempted": record["passes_attempted"],
+                "exit_code": record["exit_code"],
+                "page_count": page_count,
+                "pdf_sha256": payload_sha256,
+                "compile_input_sha256": compile_inputs["manifest_sha256"],
+                "fatal_line": record.get("fatal_line"),
+                "fatal_error": record["fatal_error"],
+                "log_path": record["log_path"],
                 "tex_sha256": hashlib.sha256(
-                    compiled_candidate_tex.encode("utf-8")
+                    candidate_tex.encode("utf-8")
                 ).hexdigest(),
                 "tex_lf_normalized_sha256": hashlib.sha256(
-                    compiled_candidate_tex.replace("\r\n", "\n")
+                    candidate_tex.replace("\r\n", "\n")
                     .replace("\r", "\n")
                     .encode("utf-8")
                 ).hexdigest(),
                 "compile_inputs": compile_inputs,
             }
+            return payload, descriptor.filename
+
+        raw_compiled_pdf, raw_compiled_pdf_name = bind_compile_preview(
+            verification["compile_before"],
+            captured_before,
+            compiled_before_tex,
+            compiled_before_extra_files,
+            "raw_preview_artifact",
+        )
+        compiled_pdf, compiled_pdf_name = bind_compile_preview(
+            verification["compile_after"],
+            captured_after,
+            compiled_candidate_tex,
+            compiled_candidate_extra_files,
+            "preview_artifact",
+        )
+        if ocr_semantic_lock_enabled:
+            verification["raw_preview_state"] = (
+                verification.get("raw_preview_artifact", {}).get("status")
+                if raw_compiled_pdf
+                else "SOURCE_PREVIEW"
+            )
     compile_safe = not require_compile
     compile_unverified = False
     if compile_check:
@@ -1622,10 +1742,16 @@ def run_pipeline(
         decision_items=decision_items,
         compiled_pdf=compiled_pdf,
         compiled_pdf_name=compiled_pdf_name,
-        compiled_tex=compiled_candidate_tex if compiled_pdf else "",
+        # Keep the exact attempted compile closure even when no final PDF was
+        # produced; audit packaging needs it to explain/reproduce failures.
+        compiled_tex=compiled_candidate_tex,
         compiled_snapshot=result_text if compiled_pdf else "",
-        compiled_extra_files=(
-            compiled_candidate_extra_files if compiled_pdf else {}
+        compiled_extra_files=compiled_candidate_extra_files,
+        raw_compiled_pdf=raw_compiled_pdf,
+        raw_compiled_pdf_name=raw_compiled_pdf_name,
+        raw_compiled_tex=compiled_before_tex if raw_compiled_pdf else "",
+        raw_compiled_extra_files=(
+            compiled_before_extra_files if raw_compiled_pdf else {}
         ),
         analyzed_tex=initial_draft if mode == "ai" else "",
         reviewed_tex=result_text if review_executed else "",

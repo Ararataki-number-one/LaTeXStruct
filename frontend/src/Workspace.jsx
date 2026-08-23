@@ -866,7 +866,9 @@ export default function Workspace({ pid, onOpenSettings }) {
       setFileAction("审计提交包编号缺失，无法下载");
       return;
     }
-    const filename = submission?.filename || `LaTeXStruct-AI-audit-${submissionId}.zip`;
+    const filename = submission?.archive_filename
+      || submission?.filename
+      || `LaTeXStruct-AI-audit-${submissionId}.zip`;
     await downloadFromApi(
       `/api/projects/${pid}/audit-submission/${encodeURIComponent(submissionId)}/download`,
       filename,

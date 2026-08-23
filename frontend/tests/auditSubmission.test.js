@@ -6,6 +6,7 @@ import {
   auditClientStaleKey,
   auditRunStatusLabel,
   auditSubmissionActionState,
+  auditVerificationStatusLabel,
   auditWorkflowLabel,
   blockAuditForPendingTask,
   buildAuditSubmissionRequest,
@@ -310,4 +311,5 @@ test("工作流和终态标签不根据 verified 状态自行推断", () => {
     assert.equal(auditRunStatusLabel(value), label);
   }
   assert.equal(auditRunStatusLabel("CUSTOM_STATE"), "CUSTOM_STATE");
+  assert.equal(auditVerificationStatusLabel("NOT_RUN"), "尚未运行机器验证");
 });

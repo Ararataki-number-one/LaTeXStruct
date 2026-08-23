@@ -22,6 +22,10 @@ server = [
 ]
 dev = ["pytest"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [".*", "ls-preserve-*", "tmp", "output", "node_modules"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
