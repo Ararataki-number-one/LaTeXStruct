@@ -579,8 +579,29 @@ def _friendly_failure(diagnostic: str, returncode: int) -> str:
         "authentication failed", "authentication error", "invalid_grant",
     )):
         return "Codex 的 ChatGPT 登录已失效，请运行 codex login 后重试"
-    if any(word in lower for word in ("rate limit", "usage limit", "quota", "too many requests")):
-        return "Codex 订阅额度不足或触发限流，请稍后重试"
+    if any(token in lower for token in (
+        "usage limit", "quota", "out of credits", "insufficient credits",
+        "credit balance exhausted", "no credits remaining",
+    )):
+        return "Codex 订阅额度已耗尽，请恢复可用额度后重试"
+    if any(token in lower for token in (
+        "rate limit", "too many requests", "http 429",
+    )):
+        return "Codex 订阅触发限流，请稍后重试"
+    if any(token in lower for token in (
+        "stream disconnected before completion",
+        "error sending request for url",
+        "failed to connect to websocket",
+        "failed to connect to",
+        "connection refused",
+        "connection reset",
+        "connection timed out",
+        "network is unreachable",
+        "os error 10013",
+    )):
+        return (
+            "Codex 网络连接失败，请检查网络、防火墙、代理或系统权限后稍后重试"
+        )
     if "model" in lower and any(word in lower for word in ("not found", "unsupported", "unavailable")):
         return "所选 Codex 模型不可用，请留空使用默认模型或更换模型"
     if "invalid_json_schema" in lower or "invalid schema for response_format" in lower:

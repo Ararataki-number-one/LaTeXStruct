@@ -1891,11 +1891,35 @@ def _footnote_math_script_context(candidate: dict, line: dict) -> bool:
          if not characters[index]["char"].isspace()),
         None,
     )
-    if previous is None or following is None:
+    if previous is None:
         return False
     previous_char = str(previous.get("char") or "")
-    following_char = str(following.get("char") or "")
     previous_math = bool(_OCR_MATH_FONT_RE.search(str(previous.get("font") or "")))
+    try:
+        candidate_size = float(candidate.get("size") or 0.0)
+        previous_size = float(previous.get("size") or 0.0)
+    except (TypeError, ValueError):
+        candidate_size = previous_size = 0.0
+    # A displayed exponent can end its extracted PDF line, so there may be no
+    # following glyph to disambiguate it.  A same-size mathematical operator
+    # immediately before the digit is strong local evidence that the digit is
+    # part of that script run (for example the terminal ``1`` in
+    # ``C k^{\ell-1}``), not a publisher footnote marker.
+    same_script_size = (
+        candidate_size > 0.0
+        and previous_size > 0.0
+        and abs(candidate_size - previous_size)
+        <= max(0.45, 0.08 * candidate_size)
+    )
+    if (
+        previous_math
+        and same_script_size
+        and previous_char in "+-−±∓*/=<>≤≥≪≫⩽⩾"
+    ):
+        return True
+    if following is None:
+        return False
+    following_char = str(following.get("char") or "")
     following_math = bool(_OCR_MATH_FONT_RE.search(str(following.get("font") or "")))
     if previous_math and (following_math or following_char in "+-*/=<>"):
         return True

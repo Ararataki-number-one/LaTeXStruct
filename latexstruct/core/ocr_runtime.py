@@ -2672,7 +2672,9 @@ def classify_ocr_error(error: object) -> OcrErrorCategory:
         return OcrErrorCategory.CANCELLED
     if any(token in text for token in ("http 401", "http 403", "unauthorized", "api key", "登录失效")):
         return OcrErrorCategory.AUTH
-    if any(token in text for token in ("quota", "额度耗尽", "insufficient balance", "余额不足")):
+    if any(token in text for token in (
+        "quota", "额度耗尽", "额度已耗尽", "insufficient balance", "余额不足",
+    )):
         return OcrErrorCategory.QUOTA
     if any(token in text for token in ("model not found", "unknown model", "base url", "模型不存在")):
         return OcrErrorCategory.CONFIG

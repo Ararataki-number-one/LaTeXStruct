@@ -17,6 +17,7 @@ from latexstruct.ocr import (
     _active_footnote_signatures,
     _footnote_digit_runs,
     _footnote_geometry_relation_backfill,
+    _footnote_math_script_context,
     _page_request,
     _relation_occurrences,
     _validate_footnote_integrity,
@@ -62,6 +63,41 @@ def test_footnote_digit_runs_keep_two_digit_markers_and_reject_interior_subscrip
     assert runs[0]["line_position_end"] == 1
     assert runs[1]["char"] == "4"
     assert runs[1]["first_nonspace_on_line"] is False
+
+
+def test_footnote_math_context_rejects_terminal_exponent_operator_digit():
+    characters = [
+        {"char": "C", "bbox": [316.1, 224.2, 324.5, 236.1], "size": 11.955, "font": "CMMI12"},
+        {"char": "k", "bbox": [325.3, 224.2, 331.4, 236.1], "size": 11.955, "font": "CMMI12"},
+        {"char": "ℓ", "bbox": [331.8, 222.9, 335.3, 230.9], "size": 7.97, "font": "CMMI8"},
+        {"char": "−", "bbox": [335.3, 222.8, 341.9, 230.8], "size": 7.97, "font": "CMSY8"},
+        {"char": "1", "bbox": [341.9, 222.9, 346.1, 230.9], "size": 7.97, "font": "CMR8"},
+    ]
+    candidate = {
+        **characters[-1],
+        "line_position": 4,
+        "line_position_end": 4,
+        "members": (characters[-1],),
+    }
+
+    assert _footnote_math_script_context(candidate, {"characters": characters}) is True
+
+
+def test_footnote_math_context_keeps_raised_prose_reference():
+    characters = [
+        {"char": "s", "bbox": [261.0, 452.7, 265.7, 464.6], "size": 11.955, "font": "CMR12"},
+        {"char": "1", "bbox": [265.6, 451.2, 269.9, 459.1], "size": 7.97, "font": "CMR8"},
+        {"char": " ", "bbox": [269.9, 448.0, 273.8, 460.0], "size": 11.955, "font": "CMR12"},
+        {"char": "t", "bbox": [273.8, 452.7, 278.3, 464.6], "size": 11.955, "font": "CMR12"},
+    ]
+    candidate = {
+        **characters[1],
+        "line_position": 1,
+        "line_position_end": 1,
+        "members": (characters[1],),
+    }
+
+    assert _footnote_math_script_context(candidate, {"characters": characters}) is False
 
 
 def _sized_png(width=1000, height=1400):

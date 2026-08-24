@@ -782,6 +782,9 @@ def test_codex_runtime_exit_failure_is_unknown_and_not_claimed_transient():
         ("Codex 本地 runtime 调用失败（退出码 1）：content refusal", OcrErrorCategory.REFUSAL),
         ("Codex runtime 与当前安全配置不兼容", OcrErrorCategory.CONFIG),
         ("Codex 分析超时，原项目保持不变", OcrErrorCategory.TRANSIENT),
+        ("Codex 订阅额度已耗尽，请恢复可用额度后重试", OcrErrorCategory.QUOTA),
+        ("Codex 订阅触发限流，请稍后重试", OcrErrorCategory.RATE_LIMIT),
+        ("Codex 网络连接失败，请检查网络后稍后重试", OcrErrorCategory.TRANSIENT),
     ],
 )
 def test_codex_runtime_wrapper_never_hides_non_retryable_provider_category(message, category):

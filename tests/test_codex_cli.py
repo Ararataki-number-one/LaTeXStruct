@@ -149,6 +149,19 @@ def test_safe_child_env_is_allowlist_and_never_inherits_api_credentials(monkeypa
             "attempt to write a readonly database",
             "运行目录不可写",
         ),
+        (
+            "workspace is out of credits",
+            "额度已耗尽",
+        ),
+        (
+            "HTTP 429 too many requests",
+            "触发限流",
+        ),
+        (
+            "stream disconnected before completion: failed to connect to "
+            "websocket (os error 10013)",
+            "网络连接失败",
+        ),
     ],
 )
 def test_friendly_failure_explains_managed_runtime_prerequisites(
