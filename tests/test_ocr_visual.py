@@ -12,6 +12,7 @@ from latexstruct.core.ocr_schema import (
 )
 from latexstruct.core.ocr_visual import (
     PageVisualVerification,
+    VISUAL_VERIFIER_SYSTEM_PROMPT,
     VisualVerdict,
     resolve_visual_candidate,
     validate_visual_verification_response,
@@ -94,6 +95,11 @@ def test_visual_schema_and_request_are_bounded_and_do_not_invite_page_rewrite():
     assert payload["pages"][0]["page_id"] == candidate.page_id
     assert payload["pages"][0]["candidate_blocks"][0]["block_id"].startswith(
         candidate.page_id
+    )
+    assert "0 <= x0 < x1 <= 1" in VISUAL_VERIFIER_SYSTEM_PROMPT
+    assert "never emit [0,0,0,0]" in VISUAL_VERIFIER_SYSTEM_PROMPT
+    assert "every replacement_latex must be exactly\nempty" in (
+        VISUAL_VERIFIER_SYSTEM_PROMPT
     )
 
 

@@ -30,7 +30,14 @@ whole page. Use FULL_OCR_REQUIRED for missing blocks, unreliable reading order,
 corrupt text, unsafe mathematics, multi-column conflict, or any difference that
 cannot be repaired locally. Never infer sections or theorem/proof environments.
 Never summarize, explain, correct mathematics from knowledge, or emit Markdown.
-Return only the supplied strict JSON schema and echo every page_id exactly."""
+Every evidence_region, missing_region, and unresolved_region must be a
+non-degenerate normalized rectangle with 0 <= x0 < x1 <= 1 and
+0 <= y0 < y1 <= 1; never emit [0,0,0,0] or another placeholder box.
+For FULL_OCR_REQUIRED or UNRESOLVED, every replacement_latex must be exactly
+empty; if no precise finding box exists, return no block_findings rather than
+smuggling a suggested patch. UNRESOLVED must contain at least one valid
+unresolved_region. Return only the supplied strict JSON schema and echo every
+page_id exactly."""
 
 _PAGE_ID_RE = re.compile(r"^ocr-page-[0-9]{6}$")
 _BATCH_ID_RE = re.compile(r"^ocr-verify-batch-[A-Za-z0-9._:-]{1,160}$")

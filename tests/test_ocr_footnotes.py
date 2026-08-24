@@ -294,7 +294,7 @@ def test_real_bondy_p43_p55_probe_and_neighbor_negative_pages():
         assert pdf_page_footnote_regions(str(source), page_no) == []
 
 
-def test_p55_verified_footnote_bbox_backfills_three_i_equals_one_occurrences():
+def test_p55_chained_relations_do_not_need_footnote_backfill_or_duplicate():
     source = (
         Path(__file__).resolve().parents[2]
         / "work"
@@ -308,7 +308,7 @@ def test_p55_verified_footnote_bbox_backfills_three_i_equals_one_occurrences():
     reference = {}
     for item in _relation_occurrences(pdf_page_text_hint(str(source), 55), latex=False):
         reference.setdefault((item["left"], item["right"]), []).append(item)
-    assert len(reference[("i", "1")]) == 2
+    assert len(reference[("i", "1")]) == 3
 
     _footnote_geometry_relation_backfill(
         reference,

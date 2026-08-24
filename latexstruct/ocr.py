@@ -2283,7 +2283,16 @@ def _relation_occurrences(text: str, *, latex: bool) -> List[dict]:
     canonical = _canonical_relation_text(source)
     occurrences = []
     pair_counts: Dict[tuple[str, str], int] = {}
-    for match in _OCR_RELATION_EXPR_RE.finditer(canonical):
+    # A relation chain shares each interior operand with its neighbours.  A
+    # normal ``finditer`` consumes that operand as the right-hand side of the
+    # first match, so ``a < b < c`` would silently omit ``b < c``.  Restart at
+    # the right operand to preserve every visible link while still advancing
+    # monotonically through unrelated expressions.
+    search_from = 0
+    while True:
+        match = _OCR_RELATION_EXPR_RE.search(canonical, search_from)
+        if match is None:
+            break
         pair = tuple(
             re.sub(r"\s*[_^]\s*", "", match.group(side)).lower()
             for side in ("left", "right")
@@ -2295,6 +2304,7 @@ def _relation_occurrences(text: str, *, latex: bool) -> List[dict]:
             "operator": match.group("operator"),
             "occurrence": pair_counts[pair],
         })
+        search_from = match.start("right")
     return occurrences
 
 
@@ -2321,12 +2331,12 @@ def _footnote_geometry_relation_backfill(
 ) -> None:
     """Backfill relation counts only inside verified footnote definition boxes.
 
-    A linear text extraction can lose an overlapping relation in a chain such as
-    ``b_i^2 >= sum_{i=1}``: the right operand of the first match is also the left
-    operand of the second. PDF word geometry retains both operators. We use that
-    stronger count only when at least one occurrence lies inside a conservatively
-    detected footnote definition. Ordinary body geometry remains bounded to the
-    content band, while bottom-margin folios outside those boxes stay excluded.
+    Chained expressions are preserved directly by ``_relation_occurrences``.
+    PDF text extraction can still omit or merge a glyph near a small footnote,
+    while word geometry retains both operators. We use that stronger count only
+    when at least one occurrence lies inside a conservatively detected footnote
+    definition. Ordinary body geometry remains bounded to the content band,
+    while bottom-margin folios outside those boxes stay excluded.
     """
     definition_boxes = [
         bbox

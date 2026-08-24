@@ -412,6 +412,31 @@ def test_relation_operands_preserve_adjacent_scripts_without_pair_collision():
     assert result.quality_flags == []
 
 
+def test_relation_occurrences_keep_every_link_in_chained_inequality():
+    reference = "Let 0 < γ < q < 1, and later take q = 1 - p."
+    active = (
+        r"\emph{Let \(0<\gamma<q<1\), and later take} "
+        r"\(q=1-p\)."
+    )
+
+    reference_q1 = [
+        item
+        for item in _relation_occurrences(reference, latex=False)
+        if (item["left"], item["right"]) == ("q", "1")
+    ]
+    active_q1 = [
+        item
+        for item in _relation_occurrences(active, latex=True)
+        if (item["left"], item["right"]) == ("q", "1")
+    ]
+
+    assert reference_q1 == [
+        {"left": "q", "right": "1", "operator": "<", "occurrence": 1},
+        {"left": "q", "right": "1", "operator": "=", "occurrence": 2},
+    ]
+    assert active_q1 == reference_q1
+
+
 def test_p29_local_pixel_read_corrects_full_page_greater_than_to_geq():
     class RelationVisionClient:
         last_usage = {}
