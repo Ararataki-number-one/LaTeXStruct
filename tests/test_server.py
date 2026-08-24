@@ -116,6 +116,29 @@ def test_build_ocr_client_uses_codex_for_vision_without_api_fallback():
     assert client.cfg.api_key == ""
 
 
+def test_codex_chinese_timeout_is_retryable_and_ocr_call_is_labeled_when_supported():
+    calls = []
+
+    def current_adapter(*args, operation):
+        calls.append((args, operation))
+        return {"pages": []}, {}
+
+    def legacy_adapter(*args):
+        calls.append((args, "legacy"))
+        return {"pages": []}, {}
+
+    assert srv._ocr_error_is_retryable("Codex 分析超时，原项目保持不变") is True
+    assert srv._call_ocr_visual_json(current_adapter, "system", "request") == (
+        {"pages": []},
+        {},
+    )
+    assert srv._call_ocr_visual_json(legacy_adapter, "system", "request") == (
+        {"pages": []},
+        {},
+    )
+    assert [operation for _args, operation in calls] == ["OCR", "legacy"]
+
+
 def test_build_ocr_client_preserves_compatible_api_selection():
     from latexstruct.config import AppConfig
     from latexstruct.core.ai import LLMClient
@@ -177,6 +200,13 @@ def _inspect_and_start_image(c, filename, image, media_type, data=None):
     assert started.status_code == 200, started.text
     assert started.json()["id"] == info["id"]
     return started
+
+
+def _discard_test_ocr_job(jid: str) -> None:
+    """Remove one test-owned OCR job even when an assertion aborts the test."""
+    with srv._ocr_jobs_lock:
+        job = srv._ocr_jobs.pop(jid, {}) if jid else {}
+    shutil.rmtree(job.get("dir", ""), ignore_errors=True)
 
 
 def test_health_and_project_flow():
@@ -1883,12 +1913,16 @@ def test_image_ocr_uses_inspected_job_id_and_replayed_start_is_idempotent():
                 assert replay.json()["status"] == "running"
                 assert calls["count"] == 1
                 release.set()
-                for _ in range(100):
-                    state = c.get(f"/api/ocr/jobs/{jid}").json()
-                    if state["status"] != "running":
-                        break
-                    time.sleep(0.02)
-            assert state["status"] == "done"
+                state = _wait_for_json(
+                    c,
+                    f"/api/ocr/jobs/{jid}",
+                    lambda value: value.get("terminal_epoch") is not None,
+                )
+            assert state["status"] == "partial"
+            page = state["pages"]["1"]
+            assert page["status"] == "done", repr(page)
+            assert state["compile_status"] == "SOURCE_PREVIEW"
+            assert state["progress"] < 1.0
             assert state["usage"]["calls"] == 1
         finally:
             release.set()
@@ -1984,6 +2018,11 @@ def test_pdf_ocr_inspects_once_then_processes_only_selected_original_pages():
             with (
                 patch("latexstruct.ocr.iter_pdf_pages", fake_render),
                 patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
+                patch("latexstruct.ocr.pdf_page_equation_tag_regions", return_value=[]),
+                patch(
+                    "latexstruct.server.app._prepare_page_formula_evidence",
+                    return_value=[],
+                ),
                 patch("latexstruct.core.ai.LLMClient.chat_vision", fake_vision),
             ):
                 started = c.post(
@@ -1991,13 +2030,15 @@ def test_pdf_ocr_inspects_once_then_processes_only_selected_original_pages():
                     data={"start_page": "88", "end_page": "90", "dpi": "150"},
                 )
                 assert started.status_code == 200, started.text
-                for _ in range(100):
-                    state = c.get(f"/api/ocr/jobs/{inspected}").json()
-                    if state["status"] != "running":
-                        break
-                    time.sleep(0.02)
+                state = _wait_for_json(
+                    c,
+                    f"/api/ocr/jobs/{inspected}",
+                    lambda value: value.get("terminal_epoch") is not None,
+                )
 
-            assert state["status"] == "done", state
+            assert state["status"] == "partial", state
+            assert state.get("compile_status") in {None, "SOURCE_PREVIEW"}
+            assert state["progress"] < 1.0
             assert state["source_total"] == 396
             assert state["total"] == 3
             assert state["selected_start"] == 88 and state["selected_end"] == 90
@@ -2014,7 +2055,7 @@ def test_pdf_ocr_inspects_once_then_processes_only_selected_original_pages():
             assert replay.status_code == 200
             assert replay.json()["id"] == inspected
             assert replay.json()["reused"] is True
-            assert replay.json()["status"] == "done"
+            assert replay.json()["status"] == "partial"
             assert calls == [88, 89, 90]
         finally:
             job = srv._ocr_jobs.pop(inspected, {}) if inspected else {}
@@ -2066,8 +2107,11 @@ def test_pdf_ocr_keeps_completed_pages_when_later_rendering_fails():
             assert state["raw_ready"] is True
             assert state["raw_revision"] == 1
             assert state["raw_chars"] > 0
-            # A partial run must never present itself as 100% complete.
-            assert 0.9 <= state["progress"] < 1.0
+            # Only one of two pages produced a usable OCR result.  Failed
+            # rendering must not count as recognition success or inflate the
+            # terminal partial run toward 100%.
+            assert state["progress_metrics"]["recognition_progress"] == 0.5
+            assert state["progress"] == pytest.approx(0.02 + 0.88 * 0.5)
             assert state["pages"]["1"]["status"] == "done"
             assert state["pages"]["2"]["status"] == "error"
             assert state["error"]
@@ -2120,6 +2164,10 @@ def test_pdf_render_failure_does_not_block_later_pages_and_retry_rerenders_missi
             with (
                 patch("latexstruct.ocr.iter_pdf_pages", flaky_render),
                 patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
+                patch(
+                    "latexstruct.server.app._prepare_page_formula_evidence",
+                    return_value=[],
+                ),
                 patch("latexstruct.core.ai.LLMClient.chat_vision", fake_vision),
             ):
                 assert c.post(
@@ -2142,7 +2190,12 @@ def test_pdf_render_failure_does_not_block_later_pages_and_retry_rerenders_missi
                 retried = c.post(f"/api/ocr/jobs/{jid}/pages/2/retry")
                 assert retried.status_code == 200, retried.text
                 body = retried.json()
-                assert body["ok"] is True and body["status"] == "done"
+                assert body["ok"] is True, json.dumps(
+                    body["pages"]["2"], ensure_ascii=False, sort_keys=True
+                )
+                assert body["status"] == "partial"
+                assert body["compile_status"] == "SOURCE_PREVIEW"
+                assert body["progress"] < 1.0
                 assert body["pages"]["2"]["preview_ready"] is True
                 assert render_calls == [(1, 200), (2, 200), (3, 200), (2, 300)]
                 assert vision_calls == [1, 3, 2]
@@ -2171,7 +2224,7 @@ def test_pdf_ocr_pause_stops_before_next_page_and_resumes_same_job():
             client.last_usage = {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10}
             if page_no == 1:
                 first_started.set()
-                assert release_first.wait(timeout=3)
+                assert release_first.wait(timeout=10)
             return f"```latex\nA sufficiently long paused OCR result from page {page_no}.\n```"
 
         with (
@@ -2181,6 +2234,10 @@ def test_pdf_ocr_pause_stops_before_next_page_and_resumes_same_job():
             ),
             patch("latexstruct.ocr.iter_pdf_pages", fake_render),
             patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
+            patch(
+                "latexstruct.server.app._prepare_page_formula_evidence",
+                return_value=[],
+            ),
             patch("latexstruct.core.ai.LLMClient.chat_vision", controlled_vision),
         ):
             try:
@@ -2202,11 +2259,12 @@ def test_pdf_ocr_pause_stops_before_next_page_and_resumes_same_job():
                 assert c.delete(f"/api/ocr/jobs/{jid}").status_code == 409
 
                 release_first.set()
-                for _ in range(150):
-                    paused = c.get(f"/api/ocr/jobs/{jid}").json()
-                    if paused["status"] == "paused":
-                        break
-                    time.sleep(0.02)
+                paused = _wait_for_json(
+                    c,
+                    f"/api/ocr/jobs/{jid}",
+                    lambda value: value["status"] == "paused",
+                    timeout=10,
+                )
                 assert paused["status"] == "paused", paused
                 assert paused["can_pause"] is False and paused["can_resume"] is True
                 assert calls == [1]
@@ -2217,12 +2275,14 @@ def test_pdf_ocr_pause_stops_before_next_page_and_resumes_same_job():
                 assert resumed.status_code == 200
                 assert resumed.json()["status"] == "running"
                 assert resumed.json()["state_revision"] > paused["state_revision"]
-                for _ in range(150):
-                    final = c.get(f"/api/ocr/jobs/{jid}").json()
-                    if final["status"] == "done":
-                        break
-                    time.sleep(0.02)
-                assert final["status"] == "done", final
+                final = _wait_for_json(
+                    c,
+                    f"/api/ocr/jobs/{jid}",
+                    lambda value: value.get("terminal_epoch") is not None,
+                )
+                assert final["status"] == "partial", final
+                assert final["compile_status"] == "SOURCE_PREVIEW"
+                assert final["progress"] < 1.0
                 assert calls == [1, 2]
                 assert final["can_pause"] is False and final["can_resume"] is False
             finally:
@@ -2233,9 +2293,9 @@ def test_pdf_ocr_pause_stops_before_next_page_and_resumes_same_job():
                         if current:
                             current["pause_requested"] = False
                             srv._ocr_jobs_changed.notify_all()
-
-        job = srv._ocr_jobs.pop(jid, {}) if jid else {}
-        shutil.rmtree(job.get("dir", ""), ignore_errors=True)
+                with srv._ocr_jobs_lock:
+                    job = srv._ocr_jobs.pop(jid, {}) if jid else {}
+                shutil.rmtree(job.get("dir", ""), ignore_errors=True)
 
 
 def test_retry_failed_runs_in_background_sequentially_and_can_pause():
@@ -2273,6 +2333,10 @@ def test_retry_failed_runs_in_background_sequentially_and_can_pause():
             ),
             patch("latexstruct.ocr.iter_pdf_pages", fake_render),
             patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
+            patch(
+                "latexstruct.server.app._prepare_page_formula_evidence",
+                return_value=[],
+            ),
             patch("latexstruct.core.ai.LLMClient.chat_vision", controlled_vision),
         ):
             try:
@@ -2315,12 +2379,16 @@ def test_retry_failed_runs_in_background_sequentially_and_can_pause():
                 assert retry_calls == [1]
 
                 assert c.post(f"/api/ocr/jobs/{jid}/resume").status_code == 200
-                for _ in range(150):
-                    final = c.get(f"/api/ocr/jobs/{jid}").json()
-                    if final["status"] == "done":
-                        break
-                    time.sleep(0.02)
-                assert final["status"] == "done", final
+                final = _wait_for_json(
+                    c,
+                    f"/api/ocr/jobs/{jid}",
+                    lambda value: (
+                        not value.get("retrying_failed")
+                        and value.get("terminal_epoch") is not None
+                    ),
+                )
+                assert final["status"] == "partial", final
+                assert final["compile_status"] == "SOURCE_PREVIEW"
                 assert final["retrying_failed"] is False
                 assert final["retry_done"] == 2
                 assert retry_calls == [1, 2]
@@ -2333,9 +2401,9 @@ def test_retry_failed_runs_in_background_sequentially_and_can_pause():
                         if current:
                             current["pause_requested"] = False
                             srv._ocr_jobs_changed.notify_all()
-
-        job = srv._ocr_jobs.pop(jid, {}) if jid else {}
-        shutil.rmtree(job.get("dir", ""), ignore_errors=True)
+                with srv._ocr_jobs_lock:
+                    job = srv._ocr_jobs.pop(jid, {}) if jid else {}
+                shutil.rmtree(job.get("dir", ""), ignore_errors=True)
 
 
 def test_pdf_ocr_preview_revision_grows_after_each_page_without_finishing_early():
@@ -2409,18 +2477,21 @@ def test_pdf_ocr_preview_revision_grows_after_each_page_without_finishing_early(
                 assert "original page 4" not in second_preview.text
 
                 allow_third.set()
-                for _ in range(100):
-                    final = c.get(f"/api/ocr/jobs/{inspected}").json()
-                    if final["status"] != "running":
-                        break
-                    time.sleep(0.02)
+                final = _wait_for_json(
+                    c,
+                    f"/api/ocr/jobs/{inspected}",
+                    lambda value: value.get("terminal_epoch") is not None,
+                )
 
-            assert final["status"] == "done"
-            # Three live snapshots plus the final immutable canonical freeze.
-            assert final["raw_revision"] == 4
+            assert final["status"] == "partial"
+            assert final["compile_status"] == "SOURCE_PREVIEW"
+            assert final["progress"] < 1.0
+            # SOURCE_PREVIEW never creates a compiled/frozen fourth revision;
+            # each successfully persisted page contributes one live revision.
+            assert final["raw_revision"] == 3
             assert final["raw_chars"] > second["raw_chars"] > first["raw_chars"]
             final_preview = c.get(f"/api/ocr/jobs/{inspected}/preview")
-            assert final_preview.headers["x-latexstruct-ocr-revision"] == "4"
+            assert final_preview.headers["x-latexstruct-ocr-revision"] == "3"
             assert int(final_preview.headers["x-latexstruct-ocr-chars"]) == len(final_preview.text)
             assert "original page 4" in final_preview.text
             assert final["usage"]["calls"] == 3
@@ -3239,12 +3310,13 @@ def test_ocr_retry_rejects_changes_to_an_immutable_successful_page():
                 created = _inspect_and_start_image(c, "a.png", png, "image/png")
                 assert created.status_code == 200
                 jid = created.json()["id"]
-                for _ in range(100):
-                    state = c.get(f"/api/ocr/jobs/{jid}").json()
-                    if state["status"] != "running":
-                        break
-                    time.sleep(0.02)
-                assert state["status"] == "done"
+                state = _wait_for_json(
+                    c,
+                    f"/api/ocr/jobs/{jid}",
+                    lambda value: value.get("terminal_epoch") is not None,
+                )
+                assert state["status"] == "partial"
+                assert state["compile_status"] == "SOURCE_PREVIEW"
                 with patch(
                     "latexstruct.server.downloads.download_root",
                     return_value=Path(tmp) / "ocr-downloads",
@@ -3259,7 +3331,9 @@ def test_ocr_retry_rejects_changes_to_an_immutable_successful_page():
                 assert "冻结" in rejected.json()["detail"]
 
             final = c.get(f"/api/ocr/jobs/{jid}").json()
-            assert final["status"] == "done"
+            assert final["status"] == "partial"
+            assert final["compile_status"] == "SOURCE_PREVIEW"
+            assert final["progress"] < 1.0
             assert final["pages"]["1"]["attempts"] == 1
             assert final["pages"]["1"]["retrying"] is False
             assert final["usage"]["calls"] == 1
@@ -3288,12 +3362,13 @@ def test_immutable_success_rejects_paid_retry_without_invalidating_saved_snapsho
             with patch("latexstruct.core.ai.LLMClient.chat_vision", initial_success):
                 created = _inspect_and_start_image(c, "a.png", png, "image/png")
                 jid = created.json()["id"]
-                for _ in range(100):
-                    state = c.get(f"/api/ocr/jobs/{jid}").json()
-                    if state["status"] != "running":
-                        break
-                    time.sleep(0.02)
-            assert state["status"] == "done"
+                state = _wait_for_json(
+                    c,
+                    f"/api/ocr/jobs/{jid}",
+                    lambda value: value.get("terminal_epoch") is not None,
+                )
+            assert state["status"] == "partial"
+            assert state["compile_status"] == "SOURCE_PREVIEW"
             with patch(
                 "latexstruct.server.downloads.download_root",
                 return_value=Path(tmp) / "ocr-downloads",
@@ -3307,7 +3382,8 @@ def test_immutable_success_rejects_paid_retry_without_invalidating_saved_snapsho
             assert retried.status_code == 409
             assert "冻结" in retried.json()["detail"]
             final = c.get(f"/api/ocr/jobs/{jid}").json()
-            assert final["status"] == "done"
+            assert final["status"] == "partial"
+            assert final["compile_status"] == "SOURCE_PREVIEW"
             assert final["raw_revision"] == saved_snapshot["revision"]
             assert final["usage_revision"] == saved_snapshot["usage_revision"]
             assert final["page_revision"] == saved_snapshot["page_revision"]
@@ -3390,12 +3466,16 @@ def test_ocr_import_blocks_duplicate_import_and_retry_until_snapshot_is_saved():
             shutil.rmtree(job_dir, ignore_errors=True)
 
 
-def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_separately():
+def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_separately(
+    request,
+):
     with WorkspaceTmp() as tmp:
         srv._store = srv.ProjectStore(root=os.path.join(tmp, "projects"))
         srv._config = None
         c = TestClient(srv.create_app())
         calls = {"count": 0}
+        jid = ""
+        request.addfinalizer(lambda: _discard_test_ocr_job(jid))
 
         def flaky_vision(_self, _system, _user, _image):
             calls["count"] += 1
@@ -3422,14 +3502,18 @@ def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_sepa
         with patch("latexstruct.core.ai.LLMClient.chat_vision", flaky_vision):
             created = _inspect_and_start_image(c, "a.png", png, "image/png")
             jid = created.json()["id"]
-            for _ in range(100):
-                state = c.get(f"/api/ocr/jobs/{jid}").json()
-                if state["status"] != "running":
-                    break
-                time.sleep(0.02)
-        assert state["status"] == "done"
+            state = _wait_for_json(
+                c,
+                f"/api/ocr/jobs/{jid}",
+                lambda value: value.get("terminal_epoch") is not None,
+            )
+        assert state["status"] == "partial"
+        assert state["compile_status"] == "SOURCE_PREVIEW"
+        assert state["progress"] < 1.0
         assert state["pages"]["1"]["attempts"] == 2
-        assert c.get(f"/api/ocr/jobs/{jid}/result").headers["x-latexstruct-ocr-complete"] == "true"
+        assert c.get(f"/api/ocr/jobs/{jid}/result").headers[
+            "x-latexstruct-ocr-complete"
+        ] == "false"
 
         def fake_structure_ai(_self, system, user):
             if "全文 formal 结构独立复核器" in system:
@@ -3547,32 +3631,13 @@ def test_ocr_transient_page_failure_retries_then_imports_raw_and_structured_sepa
             ),
         ):
             imported = c.post(f"/api/ocr/jobs/{jid}/import?mode=ai")
-            assert imported.status_code == 200
-            pid = imported.json()["id"]
-            assert imported.json()["process"]["status"] in {"running", "committing", "done"}
-            process = _wait_for_json(
-                c,
-                f"/api/projects/{pid}/process/status",
-                lambda item: item["status"]
-                not in {"running", "pausing", "paused", "committing"},
-                timeout=60.0,
-            )
-        assert process["status"] == "done", process
-        raw = c.get(f"/api/projects/{pid}/source").text
-        structured = c.get(f"/api/projects/{pid}/result").text
-        assert "Theorem 1." in raw and "\\begin{theorem}" not in raw
-        assert "% LaTeXStruct template: faithfulbook v1" not in structured
-        assert "\\documentclass[11pt]{article}" in structured
-        assert "\\documentclass[11pt]{article}" in structured
-        assert "\\begin{theorem}[1]" in structured
-        assert "Theorem 1. A recovered statement." not in structured
-        assert "\\begin{proof}" in structured
-        project = srv.get_store().get(pid)
-        assert project["kind"] == "ocr"
-        assert project["mode"] == "ai"
-        assert project["template"] == ""
-        job = srv._ocr_jobs.pop(jid, {})
-        shutil.rmtree(job.get("dir", ""), ignore_errors=True)
+            assert imported.status_code == 409
+            assert imported.json()["detail"]
+        # The paid OCR text remains readable/exportable, but an uncompiled
+        # source preview cannot enter analysis as if it were a verified PDF.
+        assert "Theorem 1." in c.get(f"/api/ocr/jobs/{jid}/result").text
+        assert srv.get_store().list() == []
+        _discard_test_ocr_job(jid)
 
 
 def test_ocr_quality_gate_retry_forwards_controlled_correction_feedback():
@@ -3585,33 +3650,95 @@ def test_ocr_quality_gate_retry_forwards_controlled_correction_feedback():
         def caption_retry(_self, _system, user, _image):
             users.append(user)
             if len(users) == 1:
-                return (
+                latex = (
                     r"\includegraphics{images/page_1_1} "
                     r"% figure: Fig. 1.1. Visible caption"
                 )
-            return "\n".join([
-                r"\includegraphics{images/page_1_1} % figure: diagram",
-                r"Fig. 1.1. Visible caption",
-            ])
+            else:
+                latex = "\n".join([
+                    (
+                        r"\includegraphics{images/page_1_1} "
+                        r"% figure: diagram"
+                    ),
+                    r"Fig. 1.1. Visible caption",
+                ])
+            return {
+                "latex": latex,
+                "figures": [{
+                    "path": "images/page_1_1",
+                    "index": 1,
+                    "bbox_normalized": [0.1, 0.1, 0.9, 0.8],
+                    "bbox_pixels": [12, 12, 108, 96],
+                }],
+                "framed_insets": [],
+            }
 
-        png = b"\x89PNG\r\n\x1a\n" + b"0" * 16
+        import pymupdf
+
+        image_document = pymupdf.open()
+        image_page = image_document.new_page(width=120, height=120)
+        image_page.insert_text((12, 20), "Fig. 1.1. Visible caption")
+        png = image_page.get_pixmap(alpha=False).tobytes("png")
+        image_document.close()
         jid = ""
         try:
-            with patch("latexstruct.core.ai.LLMClient.chat_vision", caption_retry):
+            with patch(
+                "latexstruct.core.ai.LLMClient.chat_vision_structured_bytes",
+                caption_retry,
+                create=True,
+            ):
                 created = _inspect_and_start_image(client, "a.png", png, "image/png")
                 jid = created.json()["id"]
-                for _ in range(100):
-                    state = client.get(f"/api/ocr/jobs/{jid}").json()
-                    if state["status"] != "running":
-                        break
-                    time.sleep(0.02)
-            assert state["status"] == "done", state
-            assert state["pages"]["1"]["attempts"] == 2
+                state = _wait_for_json(
+                    client,
+                    f"/api/ocr/jobs/{jid}",
+                    lambda value: (
+                        value["status"] not in {"starting", "running"}
+                        and value.get("terminal_epoch") is not None
+                    ),
+                )
+            assert state["status"] == "partial", state
+            assert state["compile_status"] == "SOURCE_PREVIEW"
+            assert state["progress"] < 1.0
+            # The corrected structured figure is preserved, while the strict
+            # page recovery ladder performs at least one controlled correction.
+            # Assert the calls that actually reached the provider instead of
+            # imposing extra calls after the corrected evidence passes its gate.
+            assert state["pages"]["1"]["attempts"] == len(users)
+            assert len(users) >= 2
             assert "retry_correction" in users[1]
             assert "Fig. 1.1" in users[1]
-            assert "Fig. 1.1. Visible caption" in client.get(
-                f"/api/ocr/jobs/{jid}/result"
-            ).text
+            with srv._ocr_jobs_lock:
+                internal_page = dict(srv._ocr_jobs[jid]["pages"][1])
+                recovery_store = srv._ocr_jobs[jid]["_v2_recovery_store"]
+            attempts, _recovery_state = recovery_store.recover_page(
+                internal_page["recovery_run_id"],
+                internal_page["page_id"],
+                crops_available=False,
+            )
+            response_payloads = []
+            for attempt in attempts:
+                if attempt.response is None:
+                    continue
+                response_path = (
+                    recovery_store.root
+                    / internal_page["recovery_run_id"]
+                    / attempt.response.storage_key
+                )
+                response_payloads.append(json.loads(response_path.read_text("utf-8")))
+            corrected = next(
+                payload
+                for payload in response_payloads
+                if "Fig. 1.1. Visible caption" in str(payload.get("latex") or "")
+                and payload.get("figures")
+            )
+            assert corrected["figures"][0]["path"] == (
+                "figures/page_0001_figure_01.png"
+            )
+            assert corrected["figures"][0]["bbox_normalized"] == [
+                0.1, 0.1, 0.9, 0.8,
+            ]
+            assert corrected["figures"][0]["bbox_pixels"] == [12, 12, 108, 96]
         finally:
             with srv._ocr_jobs_lock:
                 job = srv._ocr_jobs.pop(jid, {}) if jid else {}
@@ -3661,6 +3788,11 @@ def test_pdf_ocr_server_forwards_relation_regions_and_retries_to_local_pixel_evi
             with (
                 patch("latexstruct.ocr.iter_pdf_pages", fake_render),
                 patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
+                patch("latexstruct.ocr.pdf_page_equation_tag_regions", return_value=[]),
+                patch(
+                    "latexstruct.server.app._prepare_page_formula_evidence",
+                    return_value=[],
+                ),
                 patch(
                     "latexstruct.ocr.pdf_page_text_hint",
                     return_value="For n ≥3, this sufficiently long paragraph describes the graph.",
@@ -3686,13 +3818,14 @@ def test_pdf_ocr_server_forwards_relation_regions_and_retries_to_local_pixel_evi
                     data={"start_page": "41", "end_page": "41", "dpi": "300"},
                 )
                 assert started.status_code == 200, started.text
-                for _ in range(150):
-                    state = c.get(f"/api/ocr/jobs/{jid}").json()
-                    if state["status"] != "running":
-                        break
-                    time.sleep(0.02)
+                state = _wait_for_json(
+                    c,
+                    f"/api/ocr/jobs/{jid}",
+                    lambda value: value.get("terminal_epoch") is not None,
+                )
 
-            assert state["status"] == "done", state
+            assert state["status"] == "partial", state
+            assert state["compile_status"] == "SOURCE_PREVIEW"
             assert state["pages"]["41"]["attempts"] == 2
             with srv._ocr_jobs_lock:
                 internal_page = dict(srv._ocr_jobs[jid]["pages"][41])
@@ -3764,6 +3897,11 @@ def test_pdf_ocr_server_forwards_divider_regions_and_records_retry_evidence():
             with (
                 patch("latexstruct.ocr.iter_pdf_pages", fake_render),
                 patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
+                patch("latexstruct.ocr.pdf_page_equation_tag_regions", return_value=[]),
+                patch(
+                    "latexstruct.server.app._prepare_page_formula_evidence",
+                    return_value=[],
+                ),
                 patch(
                     "latexstruct.ocr.pdf_page_text_hint",
                     return_value="A sufficiently long exercise paragraph remains visible on this page.",
@@ -3787,13 +3925,14 @@ def test_pdf_ocr_server_forwards_divider_regions_and_records_retry_evidence():
                     data={"start_page": "36", "end_page": "36", "dpi": "300"},
                 )
                 assert started.status_code == 200, started.text
-                for _ in range(150):
-                    state = c.get(f"/api/ocr/jobs/{jid}").json()
-                    if state["status"] != "running":
-                        break
-                    time.sleep(0.02)
+                state = _wait_for_json(
+                    c,
+                    f"/api/ocr/jobs/{jid}",
+                    lambda value: value.get("terminal_epoch") is not None,
+                )
 
-            assert state["status"] == "done", state
+            assert state["status"] == "partial", state
+            assert state["compile_status"] == "SOURCE_PREVIEW"
             assert state["pages"]["36"]["attempts"] == 2
             assert calls == {"page": 2, "local": 1}
             with srv._ocr_jobs_lock:
@@ -3872,6 +4011,11 @@ def test_pdf_ocr_server_forwards_footnote_regions_and_records_retry_evidence():
             jid = inspected.json()["id"]
             with (
                 patch("latexstruct.ocr.iter_pdf_pages", fake_render),
+                patch("latexstruct.ocr.pdf_page_equation_tag_regions", return_value=[]),
+                patch(
+                    "latexstruct.server.app._prepare_page_formula_evidence",
+                    return_value=[],
+                ),
                 patch(
                     "latexstruct.ocr.pdf_page_text_hint",
                     return_value="A sufficiently long paragraph with a repeated footnote.",
@@ -3897,13 +4041,14 @@ def test_pdf_ocr_server_forwards_footnote_regions_and_records_retry_evidence():
                     data={"start_page": "55", "end_page": "55", "dpi": "300"},
                 )
                 assert started.status_code == 200, started.text
-                for _ in range(150):
-                    state = c.get(f"/api/ocr/jobs/{jid}").json()
-                    if state["status"] != "running":
-                        break
-                    time.sleep(0.02)
+                state = _wait_for_json(
+                    c,
+                    f"/api/ocr/jobs/{jid}",
+                    lambda value: value.get("terminal_epoch") is not None,
+                )
 
-            assert state["status"] == "done", state
+            assert state["status"] == "partial", state
+            assert state["compile_status"] == "SOURCE_PREVIEW"
             assert state["pages"]["55"]["attempts"] == 2
             assert calls == {"page": 2, "local": 1}
             with srv._ocr_jobs_lock:
@@ -4000,6 +4145,9 @@ def test_publication_formula_evidence_uses_stored_hash_and_exports_no_private_pa
             "dir": temp_dir,
             "_source_sha256": "a" * 64,
             "client": MultiImageClient(),
+            # Formula crops are recovery evidence, not an unconditional first-
+            # read side channel.  Mark this synthetic page as actively retrying.
+            "pages": {85: {"retrying": True}},
         }
         with (
             patch.object(formula, "detect_pdf_formula_regions", return_value=[region]),
@@ -4360,14 +4508,16 @@ d &= e
                 created = _inspect_and_start_image(c, "a.png", png, "image/png")
                 assert created.status_code == 200, created.text
                 jid = created.json()["id"]
-                for _ in range(100):
-                    state = c.get(f"/api/ocr/jobs/{jid}").json()
-                    if state["status"] != "running":
-                        break
-                    time.sleep(0.02)
+                state = _wait_for_json(
+                    c,
+                    f"/api/ocr/jobs/{jid}",
+                    lambda value: value.get("terminal_epoch") is not None,
+                )
 
-            assert state["status"] == "done"
-            assert state["pages"]["1"]["status"] == "done"
+            assert state["status"] == "partial"
+            assert not state.get("compile_status")
+            assert state["progress"] < 1.0
+            assert state["pages"]["1"]["status"] == "done", state
             assert state["pages"]["1"]["low_conf"] is True
         finally:
             job = srv._ocr_jobs.pop(jid, {}) if jid else {}
@@ -4393,10 +4543,12 @@ def test_ocr_structured_model_output_is_preserved_and_marked_for_review():
                 jid = created.json()["id"]
                 for _ in range(100):
                     state = c.get(f"/api/ocr/jobs/{jid}").json()
-                    if state["status"] == "done":
+                    if state["status"] not in {"starting", "running"}:
                         break
                     time.sleep(0.02)
-            assert state["status"] == "done", state
+            assert state["status"] == "partial", state
+            assert not state.get("compile_status")
+            assert state["progress"] < 1.0
             page = state["pages"]["1"]
             assert page["status"] == "done"
             assert page["needs_review"] is True

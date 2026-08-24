@@ -54,6 +54,29 @@ test("OCR progress prefers host metrics and never counts pending pages as succes
   assert.equal(progress.etaSeconds, 90);
 });
 
+test("failed terminal pages do not override the host recognition progress", () => {
+  const pages = Object.fromEntries(Array.from({ length: 37 }, (_, index) => [
+    index + 1,
+    { final_status: index < 3 ? "SUCCESS" : "FAILED" },
+  ]));
+  const progress = buildOcrProgress({
+    status: "partial",
+    total: 37,
+    progress_metrics: {
+      total_pages: 37,
+      success_pages: 3,
+      failed_pages: 34,
+      progress: 0.091351,
+    },
+    pages,
+  });
+
+  assert.equal(progress.completed, 37);
+  assert.equal(progress.success, 3);
+  assert.equal(progress.failed, 34);
+  assert.equal(progress.progress, 0.091351);
+});
+
 test("new and legacy page states share one user-facing status", () => {
   assert.equal(ocrPagePresentation({ status: "SUCCESS" }).label, "成功");
   assert.equal(ocrPagePresentation({ status: "done", low_conf: true }).label, "待确认");
@@ -131,18 +154,33 @@ test("restart recovery offers one explicit resume action and never claims comple
   assert.equal(presentation.actionLabel, "继续未完成页面（2）");
 });
 
-test("review-only completion is distinguished from interrupted pages", () => {
+test("review-only terminal state remains below 100% and offers targeted retry", () => {
   const presentation = buildOcrRecoveryPresentation({
-    status: "done",
+    status: "partial",
+    raw_frozen: false,
     total: 1,
+    progress_metrics: { progress: 0.9, needs_review_pages: 1 },
     pages: {
-      1: { status: "done", final_status: "NEEDS_REVIEW", needs_review: true },
+      1: {
+        status: "done",
+        final_status: "NEEDS_REVIEW",
+        needs_review: true,
+        can_retry: true,
+      },
     },
   });
   assert.equal(presentation.incompleteCount, 0);
   assert.equal(presentation.canResumeIncomplete, false);
+  assert.equal(presentation.canRetryReview, true);
   assert.equal(presentation.statusLabel, "已完成，待确认");
   assert.match(presentation.title, /1 页待确认/);
+  assert.match(presentation.detail, /只重试待确认页/);
+  assert.equal(buildOcrProgress({
+    status: "done",
+    total: 1,
+    progress_metrics: { progress: 0.9, needs_review_pages: 1 },
+    pages: { 1: { final_status: "NEEDS_REVIEW", needs_review: true } },
+  }).progress, 0.9);
 });
 
 test("active OCR keeps its running label instead of being presented as a terminal failure", () => {

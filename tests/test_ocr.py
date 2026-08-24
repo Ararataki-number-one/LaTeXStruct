@@ -31,6 +31,7 @@ from latexstruct.ocr import (  # noqa: E402
     encode_image,
     image_mime_type,
     merge_book,
+    merge_raw_ocr_book,
     ocr_page_needs_review,
     ocr_page_needs_retry,
     parse_page_range,
@@ -1636,6 +1637,20 @@ def test_merge_book():
     assert tex.rstrip().endswith("\\end{document}")
     assert "%=== PAGE BREAK ===" in tex
     assert "\\clearpage" in tex
+
+
+def test_merge_raw_ocr_book_keeps_page_fragments_unmodified():
+    first = "% Page 1\nFirst sentence ends here and"
+    second = "% Page 2\ncontinuation starts in lower case."
+
+    tex = merge_raw_ocr_book([first, second])
+
+    assert first in tex and second in tex
+    assert "\\clearpage" not in tex
+    assert "\\noindent" not in tex
+    assert "%=== PAGE BREAK ===" not in tex
+    assert "\\tableofcontents" not in tex
+    assert tex.rstrip().endswith("\\end{document}")
 
 
 def test_merge_book_embeds_only_fully_verified_equation_evidence():

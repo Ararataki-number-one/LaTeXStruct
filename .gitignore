@@ -6,8 +6,10 @@ __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
+.pytest-basetemp-*/
 .pytest_tmp*/
 .test-tmp/
+.test-tmp-*/
 .pytest-tmp-*/
 pytest-of-*/
 tests/.pytest-tmp-*/

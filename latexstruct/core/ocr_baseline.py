@@ -19,6 +19,12 @@ from .ocrstruct import _build_syntax_repair_ops
 from .patch import Decision, apply_patches, validate_ops
 
 
+_SOURCE_PREVIEW_NOTICE = (
+    "This PDF is a readable fallback rendered from TeX source. "
+    "It is not evidence that LaTeX compilation succeeded."
+)
+
+
 @dataclass(frozen=True, slots=True)
 class OcrBaselineResult:
     tex: str
@@ -30,6 +36,72 @@ class OcrBaselineResult:
     syntax_repairs: tuple[dict, ...]
     error_lines: tuple[dict, ...]
     engine: str
+
+
+def build_source_preview_pdf(source: str) -> bytes:
+    """Create a readable, unmistakably non-compiled PDF fallback.
+
+    The first page contains the mandatory notice.  The remaining pages are a
+    bounded source rendering, never a simulation of LaTeX layout.
+    """
+    try:
+        import pymupdf
+    except ImportError:  # pragma: no cover - declared runtime dependency
+        import fitz as pymupdf  # type: ignore
+
+    document = pymupdf.open()
+    try:
+        notice_page = document.new_page(width=595, height=842)
+        notice_page.insert_text(
+            pymupdf.Point(54, 82),
+            "SOURCE_PREVIEW: NOT A LATEX COMPILED RESULT.",
+            fontname="helv",
+            fontsize=11,
+        )
+        notice_page.insert_text(
+            pymupdf.Point(54, 104),
+            "NOT A LATEX COMPILE RESULT.",
+            fontname="helv",
+            fontsize=11,
+        )
+        notice_page.insert_textbox(
+            pymupdf.Rect(54, 130, 541, 230),
+            _SOURCE_PREVIEW_NOTICE,
+            fontname="china-s",
+            fontsize=11,
+            lineheight=1.45,
+        )
+        notice_page.insert_textbox(
+            pymupdf.Rect(54, 240, 541, 780),
+            "TeX source preview begins on the following page.",
+            fontname="china-s",
+            fontsize=10,
+        )
+        lines = str(source or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        # Keep the fallback deterministic and readable without claiming TeX
+        # pagination.  Very long source lines are visibly wrapped as text.
+        wrapped: list[str] = []
+        for line in lines:
+            if not line:
+                wrapped.append("")
+                continue
+            wrapped.extend(line[index:index + 92] for index in range(0, len(line), 92))
+        for offset in range(0, max(1, len(wrapped)), 58):
+            page = document.new_page(width=595, height=842)
+            chunk = wrapped[offset:offset + 58] or [""]
+            page.insert_textbox(
+                pymupdf.Rect(36, 36, 559, 806),
+                "\n".join(chunk),
+                fontname="china-s",
+                fontsize=8,
+                lineheight=1.15,
+            )
+        payload = document.tobytes(garbage=4, deflate=True)
+    finally:
+        document.close()
+    if not payload.startswith(b"%PDF-"):
+        raise RuntimeError("failed to create SOURCE_PREVIEW PDF")
+    return payload
 
 
 def _syntax_only_repair(text: str) -> tuple[str, tuple[dict, ...]]:
@@ -111,6 +183,7 @@ def compile_ocr_baseline(
             logs.append(str(result["log"]))
     if status == OcrPreviewStatus.SOURCE_PREVIEW:
         logs.append("[LaTeXStruct] SOURCE_PREVIEW：这不是 LaTeX 编译结果；当前仅可查看 TeX 源码。")
+        pdf_bytes = build_source_preview_pdf(candidate)
     errors = tuple(
         {"message": str(message)[:500]}
         for message in (chosen.get("errors") or ())
@@ -128,4 +201,4 @@ def compile_ocr_baseline(
     )
 
 
-__all__ = ["OcrBaselineResult", "compile_ocr_baseline"]
+__all__ = ["OcrBaselineResult", "build_source_preview_pdf", "compile_ocr_baseline"]

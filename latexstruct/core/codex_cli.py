@@ -32,7 +32,7 @@ CODEX_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 CODEX_MAX_IMAGE_BYTES = 100 * 1024 * 1024
 CODEX_TRANSIENT_TEXT_RETRIES = 2
 CODEX_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
-CODEX_TEXT_CONCURRENCY = 1
+CODEX_TEXT_CONCURRENCY = 3
 CODEX_VISUAL_CONCURRENCY = 3
 CODEX_DISABLED_FEATURES = (
     "shell_tool", "shell_snapshot", "unified_exec", "code_mode",
@@ -49,8 +49,8 @@ _GLOBAL_RUN_GATE = threading.BoundedSemaphore(CODEX_VISUAL_CONCURRENCY)
 _TEXT_RUN_GATE = threading.BoundedSemaphore(CODEX_TEXT_CONCURRENCY)
 _VISUAL_RUN_GATE = _GLOBAL_RUN_GATE
 # Kept as a private compatibility alias for older in-process integrations.
-# Text analysis remains atomic and serial; OCR/visual calls use the separate
-# three-slot gate below.
+# Text and visual calls share the same hard three-process ceiling.  A separate
+# text semaphore remains for role accounting but no longer serializes pages.
 _RUN_LOCK = _TEXT_RUN_GATE
 _FEATURE_CACHE: dict[str, frozenset[str]] = {}
 _FEATURE_CACHE_LOCK = threading.Lock()
@@ -144,6 +144,12 @@ def _safe_child_env() -> Dict[str, str]:
         "TEMP", "TMP", "TMPDIR", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
         "HOME", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
         "XDG_CONFIG_HOME", "XDG_DATA_HOME", "LANG", "LC_ALL", "CODEX_HOME",
+        # Enterprise and managed desktops commonly terminate TLS through a
+        # locally trusted CA.  Codex supports these standard certificate-bundle
+        # variables; dropping them makes the child process fail with
+        # ``UnknownIssuer`` even though the host application can connect.
+        "CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "CURL_CA_BUNDLE",
+        "REQUESTS_CA_BUNDLE",
     }
     child: Dict[str, str] = {}
     for key, value in os.environ.items():
@@ -550,7 +556,28 @@ def _friendly_failure(diagnostic: str, returncode: int) -> str:
     raw text, because it may contain document fragments or credentials.
     """
     lower = (diagnostic or "").lower()
-    if "login" in lower or "auth" in lower or "unauthorized" in lower:
+    if any(token in lower for token in (
+        "failed to read ca certificate file",
+        "failed to load ca certificates from",
+        "failed to parse certificate",
+        "failed to build http client while using ca bundle",
+        "custom ca env var points at an unreadable file",
+        "custom ca env var does not point at a file",
+    )):
+        return "Codex 的 CA 证书文件无效或不可读，请检查证书环境配置后重试"
+    if any(token in lower for token in (
+        "invalid peer certificate", "unknownissuer", "unknown issuer",
+        "unknown certificate authority", "unable to get local issuer certificate",
+        "self signed certificate in certificate chain", "certificate verify failed",
+        "certificate_unknown",
+    )):
+        return (
+            "Codex 云端连接的证书信任失败；请保留系统提供的 CA 证书环境后重试"
+        )
+    if any(token in lower for token in (
+        "login", "unauthorized", "not authenticated", "authentication required",
+        "authentication failed", "authentication error", "invalid_grant",
+    )):
         return "Codex 的 ChatGPT 登录已失效，请运行 codex login 后重试"
     if any(word in lower for word in ("rate limit", "usage limit", "quota", "too many requests")):
         return "Codex 订阅额度不足或触发限流，请稍后重试"
@@ -558,6 +585,15 @@ def _friendly_failure(diagnostic: str, returncode: int) -> str:
         return "所选 Codex 模型不可用，请留空使用默认模型或更换模型"
     if "invalid_json_schema" in lower or "invalid schema for response_format" in lower:
         return "Codex 结构化输出协议不兼容，请更新 LaTeXStruct 后重试"
+    if any(token in lower for token in (
+        "failed to initialize in-process app-server client",
+        "attempt to write a readonly database",
+        "could not create path aliases",
+    )) and any(token in lower for token in (
+        "access denied", "access is denied", "permission denied", "os error 5",
+        "os error 13", "readonly database", "read-only file system", "拒绝访问",
+    )):
+        return "Codex 运行目录不可写，请检查 CODEX_HOME 与临时目录权限后重试"
     if any(token in lower for token in (
         "unknown feature", "unrecognized option", "unexpected argument",
         "unknown configuration", "unknown config", "failed to load config",
@@ -845,6 +881,8 @@ class CodexCLIClient:
         user_text: str,
         image_bytes: bytes,
         schema: dict = None,
+        *,
+        operation: str = "视觉复核",
     ) -> Tuple[dict, Dict]:
         """Run a generic, tool-disabled visual classifier with a strict schema."""
         self.last_usage = {}
@@ -873,7 +911,7 @@ class CodexCLIClient:
                 prompt,
                 output_schema,
                 image=(bytes(image_bytes), suffix),
-                operation="视觉复核",
+                operation=operation,
             )
         finally:
             _release_role_gates(gate)
@@ -884,6 +922,8 @@ class CodexCLIClient:
         user_text: str,
         images: Sequence[bytes],
         schema: dict = None,
+        *,
+        operation: str = "视觉批量复核",
     ) -> Tuple[dict, Dict]:
         """Review several independent page-pair images in one Codex run."""
         self.last_usage = {}
@@ -891,8 +931,8 @@ class CodexCLIClient:
             raise LLMError("Codex 视觉批量复核请求过长，已保守停止")
         if isinstance(images, (bytes, bytearray, str)):
             raise LLMError("Codex 视觉批量复核输入必须是图片序列")
-        if not 1 <= len(images) <= 3:
-            raise LLMError("Codex 视觉批量复核每次必须包含 1 至 3 张图片")
+        if not 1 <= len(images) <= 5:
+            raise LLMError("Codex 视觉批量输入每次必须包含 1 至 5 张图片")
         if sum(len(item) for item in images) > CODEX_MAX_IMAGE_BYTES:
             raise LLMError("Codex 视觉批量复核输入合计超过 100 MB 限制")
         prepared = tuple(
@@ -921,7 +961,7 @@ class CodexCLIClient:
                 prompt,
                 output_schema,
                 images=prepared,
-                operation="视觉批量复核",
+                operation=operation,
             )
         finally:
             _release_role_gates(gate)

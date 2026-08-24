@@ -480,8 +480,11 @@ def test_release_build_safety_guards():
     assert "dist/LaTeXStruct-portable-*.zip" in workflow
     assert "dist/LaTeXStruct.exe\n            dist/LaTeXStruct-setup" not in workflow
     assert "安装后未找到第三方许可证" in workflow
-    assert "便携包缺少 $requiredFile" in workflow
-    assert "'dist/LaTeXStruct.exe','LICENSE',$notice" in workflow
+    assert "packaging/release_integrity.py build-portable" in workflow
+    assert "--executable dist/LaTeXStruct.exe --license LICENSE" in workflow
+    assert "--notices $notice --output $portable" in workflow
+    assert "dist/release-assets.json" in workflow
+    assert "dist/SHA256SUMS.txt" in workflow
 
     with open(os.path.join(root, "packaging", "LaTeXStruct.spec"), encoding="utf-8") as f:
         pyinstaller_spec = f.read()

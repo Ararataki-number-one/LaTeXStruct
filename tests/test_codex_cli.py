@@ -28,6 +28,7 @@ from latexstruct.core.ai import (  # noqa: E402
 from latexstruct.core.codex_cli import (  # noqa: E402
     CODEX_BACKEND,
     CODEX_BILLING_MODE,
+    CODEX_TEXT_CONCURRENCY,
     CODEX_VISUAL_CONCURRENCY,
     CodexCLIClient,
     validate_codex_effort,
@@ -96,6 +97,10 @@ def test_safe_child_env_is_allowlist_and_never_inherits_api_credentials(monkeypa
         "PATH": r"C:\\Windows\\System32",
         "USERPROFILE": r"C:\\Users\\tester",
         "CODEX_HOME": r"C:\\Users\\tester\\.codex",
+        "CODEX_CA_CERTIFICATE": r"C:\\certs\\managed-root.pem",
+        "SSL_CERT_FILE": r"C:\\certs\\python-roots.pem",
+        "CURL_CA_BUNDLE": r"C:\\certs\\curl-roots.pem",
+        "REQUESTS_CA_BUNDLE": r"C:\\certs\\requests-roots.pem",
     }
     secret_values = {
         "OPENAI_API_KEY": "sk-openai-secret",
@@ -119,6 +124,40 @@ def test_safe_child_env_is_allowlist_and_never_inherits_api_credentials(monkeypa
     assert not child_names.intersection(secret_values)
     assert not any(secret in child.values() for secret in secret_values.values())
     assert child["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"] == "latexstruct_local_backend"
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "expected"),
+    [
+        (
+            "stream disconnected: invalid peer certificate: UnknownIssuer",
+            "证书信任失败",
+        ),
+        (
+            "request to https://auth.openai.com failed: unknown certificate authority",
+            "证书信任失败",
+        ),
+        (
+            "failed to read CA certificate file C:/private/company/root.pem",
+            "CA 证书文件无效或不可读",
+        ),
+        (
+            "failed to initialize in-process app-server client: Access denied (os error 5)",
+            "运行目录不可写",
+        ),
+        (
+            "attempt to write a readonly database",
+            "运行目录不可写",
+        ),
+    ],
+)
+def test_friendly_failure_explains_managed_runtime_prerequisites(
+    diagnostic,
+    expected,
+):
+    message = codex_cli._friendly_failure(diagnostic, 1)
+    assert expected in message
+    assert "C:/private/company/root.pem" not in message
 
 
 def test_codex_status_reports_missing_runtime_without_probing(monkeypatch):
@@ -490,27 +529,39 @@ def test_chat_vision_json_images_keeps_one_call_schema_order_and_rejects_invalid
     images = [
         b"\x89PNG\r\n\x1a\nfirst-page-pair",
         b"\xff\xd8\xffsecond-page-pair",
+        b"\x89PNG\r\n\x1a\nthird-page-pair",
+        b"\xff\xd8\xff-fourth-page-pair",
+        b"\x89PNG\r\n\x1a\nfifth-page-pair",
     ]
     client = CodexCLIClient()
     result, _usage = client.chat_vision_json_images_bytes(
         "system",
-        '{"page_requests": [1, 2]}',
+        '{"page_requests": [1, 2, 3, 4, 5]}',
         images,
         schema,
     )
-    with pytest.raises(LLMError, match="1 至 3"):
-        client.chat_vision_json_images_bytes("system", "user", images * 2, schema)
+    with pytest.raises(LLMError) as raised:
+        client.chat_vision_json_images_bytes(
+            "system", "user", [images[0]] * 6, schema,
+        )
+    assert str(raised.value) == "Codex 视觉批量输入每次必须包含 1 至 5 张图片"
 
     assert result == {"pages": []}
     assert len(captured) == 1
     assert captured[0]["bytes"] == images
-    assert captured[0]["names"] == ["page.png", "formula-01.jpg"]
+    assert captured[0]["names"] == [
+        "page.png",
+        "formula-01.jpg",
+        "formula-02.png",
+        "formula-03.jpg",
+        "formula-04.png",
+    ]
     assert captured[0]["schema"] == schema
     assert all(not path.exists() for path in captured[0]["paths"])
     prompt_data = json.loads(captured[0]["prompt"].split("\n\n", 1)[1])
     assert prompt_data == {
         "system_instructions": "system",
-        "page_requests": '{"page_requests": [1, 2]}',
+        "page_requests": '{"page_requests": [1, 2, 3, 4, 5]}',
     }
 
 
@@ -605,6 +656,24 @@ def test_chat_json_turns_subprocess_timeout_into_fail_closed_error(monkeypatch):
 
     with pytest.raises(LLMError, match="分析超时.*原项目保持不变"):
         CodexCLIClient(timeout=0.01).chat_json(DECIDE_SYSTEM, "document")
+
+
+def test_generic_visual_ocr_timeout_uses_page_safe_message(monkeypatch):
+    _install_ready_status(monkeypatch)
+
+    def fake_run(args, **_kwargs):
+        raise subprocess.TimeoutExpired(args, 0.01)
+
+    monkeypatch.setattr(codex_cli.subprocess, "run", fake_run)
+
+    with pytest.raises(LLMError, match="OCR 超时.*本页未写入结果"):
+        CodexCLIClient(timeout=0.01).chat_vision_json_bytes(
+            "system",
+            "user",
+            b"\x89PNG\r\n\x1a\nfixture",
+            {"type": "object"},
+            operation="OCR",
+        )
 
 
 def test_chat_json_retries_only_explicit_transient_failures(monkeypatch):
@@ -725,7 +794,7 @@ def test_role_gate_allows_visual_parallelism_but_caps_total_processes_at_three(
     assert sorted(usage["call"] for _result, usage in results) == [1, 2, 3, 4]
 
 
-def test_role_gate_keeps_text_analysis_serial_while_visual_lane_is_parallel(
+def test_role_gate_allows_text_page_parallelism_with_hard_three_call_cap(
     monkeypatch,
 ):
     _install_ready_status(monkeypatch)
@@ -752,7 +821,7 @@ def test_role_gate_keeps_text_analysis_serial_while_visual_lane_is_parallel(
         ))
 
     assert all(result == {"decisions": []} for result, _usage in results)
-    assert peak == 1
+    assert peak == CODEX_TEXT_CONCURRENCY == 3
 
 
 def test_concurrent_first_visual_calls_probe_runtime_once(monkeypatch):

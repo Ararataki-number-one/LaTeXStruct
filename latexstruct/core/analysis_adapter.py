@@ -1007,10 +1007,17 @@ def freeze_pipeline_analysis_run(
         current_tex=artifacts.current_tex,
     )
     verification_dict = dict(artifacts.verification or {})
-    nested_evidence = verification_dict.get("v2_verification_evidence")
-    supplied_evidence = _coerce_verification_evidence(
-        verification_evidence if verification_evidence is not None else nested_evidence
-    )
+    if verification_evidence is not None:
+        supplied_evidence = _coerce_verification_evidence(verification_evidence)
+    else:
+        supplied_evidence = _coerce_verification_evidence(
+            verification_dict.get("v2_verification_evidence")
+        )
+        analysis_v2 = verification_dict.get("analysis_v2")
+        if supplied_evidence is None and isinstance(analysis_v2, Mapping):
+            supplied_evidence = _coerce_verification_evidence(
+                analysis_v2.get("verification_evidence")
+            )
 
     baseline_compile = verification_dict.get("compile_before")
     initial_compile_state = _compile_state(baseline_pdf, baseline_compile)

@@ -8,13 +8,20 @@ already frozen by the running LaTeXStruct instance.
 
 Examples::
 
-    python tools/v2_acceptance_e2e.py book.pdf --end-page 17
+    python tools/v2_acceptance_e2e.py book.pdf --end-page 17 \
+        --executable dist/LaTeXStruct.exe --expected-commit COMMIT \
+        --expected-build-id BUILD_ID
     python tools/v2_acceptance_e2e.py book.pdf --end-page 600 \
-        --output output/playwright/v2-acceptance/book-p1-600
+        --output output/playwright/v2-acceptance/book-p1-600 \
+        --executable dist/LaTeXStruct.exe --expected-commit COMMIT \
+        --expected-build-id BUILD_ID
 
-Exit status is zero only when every machine check passes.  Missing browser
-automation, status evidence, pages, hashes, or artifacts produces reports with
-``acceptance_passed=false`` and a non-zero exit status.
+Exit status is zero only when every machine check passes against the real local
+HTTP service through real Playwright and the tested executable/build identity is
+explicitly bound.  Missing browser automation, status evidence, pages, hashes,
+or artifacts produces reports with ``acceptance_passed=false`` and a non-zero
+exit status.  Test doubles can exercise this module, but can never mint a release
+attestation that says PASS.
 """
 
 from __future__ import annotations
@@ -36,7 +43,16 @@ from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import urljoin, urlsplit
 
 
-SCHEMA_VERSION = "latexstruct-v2-ocr-acceptance/1"
+SCHEMA_VERSION = "latexstruct-v2-ocr-acceptance/2"
+ATTESTATION_SCHEMA = "latexstruct-v2-ocr-acceptance-attestation/1"
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+COMMIT_RE = re.compile(r"[0-9a-f]{40,64}")
+DEFAULT_ACCEPTANCE_TIMEOUT_SECONDS = 3600.0
+# A 600-page run must be allowed to reach a real terminal state.  Its 30-minute
+# OCR target is still checked separately; this four-hour observation window
+# prevents the old one-hour polling timeout from being mistaken for a completed
+# 600-page result.
+LARGE_RUN_TIMEOUT_SECONDS = 4 * 3600.0
 TERMINAL_STATUSES = frozenset({"done", "partial", "error", "failed", "cancelled"})
 ACTIVE_STATUSES = frozenset({"ready", "starting", "running", "pausing", "paused"})
 VALID_COMPILE_STATUSES = frozenset(
@@ -52,6 +68,7 @@ REQUIRED_ARTIFACTS = (
     "baseline-pdf",
     "compile-log",
     "snapshot",
+    "baseline-manifest",
 )
 
 
@@ -71,6 +88,9 @@ class AcceptanceConfig:
     end_page: int
     output_dir: Path
     expected_version: str = "2.0.0"
+    expected_commit: str = ""
+    expected_build_id: str = ""
+    executable: Path | None = None
     quality_tier: str = "recommended"
     poll_seconds: float = 2.0
     timeout_seconds: float = 3600.0
@@ -121,11 +141,17 @@ class RunEvidence:
     checks: list[Check] = field(default_factory=list)
     execution_errors: list[str] = field(default_factory=list)
     overall_started_at: str = ""
+    measurement_started_at: str = ""
     ocr_started_at: str = ""
     ended_at: str = ""
     ui_setup_seconds: float | None = None
     wall_time_seconds: float | None = None
     timed_out: bool = False
+    real_execution: bool = False
+    api_client: str = ""
+    ui_driver: str = ""
+    executable_filename: str = ""
+    executable_sha256: str = ""
 
     def add_check(self, check_id: str, passed: bool, evidence: Any) -> None:
         self.checks.append(Check(check_id, bool(passed), evidence))
@@ -172,11 +198,23 @@ class LocalHttpApi:
             raise AcceptanceError("cross-origin artifact URL was rejected")
         return url
 
-    def _request(self, path: str) -> HttpDownload:
+    def _request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        body: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> HttpDownload:
+        request_headers = {
+            "Accept": "application/json, application/octet-stream",
+            **dict(headers or {}),
+        }
         request = urllib.request.Request(
             self._url(path),
-            method="GET",
-            headers={"Accept": "application/json, application/octet-stream"},
+            data=body,
+            method=str(method or "GET").upper(),
+            headers=request_headers,
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
@@ -188,11 +226,12 @@ class LocalHttpApi:
         except urllib.error.HTTPError as exc:
             detail = exc.read(2048).decode("utf-8", errors="replace").strip()
             raise AcceptanceError(
-                f"GET {urlsplit(self._url(path)).path} returned HTTP {exc.code}: {detail}"
+                f"{request.method} {urlsplit(self._url(path)).path} returned "
+                f"HTTP {exc.code}: {detail}"
             ) from exc
         except (OSError, urllib.error.URLError) as exc:
             raise AcceptanceError(
-                f"GET {urlsplit(self._url(path)).path} failed: {exc}"
+                f"{request.method} {urlsplit(self._url(path)).path} failed: {exc}"
             ) from exc
 
     def get_json(self, path: str) -> dict[str, Any]:
@@ -207,6 +246,34 @@ class LocalHttpApi:
 
     def download(self, path: str) -> HttpDownload:
         return self._request(path)
+
+    def post_json(
+        self,
+        path: str,
+        payload: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """POST one same-origin request and require a JSON-object response."""
+
+        body = None
+        headers: dict[str, str] = {}
+        if payload is not None:
+            body = json.dumps(
+                dict(payload), ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+            headers["Content-Type"] = "application/json; charset=utf-8"
+        response = self._request(
+            path,
+            method="POST",
+            body=body,
+            headers=headers,
+        )
+        try:
+            value = json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AcceptanceError(f"POST {path} did not return valid JSON") from exc
+        if not isinstance(value, dict):
+            raise AcceptanceError(f"POST {path} did not return a JSON object")
+        return value
 
 
 class PlaywrightUiDriver:
@@ -340,6 +407,71 @@ def _sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _normalized_commit(value: object) -> str:
+    commit = str(value or "").strip().lower()
+    return commit if COMMIT_RE.fullmatch(commit) else ""
+
+
+def _positive_int(value: object) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, result)
+
+
+def _model_call_count(snapshot: Mapping[str, Any]) -> int:
+    usage = snapshot.get("usage")
+    if isinstance(usage, Mapping):
+        calls = _positive_int(usage.get("calls"))
+        if calls:
+            return calls
+    # Older compatible servers expose bounded per-page attempt counts but no
+    # aggregate usage counter.  Preserve that evidence explicitly rather than
+    # inventing a smaller network-call count for batched requests.
+    return sum(
+        _positive_int(record.get("attempts"))
+        for record in _page_records(snapshot)
+    )
+
+
+def _load_snapshot_artifact(
+    config: AcceptanceConfig,
+    evidence: RunEvidence,
+) -> tuple[dict[str, Any], str]:
+    artifact = evidence.artifacts.get("snapshot")
+    if artifact is None:
+        return {}, "snapshot artifact is unavailable"
+    try:
+        loaded = json.loads(
+            (config.output_dir / artifact.filename).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {}, f"snapshot artifact cannot be read: {exc}"
+    if not isinstance(loaded, dict):
+        return {}, "snapshot artifact is not a JSON object"
+    return loaded, ""
+
+
+def _load_json_artifact(
+    config: AcceptanceConfig,
+    evidence: RunEvidence,
+    role: str,
+) -> tuple[dict[str, Any], str]:
+    artifact = evidence.artifacts.get(role)
+    if artifact is None:
+        return {}, f"{role} artifact is unavailable"
+    try:
+        loaded = json.loads(
+            (config.output_dir / artifact.filename).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {}, f"{role} artifact cannot be read: {exc}"
+    if not isinstance(loaded, dict):
+        return {}, f"{role} artifact is not a JSON object"
+    return loaded, ""
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
@@ -542,6 +674,8 @@ def _artifact_filename(role: str, compile_status: str, source_suffix: str) -> st
         return "compile-baseline.log"
     if role == "snapshot":
         return "run-snapshot.json"
+    if role == "baseline-manifest":
+        return "baseline-manifest.json"
     if compile_status == "PARTIAL_COMPILED":
         return "partial-baseline.pdf"
     if compile_status == "SOURCE_PREVIEW":
@@ -561,7 +695,7 @@ def _validate_artifact_bytes(role: str, data: bytes) -> str:
             return "artifact is not UTF-8 text"
         if not text.strip():
             return "artifact contains no TeX text"
-    if role == "snapshot":
+    if role in {"snapshot", "baseline-manifest"}:
         try:
             value = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -639,6 +773,13 @@ def _evaluate(
         + pages["pending_pages"]
     )
 
+    _check(
+        evidence,
+        "real-runtime-drivers",
+        evidence.real_execution,
+        {"api_client": evidence.api_client, "ui_driver": evidence.ui_driver},
+        "release acceptance requires LocalHttpApi plus PlaywrightUiDriver",
+    )
     _check(evidence, "service-health", evidence.health.get("ok") is True, evidence.health)
     _check(
         evidence,
@@ -646,6 +787,35 @@ def _evaluate(
         str(evidence.health.get("version") or "") == config.expected_version,
         str(evidence.health.get("version") or ""),
         f"expected {config.expected_version}, got {evidence.health.get('version')!r}",
+    )
+    observed_commit = _normalized_commit(evidence.health.get("commit"))
+    expected_commit = _normalized_commit(config.expected_commit)
+    _check(
+        evidence,
+        "service-commit",
+        bool(expected_commit) and observed_commit == expected_commit,
+        {"expected": expected_commit, "observed": observed_commit},
+        "expected commit is missing/invalid or does not match /api/health",
+    )
+    observed_build_id = str(evidence.health.get("build_id") or "").strip()
+    expected_build_id = str(config.expected_build_id or "").strip()
+    _check(
+        evidence,
+        "service-build-id",
+        bool(expected_build_id) and observed_build_id == expected_build_id,
+        {"expected": expected_build_id, "observed": observed_build_id},
+        "expected build id is missing or does not match /api/health",
+    )
+    _check(
+        evidence,
+        "tested-executable-sha256",
+        bool(evidence.executable_filename)
+        and SHA256_RE.fullmatch(evidence.executable_sha256) is not None,
+        {
+            "filename": evidence.executable_filename,
+            "sha256": evidence.executable_sha256,
+        },
+        "the tested executable was not supplied and SHA-256 hashed",
     )
     _check(
         evidence,
@@ -761,20 +931,7 @@ def _evaluate(
             "downloaded_sha256": source_artifact.sha256 if source_artifact else None,
         },
     )
-    snapshot_payload: dict[str, Any] = {}
-    snapshot_problem = "snapshot artifact is unavailable"
-    snapshot_artifact = evidence.artifacts.get("snapshot")
-    if snapshot_artifact is not None:
-        try:
-            snapshot_path = config.output_dir / snapshot_artifact.filename
-            loaded = json.loads(snapshot_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                snapshot_payload = loaded
-                snapshot_problem = ""
-            else:
-                snapshot_problem = "snapshot artifact is not a JSON object"
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            snapshot_problem = f"snapshot artifact cannot be read: {exc}"
+    snapshot_payload, snapshot_problem = _load_snapshot_artifact(config, evidence)
     try:
         snapshot_source_pages = int(snapshot_payload.get("source_total_pages") or 0)
     except (TypeError, ValueError):
@@ -794,6 +951,84 @@ def _evaluate(
             "app_version": snapshot_payload.get("app_version"),
         },
         snapshot_problem or "immutable snapshot does not match the tested source/run",
+    )
+    model_id = str(snapshot_payload.get("ocr_model") or "").strip()
+    api_backend = str(snapshot_payload.get("api_backend") or "").strip()
+    observed_model = str(final.get("model") or "").strip()
+    observed_backend = str(final.get("backend") or "").strip()
+    _check(
+        evidence,
+        "model-bound-to-snapshot",
+        bool(model_id)
+        and bool(api_backend)
+        and observed_model == model_id
+        and observed_backend == api_backend,
+        {
+            "snapshot_model": model_id,
+            "snapshot_backend": api_backend,
+            "terminal_model": observed_model,
+            "terminal_backend": observed_backend,
+        },
+    )
+    model_calls = _model_call_count(final)
+    _check(
+        evidence,
+        "real-model-calls-recorded",
+        model_calls > 0,
+        {"calls": model_calls},
+        "no model-call evidence was recorded",
+    )
+    baseline_compile, baseline_problem = _load_json_artifact(
+        config, evidence, "baseline-manifest"
+    )
+    successful_compile_passes = _positive_int(
+        baseline_compile.get("successful_passes")
+    )
+    compile_exit_code = baseline_compile.get("exit_code")
+    baseline_tex_artifact = evidence.artifacts.get("baseline-tex")
+    baseline_pdf_artifact = evidence.artifacts.get("baseline-pdf")
+    compile_log_artifact = evidence.artifacts.get("compile-log")
+    terminal_compile = final.get("baseline_compile")
+    terminal_compile = (
+        dict(terminal_compile) if isinstance(terminal_compile, Mapping) else {}
+    )
+    _check(
+        evidence,
+        "two-successful-real-compile-passes",
+        not baseline_problem
+        and compile_status == "COMPILED"
+        and baseline_compile.get("preview_status") == "COMPILED"
+        and successful_compile_passes >= 2
+        and compile_exit_code == 0,
+        {
+            "compile_status": compile_status,
+            "successful_passes": successful_compile_passes,
+            "exit_code": compile_exit_code,
+        },
+        baseline_problem or "immutable baseline manifest lacks two successful passes",
+    )
+    _check(
+        evidence,
+        "baseline-manifest-artifact-bindings",
+        not baseline_problem
+        and baseline_tex_artifact is not None
+        and baseline_pdf_artifact is not None
+        and compile_log_artifact is not None
+        and baseline_compile.get("baseline_tex_sha256")
+        == baseline_tex_artifact.sha256
+        and baseline_compile.get("pdf_sha256") == baseline_pdf_artifact.sha256
+        and baseline_compile.get("compile_log_sha256")
+        == compile_log_artifact.sha256
+        and all(
+            terminal_compile.get(field) == baseline_compile.get(field)
+            for field in ("preview_status", "successful_passes", "exit_code")
+        ),
+        {
+            "baseline_tex_sha256": baseline_compile.get("baseline_tex_sha256"),
+            "pdf_sha256": baseline_compile.get("pdf_sha256"),
+            "compile_log_sha256": baseline_compile.get("compile_log_sha256"),
+        },
+        baseline_problem or "baseline manifest does not bind downloaded artifacts",
     )
 
     successful_count = len(pages["successful_pages"])
@@ -824,6 +1059,12 @@ def _evaluate(
         "page_evidence": pages,
         "compile_status": compile_status,
         "successful_pages_per_minute": successful_ppm,
+        "snapshot": snapshot_payload,
+        "model_id": model_id,
+        "api_backend": api_backend,
+        "model_calls": model_calls,
+        "successful_compile_passes": successful_compile_passes,
+        "compile_exit_code": compile_exit_code,
     }
 
 
@@ -843,11 +1084,17 @@ def _reports(
         and not evidence.timed_out
     )
     page_evidence = evaluation.get("page_evidence") or {}
+    result = "PASS" if passed else ("INCOMPLETE" if evidence.timed_out else "FAIL")
     performance = {
         "schema_version": SCHEMA_VERSION,
         "acceptance_passed": passed,
-        "measurement": "external monotonic wall clock from OCR start acknowledgement to terminal status",
+        "result": result,
+        "measurement": (
+            "external monotonic wall clock started before browser upload/start click "
+            "and stopped only after the OCR job reached a terminal compile state"
+        ),
         "overall_started_at": evidence.overall_started_at,
+        "measurement_started_at": evidence.measurement_started_at,
         "ocr_started_at": evidence.ocr_started_at,
         "ended_at": evidence.ended_at,
         "ui_setup_seconds": evidence.ui_setup_seconds,
@@ -855,7 +1102,10 @@ def _reports(
         "successful_pages_per_minute": evaluation.get("successful_pages_per_minute"),
         "terminal_status": str(evidence.final_snapshot.get("status") or "NOT_STARTED"),
         "compile_status": evaluation.get("compile_status") or "",
+        "successful_compile_passes": evaluation.get("successful_compile_passes", 0),
+        "compile_exit_code": evaluation.get("compile_exit_code"),
         "timed_out": evidence.timed_out,
+        "completed_terminal_run": bool(evidence.final_snapshot) and not evidence.timed_out,
         "source": {
             "filename": config.pdf.name,
             "sha256": source_sha256,
@@ -886,15 +1136,36 @@ def _reports(
                 "recent_pages_per_minute"
             ),
         },
+        "runtime_identity": {
+            "version": str(evidence.health.get("version") or ""),
+            "commit": _normalized_commit(evidence.health.get("commit")),
+            "build_id": str(evidence.health.get("build_id") or ""),
+            "executable_filename": evidence.executable_filename,
+            "executable_sha256": evidence.executable_sha256,
+        },
+        "model": {
+            "id": evaluation.get("model_id") or "",
+            "backend": evaluation.get("api_backend") or "",
+            "calls": evaluation.get("model_calls", 0),
+        },
         "poll_history": evidence.poll_history,
     }
     validation = {
         "schema_version": SCHEMA_VERSION,
-        "result": "PASS" if passed else "FAIL",
+        "result": result,
         "acceptance_passed": passed,
         "generated_at": evidence.ended_at or _utc_now(),
         "job_id": evidence.ui.job_id if evidence.ui else "",
         "server": evidence.health,
+        "execution": {
+            "real_execution": evidence.real_execution,
+            "test_double": not evidence.real_execution,
+            "simulated": not evidence.real_execution,
+            "api_client": evidence.api_client,
+            "ui_driver": evidence.ui_driver,
+        },
+        "runtime_identity": performance["runtime_identity"],
+        "model": performance["model"],
         "ui_evidence": asdict(evidence.ui) if evidence.ui else None,
         "checks": [asdict(check) for check in evidence.checks],
         "failed_checks": failed_checks,
@@ -908,10 +1179,81 @@ def _reports(
             "raw_frozen": evidence.final_snapshot.get("raw_frozen"),
             "raw_ready": evidence.final_snapshot.get("raw_ready"),
             "compile_status": evaluation.get("compile_status") or "",
+            "successful_compile_passes": evaluation.get(
+                "successful_compile_passes", 0
+            ),
+            "compile_exit_code": evaluation.get("compile_exit_code"),
             "page_evidence": page_evidence,
         },
     }
     return performance, validation
+
+
+def _acceptance_attestation(
+    config: AcceptanceConfig,
+    evidence: RunEvidence,
+    performance_path: Path,
+    validation_path: Path,
+    performance: Mapping[str, Any],
+    validation: Mapping[str, Any],
+) -> dict[str, Any]:
+    source = performance.get("source")
+    source = dict(source) if isinstance(source, Mapping) else {}
+    model = performance.get("model")
+    model = dict(model) if isinstance(model, Mapping) else {}
+    runtime = performance.get("runtime_identity")
+    runtime = dict(runtime) if isinstance(runtime, Mapping) else {}
+    compilation = {
+        "status": performance.get("compile_status") or "",
+        "successful_passes": performance.get("successful_compile_passes", 0),
+        "exit_code": performance.get("compile_exit_code"),
+        "compile_log_sha256": (
+            evidence.artifacts["compile-log"].sha256
+            if "compile-log" in evidence.artifacts
+            else ""
+        ),
+        "baseline_pdf_sha256": (
+            evidence.artifacts["baseline-pdf"].sha256
+            if "baseline-pdf" in evidence.artifacts
+            else ""
+        ),
+    }
+    return {
+        "schema_version": ATTESTATION_SCHEMA,
+        "profile_kind": "ocr",
+        "result": validation.get("result") or "FAIL",
+        "acceptance_passed": validation.get("acceptance_passed") is True,
+        "generated_at": validation.get("generated_at") or evidence.ended_at,
+        "execution": validation.get("execution") or {},
+        "runtime_identity": runtime,
+        "source": source,
+        "selected_range": performance.get("selected_range") or {},
+        "pages": performance.get("pages") or {},
+        "model": model,
+        "compilation": compilation,
+        "timing": {
+            "measurement": performance.get("measurement") or "",
+            "started_at": performance.get("measurement_started_at") or "",
+            "ended_at": performance.get("ended_at") or "",
+            "wall_time_seconds": performance.get("wall_time_seconds"),
+            "successful_pages_per_minute": performance.get(
+                "successful_pages_per_minute"
+            ),
+            "timed_out": performance.get("timed_out") is True,
+            "completed_terminal_run": performance.get("completed_terminal_run")
+            is True,
+        },
+        "reports": {
+            "performance": {
+                "filename": performance_path.name,
+                "sha256": _sha256_file(performance_path),
+            },
+            "validation": {
+                "filename": validation_path.name,
+                "sha256": _sha256_file(validation_path),
+            },
+        },
+    }
 
 
 def run_acceptance(
@@ -929,11 +1271,15 @@ def run_acceptance(
     source_pages: int | None = None
     source_sha256 = ""
     evaluation: dict[str, Any] = {}
-    overall_start = monotonic()
-    ocr_start: float | None = None
     ui_driver = ui_driver or PlaywrightUiDriver()
+    evidence.ui_driver = type(ui_driver).__name__
+    measurement_start: float | None = None
     try:
         api = api or LocalHttpApi(config.base_url)
+        evidence.api_client = type(api).__name__
+        evidence.real_execution = isinstance(api, LocalHttpApi) and isinstance(
+            ui_driver, PlaywrightUiDriver
+        )
         if not config.pdf.is_file():
             raise AcceptanceError("source PDF does not exist")
         if config.pdf.suffix.lower() != ".pdf":
@@ -944,6 +1290,34 @@ def run_acceptance(
             raise AcceptanceError("quality_tier must be fast, recommended, or high")
         if config.poll_seconds <= 0 or config.timeout_seconds <= 0:
             raise AcceptanceError("poll and timeout values must be positive")
+        if (
+            config.expected_pages == 600
+            and config.timeout_seconds < LARGE_RUN_TIMEOUT_SECONDS
+        ):
+            raise AcceptanceError(
+                "600-page acceptance requires a polling timeout of at least "
+                f"{LARGE_RUN_TIMEOUT_SECONDS:.0f} seconds so a one-hour timeout "
+                "cannot masquerade as a completed result"
+            )
+        if config.expected_pages == 600 and (
+            config.min_successful_ppm is None
+            or config.min_successful_ppm < 20
+            or config.max_wall_seconds is None
+            or config.max_wall_seconds > 1800
+        ):
+            raise AcceptanceError(
+                "600-page acceptance requires at least 20 successful pages/minute "
+                "and at most 1800 seconds wall time"
+            )
+        expected_commit = _normalized_commit(config.expected_commit)
+        if not expected_commit:
+            raise AcceptanceError("expected_commit must be a 40-64 character Git commit")
+        if not str(config.expected_build_id or "").strip():
+            raise AcceptanceError("expected_build_id is required")
+        if config.executable is None or not config.executable.is_file():
+            raise AcceptanceError("the tested executable does not exist")
+        evidence.executable_filename = config.executable.name
+        evidence.executable_sha256 = _sha256_file(config.executable)
         source_pages = pdf_page_counter(config.pdf)
         if config.end_page > source_pages:
             raise AcceptanceError(
@@ -951,12 +1325,15 @@ def run_acceptance(
             )
         source_sha256 = _sha256_file(config.pdf)
         evidence.health = api.get_json("/api/health")
+        # This starts before Playwright uploads the file, configures the range,
+        # and clicks Start.  It therefore cannot omit click/request latency.
+        measurement_start = monotonic()
+        evidence.measurement_started_at = utc_now()
+        evidence.ocr_started_at = evidence.measurement_started_at
         evidence.ui = ui_driver.start_ocr(
             config, expected_source_pages=source_pages
         )
-        evidence.ui_setup_seconds = round(monotonic() - overall_start, 3)
-        ocr_start = monotonic()
-        evidence.ocr_started_at = utc_now()
+        evidence.ui_setup_seconds = round(monotonic() - measurement_start, 3)
         final = _poll_job(
             api,
             evidence.ui.job_id,
@@ -964,10 +1341,12 @@ def run_acceptance(
             evidence,
             monotonic=monotonic,
             sleep=sleep,
-            started=ocr_start,
+            started=measurement_start,
         )
         evidence.final_snapshot = final
-        evidence.wall_time_seconds = round(max(0.0, monotonic() - ocr_start), 3)
+        evidence.wall_time_seconds = round(
+            max(0.0, monotonic() - measurement_start), 3
+        )
         compile_status = _compile_status(final)
         _download_artifacts(
             api, evidence.ui.job_id, config, evidence, compile_status
@@ -981,8 +1360,10 @@ def run_acceptance(
     except (AcceptanceError, OSError, ValueError) as exc:
         evidence.execution_errors.append(str(exc))
         evidence.add_check("execution", False, str(exc))
-        if ocr_start is not None:
-            evidence.wall_time_seconds = round(max(0.0, monotonic() - ocr_start), 3)
+        if measurement_start is not None:
+            evidence.wall_time_seconds = round(
+                max(0.0, monotonic() - measurement_start), 3
+            )
     finally:
         evidence.ended_at = utc_now()
         performance, validation = _reports(
@@ -992,8 +1373,21 @@ def run_acceptance(
             source_pages=source_pages,
             source_sha256=source_sha256,
         )
-        _atomic_write_json(config.output_dir / "performance.json", performance)
-        _atomic_write_json(config.output_dir / "validation-report.json", validation)
+        performance_path = config.output_dir / "performance.json"
+        validation_path = config.output_dir / "validation-report.json"
+        _atomic_write_json(performance_path, performance)
+        _atomic_write_json(validation_path, validation)
+        attestation = _acceptance_attestation(
+            config,
+            evidence,
+            performance_path,
+            validation_path,
+            performance,
+            validation,
+        )
+        _atomic_write_json(
+            config.output_dir / "acceptance-attestation.json", attestation
+        )
     return validation
 
 
@@ -1013,10 +1407,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--expected-version", default="2.0.0")
     parser.add_argument(
+        "--expected-commit",
+        required=True,
+        help="Git commit expected from /api/health (40-64 lowercase hex characters)",
+    )
+    parser.add_argument(
+        "--expected-build-id",
+        required=True,
+        help="build id expected from /api/health",
+    )
+    parser.add_argument(
+        "--executable",
+        type=Path,
+        required=True,
+        help="exact LaTeXStruct executable used by the tested service",
+    )
+    parser.add_argument(
         "--quality-tier", choices=("fast", "recommended", "high"), default="recommended"
     )
     parser.add_argument("--poll-seconds", type=float, default=2.0)
-    parser.add_argument("--timeout-seconds", type=float, default=3600.0)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        help=(
+            "polling observation window; defaults to 4 hours for exactly 600 "
+            "pages and 1 hour otherwise"
+        ),
+    )
     parser.add_argument("--browser-timeout-seconds", type=float, default=90.0)
     parser.add_argument("--headed", action="store_true")
     parser.add_argument(
@@ -1036,11 +1453,16 @@ def _config_from_args(args: argparse.Namespace) -> AcceptanceConfig:
     expected_pages = args.end_page - args.start_page + 1
     min_ppm = args.min_ppm
     max_wall = args.max_wall_seconds
+    timeout_seconds = args.timeout_seconds
     if expected_pages == 600:
         if min_ppm is None:
             min_ppm = 20.0
         if max_wall is None:
             max_wall = 1800.0
+        if timeout_seconds is None:
+            timeout_seconds = LARGE_RUN_TIMEOUT_SECONDS
+    elif timeout_seconds is None:
+        timeout_seconds = DEFAULT_ACCEPTANCE_TIMEOUT_SECONDS
     output = args.output or _default_output(args.pdf, args.start_page, args.end_page)
     return AcceptanceConfig(
         base_url=args.base_url,
@@ -1049,9 +1471,12 @@ def _config_from_args(args: argparse.Namespace) -> AcceptanceConfig:
         end_page=args.end_page,
         output_dir=output.resolve(),
         expected_version=args.expected_version,
+        expected_commit=args.expected_commit,
+        expected_build_id=args.expected_build_id,
+        executable=args.executable.resolve(),
         quality_tier=args.quality_tier,
         poll_seconds=args.poll_seconds,
-        timeout_seconds=args.timeout_seconds,
+        timeout_seconds=timeout_seconds,
         browser_timeout_seconds=args.browser_timeout_seconds,
         headed=args.headed,
         min_successful_ppm=min_ppm,
@@ -1066,6 +1491,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"v2 OCR acceptance: {result}")
     print(f"validation: {config.output_dir / 'validation-report.json'}")
     print(f"performance: {config.output_dir / 'performance.json'}")
+    print(f"attestation: {config.output_dir / 'acceptance-attestation.json'}")
+    print(
+        "release note: this runner emits OCR evidence only; a release also "
+        "requires independent analysis-17 and analysis-600 attestations"
+    )
     if validation.get("execution_errors"):
         for error in validation["execution_errors"]:
             print(f"error: {error}", file=sys.stderr)

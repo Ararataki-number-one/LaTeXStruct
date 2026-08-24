@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -240,6 +240,25 @@ def test_complete_machine_evidence_can_verify_only_the_exact_current_bytes(tmp_p
     )
     assert rejected.status == AnalysisFinalStatus.COMPLETED_WITH_ISSUES
     assert "candidate_hash_not_current_artifact" in rejected.failures
+
+
+def test_nested_production_verification_evidence_can_verify_the_exact_current_bytes(
+    tmp_path,
+):
+    artifacts = _artifacts()
+    verification = dict(artifacts.verification)
+    verification["analysis_v2"] = {
+        "verification_evidence": asdict(_verified_evidence()),
+    }
+
+    result = _freeze(
+        tmp_path,
+        "analysis-nested-v2-evidence",
+        artifacts=replace(artifacts, verification=verification),
+    )
+
+    assert result.status == AnalysisFinalStatus.VERIFIED
+    assert result.verified is True
 
 
 def test_page_mismatch_and_failed_processing_remain_fail_closed(tmp_path):

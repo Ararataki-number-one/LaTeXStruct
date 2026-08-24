@@ -6,8 +6,10 @@ import json
 import os
 import re
 import sys
+import threading
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -343,10 +345,41 @@ def test_llm_requests_have_finite_configurable_token_limit():
         raise AssertionError("非正 max_tokens 必须在发送请求前被拒绝")
 
 
+def test_concurrent_llm_usage_is_bound_to_each_request_thread():
+    client = LLMClient(RoleConfig(api_key="not-a-real-key"))
+    barrier = threading.Barrier(2)
+
+    def fake_post(payload, _operation):
+        marker = payload["messages"][1]["content"]
+        client.last_usage = {"request": marker, "total_tokens": len(marker)}
+        barrier.wait(timeout=2)
+        return {
+            "choices": [{"message": {"content": json.dumps({"request": marker})}}],
+        }
+
+    def invoke(marker):
+        result, usage = client.chat_json("system", marker)
+        return result, usage
+
+    with patch.object(client, "_post_chat", fake_post):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(invoke, ("page-one", "page-two")))
+
+    assert sorted(results, key=lambda item: item[0]["request"]) == [
+        ({"request": "page-one"}, {"request": "page-one", "total_tokens": 8}),
+        ({"request": "page-two"}, {"request": "page-two", "total_tokens": 8}),
+    ]
+
+
 def test_llm_multi_image_json_preserves_order_and_rejects_invalid_before_request():
     calls = []
-    png = b"\x89PNG\r\n\x1a\nfirst"
-    jpeg = b"\xff\xd8\xffsecond"
+    images = [
+        b"\x89PNG\r\n\x1a\nfirst",
+        b"\xff\xd8\xffsecond",
+        b"\x89PNG\r\n\x1a\nthird",
+        b"\xff\xd8\xff-fourth",
+        b"\x89PNG\r\n\x1a\nfifth",
+    ]
     client = LLMClient(RoleConfig(model="vision-test", api_key="not-a-real-key"))
 
     def fake_post(payload, operation):
@@ -361,14 +394,16 @@ def test_llm_multi_image_json_preserves_order_and_rejects_invalid_before_request
     with patch.object(client, "_post_chat", fake_post):
         result, _usage = client.chat_vision_json_images_bytes(
             "system",
-            '{"page_requests": [1, 2]}',
-            [png, jpeg],
+            '{"page_requests": [1, 2, 3, 4, 5]}',
+            images,
             {"type": "object"},
         )
         try:
-            client.chat_vision_json_images_bytes("system", "user", [png] * 4)
+            client.chat_vision_json_images_bytes(
+                "system", "user", [images[0]] * 6,
+            )
         except LLMError as exc:
-            assert "1 至 3" in str(exc)
+            assert str(exc) == "视觉 JSON 多图输入必须包含 1 至 5 张图片"
         else:
             raise AssertionError("非法多图数量必须在发请求前被拒绝")
 
@@ -378,14 +413,18 @@ def test_llm_multi_image_json_preserves_order_and_rejects_invalid_before_request
     content = payload["messages"][1]["content"]
     assert operation == "视觉 JSON 批量复核"
     assert payload["response_format"] == {"type": "json_object"}
-    assert [item["type"] for item in content] == ["image_url", "image_url", "text"]
-    assert content[0]["image_url"]["url"] == (
-        "data:image/png;base64," + base64.b64encode(png).decode("ascii")
-    )
-    assert content[1]["image_url"]["url"] == (
-        "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
-    )
-    assert content[2] == {"type": "text", "text": '{"page_requests": [1, 2]}'}
+    assert [item["type"] for item in content] == ["image_url"] * 5 + ["text"]
+    assert [item["image_url"]["url"] for item in content[:5]] == [
+        f"data:{mime};base64," + base64.b64encode(image).decode("ascii")
+        for mime, image in zip(
+            ("image/png", "image/jpeg", "image/png", "image/jpeg", "image/png"),
+            images,
+        )
+    ]
+    assert content[5] == {
+        "type": "text",
+        "text": '{"page_requests": [1, 2, 3, 4, 5]}',
+    }
 
 
 def test_llm_response_does_not_accept_truncation_filter_or_refusal_as_success():

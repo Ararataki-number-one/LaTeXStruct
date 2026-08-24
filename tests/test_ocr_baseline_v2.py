@@ -55,5 +55,13 @@ def test_source_preview_is_explicit_when_no_pdf(monkeypatch):
     )
     result = compile_ocr_baseline("plain text")
     assert result.preview_status == OcrPreviewStatus.SOURCE_PREVIEW
-    assert result.pdf_bytes == b""
+    assert result.pdf_bytes.startswith(b"%PDF-")
     assert "这不是 LaTeX 编译结果" in result.log
+    import pymupdf
+
+    document = pymupdf.open(stream=result.pdf_bytes, filetype="pdf")
+    try:
+        assert "NOT A LATEX COMPILE RESULT" in document[0].get_text().upper()
+        assert "plain text" in "".join(page.get_text() for page in document[1:])
+    finally:
+        document.close()

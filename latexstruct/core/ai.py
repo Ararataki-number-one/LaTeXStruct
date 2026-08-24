@@ -13,6 +13,7 @@ import base64
 import json
 import re
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -103,7 +104,18 @@ HIGH_RISK_DECISION_BATCH_SIZE = 3
 class LLMClient:
     def __init__(self, cfg: RoleConfig):
         self.cfg = cfg
+        self._usage_local = threading.local()
         self.last_usage: Dict = {}
+
+    @property
+    def last_usage(self) -> Dict:
+        """Usage for the current caller thread, never a sibling request."""
+
+        return dict(getattr(self._usage_local, "value", {}))
+
+    @last_usage.setter
+    def last_usage(self, value: Dict) -> None:
+        self._usage_local.value = dict(value) if isinstance(value, dict) else {}
 
     def chat_json(self, system: str, user: str) -> Tuple[dict, Dict]:
         """返回 (解析后的 JSON 对象, usage)。失败抛出 LLMError。"""
@@ -222,8 +234,8 @@ class LLMClient:
         The caller remains responsible for exact per-image echo validation.
         """
         del schema  # Compatible endpoints use JSON mode, then host validation.
-        if not isinstance(images, list) or not 1 <= len(images) <= 3:
-            raise LLMError("视觉 JSON 多图输入必须包含 1 至 3 张图片")
+        if not isinstance(images, list) or not 1 <= len(images) <= 5:
+            raise LLMError("视觉 JSON 多图输入必须包含 1 至 5 张图片")
         if sum(len(item) for item in images if isinstance(item, (bytes, bytearray))) > 100 * 1024 * 1024:
             raise LLMError("视觉 JSON 多图输入合计超过 100 MB 限制")
         content = []

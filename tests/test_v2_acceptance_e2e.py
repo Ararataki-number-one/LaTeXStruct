@@ -13,6 +13,9 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
+TEST_COMMIT = "c" * 40
+TEST_BUILD_ID = "build-200"
+
 
 class FakeClock:
     def __init__(self, step: float = 2.0):
@@ -60,6 +63,7 @@ def _status(page_count: int, *, status: str = "done", compile_status: str = "COM
             "page_id": f"ocr-p{page:06d}",
             "source_page": page,
             "final_status": "SUCCESS",
+            "attempts": 1,
         }
         for page in range(1, page_count + 1)
     }
@@ -73,6 +77,14 @@ def _status(page_count: int, *, status: str = "done", compile_status: str = "COM
         "raw_frozen": True,
         "raw_ready": True,
         "compile_status": compile_status,
+        "baseline_compile": {
+            "preview_status": compile_status,
+            "successful_passes": 2 if compile_status == "COMPILED" else 0,
+            "exit_code": 0 if compile_status == "COMPILED" else 1,
+        },
+        "model": "qwen-vl-test",
+        "backend": "test-provider",
+        "usage": {"calls": page_count},
         "pages": pages,
     }
 
@@ -83,12 +95,18 @@ class FakeApi:
         self.statuses = list(statuses)
         terminal = self.statuses[-1] if self.statuses else {}
         self.page_count = int(terminal.get("total") or 0)
+        self.compile_status = str(terminal.get("compile_status") or "COMPILED")
         self.missing = missing or set()
         self.downloaded = []
 
     def get_json(self, path: str):
         if path == "/api/health":
-            return {"ok": True, "version": "2.0.0", "build_id": "test"}
+            return {
+                "ok": True,
+                "version": "2.0.0",
+                "commit": TEST_COMMIT,
+                "build_id": TEST_BUILD_ID,
+            }
         if not self.statuses:
             raise AssertionError("unexpected extra poll")
         if len(self.statuses) > 1:
@@ -113,6 +131,25 @@ class FakeApi:
                     "source_total_pages": self.page_count,
                     "selected_pages": list(range(1, self.page_count + 1)),
                     "app_version": "2.0.0",
+                    "ocr_model": "qwen-vl-test",
+                    "api_backend": "test-provider",
+                },
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            "baseline-manifest": json.dumps(
+                {
+                    "preview_status": self.compile_status,
+                    "successful_passes": (
+                        2 if self.compile_status == "COMPILED" else 0
+                    ),
+                    "exit_code": 0 if self.compile_status == "COMPILED" else 1,
+                    "baseline_tex_sha256": MODULE._sha256_bytes(
+                        b"\\documentclass{article}\n\\begin{document}x\\end{document}\n"
+                    ),
+                    "compile_log_sha256": MODULE._sha256_bytes(
+                        b"pass 1 ok\npass 2 ok\n"
+                    ),
+                    "pdf_sha256": MODULE._sha256_bytes(b"%PDF-1.7\ncompiled\n"),
                 },
                 separators=(",", ":"),
             ).encode("utf-8"),
@@ -122,12 +159,17 @@ class FakeApi:
 
 
 def _config(tmp_path: Path, pdf: Path, pages: int = 17, **overrides):
+    executable = tmp_path / "LaTeXStruct.exe"
+    executable.write_bytes(b"MZ\x00test executable")
     values = {
         "base_url": "http://127.0.0.1:8080",
         "pdf": pdf,
         "start_page": 1,
         "end_page": pages,
         "output_dir": tmp_path / "acceptance",
+        "expected_commit": TEST_COMMIT,
+        "expected_build_id": TEST_BUILD_ID,
+        "executable": executable,
         "poll_seconds": 1,
         "timeout_seconds": 100,
     }
@@ -135,7 +177,7 @@ def _config(tmp_path: Path, pdf: Path, pages: int = 17, **overrides):
     return MODULE.AcceptanceConfig(**values)
 
 
-def test_real_ui_plus_http_evidence_can_pass_and_reports_are_recomputable(tmp_path: Path):
+def test_test_doubles_cannot_mint_release_pass_but_reports_are_recomputable(tmp_path: Path):
     source = b"%PDF-1.7\nsource bytes\n"
     pdf = tmp_path / "17-pages.pdf"
     pdf.write_bytes(source)
@@ -153,7 +195,10 @@ def test_real_ui_plus_http_evidence_can_pass_and_reports_are_recomputable(tmp_pa
         utc_now=clock.utc_now,
     )
 
-    assert result["acceptance_passed"] is True
+    assert result["acceptance_passed"] is False
+    assert {item["id"] for item in result["failed_checks"]} == {
+        "real-runtime-drivers"
+    }
     assert ui.calls == [(1, 17, 17)]
     assert api.downloaded == list(MODULE.REQUIRED_ARTIFACTS)
     performance = json.loads(
@@ -162,8 +207,29 @@ def test_real_ui_plus_http_evidence_can_pass_and_reports_are_recomputable(tmp_pa
     assert performance["pages"]["successful"] == 17
     assert performance["wall_time_seconds"] == 2
     assert performance["successful_pages_per_minute"] == 510
+    assert performance["runtime_identity"]["commit"] == TEST_COMMIT
+    assert performance["runtime_identity"]["build_id"] == TEST_BUILD_ID
+    assert performance["runtime_identity"]["executable_sha256"] == MODULE._sha256_file(
+        tmp_path / "LaTeXStruct.exe"
+    )
+    assert performance["model"] == {
+        "id": "qwen-vl-test",
+        "backend": "test-provider",
+        "calls": 17,
+    }
+    assert performance["successful_compile_passes"] == 2
     raw = tmp_path / "acceptance" / "artifacts" / "raw-ocr.tex"
     assert result["artifacts"]["raw-ocr"]["sha256"] == MODULE._sha256_file(raw)
+    attestation = json.loads(
+        (tmp_path / "acceptance" / "acceptance-attestation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert attestation["result"] == "FAIL"
+    assert attestation["execution"]["real_execution"] is False
+    assert attestation["timing"]["measurement"].startswith(
+        "external monotonic wall clock started before browser upload/start click"
+    )
 
 
 def test_missing_artifact_is_recorded_and_never_reported_as_pass(tmp_path: Path):
@@ -248,10 +314,21 @@ def test_browser_unavailable_writes_fail_closed_reports_without_http_start(tmp_p
 
 def test_600_page_defaults_and_slow_measurement_fail_thresholds(tmp_path: Path):
     parser = MODULE.build_parser()
-    args = parser.parse_args(["book.pdf", "--end-page", "600"])
+    args = parser.parse_args([
+        "book.pdf",
+        "--end-page",
+        "600",
+        "--expected-commit",
+        TEST_COMMIT,
+        "--expected-build-id",
+        TEST_BUILD_ID,
+        "--executable",
+        "LaTeXStruct.exe",
+    ])
     config = MODULE._config_from_args(args)
     assert config.min_successful_ppm == 20
     assert config.max_wall_seconds == 1800
+    assert config.timeout_seconds == MODULE.LARGE_RUN_TIMEOUT_SECONDS
 
     source = b"%PDF-1.7\nsource\n"
     pdf = tmp_path / "book.pdf"
@@ -263,7 +340,7 @@ def test_600_page_defaults_and_slow_measurement_fail_thresholds(tmp_path: Path):
             tmp_path,
             pdf,
             pages=600,
-            timeout_seconds=3600,
+            timeout_seconds=MODULE.LARGE_RUN_TIMEOUT_SECONDS,
             min_successful_ppm=20,
             max_wall_seconds=1800,
         ),
@@ -278,3 +355,79 @@ def test_600_page_defaults_and_slow_measurement_fail_thresholds(tmp_path: Path):
     assert result["acceptance_passed"] is False
     failed = {item["id"] for item in result["failed_checks"]}
     assert {"minimum-throughput", "maximum-wall-time"} <= failed
+
+
+def test_600_page_one_hour_timeout_is_rejected_before_ui_and_not_reported_complete(
+    tmp_path: Path,
+):
+    source = b"%PDF-1.7\nsource\n"
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(source)
+    ui = FakeUi(source_pages=600)
+
+    result = MODULE.run_acceptance(
+        _config(tmp_path, pdf, pages=600, timeout_seconds=3600),
+        api=FakeApi(source, [_status(600)]),
+        ui_driver=ui,
+        pdf_page_counter=lambda _path: 600,
+    )
+
+    assert result["acceptance_passed"] is False
+    assert result["result"] == "FAIL"
+    assert ui.calls == []
+    assert "one-hour timeout" in result["execution_errors"][0]
+    performance = json.loads(
+        (tmp_path / "acceptance" / "performance.json").read_text(encoding="utf-8")
+    )
+    assert performance["completed_terminal_run"] is False
+
+
+def test_600_page_thresholds_cannot_be_disabled_programmatically(tmp_path: Path):
+    source = b"%PDF-1.7\nsource\n"
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(source)
+    ui = FakeUi(source_pages=600)
+
+    result = MODULE.run_acceptance(
+        _config(
+            tmp_path,
+            pdf,
+            pages=600,
+            timeout_seconds=MODULE.LARGE_RUN_TIMEOUT_SECONDS,
+        ),
+        api=FakeApi(source, [_status(600)]),
+        ui_driver=ui,
+        pdf_page_counter=lambda _path: 600,
+    )
+
+    assert result["acceptance_passed"] is False
+    assert ui.calls == []
+    assert "at least 20 successful pages/minute" in result["execution_errors"][0]
+
+
+def test_poll_timeout_is_incomplete_never_a_terminal_acceptance(tmp_path: Path):
+    source = b"%PDF-1.7\nsource\n"
+    pdf = tmp_path / "source.pdf"
+    pdf.write_bytes(source)
+    clock = FakeClock(step=100)
+
+    result = MODULE.run_acceptance(
+        _config(tmp_path, pdf, timeout_seconds=10),
+        api=FakeApi(source, [{"status": "running", "total": 17}]),
+        ui_driver=FakeUi(),
+        pdf_page_counter=lambda _path: 17,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+        utc_now=clock.utc_now,
+    )
+
+    assert result["result"] == "INCOMPLETE"
+    assert result["acceptance_passed"] is False
+    attestation = json.loads(
+        (tmp_path / "acceptance" / "acceptance-attestation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert attestation["result"] == "INCOMPLETE"
+    assert attestation["timing"]["timed_out"] is True
+    assert attestation["timing"]["completed_terminal_run"] is False

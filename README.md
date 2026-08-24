@@ -97,24 +97,36 @@ AI 复查与 OCR 模型；开启「系统凭据管理器」后，密钥会存入
 [OpenAI 兼容 Chat 与图片输入](https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions)、
 [API Key 安全建议](https://www.alibabacloud.com/help/en/model-studio/get-api-key)。
 
-## 发布新版本（全自动）
+## 发布新版本（不可变候选验收后发布）
 
 ```powershell
 # 1) 修改 latexstruct/_version.py 后同步生成元数据
 $version = "X.Y.Z"
 python packaging/sync_version.py --version $version
-# 2) 精确暂存本次改动（避免把无关未跟踪文件带入发布），再提交并打 tag 推送
+# 2) 精确暂存本次改动（避免把无关未跟踪文件带入发布），提交并推送 main
 git add -u
 git add <本次新增文件路径...>
 git status --short
 git commit -m "release: v$version"
-git push origin HEAD
+git push origin HEAD:main
+# 3) 手动构建一次不可变候选；下载该 run 的候选，用同一 EXE 完成
+#    ocr-17、ocr-600、analysis-17、analysis-600 四项真实验收
+gh workflow run build.yml --ref main -f version=$version
+# 真实验收机一次性安装 Python Playwright 与 Chromium；浏览器二进制只进入
+# Playwright 的本机缓存，不进入仓库、安装包或便携包
+python -m pip install -e ".[server,acceptance]"
+python -m playwright install chromium
+# 4) 提交 release/acceptance/v$version/ 下的验收声明并推送 main；全部门禁通过后再打 tag
 git tag "v$version"
 git push origin "v$version"
-# 3) 已安装客户端下次启动自动提示更新
+# 5) tag workflow 复算并发布已验收候选的原始字节；不会重新构建资产
 ```
 
 ## 当前状态（v2.0.0）
+
+> `v2.0.0-rc.1` 是明确标记为 **UNVERIFIED** 的 GitHub 预发行版，供提前试用与反馈；其
+> Windows 二进制内部版本仍显示 `2.0.0`，不会进入稳定版自动更新通道。该 RC 尚未完成
+> 17/600 页 OCR 与分析四项同候选真实验收，不应被视为稳定版或出版质量证明。
 
 - v2.0.0 把“忠实 OCR 与基线恢复”和“OCR 后 AI 自动整理”明确分离。OCR 运行使用不可变快照、
   稳定页面 ID、逐页原子保存和断点恢复；批量或并发始终有界，失败只影响对应任务单元，原始 OCR
@@ -130,11 +142,8 @@ git push origin "v$version"
   `FAILED_BEST_RETAINED`，模型不能自行提升状态；
 - 工作台新增当前阶段与轮次、检查页、问题数、阻塞数、回滚、历史最佳、真实耗时和 ETA 概览，
   并按证据显示 OCR 原稿、基线 TEX/PDF、AI 最佳 TEX/PDF 与质量报告是否可用；
-- 修复后源码已重新构建 Windows 便携候选：`LaTeXStruct.exe` 为 181,316,254 bytes，SHA-256
-  为 `5F826D83960324891C7EB1F4126FF140DAD9351D531641579451044E5673BB23`；
-  `LaTeXStruct-portable-2.0.0.zip` 为 180,468,401 bytes，SHA-256 为
-  `FD6BDAEC9011508E414F8724432CDEC853B42CF6E198DC253E5C887F2767700D`。两者的版本资源、内置
-  Codex CLI、首页和 `/api/health` 均已核验；本机未安装 Inno Setup，不声称安装器本地冒烟已通过；
+- 候选 workflow 为当次不可变资产生成 `release-assets.json` 与 `SHA256SUMS.txt`；资产字节数和
+  SHA-256 只以该候选及最终 GitHub Release 附件为准，README 不预写尚未构建资产的摘要；
 - 真实页面通路已完成一次合成双图片项目的 Codex CLI OCR 冒烟：2/2 页为 `SUCCESS`、并发数为 2、
   每页模型调用约 21.4 秒且相互重叠，总墙钟约 33.6 秒，重试数为 0；原始 OCR TEX 冻结后，
   基线经两遍 XeLaTeX 编译且两次均以 exit 0 结束，生成 2 页 `COMPILED` 预览。这是非用户样本的
@@ -146,10 +155,11 @@ git push origin "v$version"
 - 界面中的 100% 仅表示本次计划阶段已执行到终点，不等于 `VERIFIED`。独立复核、第二遍 AI 复查、
   编译、视觉闭环或最终门禁任一缺失/失败时，结果仍为 `COMPLETED_WITH_ISSUES`、`UNVERIFIED`
   或失败状态，不会因进度值自动提升；
-- 上述内容描述已经落地的代码与宿主门禁，不代表真实模型验收已经完成。本轮 17 页质量样本和
-  600 页性能样本涉及把用户 PDF 发送到 Codex 云端，目前尚未获得用户的明确授权，因此尚未运行，
-  也不能作为 v2.0.0 已通过或已发布的证据；当前不声称达到“600 页 OCR 30 分钟”或
-  “600 页 AI 整理 180 分钟”目标。
+- v2.0.0 只有在 `ocr-17`、`ocr-600`、`analysis-17`、`analysis-600` 四项真实验收全部通过并
+  绑定同一候选字节后才能发布；单次较小样本诊断不能替代 600 页门禁，也不构成整书性能声明。
+  每份 analysis 验收还必须携带 `candidate.tex`、`candidate.pdf` 和 `compile.log` 原始文件；
+  正式门会复算其字节数与 SHA-256，并把这些文件原样复制进发布 evidence，只有哈希字符串的旧证据
+  会被拒绝。
 
 - OCR 导入会从冻结、哈希绑定的源 PDF 字节复算并校验真实总页数，任务快照和 manifest 不再把
   多页 PDF 误记为 1 页；受 v1.2.8 缺陷影响的旧项目只有在最新不可变审计快照独立证明同一 PDF、
@@ -259,8 +269,8 @@ git push origin "v$version"
   审阅的当前快照则以 `UNVERIFIED` 文件名和包内警告导出，hash 不一致仍会阻止读取；
 - Windows 凭据管理器开启后，配置文件只存占位符；凭据写入失败会中止保存，不会静默
   降级为明文。未开启时，界面会明确提示密钥保存在本机配置文件中；
-- 每次发布均由 CI 重跑完整测试、编译基准、前端构建、Windows 安装/运行/卸载以及上一版
-  运行中升级冒烟；任一门禁失败都不会生成 GitHub Release。
+- 手动候选 workflow 执行完整测试、构建、Windows 安装/卸载与升级冒烟；tag workflow 重跑
+  测试门、核验四项真实验收并复算先前候选字节。任一门禁失败都不会发布，tag 阶段不重建资产。
 
 核心保证：只改结构不改内容（撤销全部编辑后与原文逐字符一致的机器校验，失败自动回退）、
 AI 只做决策不生成正文、歧义项一律保守保留并列入汇报。
@@ -269,7 +279,7 @@ AI 只做决策不生成正文、歧义项一律保守保留并列入汇报。
 
 ```
 latexstruct/
-├── .github/workflows/build.yml   # CI：测试 → 构建 exe → 安装器 → Release（全自动）
+├── .github/workflows/build.yml   # CI：测试；手动构建候选；tag 验收后复用候选发布
 ├── latexstruct/
 │   ├── __init__.py               # 版本号 + 更新源
 │   ├── __main__.py               # 启动器（windowed 兼容修复）

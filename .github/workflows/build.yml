@@ -17,6 +17,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -132,15 +134,17 @@ jobs:
           Get-Content benchmark/report.md
           if ($benchmarkExit -ne 0) { Write-Error "Benchmark（编译）未通过"; exit 1 }
 
-  build:
-    name: 构建安装包（仅 tag / 手动触发）
+  build_candidate:
+    name: 构建待验收候选安装包（仅手动触发）
     needs: test
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -481,23 +485,169 @@ jobs:
           $notice = 'packaging/THIRD_PARTY_NOTICES.txt'
           if (-not (Test-Path $notice)) { Write-Error '缺少第三方许可证'; exit 1 }
           $portable = "dist/LaTeXStruct-portable-$env:APP_VERSION.zip"
-          Compress-Archive -LiteralPath 'dist/LaTeXStruct.exe','LICENSE',$notice -DestinationPath $portable
-          $verifyDir = Join-Path $env:RUNNER_TEMP 'latexstruct-portable-license-check'
-          Expand-Archive -LiteralPath $portable -DestinationPath $verifyDir
-          foreach ($requiredFile in @('LaTeXStruct.exe','LICENSE','THIRD_PARTY_NOTICES.txt')) {
-            if (-not (Test-Path (Join-Path $verifyDir $requiredFile))) {
-              Write-Error "便携包缺少 $requiredFile"; exit 1
-            }
-          }
+          python packaging/release_integrity.py build-portable `
+            --executable dist/LaTeXStruct.exe --license LICENSE `
+            --notices $notice --output $portable
+          if ($LASTEXITCODE -ne 0) { Write-Error '便携包完整性校验失败'; exit 1 }
+          $setup = Get-ChildItem dist/LaTeXStruct-setup-*.exe | Select-Object -First 1
+          if (-not $setup) { Write-Error '未找到已签名安装器'; exit 1 }
+          python packaging/release_integrity.py record-assets `
+            --version $env:APP_VERSION --commit $env:GITHUB_SHA `
+            --build-id $env:GITHUB_RUN_ID --output dist/release-assets.json `
+            --checksums-output dist/SHA256SUMS.txt $portable $setup.FullName
+          if ($LASTEXITCODE -ne 0) { Write-Error '发布资产摘要生成失败'; exit 1 }
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: LaTeXStruct-v${{ env.APP_VERSION }}
+          if-no-files-found: error
+          retention-days: 90
           path: |
             dist/LaTeXStruct-portable-*.zip
             dist/LaTeXStruct-setup-*.exe
+            dist/release-assets.json
+            dist/SHA256SUMS.txt
+
+  release_attested_candidate:
+    name: 发布四项真实验收过的原始候选字节（仅 tag）
+    needs: test
+    # 带连字符的 tag 是明确标注的预发行版；它们只能由人工以 prerelease
+    # 方式发布，不能进入或削弱下方稳定版四项真实验收门。
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 版本一致性校验
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME.TrimStart('v').Trim()
+          if ($v -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Error "版本格式无效: $v"; exit 1
+          }
+          python -c "import latexstruct; assert latexstruct.__version__=='$v', f'版本不匹配: {latexstruct.__version__} vs $v'"
+          "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: 发布门（定位已完成且四项真实验收过的候选 run）
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error '无法读取 origin/main，发布门保持关闭'; exit 1
+          }
+          git merge-base --is-ancestor "$env:GITHUB_SHA" 'refs/remotes/origin/main'
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error 'tag 指向的提交不是 origin/main 的祖先，禁止发布'; exit 1
+          }
+          $manifest = "release/acceptance/v$env:APP_VERSION/release-attestation.json"
+          if (-not (Test-Path -LiteralPath $manifest)) {
+            Write-Error "缺少四份真实验收声明（ocr-17、ocr-600、analysis-17、analysis-600）: $manifest"
+            exit 1
+          }
+          try {
+            $attestation = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+            $attestedCommit = ([string]$attestation.commit).ToLowerInvariant()
+            $candidateRunId = [string]$attestation.runtime_identity.build_id
+          } catch {
+            Write-Error '真实验收声明不是有效 JSON'; exit 1
+          }
+          if ($attestedCommit -notmatch '^[0-9a-f]{40,64}$') {
+            Write-Error '真实验收声明缺少有效 tested commit'; exit 1
+          }
+          if ($candidateRunId -notmatch '^[1-9][0-9]*$') {
+            Write-Error '真实验收 build_id 不是数字 GitHub Actions run id'; exit 1
+          }
+          git merge-base --is-ancestor $attestedCommit "$env:GITHUB_SHA"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error '真实验收所测提交不是 tag 提交的祖先'; exit 1
+          }
+          # 验收 JSON 本身会产生后续提交，因此不可能与被测 commit 自引用。
+          # 被测 commit 到 tag 之间仅允许加入验收证据和发布说明；任何运行时代码
+          # 变化都要求重新构建候选、重新执行 OCR/分析的真实 17/600 页验收。
+          $evidencePrefix = "release/acceptance/v$env:APP_VERSION/"
+          $changedPaths = @(git diff --name-only "$attestedCommit..$env:GITHUB_SHA")
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error '无法核对被测提交到 tag 的文件变化'; exit 1
+          }
+          foreach ($changedPath in $changedPaths) {
+            $normalizedPath = ([string]$changedPath).Replace('\','/')
+            if (
+              $normalizedPath -ne 'CHANGELOG.md' -and
+              -not $normalizedPath.StartsWith($evidencePrefix)
+            ) {
+              Write-Error "真实验收后仍修改了运行时文件，禁止发布: $normalizedPath"
+              exit 1
+            }
+          }
+          python packaging/release_integrity.py verify-attestation `
+            --manifest $manifest --version $env:APP_VERSION --commit $attestedCommit
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error '四份真实验收声明未通过发布门；缺少 analysis-17/analysis-600 时禁止发布'
+            exit 1
+          }
+          python packaging/release_integrity.py verify-release-notes `
+            --changelog CHANGELOG.md --version $env:APP_VERSION
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error 'CHANGELOG 含未来 CI 资产摘要或缺少当前版本说明'; exit 1
+          }
+          $headers = @{
+            'User-Agent' = 'latexstruct-release-gate'
+            'Authorization' = "Bearer $env:GITHUB_TOKEN"
+            'Accept' = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          try {
+            $candidateRun = Invoke-RestMethod -Headers $headers `
+              "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/runs/$candidateRunId"
+          } catch {
+            Write-Error "无法核验候选 GitHub Actions run $candidateRunId"; exit 1
+          }
+          if (
+            [string]$candidateRun.id -ne $candidateRunId -or
+            [string]$candidateRun.event -ne 'workflow_dispatch' -or
+            [string]$candidateRun.status -ne 'completed' -or
+            [string]$candidateRun.conclusion -ne 'success' -or
+            [string]$candidateRun.path -ne '.github/workflows/build.yml' -or
+            [int]$candidateRun.run_attempt -ne 1 -or
+            ([string]$candidateRun.head_sha).ToLowerInvariant() -ne $attestedCommit
+          ) {
+            Write-Error "候选 run 未完成、非手动构建、失败或 commit 不匹配: $candidateRunId"
+            exit 1
+          }
+          "ATTESTED_COMMIT=$attestedCommit" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_RUN_ID=$candidateRunId" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: 下载先前候选 run 的不可变发布资产
+        uses: actions/download-artifact@v4
+        with:
+          name: LaTeXStruct-v${{ env.APP_VERSION }}
+          path: dist
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.CANDIDATE_RUN_ID }}
+      - name: 复算候选资产并绑定四项真实验收
+        shell: pwsh
+        run: |
+          $manifest = "release/acceptance/v$env:APP_VERSION/release-attestation.json"
+          python packaging/release_integrity.py verify-candidate-assets `
+            --manifest $manifest --version $env:APP_VERSION `
+            --commit $env:ATTESTED_COMMIT `
+            --assets-manifest dist/release-assets.json `
+            --checksums dist/SHA256SUMS.txt --assets-dir dist
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error '候选资产不是四 profile 实际验收过的精确字节，禁止发布'
+            exit 1
+          }
       - name: 生成当前版本中文发布说明
-        if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
           $escaped = [regex]::Escape($env:APP_VERSION)
@@ -509,12 +659,14 @@ jobs:
             Write-Error "CHANGELOG 缺少 v$env:APP_VERSION 的发布说明"
             exit 1
           }
-          $match.Groups['body'].Value.Trim() | Set-Content dist/RELEASE_NOTES.md -Encoding utf8NoBOM
-      - name: 发布 GitHub Release（tag 时）
-        if: startsWith(github.ref, 'refs/tags/v')
+          $match.Groups['body'].Value.Trim() |
+            Set-Content dist/RELEASE_NOTES.md -Encoding utf8NoBOM
+      - name: 发布 GitHub Release（复用已验收候选原始字节）
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/LaTeXStruct-portable-*.zip
-            dist/LaTeXStruct-setup-*.exe
+            dist/LaTeXStruct-portable-${{ env.APP_VERSION }}.zip
+            dist/LaTeXStruct-setup-${{ env.APP_VERSION }}.exe
+            dist/release-assets.json
+            dist/SHA256SUMS.txt
           body_path: dist/RELEASE_NOTES.md

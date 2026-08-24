@@ -16,6 +16,38 @@ from ..pricing import summarize_ai_usage
 TERMINAL_STATUSES = {"done", "blocked", "error", "cancelled"}
 ACTIVE_STATUSES = {"running", "pausing", "paused", "cancelling", "committing"}
 _AUDIT_PARENT_SNAPSHOT_FIELD = "_audit_parent_snapshot_id"
+_UNVERIFIED_PROGRESS_CEILING = 0.99
+_BLOCKING_VERIFICATION_STATUSES = frozenset({
+    "BLOCKED",
+    "CANCELLED",
+    "COMPLETED_WITH_ISSUES",
+    "ERROR",
+    "FAILED",
+    "FAILED_BEST_RETAINED",
+    "NOT_AVAILABLE",
+    "NOT_RUN",
+    "PARTIAL",
+    "UNVERIFIED",
+})
+
+
+def _completion_gate_passed(result: dict) -> bool:
+    """Accept only an explicit successful result with no contrary gate fact."""
+    if result.get("ok") is not True or result.get("safe_to_export") is False:
+        return False
+    declared = {
+        str(result.get("verification_status") or "").strip().upper(),
+        str(result.get("terminal_status") or "").strip().upper(),
+    }
+    verification = result.get("verification")
+    if isinstance(verification, dict):
+        if verification.get("safe_to_export") is False:
+            return False
+        declared.update({
+            str(verification.get("status") or "").strip().upper(),
+            str(verification.get("verification_status") or "").strip().upper(),
+        })
+    return not bool(declared.intersection(_BLOCKING_VERIFICATION_STATUSES))
 
 
 class ProcessingCancelled(Exception):
@@ -386,7 +418,7 @@ class ProcessJobManager:
             job = self._jobs.get(jid)
             if not job:
                 return
-            passed = bool(result.get("ok"))
+            passed = _completion_gate_passed(result)
             job["status"] = "done" if passed else "blocked"
             job["execution_state"] = "completed"
             job["verification_status"] = "passed" if passed else "failed"
@@ -396,7 +428,20 @@ class ProcessJobManager:
                 "安全检查通过"
                 if passed else str(result.get("failure_summary") or "安全检查未通过；失败草稿已保留供检查")[:500]
             )
-            job["progress"] = 1.0
+            if passed:
+                job["progress"] = 1.0
+            else:
+                # A blocked/UNVERIFIED terminal result did not pass the final
+                # completion gate.  Preserve its real business-pipeline
+                # position, while also correcting any premature 100% callback.
+                try:
+                    current_progress = float(job.get("progress") or 0.0)
+                except (TypeError, ValueError):
+                    current_progress = 0.0
+                job["progress"] = round(min(
+                    max(0.0, current_progress),
+                    _UNVERIFIED_PROGRESS_CEILING,
+                ), 4)
             reached_phases = job.setdefault("reached_phases", [])
             if job["phase"] not in reached_phases:
                 reached_phases.append(job["phase"])

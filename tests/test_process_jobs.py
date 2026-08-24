@@ -67,18 +67,35 @@ def test_preview_state_is_explicit_and_only_promoted_by_terminal_evidence():
 def test_terminal_execution_and_verification_are_separate_statuses():
     manager = ProcessJobManager()
     blocked = manager.create("project-unverified-progress", "source")
+    manager.update(blocked["id"], "verification", 1.0, "正在执行最终安全门")
     manager.complete(blocked["id"], {"ok": False})
     public = manager.public(blocked)
 
-    # 100% means the task reached a terminal execution state.  It is not a
-    # safety-pass signal: consumers must use verification_status for that.
-    assert public["progress"] == 1.0
+    # A failed final gate may be terminal, but it must never render as 100%.
+    assert public["progress"] == 0.99
     assert public["execution_state"] == "completed"
     assert public["verification_status"] == "failed"
 
     cancelled = manager.create("project-cancelled-progress", "source")
     manager.cancelled(cancelled["id"])
     assert manager.public(cancelled)["verification_status"] == "not_reached"
+
+
+def test_explicit_unverified_result_cannot_reach_100_even_if_ok_is_inconsistent():
+    manager = ProcessJobManager()
+    job = manager.create("project-explicit-unverified", "source")
+    manager.update(job["id"], "verification", 1.0, "正在执行最终安全门")
+
+    manager.complete(job["id"], {
+        "ok": True,
+        "safe_to_export": True,
+        "verification_status": "UNVERIFIED",
+    })
+    public = manager.public(job)
+
+    assert public["status"] == "blocked"
+    assert public["verification_status"] == "failed"
+    assert public["progress"] == 0.99
 
 
 def test_job_snapshot_exposes_only_allowlisted_analysis_backend():

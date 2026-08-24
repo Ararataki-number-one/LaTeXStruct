@@ -21,10 +21,13 @@ server = [
     "PyMuPDF>=1.24,<2",
 ]
 dev = ["pytest"]
+acceptance = [
+    "playwright>=1.49,<2",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-norecursedirs = [".*", "ls-preserve-*", "tmp", "output", "node_modules"]
+norecursedirs = [".*", "ls-preserve-*", "ls-test-*", "tmp", "output", "node_modules"]
 
 [build-system]
 requires = ["setuptools>=68"]

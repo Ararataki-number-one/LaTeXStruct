@@ -58,6 +58,15 @@ _DISPLAY_ENV_RE = re.compile(
     re.I | re.S,
 )
 _ENV_TOKEN_RE = re.compile(r"\\(?P<kind>begin|end)\s*\{\s*(?P<name>[^{}\s]+)\s*\}")
+_OCR_INCLUDEGRAPHICS_RE = re.compile(
+    r"\\includegraphics(?:\s*\[[^\]\r\n]*\])?\s*\{([^{}\r\n]+)\}",
+    re.I,
+)
+_OCR_BOUNDARY_DECIMAL_RE = re.compile(r"^[0-9]{1,6}$")
+_OCR_TARGET_TEXT_BLOCK_PAGE_RATIO = 125.0 / 155.0
+_OCR_FIGURE_WIDTH_MIN = 0.25
+_OCR_FIGURE_WIDTH_MAX = 1.0
+_OCR_FIGURE_HEIGHT_MAX = 0.72
 
 
 def _utc_now() -> str:
@@ -75,6 +84,52 @@ def _canonical_json(value: object) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _crop_ocr_figure_png(
+    image_bytes: bytes,
+    bbox_pixels: tuple[int, int, int, int],
+    image_size_pixels: tuple[int, int],
+) -> tuple[bytes, tuple[int, int]]:
+    """Crop one exact raster input without trusting model file bytes or paths."""
+    try:
+        import pymupdf
+
+        width, height = image_size_pixels
+        x0, y0, x1, y1 = bbox_pixels
+        document = pymupdf.open(stream=bytes(image_bytes))
+        try:
+            if document.page_count != 1:
+                raise ValueError("page visual must contain exactly one raster page")
+            page = document[0]
+            page_rect = page.rect
+            if page_rect.width <= 0 or page_rect.height <= 0:
+                raise ValueError("page visual has invalid geometry")
+            clip = pymupdf.Rect(
+                page_rect.x0 + (x0 / width) * page_rect.width,
+                page_rect.y0 + (y0 / height) * page_rect.height,
+                page_rect.x0 + (x1 / width) * page_rect.width,
+                page_rect.y0 + (y1 / height) * page_rect.height,
+            )
+            matrix = pymupdf.Matrix(width / page_rect.width, height / page_rect.height)
+            pixmap = page.get_pixmap(matrix=matrix, clip=clip, alpha=False)
+            expected_width = x1 - x0
+            expected_height = y1 - y0
+            if (
+                pixmap.width < 1
+                or pixmap.height < 1
+                or abs(pixmap.width - expected_width) > 2
+                or abs(pixmap.height - expected_height) > 2
+            ):
+                raise ValueError("cropped figure dimensions do not match the validated bbox")
+            result = pixmap.tobytes("png")
+            if not result.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise ValueError("figure crop encoder did not return PNG")
+            return result, (pixmap.width, pixmap.height)
+        finally:
+            document.close()
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        raise OcrStoreError("failed to crop a host-validated OCR figure") from exc
 
 
 def _freeze(value: Any) -> Any:
@@ -154,10 +209,10 @@ _TIER_POLICIES = {
         OcrQualityTier.FAST, 200, 200, 3, 3, 1, False, True, False, False,
     ),
     OcrQualityTier.RECOMMENDED: OcrTierPolicy(
-        OcrQualityTier.RECOMMENDED, 200, 300, 3, 3, 3, True, True, True, False,
+        OcrQualityTier.RECOMMENDED, 200, 300, 3, 3, 5, True, True, True, True,
     ),
     OcrQualityTier.HIGH: OcrTierPolicy(
-        OcrQualityTier.HIGH, 200, 300, 3, 3, 4, True, True, True, True,
+        OcrQualityTier.HIGH, 200, 300, 3, 3, 5, True, True, True, True,
     ),
 }
 
@@ -880,17 +935,33 @@ class OcrRunStore:
         return self.run_dir(run_id) / "pages" / f"{page_id}.json"
 
     def load_record(self, run_id: str, page_id: str) -> OcrPageRecord:
-        try:
-            value = json.loads(self._record_path(run_id, page_id).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise OcrStoreError(f"OCR page record is missing or corrupt: {page_id}") from exc
-        record = OcrPageRecord.from_dict(value)
-        self._validate_record_identity(self.load_snapshot(run_id), record)
-        return record
+        # Windows does not allow ``os.replace`` to replace a file while another
+        # thread still has that file open for reading.  API polling and recovery
+        # writes share one store instance, so reads must participate in the same
+        # lock as ``persist_record`` instead of racing its atomic commit marker.
+        with self._lock:
+            try:
+                value = json.loads(
+                    self._record_path(run_id, page_id).read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError) as exc:
+                raise OcrStoreError(
+                    f"OCR page record is missing or corrupt: {page_id}"
+                ) from exc
+            record = OcrPageRecord.from_dict(value)
+            self._validate_record_identity(self.load_snapshot(run_id), record)
+            return record
 
     def list_records(self, run_id: str) -> list[OcrPageRecord]:
-        snapshot = self.load_snapshot(run_id)
-        return [self.load_record(run_id, make_page_id(index)) for index in range(1, len(snapshot.selected_pages) + 1)]
+        # Hold the lock across the whole list so public job snapshots cannot mix
+        # page records from opposite sides of a concurrent recovery commit.
+        # ``RLock`` keeps the nested ``load_record`` calls safe and re-entrant.
+        with self._lock:
+            snapshot = self.load_snapshot(run_id)
+            return [
+                self.load_record(run_id, make_page_id(index))
+                for index in range(1, len(snapshot.selected_pages) + 1)
+            ]
 
     def _page_image_path(self, run_id: str, record: OcrPageRecord) -> Path:
         """Return the hash-addressed path for one exact model visual input."""
@@ -938,6 +1009,116 @@ class OcrRunStore:
             if not hmac.compare_digest(_sha256_bytes(data), record.image_sha256):
                 raise OcrStoreError("persisted OCR page image SHA-256 verification failed")
             return path
+
+    def materialize_figure_assets(
+        self,
+        run_id: str,
+    ) -> tuple[dict[str, bytes], dict[str, object]]:
+        """Crop host-validated figures from exact persisted model inputs.
+
+        Logical TeX paths are model output only until this host step binds them
+        to immutable PNG bytes.  The resulting mapping is the exact extra-file
+        closure passed to both baseline compile executions.
+        """
+        with self._lock:
+            snapshot = self.load_snapshot(run_id)
+            assets: dict[str, bytes] = {}
+            rows: list[dict[str, object]] = []
+            for record in self.list_records(run_id):
+                if record.status != OcrPageStatus.SUCCESS:
+                    raise OcrStoreError(
+                        f"figure assets require a successful page: {record.page_id}"
+                    )
+                response_path = self.run_dir(run_id) / "responses" / (
+                    f"{record.page_id}-{record.raw_response_sha256}.json"
+                )
+                try:
+                    raw_bytes = response_path.read_bytes()
+                except OSError as exc:
+                    raise OcrStoreError(
+                        f"saved OCR response is missing: {record.page_id}"
+                    ) from exc
+                if not hmac.compare_digest(_sha256_bytes(raw_bytes), record.raw_response_sha256):
+                    raise OcrStoreError(
+                        f"saved OCR response SHA-256 mismatch: {record.page_id}"
+                    )
+                try:
+                    raw_response = json.loads(raw_bytes.decode("utf-8"))
+                    validated = validate_ocr_batch_response(
+                        raw_response,
+                        [record.page_id],
+                        page_context_by_page_id={record.page_id: {
+                            "source_page": record.source_page,
+                            "image_size_pixels": record.image_size_pixels,
+                        }},
+                    )[0]
+                except (UnicodeDecodeError, json.JSONDecodeError, OcrBatchValidationError) as exc:
+                    raise OcrStoreError(
+                        f"saved OCR figure evidence is invalid: {record.page_id}"
+                    ) from exc
+                if not validated.figures:
+                    continue
+                image_path = self.verify_page_image(run_id, record)
+                image_bytes = image_path.read_bytes()
+                for figure in validated.figures:
+                    logical_path = str(figure["path"])
+                    if logical_path in assets:
+                        raise OcrStoreError(f"duplicate OCR figure path: {logical_path}")
+                    crop_bytes, crop_size = _crop_ocr_figure_png(
+                        image_bytes,
+                        tuple(int(item) for item in figure["bbox_pixels"]),
+                        record.image_size_pixels,
+                    )
+                    crop_sha = _sha256_bytes(crop_bytes)
+                    target = self.run_dir(run_id) / "artifacts" / Path(logical_path)
+                    if target.exists():
+                        if target.is_symlink() or target.read_bytes() != crop_bytes:
+                            raise OcrStoreError(
+                                f"immutable OCR figure already exists with different bytes: {logical_path}"
+                            )
+                    else:
+                        self._atomic_write(target, crop_bytes)
+                    assets[logical_path] = crop_bytes
+                    rows.append({
+                        "path": logical_path,
+                        "page_id": record.page_id,
+                        "source_page": record.source_page,
+                        "source_image_sha256": record.image_sha256,
+                        "bbox_normalized": thaw_json(figure["bbox_normalized"]),
+                        "bbox_pixels": thaw_json(figure["bbox_pixels"]),
+                        "crop_size_pixels": list(crop_size),
+                        "bytes": len(crop_bytes),
+                        "sha256": crop_sha,
+                    })
+            body = {
+                "schema_version": "latexstruct-ocr-figures-v1",
+                "run_id": snapshot.run_id,
+                "figures": rows,
+            }
+            body_sha = _sha256_bytes(_canonical_json(body))
+            manifest = {
+                **body,
+                "created_at": _utc_now(),
+                "manifest_sha256": body_sha,
+            }
+            marker = self.run_dir(run_id) / "artifacts" / "figures-manifest.json"
+            if marker.exists():
+                try:
+                    existing = json.loads(marker.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise OcrStoreError("OCR figure manifest is corrupt") from exc
+                existing_body = {
+                    key: existing.get(key) for key in ("schema_version", "run_id", "figures")
+                }
+                if (
+                    _canonical_json(existing_body) != _canonical_json(body)
+                    or existing.get("manifest_sha256") != body_sha
+                ):
+                    raise OcrStoreError("immutable OCR figure manifest already differs")
+                manifest = existing
+            else:
+                self._atomic_write(marker, _canonical_json(manifest))
+            return assets, manifest
 
     def persist_record(
         self,
@@ -1003,6 +1184,7 @@ class OcrRunStore:
         document_builder: Callable[[list[str]], str] | None = None,
         model_usage: Mapping[str, object] | None = None,
         merge_version: str = "1",
+        figure_manifest: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """Merge every selected page in source order and freeze it write-once.
 
@@ -1063,6 +1245,13 @@ class OcrRunStore:
                 ],
                 "merge_version": str(merge_version),
             }
+            if figure_manifest is not None:
+                manifest["figure_manifest_sha256"] = str(
+                    figure_manifest.get("manifest_sha256") or ""
+                )
+                manifest["figure_assets"] = thaw_json(
+                    figure_manifest.get("figures") or []
+                )
             directory = self.run_dir(run_id) / "artifacts"
             raw_path = directory / "raw-ocr.tex"
             marker_path = directory / "raw-ocr-freeze.json"
@@ -1091,6 +1280,7 @@ class OcrRunStore:
         syntax_repairs: Sequence[Mapping[str, object]] = (),
         error_lines: Sequence[Mapping[str, object]] = (),
         preview_filename: str = "",
+        extra_files: Mapping[str, bytes] | None = None,
     ) -> dict[str, object]:
         """Record real compile evidence without ever replacing raw-ocr.tex."""
         with self._lock:
@@ -1128,6 +1318,14 @@ class OcrRunStore:
                 "successful_passes": int(successful_passes),
                 "syntax_repairs": thaw_json(tuple(syntax_repairs)),
                 "error_lines": thaw_json(tuple(error_lines)),
+                "extra_files": [
+                    {
+                        "path": str(path).replace("\\", "/"),
+                        "bytes": len(data),
+                        "sha256": _sha256_bytes(bytes(data)),
+                    }
+                    for path, data in sorted((extra_files or {}).items())
+                ],
             }
             marker_path = directory / "baseline-manifest.json"
             if marker_path.exists():
@@ -1223,6 +1421,123 @@ def _strip_host_page_markers(text: str) -> str:
     return _HOST_PAGE_MARKER_RE.sub("", str(text or "")).strip()
 
 
+def _split_graphics_options(options: str) -> list[str]:
+    """Split a graphicx option list without breaking commas in braces."""
+    result: list[str] = []
+    start = 0
+    depth = 0
+    for index, character in enumerate(str(options or "")):
+        if character == "{" and (index == 0 or options[index - 1] != "\\"):
+            depth += 1
+        elif character == "}" and (index == 0 or options[index - 1] != "\\"):
+            depth = max(0, depth - 1)
+        elif character == "," and depth == 0:
+            value = options[start:index].strip()
+            if value:
+                result.append(value)
+            start = index + 1
+    value = options[start:].strip()
+    if value:
+        result.append(value)
+    return result
+
+
+def _validated_figure_width_ratio(figure: Mapping[str, object]) -> float:
+    """Convert a host-validated page bbox to a bounded text-block width."""
+    bbox = tuple(figure.get("bbox_normalized") or ())
+    page_ratio = max(0.0, float(bbox[2]) - float(bbox[0]))
+    body_ratio = page_ratio / _OCR_TARGET_TEXT_BLOCK_PAGE_RATIO
+    return round(
+        min(_OCR_FIGURE_WIDTH_MAX, max(_OCR_FIGURE_WIDTH_MIN, body_ratio)),
+        2,
+    )
+
+
+def _normalize_validated_figure_layout(
+    latex: str,
+    figures: Sequence[Mapping[str, object]],
+) -> tuple[str, list[Mapping[str, object]]]:
+    """Apply deterministic, page-bounded sizing to validated active figures."""
+    if not figures:
+        return latex, list(figures)
+    matches = list(_OCR_INCLUDEGRAPHICS_RE.finditer(latex))
+    if len(matches) != len(figures):
+        raise OcrBatchValidationError(
+            "INVALID_FIGURES", "validated figure count no longer matches LaTeX",
+        )
+    normalized: list[Mapping[str, object]] = []
+    edits: list[tuple[int, int, str]] = []
+    for match, raw_figure in zip(matches, figures):
+        figure = dict(raw_figure)
+        width_ratio = _validated_figure_width_ratio(figure)
+        figure["display_width_ratio"] = width_ratio
+        normalized.append(figure)
+
+        command = match.group(0)
+        options_match = re.search(r"\[(?P<options>[^\]\r\n]*)\]", command)
+        options = _split_graphics_options(
+            options_match.group("options") if options_match else "",
+        )
+        options = [
+            option for option in options
+            if not re.match(r"^\s*(?:width|height)\s*=", option, re.I)
+            and not re.match(r"^\s*keepaspectratio(?:\s*=.*)?$", option, re.I)
+        ]
+        bounded = [
+            f"width={width_ratio:.2f}\\linewidth",
+            f"height={_OCR_FIGURE_HEIGHT_MAX:.2f}\\textheight",
+            "keepaspectratio",
+            *options,
+        ]
+        path = match.group(1)
+        replacement = rf"\includegraphics[{','.join(bounded)}]{{{path}}}"
+        edits.append((match.start(), match.end(), replacement))
+    for start, end, replacement in reversed(edits):
+        latex = latex[:start] + replacement + latex[end:]
+    return latex, normalized
+
+
+def _boundary_folio_candidates(reference_text: str, source_page: int | None) -> set[str]:
+    """Return only host-supported decimal folios for one physical source page."""
+    candidates = {str(source_page)} if source_page is not None and source_page > 0 else set()
+    reference_lines = [
+        line.strip() for line in str(reference_text or "").splitlines() if line.strip()
+    ]
+    for value in reference_lines[:1] + reference_lines[-1:]:
+        if _OCR_BOUNDARY_DECIMAL_RE.fullmatch(value):
+            candidates.add(value)
+    return candidates
+
+
+def _strip_host_supported_boundary_folios(
+    latex: str,
+    *,
+    source_page: int | None,
+    reference_text: str,
+) -> tuple[str, tuple[str, ...]]:
+    """Remove model-copied outer folios without touching interior numeric text."""
+    lines = str(latex or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    candidates = _boundary_folio_candidates(reference_text, source_page)
+    removed: list[str] = []
+    while True:
+        active = [
+            index for index, line in enumerate(lines)
+            if line.strip() and not line.lstrip().startswith("%")
+        ]
+        if not active:
+            break
+        changed = False
+        for index in dict.fromkeys((active[0], active[-1])):
+            value = lines[index].strip()
+            if value in candidates and _OCR_BOUNDARY_DECIMAL_RE.fullmatch(value):
+                removed.append(value)
+                lines[index] = ""
+                changed = True
+        if not changed:
+            break
+    return "\n".join(lines).strip(), tuple(removed)
+
+
 @dataclass(frozen=True, slots=True)
 class OcrValidationIssue:
     code: str
@@ -1278,6 +1593,7 @@ def validate_ocr_batch_response(
     expected_page_ids: Sequence[str],
     *,
     reference_text_by_page_id: Mapping[str, str] | None = None,
+    page_context_by_page_id: Mapping[str, Mapping[str, object]] | None = None,
     minimum_nonspace_chars: int = 8,
 ) -> list[ValidatedOcrPage]:
     """Require exact page-id coverage and validate every page independently."""
@@ -1311,6 +1627,7 @@ def validate_ocr_batch_response(
         raise OcrBatchValidationError("PAGE_ID_COVERAGE", "OCR response page count does not match request")
     by_id = {str(item["page_id"]): item for item in values}
     references = dict(reference_text_by_page_id or {})
+    page_contexts = dict(page_context_by_page_id or {})
     output: list[ValidatedOcrPage] = []
     for page_id in expected:
         item = by_id[page_id]
@@ -1331,11 +1648,38 @@ def validate_ocr_batch_response(
             raise OcrBatchValidationError(
                 "INVALID_UNRESOLVED_REGIONS", f"{page_id} contains an invalid unresolved region",
             )
+        page_context = page_contexts.get(page_id)
+        figures = list(_validate_ocr_page_figures(
+            page_id,
+            latex,
+            figures,
+            page_context,
+        ))
+        latex, figures = _normalize_validated_figure_layout(latex, figures)
+        source_page = (
+            page_context.get("source_page")
+            if isinstance(page_context, Mapping)
+            and isinstance(page_context.get("source_page"), int)
+            and not isinstance(page_context.get("source_page"), bool)
+            else None
+        )
+        latex, removed_folios = _strip_host_supported_boundary_folios(
+            latex,
+            source_page=source_page,
+            reference_text=references.get(page_id, ""),
+        )
         issues = inspect_latex_fragment(
             latex,
             reference_text=references.get(page_id, ""),
             minimum_nonspace_chars=minimum_nonspace_chars,
         )
+        if removed_folios:
+            issues.append(OcrValidationIssue(
+                "BOUNDARY_FOLIO_REMOVED",
+                "info",
+                f"host removed {len(removed_folios)} supported boundary folio line(s)",
+                False,
+            ))
         if unresolved:
             issues.append(OcrValidationIssue(
                 "UNRESOLVED_REGIONS", "warning",
@@ -1354,6 +1698,145 @@ def validate_ocr_batch_response(
             raw_object=_freeze(dict(item)),
         ))
     return output
+
+
+def _validate_ocr_page_figures(
+    page_id: str,
+    latex: str,
+    figures: Sequence[Mapping[str, object]],
+    context: Mapping[str, object] | None,
+) -> tuple[Mapping[str, object], ...]:
+    """Bind every model figure to one host-owned path and a sane page crop."""
+    if len(figures) > 32:
+        raise OcrBatchValidationError(
+            "INVALID_FIGURES", f"{page_id} contains too many figure records",
+        )
+    references = [
+        match.group(1).replace("\\", "/").strip()
+        for match in _OCR_INCLUDEGRAPHICS_RE.finditer(latex)
+    ]
+    if not figures:
+        if references:
+            raise OcrBatchValidationError(
+                "INVALID_FIGURES", f"{page_id} references an image without figure evidence",
+            )
+        return ()
+    if not isinstance(context, Mapping):
+        raise OcrBatchValidationError(
+            "INVALID_FIGURES", f"{page_id} figure evidence lacks host page context",
+        )
+    source_page = context.get("source_page")
+    size = tuple(context.get("image_size_pixels") or ())
+    if (
+        not isinstance(source_page, int)
+        or isinstance(source_page, bool)
+        or source_page < 1
+        or len(size) != 2
+        or any(
+            not isinstance(item, int) or isinstance(item, bool) or item < 1
+            for item in size
+        )
+    ):
+        raise OcrBatchValidationError(
+            "INVALID_FIGURES", f"{page_id} figure evidence has invalid host page context",
+        )
+    image_width, image_height = size
+    validated: list[Mapping[str, object]] = []
+    expected_paths: list[str] = []
+    for position, raw in enumerate(figures, start=1):
+        expected_path = f"figures/page_{source_page:04d}_figure_{position:02d}.png"
+        path = str(raw.get("path") or "").replace("\\", "/").strip()
+        index = raw.get("index")
+        normalized = raw.get("bbox_normalized")
+        pixels = raw.get("bbox_pixels")
+        if path != expected_path or index != position:
+            raise OcrBatchValidationError(
+                "INVALID_FIGURES",
+                f"{page_id} figure {position} must use host path {expected_path}",
+            )
+        if not isinstance(normalized, (list, tuple)) or len(normalized) != 4:
+            raise OcrBatchValidationError(
+                "INVALID_FIGURES", f"{page_id} figure {position} has invalid normalized bbox",
+            )
+        if not isinstance(pixels, (list, tuple)) or len(pixels) != 4:
+            raise OcrBatchValidationError(
+                "INVALID_FIGURES", f"{page_id} figure {position} has invalid pixel bbox",
+            )
+        if any(
+            isinstance(item, bool) or not isinstance(item, (int, float))
+            for item in normalized
+        ) or any(
+            isinstance(item, bool) or not isinstance(item, int)
+            for item in pixels
+        ):
+            raise OcrBatchValidationError(
+                "INVALID_FIGURES", f"{page_id} figure {position} bbox values are invalid",
+            )
+        nx0, ny0, nx1, ny1 = [float(item) for item in normalized]
+        px0, py0, px1, py1 = [int(item) for item in pixels]
+        if not (
+            all(math.isfinite(item) for item in (nx0, ny0, nx1, ny1))
+            and 0 <= nx0 < nx1 <= 1
+            and 0 <= ny0 < ny1 <= 1
+            and 0 <= px0 < px1 <= image_width
+            and 0 <= py0 < py1 <= image_height
+        ):
+            raise OcrBatchValidationError(
+                "INVALID_FIGURES", f"{page_id} figure {position} bbox is outside the page",
+            )
+        width_ratio = nx1 - nx0
+        height_ratio = ny1 - ny0
+        if (
+            width_ratio < 0.01
+            or height_ratio < 0.01
+            or width_ratio * height_ratio > 0.88
+            or (width_ratio > 0.96 and height_ratio > 0.90)
+        ):
+            raise OcrBatchValidationError(
+                "INVALID_FIGURES", f"{page_id} figure {position} is not a bounded local crop",
+            )
+        tolerance_x = max(4, int(round(image_width * 0.02)))
+        tolerance_y = max(4, int(round(image_height * 0.02)))
+        expected_pixels = (
+            nx0 * image_width, ny0 * image_height,
+            nx1 * image_width, ny1 * image_height,
+        )
+        if (
+            abs(px0 - expected_pixels[0]) > tolerance_x
+            or abs(px1 - expected_pixels[2]) > tolerance_x
+            or abs(py0 - expected_pixels[1]) > tolerance_y
+            or abs(py1 - expected_pixels[3]) > tolerance_y
+        ):
+            normalized_evidence = [
+                round(value, 6) for value in (nx0, ny0, nx1, ny1)
+            ]
+            expected_evidence = [
+                round(value, 2) for value in expected_pixels
+            ]
+            raise OcrBatchValidationError(
+                "INVALID_FIGURES",
+                f"{page_id} figure {position} normalized/pixel bboxes disagree: "
+                f"bbox_normalized={normalized_evidence}, "
+                f"bbox_pixels={[px0, py0, px1, py1]}, "
+                f"image_size_pixels={[image_width, image_height]}, "
+                f"expected_pixels={expected_evidence}, "
+                f"tolerance_pixels={[tolerance_x, tolerance_y]}",
+            )
+        expected_paths.append(expected_path)
+        validated.append(_freeze({
+            "path": expected_path,
+            "index": position,
+            "bbox_normalized": [nx0, ny0, nx1, ny1],
+            "bbox_pixels": [px0, py0, px1, py1],
+            "image_size_pixels": [image_width, image_height],
+            "source": "host_validated_structured_vision",
+        }))
+    if references != expected_paths:
+        raise OcrBatchValidationError(
+            "INVALID_FIGURES",
+            f"{page_id} includegraphics references do not exactly match figure evidence",
+        )
+    return tuple(validated)
 
 
 def inspect_latex_fragment(
@@ -1511,7 +1994,7 @@ def classify_ocr_error(error: object) -> OcrErrorCategory:
         return OcrErrorCategory.TRUNCATED
     if any(token in text for token in (
         "timeout", "timed out", "connection", "http 408", "http 500", "http 502",
-        "http 503", "http 504", "temporary", "temporarily", "网络", "临时",
+        "http 503", "http 504", "temporary", "temporarily", "网络", "临时", "超时",
     )):
         return OcrErrorCategory.TRANSIENT
     if any(token in text for token in (
@@ -1554,6 +2037,7 @@ class OcrPageRequest:
     crops: tuple[bytes, ...] = field(default_factory=tuple, repr=False)
     correction_instruction: str = ""
     retry_state: Mapping[str, object] = field(default_factory=dict, repr=False)
+    image_size_pixels: tuple[int, int] = ()
 
     def __post_init__(self) -> None:
         if self.page_id != make_page_id(self.task_index):
@@ -1564,8 +2048,18 @@ class OcrPageRequest:
             raise ValueError("OCR request DPI is outside 72..600")
         if len(self.crops) > 4 or any(not crop for crop in self.crops):
             raise ValueError("OCR request supports at most four non-empty crops")
+        size = tuple(self.image_size_pixels or ())
+        if size and (
+            len(size) != 2
+            or any(
+                not isinstance(item, int) or isinstance(item, bool) or item < 1
+                for item in size
+            )
+        ):
+            raise ValueError("OCR request image_size_pixels must contain two positive integers")
         object.__setattr__(self, "correction_instruction", str(self.correction_instruction or "")[:1600])
         object.__setattr__(self, "retry_state", _freeze(dict(self.retry_state or {})))
+        object.__setattr__(self, "image_size_pixels", size)
 
     def public_payload(self) -> dict[str, object]:
         return {
@@ -1575,6 +2069,7 @@ class OcrPageRequest:
             "dpi": self.dpi,
             "image_sha256": _sha256_bytes(self.image_bytes),
             "crop_count": len(self.crops),
+            "image_size_pixels": list(self.image_size_pixels),
         }
 
 
@@ -1587,8 +2082,183 @@ class OcrExecutionResult:
     retry_instruction: str = ""
     retry_state: Mapping[str, object] = field(default_factory=dict, repr=False)
     batch_id: str = ""
+    batch_size: int = 1
     used_batch: bool = False
     fell_back_to_single: bool = False
+
+
+_BATCH_EVIDENCE_SECRET_KEY_RE = re.compile(
+    r"(?:api[_ -]?key|authorization|password|secret|access[_ -]?token|"
+    r"refresh[_ -]?token|codex[_ -]?(?:login|token))",
+    re.I,
+)
+_BATCH_EVIDENCE_CREDENTIAL_RE = re.compile(
+    r"(?i)(?:\bBearer\s+)[A-Za-z0-9._~+/=-]+|"
+    r"\bsk-[A-Za-z0-9_-]{8,}|"
+    r"\b(?:api[_ -]?key|authorization|password|secret|access[_ -]?token)"
+    r"\s*[:=]\s*[^\s,;\]\}\"']+",
+)
+_BATCH_EVIDENCE_WINDOWS_PATH_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])(?:[A-Z]:[\\/]|\\\\)[^\r\n\t\"'<>|]+",
+)
+_BATCH_EVIDENCE_POSIX_PATH_RE = re.compile(
+    r"(?<![:A-Za-z0-9_.-])/(?:"
+    r"(?:Users|home|root|tmp|var|etc|opt|mnt|private)(?:/[^\r\n\t\"'<>]*)?"
+    r"|(?:[^/\r\n\t\"'<>\s]+/)+[^/\r\n\t\"'<>\s]*"
+    r")",
+    re.I,
+)
+
+
+def _redact_batch_evidence_text(value: object) -> str:
+    """Remove credentials and host absolute paths from batch-attempt evidence."""
+    text = str(value or "")
+    text = _BATCH_EVIDENCE_CREDENTIAL_RE.sub("[REDACTED_CREDENTIAL]", text)
+    text = _BATCH_EVIDENCE_WINDOWS_PATH_RE.sub("[REDACTED_ABSOLUTE_PATH]", text)
+    return _BATCH_EVIDENCE_POSIX_PATH_RE.sub("[REDACTED_ABSOLUTE_PATH]", text)
+
+
+def _batch_evidence_digest(value: object) -> str:
+    if isinstance(value, bytes):
+        payload = value
+    elif isinstance(value, str):
+        payload = value.encode("utf-8", errors="replace")
+    else:
+        try:
+            payload = _canonical_json(value)
+        except (TypeError, ValueError):
+            payload = repr(value).encode("utf-8", errors="replace")
+    return _sha256_bytes(payload)
+
+
+def _sanitize_batch_evidence_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        output: dict[str, object] = {}
+        for key, item in value.items():
+            name = str(key)
+            if _BATCH_EVIDENCE_SECRET_KEY_RE.search(name):
+                output[name] = "[REDACTED_CREDENTIAL]"
+            else:
+                output[name] = _sanitize_batch_evidence_value(item)
+        return output
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_batch_evidence_value(item) for item in value]
+    if isinstance(value, bytes):
+        return _redact_batch_evidence_text(value.decode("utf-8", errors="replace"))
+    if isinstance(value, str):
+        return _redact_batch_evidence_text(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _redact_batch_evidence_text(repr(value))
+
+
+@dataclass(frozen=True, slots=True)
+class OcrBatchAttemptEvidence:
+    """Immutable, privacy-clean evidence for one shared batch fallback.
+
+    Validation failures retain a sanitized copy of the provider response plus
+    the SHA-256 of the exact response.  Provider failures retain only a
+    sanitized error summary plus its SHA-256.  The host receives this object
+    before any single-page fallback starts, allowing all resulting page
+    records to reference the same ``batch_id`` without guessing provenance.
+    """
+
+    batch_id: str
+    page_ids: tuple[str, ...]
+    classification: str
+    fallback_to_single: bool
+    raw_response: object | None = field(default=None, repr=False)
+    raw_response_sha256: str = ""
+    error_summary: str = ""
+    error_sha256: str = ""
+
+    def __post_init__(self) -> None:
+        batch_id = str(self.batch_id or "").strip()
+        page_ids = tuple(str(item) for item in self.page_ids)
+        if not batch_id.startswith("ocr-batch-"):
+            raise ValueError("batch evidence requires a host-issued batch_id")
+        if not page_ids or len(page_ids) > 3 or len(set(page_ids)) != len(page_ids):
+            raise ValueError("batch evidence requires 1-3 unique page_ids")
+        if any(_PAGE_ID_RE.fullmatch(item) is None for item in page_ids):
+            raise ValueError("batch evidence contains an invalid page_id")
+        classification = str(self.classification or "").strip()
+        if not classification:
+            raise ValueError("batch evidence requires a classification")
+        raw_response_sha256 = _validate_sha256(
+            self.raw_response_sha256,
+            "batch raw_response_sha256",
+            allow_empty=True,
+        )
+        error_sha256 = _validate_sha256(
+            self.error_sha256,
+            "batch error_sha256",
+            allow_empty=True,
+        )
+        error_summary = _redact_batch_evidence_text(self.error_summary)[:1000]
+        raw_response = self.raw_response
+        if raw_response is not None:
+            raw_response = _freeze(_sanitize_batch_evidence_value(raw_response))
+        if not raw_response_sha256 and not error_sha256:
+            raise ValueError("batch evidence requires a response or error SHA-256")
+        if error_summary and not error_sha256:
+            raise ValueError("batch error summary requires error_sha256")
+        object.__setattr__(self, "batch_id", batch_id)
+        object.__setattr__(self, "page_ids", page_ids)
+        object.__setattr__(self, "classification", classification)
+        object.__setattr__(self, "fallback_to_single", bool(self.fallback_to_single))
+        object.__setattr__(self, "raw_response", raw_response)
+        object.__setattr__(self, "raw_response_sha256", raw_response_sha256)
+        object.__setattr__(self, "error_summary", error_summary)
+        object.__setattr__(self, "error_sha256", error_sha256)
+
+    @classmethod
+    def validation_failure(
+        cls,
+        *,
+        batch_id: str,
+        page_ids: Sequence[str],
+        response: object,
+        validation_code: str,
+    ) -> "OcrBatchAttemptEvidence":
+        return cls(
+            batch_id=batch_id,
+            page_ids=tuple(page_ids),
+            classification=f"VALIDATION:{validation_code}",
+            fallback_to_single=True,
+            raw_response=response,
+            raw_response_sha256=_batch_evidence_digest(response),
+        )
+
+    @classmethod
+    def provider_failure(
+        cls,
+        *,
+        batch_id: str,
+        page_ids: Sequence[str],
+        error: object,
+        category: OcrErrorCategory,
+    ) -> "OcrBatchAttemptEvidence":
+        raw_error = str(error or "")
+        return cls(
+            batch_id=batch_id,
+            page_ids=tuple(page_ids),
+            classification=f"PROVIDER:{category.value}",
+            fallback_to_single=True,
+            error_summary=_redact_batch_evidence_text(raw_error)[:1000],
+            error_sha256=_sha256_bytes(raw_error.encode("utf-8", errors="replace")),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "batch_id": self.batch_id,
+            "page_ids": list(self.page_ids),
+            "classification": self.classification,
+            "fallback_to_single": self.fallback_to_single,
+            "raw_response": thaw_json(self.raw_response),
+            "raw_response_sha256": self.raw_response_sha256,
+            "error_summary": self.error_summary,
+            "error_sha256": self.error_sha256,
+        }
 
 
 class AdaptivePageConcurrency:
@@ -1639,6 +2309,7 @@ class BoundedOcrExecutor:
         single_call: Callable[[OcrPageRequest], object],
         batch_call: Callable[[Sequence[OcrPageRequest]], object] | None = None,
         on_result: Callable[[OcrExecutionResult], None] | None = None,
+        on_batch_attempt: Callable[[OcrBatchAttemptEvidence], None] | None = None,
     ) -> list[OcrExecutionResult]:
         if len({request.page_id for request in requests}) != len(requests):
             raise ValueError("OCR request page_id values must be unique")
@@ -1647,13 +2318,19 @@ class BoundedOcrExecutor:
         # local-runtime failure becomes a page result which the host can retry
         # at 300 DPI instead of escaping from the batch exception path.
         if len(requests) <= 1 or batch_call is None or self.batch_size == 1:
-            results = self._run_singles(requests, single_call, False, "")
-            self._emit(results, on_result)
+            results = self._run_singles(
+                requests,
+                single_call,
+                False,
+                "",
+                on_result=on_result,
+            )
             return sorted(results, key=lambda item: item.request.task_index)
         results: list[OcrExecutionResult] = []
         for offset in range(0, len(requests), self.batch_size):
             batch = tuple(requests[offset:offset + self.batch_size])
             batch_id = f"ocr-batch-{uuid.uuid4().hex[:12]}"
+            emitted_incrementally = False
             try:
                 raw = batch_call(batch)
                 pages = validate_ocr_batch_response(
@@ -1662,6 +2339,13 @@ class BoundedOcrExecutor:
                     reference_text_by_page_id={
                         request.page_id: request.text_layer_hint for request in batch
                     },
+                    page_context_by_page_id={
+                        request.page_id: {
+                            "source_page": request.source_page,
+                            "image_size_pixels": request.image_size_pixels,
+                        }
+                        for request in batch
+                    },
                 )
                 by_id = {page.page_id: page for page in pages}
                 current = [
@@ -1669,6 +2353,7 @@ class BoundedOcrExecutor:
                         request=request,
                         page=by_id[request.page_id],
                         batch_id=batch_id,
+                        batch_size=len(batch),
                         used_batch=True,
                     )
                     for request in batch
@@ -1676,7 +2361,23 @@ class BoundedOcrExecutor:
             except OcrBatchValidationError as exc:
                 if exc.code not in _BATCH_FALLBACK_CODES:
                     raise
-                current = self._run_singles(batch, single_call, True, batch_id)
+                self._emit_batch_attempt(
+                    OcrBatchAttemptEvidence.validation_failure(
+                        batch_id=batch_id,
+                        page_ids=tuple(request.page_id for request in batch),
+                        response=raw,
+                        validation_code=exc.code,
+                    ),
+                    on_batch_attempt,
+                )
+                current = self._run_singles(
+                    batch,
+                    single_call,
+                    True,
+                    batch_id,
+                    on_result=on_result,
+                )
+                emitted_incrementally = True
             except Exception as exc:  # provider categories are host policy, not model policy
                 category = classify_ocr_error(exc)
                 if category not in _BATCH_FALLBACK_CATEGORIES:
@@ -1686,9 +2387,26 @@ class BoundedOcrExecutor:
                     }:
                         raise OcrRunPaused(category, str(exc)) from exc
                     raise
-                current = self._run_singles(batch, single_call, True, batch_id)
+                self._emit_batch_attempt(
+                    OcrBatchAttemptEvidence.provider_failure(
+                        batch_id=batch_id,
+                        page_ids=tuple(request.page_id for request in batch),
+                        error=exc,
+                        category=category,
+                    ),
+                    on_batch_attempt,
+                )
+                current = self._run_singles(
+                    batch,
+                    single_call,
+                    True,
+                    batch_id,
+                    on_result=on_result,
+                )
+                emitted_incrementally = True
             results.extend(current)
-            self._emit(current, on_result)
+            if not emitted_incrementally:
+                self._emit(current, on_result)
         return sorted(results, key=lambda item: item.request.task_index)
 
     def _run_singles(
@@ -1697,6 +2415,8 @@ class BoundedOcrExecutor:
         single_call: Callable[[OcrPageRequest], object],
         fallback: bool,
         batch_id: str,
+        *,
+        on_result: Callable[[OcrExecutionResult], None] | None = None,
     ) -> list[OcrExecutionResult]:
         def invoke(request: OcrPageRequest) -> OcrExecutionResult:
             try:
@@ -1705,11 +2425,32 @@ class BoundedOcrExecutor:
                     raw,
                     [request.page_id],
                     reference_text_by_page_id={request.page_id: request.text_layer_hint},
+                    page_context_by_page_id={request.page_id: {
+                        "source_page": request.source_page,
+                        "image_size_pixels": request.image_size_pixels,
+                    }},
                 )[0]
                 return OcrExecutionResult(
                     request=request,
                     page=page,
                     batch_id=batch_id,
+                    batch_size=1,
+                    used_batch=False,
+                    fell_back_to_single=fallback,
+                )
+            except OcrBatchValidationError as exc:
+                return OcrExecutionResult(
+                    request=request,
+                    page=None,
+                    error=str(exc)[:1000],
+                    error_category=OcrErrorCategory.UNKNOWN,
+                    retry_instruction=(
+                        "上一响应未通过宿主结构校验。只重新识别本页并严格修正 "
+                        f"{exc.code}；不得省略可见内容，不得猜测坐标或文件路径。"
+                    ),
+                    retry_state=_freeze({"validation_code": exc.code}),
+                    batch_id=batch_id,
+                    batch_size=1,
                     used_batch=False,
                     fell_back_to_single=fallback,
                 )
@@ -1732,19 +2473,41 @@ class BoundedOcrExecutor:
                         else {}
                     ),
                     batch_id=batch_id,
+                    batch_size=1,
                     used_batch=False,
                     fell_back_to_single=fallback,
                 )
 
         if len(requests) <= 1:
-            return [invoke(requests[0])] if requests else []
+            if not requests:
+                return []
+            result = invoke(requests[0])
+            self._emit((result,), on_result)
+            return [result]
         output: list[OcrExecutionResult] = []
+        paused: OcrRunPaused | None = None
         with ThreadPoolExecutor(max_workers=min(self.concurrency_limit, len(requests))) as pool:
             futures: dict[Future[OcrExecutionResult], OcrPageRequest] = {
                 pool.submit(invoke, request): request for request in requests
             }
             for future in as_completed(futures):
-                output.append(future.result())
+                try:
+                    result = future.result()
+                except OcrRunPaused as exc:
+                    # Authentication/quota/config failures stop new work, but
+                    # sibling calls were already in flight.  Drain them and
+                    # persist every paid-for success before surfacing the pause;
+                    # otherwise recovery repeats successful model calls.
+                    if paused is None:
+                        paused = exc
+                    continue
+                output.append(result)
+                # Persist/observe a completed page before a slower sibling
+                # finishes.  This bounds crash loss to the currently running
+                # calls instead of the whole concurrency group.
+                self._emit((result,), on_result)
+        if paused is not None:
+            raise paused
         return output
 
     @staticmethod
@@ -1755,6 +2518,14 @@ class BoundedOcrExecutor:
         if callback is not None:
             for result in results:
                 callback(result)
+
+    @staticmethod
+    def _emit_batch_attempt(
+        attempt: OcrBatchAttemptEvidence,
+        callback: Callable[[OcrBatchAttemptEvidence], None] | None,
+    ) -> None:
+        if callback is not None:
+            callback(attempt)
 
 
 def progress_metrics(
@@ -1781,6 +2552,10 @@ def progress_metrics(
         counts[record.status.value] += 1
     total = len(ordered)
     finalized = sum(counts[status.value] for status in _FINALIZED_PAGE_STATUSES)
+    result_pages = (
+        counts[OcrPageStatus.SUCCESS.value]
+        + counts[OcrPageStatus.NEEDS_REVIEW.value]
+    )
     active = [record for record in ordered if record.status in _TRANSIENT_PAGE_STATUSES]
     retry_pages = [record for record in ordered if record.retry_count > 0]
     now_value = time.time() if now_epoch is None else float(now_epoch)
@@ -1802,7 +2577,6 @@ def progress_metrics(
             elapsed_frozen = True
             metric_now = terminal_value
     elapsed = max(0.0, metric_now - started_epoch)
-    result_pages = counts[OcrPageStatus.SUCCESS.value] + counts[OcrPageStatus.NEEDS_REVIEW.value]
     average = (result_pages * 60.0 / elapsed) if elapsed > 0 else 0.0
     recent = 0
     for record in ordered:
@@ -1818,20 +2592,36 @@ def progress_metrics(
     effective_rate = recent_rate or average
     unfinished = total - result_pages - counts[OcrPageStatus.CANCELLED.value]
     eta = (unfinished * 60.0 / effective_rate) if unfinished > 0 and effective_rate > 0 else None
-    recognition_progress = finalized / total if total else 0.0
+    attempt_progress = finalized / total if total else 0.0
+    recognition_progress = result_pages / total if total else 0.0
+    all_pages_recognized = bool(total) and result_pages == total
+    # Host callers may have a partial, downloadable raw preview after the first
+    # successful page.  That is not evidence that the selected page range was
+    # merged or frozen.  Keep every post-recognition milestone fail-closed when
+    # FAILED/CANCELLED/PENDING pages remain, even if a stale or legacy caller
+    # passes optimistic flags.
+    effective_merge_complete = bool(merge_complete and all_pages_recognized)
+    effective_raw_frozen = bool(raw_frozen and effective_merge_complete)
     # Explicit milestones keep log/snapshot writes from pretending the run is
-    # 99% complete.  COMPILED is the only state that reaches 100%.
+    # complete.  A compiled preview is necessary but not sufficient: the host
+    # must also attest the merge and immutable raw freeze before reaching 100%.
     overall = 0.02 + 0.88 * recognition_progress
-    if merge_complete:
+    if effective_merge_complete:
         overall = max(overall, 0.93)
-    if raw_frozen:
+    if effective_raw_frozen:
         overall = max(overall, 0.95)
     normalized_compile = None
     if compile_status is not None:
         normalized_compile = _enum_value(OcrPreviewStatus, compile_status, "OCR preview status")
-        if normalized_compile == OcrPreviewStatus.COMPILED:
-            overall = 1.0
-        elif normalized_compile == OcrPreviewStatus.PARTIAL_COMPILED:
+        if normalized_compile == OcrPreviewStatus.COMPILED and all_pages_recognized:
+            if effective_merge_complete and effective_raw_frozen:
+                overall = 1.0
+            else:
+                overall = max(overall, 0.99)
+        elif (
+            normalized_compile == OcrPreviewStatus.PARTIAL_COMPILED
+            and all_pages_recognized
+        ):
             overall = max(overall, 0.97)
     current_limit = max(1, min(3, int(concurrency_limit or snapshot.concurrency_limit)))
     current_pages = [record.source_page for record in active]
@@ -1852,6 +2642,7 @@ def progress_metrics(
         "quality_tier": snapshot.quality_tier.value,
         "counts": public_counts,
         "status_counts": counts,
+        "attempt_progress": round(attempt_progress, 6),
         "recognition_progress": round(recognition_progress, 6),
         "overall_progress": round(min(1.0, overall), 6),
         "elapsed_seconds": round(elapsed, 3),
@@ -1865,8 +2656,8 @@ def progress_metrics(
         "current_dpi": current_dpi,
         "current_pages": current_pages,
         "current_page": current_pages[0] if current_pages else None,
-        "merge_complete": bool(merge_complete),
-        "raw_frozen": bool(raw_frozen),
+        "merge_complete": effective_merge_complete,
+        "raw_frozen": effective_raw_frozen,
         "compile_status": normalized_compile.value if normalized_compile else None,
     }
 
@@ -1882,7 +2673,9 @@ OCR_TRANSCRIPTION_SYSTEM_PROMPT = r"""你是数学文档页面忠实转写器。
 不输出 Markdown 代码围栏，不输出解释性文字。
 若页面包含必须保留的非文字插图，在正文中使用
 \includegraphics{figures/page_XXXX_figure_YY.png}，并在 figures 中按出现顺序给出
-同一路径、从 1 开始的 index、完整页归一化坐标和像素坐标；不要把整页当作插图。
+同一路径、从 1 开始的 index、完整页归一化坐标和像素坐标；bbox_pixels 必须严格使用
+本次 page_request.image_size_pixels 所声明的原始整页栅格尺寸，不得使用模型内部缩放尺寸、
+0..1000 坐标系或上一轮 DPI 的尺寸；不要把整页当作插图。
 不确定的区域不得猜测，必须在 unresolved_regions 中给出 type、reason 和完整页
 归一化坐标；没有插图或不确定区域时返回空数组。
 每页必须准确回显宿主给出的 page_id。
@@ -1975,6 +2768,12 @@ def ocr_batch_request_payload(requests: Sequence[OcrPageRequest]) -> str:
             "dpi": request.dpi,
             "instruction": "只转写该 image_index 对应的独立页面，并回显 page_id",
         }
+        if request.image_size_pixels:
+            item["image_size_pixels"] = list(request.image_size_pixels)
+            item["bbox_pixel_policy"] = (
+                "bbox_pixels 使用该原始整页栅格的左上-右下像素坐标；"
+                "不得使用内部缩放、0..1000 坐标或其他 DPI 尺寸"
+            )
         if request.text_layer_hint:
             item["untrusted_pdf_text_reference"] = request.text_layer_hint[:12000]
             item["reference_policy"] = "仅辅助拼写与顺序；页面像素冲突时以像素为准"
@@ -1983,5 +2782,14 @@ def ocr_batch_request_payload(requests: Sequence[OcrPageRequest]) -> str:
             item["retry_policy"] = "只修复列出的可定位问题；仍须忠实转写当前页面像素"
         if request.retry_state:
             item["host_verified_retry_evidence"] = thaw_json(request.retry_state)
+        if request.crops:
+            item["formula_crop_evidence"] = [
+                {
+                    "image_index": index + 1,
+                    "sha256": _sha256_bytes(crop),
+                    "policy": "local evidence only; do not transcribe as another page",
+                }
+                for index, crop in enumerate(request.crops, start=1)
+            ]
         pages.append(item)
     return json.dumps({"page_requests": pages}, ensure_ascii=False, separators=(",", ":"))

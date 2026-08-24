@@ -206,6 +206,7 @@ def make_host_ocr_page_request(
     crops: tuple[bytes, ...] = (),
     correction_instruction: str = "",
     retry_state: dict | None = None,
+    image_size_pixels: tuple[int, int] = (),
 ) -> OcrPageRequest:
     """Bind one rendered page to its host-owned stable v2 OCR identity.
 
@@ -222,6 +223,7 @@ def make_host_ocr_page_request(
         crops=tuple(crops),
         correction_instruction=correction_instruction,
         retry_state=dict(retry_state or {}),
+        image_size_pixels=tuple(image_size_pixels),
     )
 
 
@@ -4665,6 +4667,25 @@ def merge_book(
     parts.append("")
     parts.append("\\end{document}")
     return "\n".join(parts)
+
+
+def merge_raw_ocr_book(chunks: List[str]) -> str:
+    """Wrap v2 page fragments without applying layout or structure heuristics.
+
+    The immutable raw OCR may add only a compile preamble, stable host page
+    comments already present in ``chunks``, and the document terminator.  Page
+    breaks, ``\\noindent``, outline inference and TOC synthesis belong to later
+    derived candidates and must not alter raw transcription evidence.
+    """
+    preamble = OCR_PREAMBLE.replace("__DOCUMENT_CLASS__", "article").rstrip()
+    body = "\n\n".join(str(chunk).rstrip("\n") for chunk in chunks)
+    return "\n".join([
+        preamble,
+        "% LaTeXStruct-Raw-OCR: 2.0.0 (host wrapper; page fragments unchanged)",
+        body,
+        "\\end{document}",
+        "",
+    ])
 
 
 def ocr_pipeline(pdf_path: str, client: LLMClient, cfg: OcrConfig = None,

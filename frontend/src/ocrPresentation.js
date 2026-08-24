@@ -205,14 +205,19 @@ export function buildOcrProgress(job = {}) {
   ));
   const explicitProgress = finiteNumber(metrics.progress, job.progress);
   const computedProgress = total ? completed / total : 0;
-  const progress = String(job.status || "").toLowerCase() === "done"
-    ? 1
-    : explicitProgress == null
-      ? computedProgress
-      : Math.max(
-        computedProgress,
-        Math.max(0, Math.min(1, explicitProgress > 1 ? explicitProgress / 100 : explicitProgress)),
-      );
+  // A terminal HTTP/job status is not evidence that the immutable raw TEX was
+  // frozen or that the two-pass baseline compile succeeded.  The host metrics
+  // deliberately reserve 100% for COMPILED; never promote it from `done` here.
+  const normalizedExplicit = explicitProgress == null
+    ? null
+    : Math.max(0, Math.min(1, explicitProgress > 1 ? explicitProgress / 100 : explicitProgress));
+  // A persisted zero can be stale after restart while page records already
+  // prove useful work.  Once the host has reported a non-zero milestone,
+  // however, it is authoritative because page completion alone omits the
+  // freeze/compile gates and must never promote a partial run to 100%.
+  const progress = normalizedExplicit == null
+    ? computedProgress
+    : (normalizedExplicit === 0 && computedProgress > 0 ? computedProgress : normalizedExplicit);
 
   return {
     total,
@@ -287,6 +292,9 @@ export function buildOcrRecoveryPresentation(job = {}) {
   );
   const terminal = ["done", "partial", "error"].includes(status);
   const complete = status === "done" && incompleteCount === 0 && needsReviewCount === 0;
+  const canRetryReview = terminal
+    && job.raw_frozen !== true
+    && needsReviewCount > 0;
 
   let statusLabel = "";
   let title = "";
@@ -304,7 +312,9 @@ export function buildOcrRecoveryPresentation(job = {}) {
   } else if (needsReviewCount > 0) {
     statusLabel = "已完成，待确认";
     title = `OCR 已完成，但有 ${needsReviewCount} 页待确认`;
-    detail = "全部页面均已处理；待确认表示质量复核项，不是未识别页面。";
+    detail = canRetryReview
+      ? "全部页面均已处理；可只重试待确认页，已经成功的页面不会重复识别。"
+      : "全部页面均已处理；待确认表示质量复核项，不是未识别页面。";
   } else if (status === "done") {
     statusLabel = "已完成";
     title = "OCR 已完成";
@@ -314,6 +324,7 @@ export function buildOcrRecoveryPresentation(job = {}) {
   return {
     complete,
     canResumeIncomplete,
+    canRetryReview,
     incompleteCount,
     pendingPageNumbers,
     failedPageNumbers,
@@ -324,6 +335,7 @@ export function buildOcrRecoveryPresentation(job = {}) {
     title,
     detail,
     actionLabel: `继续未完成页面（${incompleteCount}）`,
+    reviewActionLabel: `重试待确认页（${needsReviewCount}）`,
   };
 }
 
