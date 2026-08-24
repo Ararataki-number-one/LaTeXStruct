@@ -22,7 +22,11 @@ from pathlib import Path
 from typing import Dict, List
 
 from .core.ai import LLMClient, LLMError, RoleConfig
-from .core.ocr_runtime import OcrPageRequest, make_page_id
+from .core.ocr_runtime import (
+    OcrPageRequest,
+    first_forbidden_tex_control,
+    make_page_id,
+)
 from .core.ocrstruct import encode_ocr_metadata, infer_document_kind
 from .core.parser import mask_comments, parse_latex
 
@@ -48,6 +52,9 @@ OCR_SYSTEM_PROMPT = """你是「数学文档页面转写专家」。把给定书
    页面中排印为斜体的英文术语用 \\emph{...} 或 \\textit{...} 忠实保留；普通英文词组
    不得仅因其为斜体就放入数学模式，例如必须写 ``\\emph{incident}``，不能写
    ``\\(incident\\)`` 或 ``\\(vice\\ versa\\)``；
+   除 U+0009/U+000A/U+000D 作为源码空白外，严禁输出其他 C0、DEL、C1
+   控制字符或 ANSI 转义序列；
+   斜体必须用合法 LaTeX 命令，引号必须用正常 Unicode 字符或合法 LaTeX 写法；
 6. 页面中的插图：用 \\includegraphics[width=<按版心内实际跨度估计>\\linewidth]{images/page_<页码>_<序号>} 占位
    并加注释 % figure: <图中内容简述>；序号从 1 开始、按页面从上到下/从左到右排列。
    页面上实际印刷、肉眼可见的编号题注（如 ``Fig. 4.1. ...``、``Figure ...``、
@@ -4335,6 +4342,21 @@ def transcribe_page_result(
             ) from None
         raise
     try:
+        forbidden_control = first_forbidden_tex_control(raw)
+        if forbidden_control is not None:
+            offset, codepoint = forbidden_control
+            raise _OcrQualityGateError(
+                f"第 {page_no} 页包含非法控制字符 U+{codepoint:04X}"
+                f"（原始响应字符偏移 {offset}），不得标记完成",
+                "上一轮响应混入了不可见控制字符或 ANSI 转义序列 "
+                "(INVALID_CONTROL_CHARACTER)。请重新查看并完整转写本页："
+                "斜体使用 \\emph{...} 或 \\textit{...}，引号使用正常 Unicode "
+                "字符或合法 LaTeX 写法；除制表、换行、回车外，严禁输出其他控制字符。",
+                retry_state={
+                    "validation_code": "INVALID_CONTROL_CHARACTER",
+                    "codepoint": f"U+{codepoint:04X}",
+                },
+            )
         text = _clean_page_output(raw)
         if not text:
             raise LLMError(f"第 {page_no} 页转写为空")

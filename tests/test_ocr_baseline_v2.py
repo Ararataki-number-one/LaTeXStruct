@@ -4,7 +4,7 @@ import hashlib
 
 import pytest
 
-from latexstruct.core import compilecheck
+from latexstruct.core import compilecheck, ocr_baseline
 from latexstruct.core.ocr_baseline import (
     OcrBaselineResult,
     OcrCompileInvocationEvidence,
@@ -22,6 +22,7 @@ def _artifact(
     log="real compiler log",
     engine="xelatex.exe",
     passes_completed=None,
+    fatal_line=None,
 ):
     return {
         "engine": engine,
@@ -32,6 +33,7 @@ def _artifact(
         ) if passes_completed is None else passes_completed,
         "pdf_bytes": pdf,
         "errors": list(errors),
+        "fatal_line": fatal_line,
         "log": log,
     }
 
@@ -77,6 +79,251 @@ def test_baseline_only_applies_host_syntax_repairs(monkeypatch):
         == result.compile_invocations[2].input_tex_sha256
         == hashlib.sha256(result.tex.encode()).hexdigest()
     )
+
+
+def test_baseline_repairs_only_each_compiler_confirmed_bare_formula(monkeypatch):
+    first_formula = r"2^{k/2} \le R(k) \le 4^k \qquad (1)"
+    second_formula = r"R(k) \le (4-\varepsilon)^k"
+    source = "\n".join((
+        r"\documentclass{article}",
+        r"\begin{document}",
+        "The bounds",
+        "",
+        first_formula,
+        "",
+        "There exists a constant such that",
+        "",
+        second_formula,
+        "",
+        "for all sufficiently large values.",
+        r"\end{document}",
+    ))
+    calls = []
+
+    def compile_once(text, **_kwargs):
+        calls.append(text)
+        for formula in (first_formula, second_formula):
+            if f"\\[\n{formula}\n\\]" not in text:
+                fatal_line = text.split("\n").index(formula) + 1
+                return _artifact(
+                    ok=False,
+                    errors=(f"Missing $ inserted. @l.{fatal_line}",),
+                    fatal_line=fatal_line,
+                )
+        return _artifact(ok=True, pdf=b"%PDF-1.7\nreal", code=0)
+
+    monkeypatch.setattr("latexstruct.core.ocr_baseline.compile_latex_artifact", compile_once)
+    result = compile_ocr_baseline(source)
+
+    assert len(calls) == 4
+    assert result.preview_status == OcrPreviewStatus.COMPILED
+    assert result.successful_passes == 2
+    assert result.tex.count("\\[") == result.tex.count("\\]") == 2
+    assert first_formula in result.tex and second_formula in result.tex
+    assert source.split("\n")[4] == first_formula
+    assert [note["status"] for note in result.syntax_repairs] == [
+        "repaired-missing-math-delimiters",
+        "repaired-missing-math-delimiters",
+    ]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "1. Introduction",
+        "Use x^2 in examples.",
+        "Version 2.0 = stable candidate",
+        r"\section{Growth of x^2}",
+        r"\includegraphics[width=0.5\linewidth]{figures/a_b.png}",
+        r"Text already contains $x_y$ inline.",
+    ],
+)
+def test_missing_math_diagnostic_does_not_wrap_prose_or_structural_lines(
+    monkeypatch,
+    line,
+):
+    source = "\n".join((
+        r"\begin{document}",
+        "",
+        line,
+        "",
+        r"\end{document}",
+    ))
+    calls = []
+
+    def compile_once(text, **_kwargs):
+        calls.append(text)
+        return _artifact(
+            ok=False,
+            errors=("Missing $ inserted. @l.3",),
+            fatal_line=3,
+        )
+
+    monkeypatch.setattr("latexstruct.core.ocr_baseline.compile_latex_artifact", compile_once)
+    result = compile_ocr_baseline(source)
+
+    assert calls == [source]
+    assert result.tex == source
+    assert result.syntax_repairs == ()
+    assert result.preview_status == OcrPreviewStatus.SOURCE_PREVIEW
+
+
+def test_bare_formula_is_not_repaired_without_matching_compiler_diagnostic(monkeypatch):
+    source = "\n".join((
+        r"\begin{document}",
+        r"R(k) \le (4-\varepsilon)^k",
+        r"\end{document}",
+    ))
+    calls = []
+
+    def compile_once(text, **_kwargs):
+        calls.append(text)
+        return _artifact(
+            ok=False,
+            errors=("Undefined control sequence. @l.2",),
+            fatal_line=2,
+        )
+
+    monkeypatch.setattr("latexstruct.core.ocr_baseline.compile_latex_artifact", compile_once)
+    result = compile_ocr_baseline(source)
+
+    assert calls == [source]
+    assert result.tex == source
+    assert result.syntax_repairs == ()
+
+
+def test_baseline_never_guesses_or_removes_forbidden_control_characters(monkeypatch):
+    source = "\n".join((
+        r"\begin{document}",
+        "",
+        "Visible \x18locally-sparse\x19 prose.",
+        "",
+        r"\end{document}",
+    ))
+    calls = []
+
+    def compile_once(text, **_kwargs):
+        calls.append(text)
+        return _artifact(
+            ok=False,
+            errors=("Text line contains an invalid character. @l.3",),
+            fatal_line=3,
+        )
+
+    monkeypatch.setattr("latexstruct.core.ocr_baseline.compile_latex_artifact", compile_once)
+    result = compile_ocr_baseline(source)
+
+    assert calls == [source]
+    assert result.tex == source
+    assert "\x18" in result.tex and "\x19" in result.tex
+    assert result.syntax_repairs == ()
+    assert result.preview_status == OcrPreviewStatus.SOURCE_PREVIEW
+
+
+def test_missing_math_repair_refuses_formula_already_inside_display_math():
+    formula = r"R(k) \le (4-\varepsilon)^k"
+    lines = [
+        r"\begin{document}",
+        r"\[",
+        "",
+        formula,
+        "",
+        r"\]",
+        r"\end{document}",
+    ]
+
+    operations, notes = ocr_baseline._missing_math_repair_ops(
+        lines,
+        {
+            "errors": ["Missing $ inserted. @l.4"],
+            "fatal_line": 4,
+        },
+    )
+
+    assert operations == []
+    assert notes == []
+
+
+def test_missing_math_repair_requires_an_isolated_paragraph_line():
+    formula = r"R(k) \le (4-\varepsilon)^k"
+    lines = [
+        r"\begin{document}",
+        "There exists a constant such that",
+        formula,
+        "",
+        r"\end{document}",
+    ]
+
+    operations, notes = ocr_baseline._missing_math_repair_ops(
+        lines,
+        {
+            "errors": ["Missing $ inserted. @l.3"],
+            "fatal_line": 3,
+        },
+    )
+
+    assert operations == []
+    assert notes == []
+
+
+def test_missing_math_diagnostic_must_bind_the_same_fatal_line():
+    formula = r"R(k) \le (4-\varepsilon)^k"
+    lines = [
+        r"\begin{document}",
+        "",
+        formula,
+        "",
+        "More text",
+        "",
+        r"x^2 \le y^2",
+        "",
+        r"\end{document}",
+    ]
+
+    operations, notes = ocr_baseline._missing_math_repair_ops(
+        lines,
+        {
+            "errors": [
+                "Undefined control sequence. @l.3",
+                "Missing $ inserted. @l.7",
+            ],
+            "fatal_line": 3,
+        },
+    )
+
+    assert operations == []
+    assert notes == []
+
+
+def test_real_ramsey_bare_formula_repair_compiles_when_xelatex_is_available():
+    if not compilecheck.find_xelatex():
+        pytest.skip("xelatex is unavailable")
+    source = "\n".join((
+        r"\documentclass{article}",
+        r"\usepackage{amsmath}",
+        r"\begin{document}",
+        "The bounds",
+        "",
+        r"2^{k/2} \le R(k) \le 4^k \qquad (1)",
+        "",
+        "There exists a constant such that",
+        "",
+        r"R(k) \le (4-\varepsilon)^k",
+        "",
+        "for all sufficiently large values.",
+        r"\end{document}",
+    ))
+
+    result = compile_ocr_baseline(source)
+
+    assert result.preview_status == OcrPreviewStatus.COMPILED
+    assert result.successful_passes == 2
+    assert len(result.compile_invocations) == 4
+    assert result.pdf_bytes.startswith(b"%PDF-")
+    assert [note["status"] for note in result.syntax_repairs] == [
+        "repaired-missing-math-delimiters",
+        "repaired-missing-math-delimiters",
+    ]
 
 
 def test_source_preview_is_explicit_when_no_pdf(monkeypatch):

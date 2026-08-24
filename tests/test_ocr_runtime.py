@@ -89,6 +89,40 @@ def test_batch_output_schema_is_strict_for_every_nested_object():
     ]
 
 
+@pytest.mark.parametrize("control", ["\x00", "\x18", "\x1b", "\x7f", "\x85", "\x9f"])
+def test_runtime_rejects_forbidden_tex_controls_and_preserves_retry_evidence(control):
+    page_id = make_page_id(1)
+    raw = _response(page_id, f"Visible {control} text with enough content.")
+
+    with pytest.raises(OcrBatchValidationError) as caught:
+        validate_ocr_batch_response(raw, [page_id])
+    assert caught.value.code == "INVALID_CONTROL_CHARACTER"
+    assert f"U+{ord(control):04X}" in str(caught.value)
+
+    execution = BoundedOcrExecutor().run(
+        [OcrPageRequest(page_id, 1, 1, b"image", 200)],
+        single_call=lambda _request: raw,
+    )[0]
+
+    assert execution.page is None
+    assert execution.raw_response == raw
+    assert execution.retry_state == {
+        "validation_code": "INVALID_CONTROL_CHARACTER",
+    }
+    assert "INVALID_CONTROL_CHARACTER" in execution.retry_instruction
+    assert "ANSI" in execution.retry_instruction
+    assert r"\emph{...}" in execution.retry_instruction
+
+
+def test_runtime_allows_newlines_tabs_and_carriage_returns_in_tex():
+    page_id = make_page_id(1)
+    latex = "Visible\ttext.\r\nMore visible content with \\(x+y\\)."
+
+    page = validate_ocr_batch_response(_response(page_id, latex), [page_id])[0]
+
+    assert page.latex == latex.replace("\r\n", "\n")
+
+
 def _success(record, response, *, ended_at="2026-08-23T00:01:00.000Z"):
     raw = json.dumps(response, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     latex = response["latex"]

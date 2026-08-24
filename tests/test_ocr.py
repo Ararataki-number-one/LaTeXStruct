@@ -96,6 +96,41 @@ def test_transcribe_page_prefers_direct_bytes_for_codex_compatible_client():
     assert client.received[2] is image
 
 
+@pytest.mark.parametrize(
+    ("raw", "codepoint"),
+    [
+        ("Visible text with \x1b[?]average\x1b[?] emphasis.", "U+001B"),
+        ("\x1cVisible text beginning after a control.", "U+001C"),
+        ("Visible text ending before a control.\x85", "U+0085"),
+    ],
+)
+def test_transcribe_page_rejects_control_characters_with_targeted_retry_evidence(
+    raw,
+    codepoint,
+):
+
+    class ControlCharacterClient:
+        backend = "codex_cli"
+        last_usage = {}
+
+        def chat_vision_bytes(self, *_args):
+            return raw
+
+    with pytest.raises(LLMError, match=codepoint.replace("+", r"\+")) as caught:
+        transcribe_page_result(
+            ControlCharacterClient(),
+            b"\x89PNG\r\n\x1a\n" + b"pixels",
+            8,
+        )
+
+    assert "ANSI" in caught.value.retry_instruction
+    assert caught.value.retry_state == {
+        "validation_code": "INVALID_CONTROL_CHARACTER",
+        "codepoint": codepoint,
+    }
+    assert caught.value.model_raw_latex == raw
+
+
 def test_formula_crops_attach_to_the_same_structured_page_call_without_path_leak(
     tmp_path,
 ):

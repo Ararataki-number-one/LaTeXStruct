@@ -2,10 +2,11 @@
 """Real, syntax-only OCR baseline compilation.
 
 The OCR stage is deliberately not allowed to infer document semantics.  This
-module therefore performs at most the small, reversible syntax repairs already
-proven by the host (blank paragraphs inside display math and misplaced closing
-environment lines), then compiles the resulting text.  It never adds headings,
-formal environments, templates, or model-authored content.
+module therefore performs at most small, reversible syntax repairs proven by
+the host (blank paragraphs inside display math, misplaced closing environment
+lines, and compiler-confirmed missing delimiters around a standalone formula),
+then compiles the resulting text.  It never adds headings, formal environments,
+templates, or model-authored content.
 """
 
 from __future__ import annotations
@@ -29,8 +30,8 @@ from .ocr_page_map import (
     inject_page_anchors,
 )
 from .ocr_runtime import OcrPreviewStatus
-from .ocrstruct import _build_syntax_repair_ops
-from .patch import Decision, apply_patches, validate_ops
+from .ocrstruct import _build_syntax_repair_ops, _update_math_stack
+from .patch import Decision, PendingOp, apply_patches, validate_ops
 
 
 _SOURCE_PREVIEW_NOTICE = (
@@ -39,6 +40,42 @@ _SOURCE_PREVIEW_NOTICE = (
 )
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+_MISSING_MATH_ERROR_RE = re.compile(r"^Missing \$ inserted\.?", re.I)
+_COMPILE_ERROR_LINE_RE = re.compile(r"@l\.([1-9][0-9]*)(?::|$)")
+_BARE_MATH_SIGNAL_RE = re.compile(
+    r"(?<!\\)[_^=<>]|"
+    r"\\(?:le|leq|ge|geq|neq|ne|approx|sim|simeq|equiv|in|notin|"
+    r"subset|subseteq|supset|supseteq|to|mapsto)\b"
+)
+_BARE_MATH_COMMAND_RE = re.compile(r"\\([A-Za-z]+|.)")
+_BARE_MATH_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+_ALLOWED_BARE_MATH_COMMANDS = frozenset({
+    # Greek letters and common mathematical constants.
+    "alpha", "beta", "gamma", "delta", "epsilon", "varepsilon", "zeta",
+    "eta", "theta", "vartheta", "iota", "kappa", "lambda", "mu", "nu",
+    "xi", "pi", "varpi", "rho", "varrho", "sigma", "varsigma", "tau",
+    "upsilon", "phi", "varphi", "chi", "psi", "omega", "Gamma", "Delta",
+    "Theta", "Lambda", "Xi", "Pi", "Sigma", "Upsilon", "Phi", "Psi",
+    "Omega", "infty", "ell", "imath", "jmath",
+    # Relations, arrows, binary operators, and delimiters.
+    "le", "leq", "ge", "geq", "neq", "ne", "approx", "sim", "simeq",
+    "equiv", "in", "notin", "ni", "subset", "subseteq", "supset",
+    "supseteq", "to", "mapsto", "rightarrow", "leftarrow", "leftrightarrow",
+    "Rightarrow", "Leftarrow", "Leftrightarrow", "cdot", "times", "pm", "mp",
+    "cup", "cap", "setminus", "vee", "wedge", "oplus", "otimes", "circ",
+    "mid", "parallel", "perp", "colon", "ldots", "cdots", "dots",
+    "langle", "rangle", "lvert", "rvert", "lVert", "rVert", "left", "right",
+    # Standard formula constructors and spacing commands.
+    "frac", "dfrac", "tfrac", "binom", "sqrt", "sum", "prod", "int", "iint",
+    "iiint", "oint", "lim", "sup", "inf", "max", "min", "log", "ln", "exp",
+    "sin", "cos", "tan", "det", "gcd", "Pr", "mathbb", "mathcal", "mathbf",
+    "mathrm", "mathit", "operatorname", "overline", "underline", "widehat",
+    "widetilde", "hat", "bar", "vec", "dot", "ddot", "quad", "qquad",
+    "big", "Big", "bigg", "Bigg", "bigl", "bigr", "Bigl", "Bigr", "biggl",
+    "biggr", "Biggl", "Biggr", ",", ";", ":", "!", " ", "{", "}", "|",
+})
+_MAX_DIAGNOSTIC_SYNTAX_REPAIRS = 16
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -372,9 +409,130 @@ def build_source_preview_pdf(source: str) -> bytes:
     return payload
 
 
-def _syntax_only_repair(text: str) -> tuple[str, tuple[dict, ...]]:
+def _balanced_braces(text: str) -> bool:
+    depth = 0
+    backslashes = 0
+    for character in text:
+        if character == "\\":
+            backslashes += 1
+            continue
+        escaped = bool(backslashes % 2)
+        backslashes = 0
+        if escaped:
+            continue
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _looks_like_standalone_math(line: str) -> bool:
+    """Conservatively recognize one complete formula-only source line.
+
+    This is deliberately stricter than general TeX parsing.  A compiler error
+    is required separately, and prose words, comments, structural commands,
+    existing math delimiters, alignment tabs, and unknown control sequences
+    all make the line ineligible for an automatic repair.
+    """
+    body = str(line or "").strip()
+    if (
+        not body
+        or len(body) > 1000
+        or "%" in body
+        or "&" in body
+        or r"\\" in body
+        or "$" in body
+        or any(token in body for token in (r"\(", r"\)", r"\[", r"\]"))
+        or not _balanced_braces(body)
+        or _BARE_MATH_SIGNAL_RE.search(body) is None
+    ):
+        return False
+    commands = _BARE_MATH_COMMAND_RE.findall(body)
+    if not commands or any(
+        command not in _ALLOWED_BARE_MATH_COMMANDS for command in commands
+    ):
+        return False
+    residual = _BARE_MATH_COMMAND_RE.sub(" ", body)
+    words = _BARE_MATH_WORD_RE.findall(residual)
+    if any(len(word) != 1 for word in words):
+        return False
+    operands = re.findall(r"[0-9]+|[^\W\d_]", residual, flags=re.UNICODE)
+    return len(operands) >= 2
+
+
+def _missing_math_repair_ops(
+    lines: list[str],
+    failed_compile: Mapping[str, object] | None,
+) -> tuple[list[PendingOp], list[dict]]:
+    if not isinstance(failed_compile, Mapping):
+        return [], []
+    raw_errors = failed_compile.get("errors") or ()
+    if isinstance(raw_errors, (str, bytes, bytearray)):
+        errors = (str(raw_errors),)
+    elif isinstance(raw_errors, Sequence):
+        errors = tuple(str(error) for error in raw_errors)
+    else:
+        return [], []
+    line_no = failed_compile.get("fatal_line")
+    if (
+        not isinstance(line_no, int)
+        or isinstance(line_no, bool)
+        or not 1 <= line_no <= len(lines)
+    ):
+        return [], []
+    matching_diagnostic = False
+    for error in errors:
+        cleaned = error.strip()
+        if _MISSING_MATH_ERROR_RE.match(cleaned) is None:
+            continue
+        reported_line = _COMPILE_ERROR_LINE_RE.search(cleaned)
+        if reported_line is not None and int(reported_line.group(1)) == line_no:
+            matching_diagnostic = True
+            break
+    if not matching_diagnostic:
+        return [], []
+    source_line = lines[line_no - 1]
+    math_stack: list[str] = []
+    for previous_line in lines[: line_no - 1]:
+        _update_math_stack(math_stack, previous_line)
+    if (
+        math_stack
+        or line_no <= 1
+        or line_no >= len(lines)
+        or lines[line_no - 2].strip()
+        or lines[line_no].strip()
+        or not _looks_like_standalone_math(source_line)
+    ):
+        return [], []
+    return [
+        PendingOp("insert_line", line_no - 1, new=r"\["),
+        PendingOp("insert_line", line_no, new=r"\]"),
+    ], [{
+        "line": line_no,
+        "status": "repaired-missing-math-delimiters",
+        "reason": (
+            "编译器在强数学独立行报告 Missing $ inserted；"
+            "仅在该原行前后插入展示数学定界符"
+        ),
+    }]
+
+
+def _syntax_only_repair(
+    text: str,
+    *,
+    failed_compile: Mapping[str, object] | None = None,
+) -> tuple[str, tuple[dict, ...]]:
     lines = text.split("\n")
     operations, notes = _build_syntax_repair_ops(lines)
+    missing_math_ops, missing_math_notes = _missing_math_repair_ops(
+        lines,
+        failed_compile,
+    )
+    operations.extend(missing_math_ops)
+    notes.extend(missing_math_notes)
     if not operations:
         return text, ()
     decision = Decision(
@@ -536,7 +694,7 @@ def compile_ocr_baseline(
         expected_selected_pages=selected_pages,
     )
     candidate = anchor_injection.syntax_tex
-    repairs: tuple[dict, ...] = ()
+    repair_notes: list[dict] = []
     attempts: list[Mapping[str, object]] = []
     invocation_evidence: list[OcrCompileInvocationEvidence] = []
 
@@ -556,13 +714,19 @@ def compile_ocr_baseline(
         )
         return result
 
-    first = invoke(candidate)
-    if not _is_real_success(invocation_evidence[-1], first):
-        repaired_candidate, repairs = _syntax_only_repair(candidate)
-        if repaired_candidate != candidate:
-            candidate = repaired_candidate
-            invoke(candidate)
-    chosen = attempts[-1]
+    chosen = invoke(candidate)
+    for _repair_index in range(_MAX_DIAGNOSTIC_SYNTAX_REPAIRS):
+        if _is_real_success(invocation_evidence[-1], chosen):
+            break
+        repaired_candidate, new_notes = _syntax_only_repair(
+            candidate,
+            failed_compile=chosen,
+        )
+        repair_notes.extend(new_notes)
+        if repaired_candidate == candidate:
+            break
+        candidate = repaired_candidate
+        chosen = invoke(candidate)
     if _is_real_success(invocation_evidence[-1], chosen):
         second = invoke(candidate)
         chosen = second
@@ -617,7 +781,7 @@ def compile_ocr_baseline(
         pdf_bytes=pdf_bytes,
         exit_code=exit_code,
         successful_passes=successful_runs,
-        syntax_repairs=repairs,
+        syntax_repairs=tuple(repair_notes),
         error_lines=errors,
         engine=_engine_basename(chosen.get("engine")),
         compile_invocations=tuple(invocation_evidence),

@@ -74,6 +74,22 @@ _OCR_FIGURE_HEIGHT_MAX = 0.72
 _OCR_BASELINE_PACKAGE_DIRECTORY = "ocr-baseline"
 
 
+def first_forbidden_tex_control(text: str) -> tuple[int, int] | None:
+    """Return ``(offset, codepoint)`` for a TeX-breaking control character.
+
+    Newlines and horizontal tabs are valid source whitespace.  Other C0/C1
+    controls and DEL are never visible page content and must not reach a saved
+    OCR page or the LaTeX compiler.
+    """
+    for offset, character in enumerate(str(text or "")):
+        codepoint = ord(character)
+        if (
+            codepoint < 32 and character not in "\t\n\r"
+        ) or 0x7F <= codepoint <= 0x9F:
+            return offset, codepoint
+    return None
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -2328,6 +2344,14 @@ def validate_ocr_batch_response(
         unresolved = item.get("unresolved_regions")
         if not isinstance(latex, str):
             raise OcrBatchValidationError("INVALID_LATEX", f"{page_id} latex must be a string")
+        forbidden_control = first_forbidden_tex_control(latex)
+        if forbidden_control is not None:
+            offset, codepoint = forbidden_control
+            raise OcrBatchValidationError(
+                "INVALID_CONTROL_CHARACTER",
+                f"{page_id} latex contains forbidden control character "
+                f"U+{codepoint:04X} at offset {offset}",
+            )
         if not isinstance(figures, list):
             raise OcrBatchValidationError("INVALID_FIGURES", f"{page_id} figures must be an array")
         if not isinstance(unresolved, list):
@@ -2702,7 +2726,7 @@ def classify_ocr_error(error: object) -> OcrErrorCategory:
 _BATCH_FALLBACK_CODES = frozenset({
     "NON_JSON", "TOP_LEVEL_SCHEMA", "MARKDOWN_FENCE", "MISSING_PAGE_ID",
     "DUPLICATE_PAGE_ID", "UNKNOWN_PAGE_ID", "PAGE_ID_COVERAGE", "INVALID_LATEX",
-    "INVALID_FIGURES", "INVALID_UNRESOLVED_REGIONS",
+    "INVALID_CONTROL_CHARACTER", "INVALID_FIGURES", "INVALID_UNRESOLVED_REGIONS",
 })
 _BATCH_FALLBACK_CATEGORIES = frozenset({
     OcrErrorCategory.TRANSIENT,
@@ -3154,16 +3178,25 @@ class BoundedOcrExecutor:
                     fell_back_to_single=fallback,
                 )
             except OcrBatchValidationError as exc:
+                retry_instruction = (
+                    "上一响应包含不可见控制字符或 ANSI 转义序列 "
+                    "(INVALID_CONTROL_CHARACTER)。只重新识别本页；"
+                    "斜体使用 \\emph{...} 或 \\textit{...}，引号使用正常 Unicode "
+                    "字符或合法 LaTeX 写法；除制表、换行、回车外，"
+                    "严禁输出其他控制字符。"
+                    if exc.code == "INVALID_CONTROL_CHARACTER"
+                    else (
+                        "上一响应未通过宿主结构校验。只重新识别本页并严格修正 "
+                        f"{exc.code}；不得省略可见内容，不得猜测坐标或文件路径。"
+                    )
+                )
                 return OcrExecutionResult(
                     request=request,
                     page=None,
                     raw_response=raw,
                     error=str(exc)[:1000],
                     error_category=OcrErrorCategory.UNKNOWN,
-                    retry_instruction=(
-                        "上一响应未通过宿主结构校验。只重新识别本页并严格修正 "
-                        f"{exc.code}；不得省略可见内容，不得猜测坐标或文件路径。"
-                    ),
+                    retry_instruction=retry_instruction,
                     retry_state=_freeze({"validation_code": exc.code}),
                     batch_id=batch_id,
                     batch_size=1,
@@ -3393,6 +3426,8 @@ OCR_TRANSCRIPTION_SYSTEM_PROMPT = r"""你是数学文档页面忠实转写器。
 页面中可见的 Theorem、Proof 等标题只按普通可见文字忠实输出。
 不输出 documentclass、usepackage、begin document 或 end document。
 不输出 Markdown 代码围栏，不输出解释性文字。
+除 U+0009/U+000A/U+000D 作为源码空白外，不得输出其他 C0、DEL、C1 控制字符
+或 ANSI 转义序列；斜体使用 \emph{...}，引号使用正常 Unicode 字符或合法 LaTeX 写法。
 若页面包含必须保留的非文字插图，在正文中使用
 \includegraphics{figures/page_XXXX_figure_YY.png}，并在 figures 中按出现顺序给出
 同一路径、从 1 开始的 index、完整页归一化坐标和像素坐标；bbox_pixels 必须严格使用
