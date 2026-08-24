@@ -173,6 +173,7 @@ class RunEvidence:
     poll_history: list[dict[str, Any]] = field(default_factory=list)
     artifacts: dict[str, DownloadedArtifact] = field(default_factory=dict)
     ocr_baseline: dict[str, str] = field(default_factory=dict)
+    ocr_package_compilation: dict[str, Any] = field(default_factory=dict)
     checks: list[Check] = field(default_factory=list)
     execution_errors: list[str] = field(default_factory=list)
     overall_started_at: str = ""
@@ -694,12 +695,59 @@ def _download_ocr_baseline_package(
         run_id = str(payload.get("run_id") or "")
         if run_id != job_id:
             raise AcceptanceError("OCR baseline package run_id differs from the UI job")
+        status = payload.get("status")
+        compile_evidence = payload.get("compile")
+        descriptors = payload.get("artifacts")
+        if (
+            not isinstance(status, Mapping)
+            or not isinstance(compile_evidence, Mapping)
+            or not isinstance(descriptors, list)
+        ):
+            raise AcceptanceError("OCR baseline package lacks compilation evidence")
+        passes = compile_evidence.get("passes")
+        if (
+            not isinstance(passes, list)
+            or not passes
+            or not isinstance(passes[-1], Mapping)
+        ):
+            raise AcceptanceError("OCR baseline package lacks a final compile pass")
+        final_pass = passes[-1]
+        final_log_role = str(final_pass.get("log_role") or "")
+        descriptors_by_role = {
+            str(item.get("role") or ""): item
+            for item in descriptors
+            if isinstance(item, Mapping)
+        }
+        final_log = descriptors_by_role.get(final_log_role)
+        baseline_pdf = descriptors_by_role.get("BASELINE_PDF")
+        final_log_sha256 = (
+            str(final_log.get("sha256") or "").lower()
+            if isinstance(final_log, Mapping)
+            else ""
+        )
+        baseline_pdf_sha256 = (
+            str(baseline_pdf.get("sha256") or "").lower()
+            if isinstance(baseline_pdf, Mapping)
+            else ""
+        )
+        if SHA256_RE.fullmatch(final_log_sha256) is None:
+            raise AcceptanceError("OCR baseline package final compile log is unbound")
+        if baseline_pdf_sha256 and SHA256_RE.fullmatch(baseline_pdf_sha256) is None:
+            raise AcceptanceError("OCR baseline package baseline PDF is unbound")
+        package_compilation = {
+            "status": str(status.get("compile_status") or ""),
+            "successful_passes": compile_evidence.get("successful_passes"),
+            "exit_code": final_pass.get("exit_code"),
+            "compile_log_sha256": final_log_sha256,
+            "baseline_pdf_sha256": baseline_pdf_sha256,
+        }
         package_root = config.output_dir / OCR_BASELINE_PACKAGE_DIRECTORY
         if package_root.exists():
             raise AcceptanceError("OCR baseline evidence directory already exists")
         for relative, data in sorted(files.items()):
             target = package_root.joinpath(*PurePosixPath(relative).parts)
             _atomic_write(target, data)
+        evidence.ocr_package_compilation = package_compilation
         evidence.ocr_baseline = {
             "package_directory": OCR_BASELINE_PACKAGE_DIRECTORY,
             "manifest_filename": (
@@ -1435,21 +1483,23 @@ def _acceptance_attestation(
     model = dict(model) if isinstance(model, Mapping) else {}
     runtime = performance.get("runtime_identity")
     runtime = dict(runtime) if isinstance(runtime, Mapping) else {}
-    compilation = {
-        "status": performance.get("compile_status") or "",
-        "successful_passes": performance.get("successful_compile_passes", 0),
-        "exit_code": performance.get("compile_exit_code"),
-        "compile_log_sha256": (
-            evidence.artifacts["compile-log"].sha256
-            if "compile-log" in evidence.artifacts
-            else ""
-        ),
-        "baseline_pdf_sha256": (
-            evidence.artifacts["baseline-pdf"].sha256
-            if "baseline-pdf" in evidence.artifacts
-            else ""
-        ),
-    }
+    compilation = dict(evidence.ocr_package_compilation)
+    if not compilation:
+        compilation = {
+            "status": performance.get("compile_status") or "",
+            "successful_passes": performance.get("successful_compile_passes", 0),
+            "exit_code": performance.get("compile_exit_code"),
+            "compile_log_sha256": (
+                evidence.artifacts["compile-log"].sha256
+                if "compile-log" in evidence.artifacts
+                else ""
+            ),
+            "baseline_pdf_sha256": (
+                evidence.artifacts["baseline-pdf"].sha256
+                if "baseline-pdf" in evidence.artifacts
+                else ""
+            ),
+        }
     return {
         "schema_version": ATTESTATION_SCHEMA,
         "profile_kind": "ocr",

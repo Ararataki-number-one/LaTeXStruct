@@ -234,6 +234,93 @@ def test_recomputable_baseline_subtree_is_verified_and_staged(tmp_path: Path):
     assert MODULE._sha256_file(manifest) == evidence.ocr_baseline["manifest_sha256"]
 
 
+def test_attestation_uses_verified_final_pass_log_not_aggregate_compile_log(
+    tmp_path: Path,
+):
+    package, source, run_id = _recomputable_baseline_zip()
+    pdf = tmp_path / "source.pdf"
+    pdf.write_bytes(source)
+    config = _config(tmp_path, pdf, pages=2)
+    config.output_dir.mkdir()
+    evidence = MODULE.RunEvidence()
+
+    class PackageApi:
+        def download(self, path: str):
+            assert path == f"/api/ocr/jobs/{run_id}/package"
+            return MODULE.HttpDownload(
+                package,
+                {"content-type": "application/zip"},
+                200,
+            )
+
+    MODULE._download_ocr_baseline_package(
+        PackageApi(),
+        run_id,
+        config,
+        evidence,
+        source_sha256=MODULE._sha256_bytes(source),
+    )
+
+    manifest_path = (
+        config.output_dir
+        / MODULE.OCR_BASELINE_PACKAGE_DIRECTORY
+        / MODULE.OCR_BASELINE_MANIFEST_MEMBER
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    final_pass = manifest["compile"]["passes"][-1]
+    artifacts_by_role = {item["role"]: item for item in manifest["artifacts"]}
+    final_pass_log_sha256 = artifacts_by_role[final_pass["log_role"]]["sha256"]
+    baseline_pdf_sha256 = artifacts_by_role["BASELINE_PDF"]["sha256"]
+    aggregate_log = b"aggregate compile log deliberately differs from final pass\n"
+    aggregate_log_sha256 = MODULE._sha256_bytes(aggregate_log)
+    assert aggregate_log_sha256 != final_pass_log_sha256
+
+    evidence.artifacts["compile-log"] = MODULE.DownloadedArtifact(
+        role="compile-log",
+        filename="compile-baseline.log",
+        sha256=aggregate_log_sha256,
+        size=len(aggregate_log),
+        media_type="text/plain",
+    )
+    evidence.artifacts["baseline-pdf"] = MODULE.DownloadedArtifact(
+        role="baseline-pdf",
+        filename="baseline.pdf",
+        sha256=baseline_pdf_sha256,
+        size=1,
+        media_type="application/pdf",
+    )
+
+    assert evidence.checks[-1].passed is True
+    assert evidence.ocr_package_compilation == {
+        "status": "COMPILED",
+        "successful_passes": 2,
+        "exit_code": 0,
+        "compile_log_sha256": final_pass_log_sha256,
+        "baseline_pdf_sha256": baseline_pdf_sha256,
+    }
+
+    performance_path = config.output_dir / "performance.json"
+    validation_path = config.output_dir / "validation-report.json"
+    performance_path.write_text("{}\n", encoding="utf-8")
+    validation_path.write_text("{}\n", encoding="utf-8")
+    attestation = MODULE._acceptance_attestation(
+        config,
+        evidence,
+        performance_path,
+        validation_path,
+        {
+            "compile_status": "COMPILED",
+            "successful_compile_passes": 2,
+            "compile_exit_code": 0,
+        },
+        {"result": "PASS", "acceptance_passed": True},
+    )
+
+    assert attestation["compilation"] == evidence.ocr_package_compilation
+    assert attestation["compilation"]["compile_log_sha256"] == final_pass_log_sha256
+    assert attestation["compilation"]["compile_log_sha256"] != aggregate_log_sha256
+
+
 @pytest.mark.parametrize(
     "bad_members",
     [
