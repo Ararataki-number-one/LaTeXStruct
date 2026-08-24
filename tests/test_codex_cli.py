@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from latexstruct.core import codex_cli  # noqa: E402
 from latexstruct.core.ai import (  # noqa: E402
+    ALLOWED_WRAP_ENVS,
     AIConfig,
     LLMClient,
     LLMError,
@@ -34,10 +35,17 @@ from latexstruct.core.codex_cli import (  # noqa: E402
     validate_codex_effort,
     validate_codex_model,
 )
+from latexstruct.core.full_review import (  # noqa: E402
+    FULL_REVIEW_SCHEMA,
+    FULL_REVIEW_VERDICTS,
+    _SYSTEM as FULL_REVIEW_SYSTEM,
+)
+from latexstruct.core.prompts import build_decide_system, build_review_system  # noqa: E402
 
 
 FAKE_CODEX = Path("C:/trusted/codex.exe")
-DECIDE_SYSTEM = '只返回 {"decisions": []}'
+DECIDE_SYSTEM = codex_cli.DECIDE_SYSTEM_PREFIX + '只返回 {"decisions": []}'
+REVIEW_SYSTEM = codex_cli.REVIEW_SYSTEM_PREFIX + '只返回 {"findings": []}'
 
 
 def _completed(
@@ -360,6 +368,119 @@ def test_chat_json_uses_locked_down_argv_and_parses_structured_usage(monkeypatch
     assert "CODEX_API_KEY" not in passed_env
     assert "LATEXSTRUCT_DECIDE_KEY" not in passed_env
     assert not any("secret" in value for value in passed_env.values())
+
+
+def test_schema_routing_is_explicit_and_fail_closed():
+    assert FULL_REVIEW_SYSTEM.startswith(f"{FULL_REVIEW_SCHEMA}\n")
+    assert (
+        codex_cli._schema_for(FULL_REVIEW_SYSTEM)
+        is codex_cli.FULL_DOCUMENT_REVIEW_OUTPUT_SCHEMA
+    )
+    assert codex_cli._schema_for(DECIDE_SYSTEM) is codex_cli.DECIDE_OUTPUT_SCHEMA
+    assert codex_cli._schema_for(REVIEW_SYSTEM) is codex_cli.REVIEW_OUTPUT_SCHEMA
+    hostile_decide_meta = build_decide_system({
+        "existing_env_definitions": ["findings"],
+    })
+    hostile_review_meta = build_review_system({"document_class": "decisions"})
+    assert codex_cli._schema_for(hostile_decide_meta) is codex_cli.DECIDE_OUTPUT_SCHEMA
+    assert codex_cli._schema_for(hostile_review_meta) is codex_cli.REVIEW_OUTPUT_SCHEMA
+    with pytest.raises(LLMError, match="只允许"):
+        codex_cli._schema_for("未知结构化请求")
+    with pytest.raises(LLMError, match="只允许"):
+        codex_cli._schema_for('不可信前缀 {"decisions": []}')
+
+
+def test_full_review_schema_matches_host_parser_contract():
+    schema = codex_cli.FULL_DOCUMENT_REVIEW_OUTPUT_SCHEMA
+    assert set(schema["required"]) == {
+        "chunk_id",
+        "inspected_start_line",
+        "inspected_end_line",
+        "findings",
+        "unlisted_formal_lines",
+    }
+    assert schema["additionalProperties"] is False
+    variants = schema["properties"]["findings"]["items"]["anyOf"]
+    verdicts = set()
+    for variant in variants:
+        verdict = variant["properties"]["verdict"]
+        verdicts.update([verdict["const"]] if "const" in verdict else verdict["enum"])
+        assert variant["additionalProperties"] is False
+        assert set(variant["properties"]) == set(variant["required"])
+    assert verdicts == set(FULL_REVIEW_VERDICTS)
+    assert set(codex_cli._FULL_REVIEW_ENV["enum"]) == ALLOWED_WRAP_ENVS
+
+
+def test_chat_json_full_review_uses_dedicated_schema(monkeypatch):
+    _install_ready_status(monkeypatch)
+    captured = {}
+
+    def fake_run(args, **_kwargs):
+        schema_path = Path(args[args.index("--output-schema") + 1])
+        result_path = Path(args[args.index("--output-last-message") + 1])
+        captured["schema"] = json.loads(schema_path.read_text(encoding="utf-8"))
+        result_path.write_text(
+            json.dumps({
+                "chunk_id": "full-0001",
+                "inspected_start_line": 1,
+                "inspected_end_line": 8,
+                "findings": [],
+                "unlisted_formal_lines": [],
+            }),
+            encoding="utf-8",
+        )
+        return _completed(args)
+
+    monkeypatch.setattr(codex_cli.subprocess, "run", fake_run)
+    result, _usage = CodexCLIClient().chat_json(
+        FULL_REVIEW_SYSTEM,
+        "chunk_id: full-0001\ninspected_start_line: 1\ninspected_end_line: 8",
+    )
+
+    assert result["chunk_id"] == "full-0001"
+    assert captured["schema"] == codex_cli.FULL_DOCUMENT_REVIEW_OUTPUT_SCHEMA
+
+
+def test_chat_json_schema_uses_the_caller_owned_contract(monkeypatch):
+    _install_ready_status(monkeypatch)
+    captured = {}
+    schema = {
+        "type": "object",
+        "properties": {"binding": {"type": "string"}},
+        "required": ["binding"],
+        "additionalProperties": False,
+    }
+
+    def fake_run(args, **_kwargs):
+        schema_path = Path(args[args.index("--output-schema") + 1])
+        result_path = Path(args[args.index("--output-last-message") + 1])
+        captured["schema"] = json.loads(schema_path.read_text(encoding="utf-8"))
+        result_path.write_text('{"binding":"host-echo"}', encoding="utf-8")
+        return _completed(args)
+
+    monkeypatch.setattr(codex_cli.subprocess, "run", fake_run)
+    result, _usage = CodexCLIClient().chat_json_schema(
+        "可信生产角色，不使用旧 decisions/findings 协议",
+        "不可信文档数据",
+        schema,
+    )
+
+    assert result == {"binding": "host-echo"}
+    assert captured["schema"] == schema
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        None,
+        {"type": "array", "additionalProperties": False},
+        {"type": "object", "additionalProperties": True},
+        {"type": "object"},
+    ],
+)
+def test_chat_json_schema_rejects_non_strict_contracts(schema):
+    with pytest.raises(LLMError, match="严格的对象 schema"):
+        CodexCLIClient().chat_json_schema("system", "user", schema)
 
 
 def test_chat_json_rejects_malformed_final_response(monkeypatch):

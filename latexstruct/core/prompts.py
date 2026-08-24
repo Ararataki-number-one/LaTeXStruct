@@ -19,6 +19,8 @@ from .scanner import Candidate
 
 
 _BOUNDARY_ANCHOR_VERSION = "ba1"
+DECIDE_SYSTEM_PROTOCOL = "latexstruct-structure-decision-v1"
+REVIEW_SYSTEM_PROTOCOL = "latexstruct-candidate-review-v1"
 # Anchors live only for the current host process and are never delegated to the
 # model.  The model sees opaque IDs that it may echo, but it cannot mint a new
 # valid ID for a different candidate/document/boundary.
@@ -335,7 +337,7 @@ REVIEW_SCHEMA = """输出格式（严格 JSON）：
 
 
 def build_decide_system(meta: Dict) -> str:
-    return "\n\n".join(
+    return DECIDE_SYSTEM_PROTOCOL + "\n" + "\n\n".join(
         [
             SYSTEM_PROMPT,
             "【当前文档元信息】\n" + json.dumps(meta, ensure_ascii=False, indent=1),
@@ -345,7 +347,7 @@ def build_decide_system(meta: Dict) -> str:
 
 
 def build_review_system(meta: Dict) -> str:
-    return "\n\n".join(
+    return REVIEW_SYSTEM_PROTOCOL + "\n" + "\n\n".join(
         [
             REVIEW_SYSTEM_PROMPT,
             "【当前文档元信息】\n" + json.dumps(meta, ensure_ascii=False, indent=1),

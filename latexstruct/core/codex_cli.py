@@ -22,7 +22,8 @@ import time
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple
 
-from .ai import LLMClient, LLMError, RoleConfig
+from .ai import ALLOWED_WRAP_ENVS, LLMClient, LLMError, RoleConfig
+from .prompts import DECIDE_SYSTEM_PROTOCOL, REVIEW_SYSTEM_PROTOCOL
 
 CODEX_BACKEND = "codex_cli"
 CODEX_BILLING_MODE = "chatgpt_subscription"
@@ -511,10 +512,95 @@ OCR_OUTPUT_SCHEMA = {
 }
 
 
+DECIDE_SYSTEM_PREFIX = DECIDE_SYSTEM_PROTOCOL + "\n"
+REVIEW_SYSTEM_PREFIX = REVIEW_SYSTEM_PROTOCOL + "\n"
+FULL_DOCUMENT_REVIEW_SYSTEM_PREFIX = "latexstruct-full-document-review-v1\n"
+
+_FULL_REVIEW_COMMON = {
+    "item_id": {"type": "string", "minLength": 1},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "evidence": {"type": "string"},
+    "reason": {"type": "string"},
+}
+
+_FULL_REVIEW_ENV = {
+    "type": "string",
+    "enum": sorted(ALLOWED_WRAP_ENVS),
+}
+
+FULL_DOCUMENT_REVIEW_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "chunk_id": {"type": "string", "minLength": 1},
+        "inspected_start_line": {"type": "integer", "minimum": 1},
+        "inspected_end_line": {"type": "integer", "minimum": 1},
+        "findings": {
+            "type": "array",
+            "items": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            **_FULL_REVIEW_COMMON,
+                            "verdict": {"type": "string", "const": "formal"},
+                            "env": _FULL_REVIEW_ENV,
+                            "body_span": _SPAN_SCHEMA,
+                        },
+                        "required": [
+                            "item_id", "verdict", "env", "body_span",
+                            "confidence", "evidence", "reason",
+                        ],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            **_FULL_REVIEW_COMMON,
+                            "verdict": {
+                                "type": "string",
+                                "enum": ["prose", "keep", "unwrap", "manual"],
+                            },
+                        },
+                        "required": [
+                            "item_id", "verdict", "confidence", "evidence", "reason",
+                        ],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            **_FULL_REVIEW_COMMON,
+                            "verdict": {"type": "string", "const": "change-env"},
+                            "env": _FULL_REVIEW_ENV,
+                        },
+                        "required": [
+                            "item_id", "verdict", "env", "confidence", "evidence",
+                            "reason",
+                        ],
+                        "additionalProperties": False,
+                    },
+                ],
+            },
+        },
+        "unlisted_formal_lines": {
+            "type": "array",
+            "items": {"type": "integer", "minimum": 1},
+        },
+    },
+    "required": [
+        "chunk_id", "inspected_start_line", "inspected_end_line", "findings",
+        "unlisted_formal_lines",
+    ],
+    "additionalProperties": False,
+}
+
+
 def _schema_for(system: str) -> Dict:
-    if '"findings"' in system:
+    if system.startswith(FULL_DOCUMENT_REVIEW_SYSTEM_PREFIX):
+        return FULL_DOCUMENT_REVIEW_OUTPUT_SCHEMA
+    if system.startswith(REVIEW_SYSTEM_PREFIX):
         return REVIEW_OUTPUT_SCHEMA
-    if '"decisions"' in system:
+    if system.startswith(DECIDE_SYSTEM_PREFIX):
         return DECIDE_OUTPUT_SCHEMA
     raise LLMError("Codex 后端只允许结构判断或复查 JSON 请求")
 
@@ -704,6 +790,22 @@ class CodexCLIClient:
         return self._runtime_path
 
     def chat_json(self, system: str, user: str) -> Tuple[dict, Dict]:
+        return self.chat_json_schema(system, user, _schema_for(system))
+
+    def chat_json_schema(
+        self,
+        system: str,
+        user: str,
+        schema: dict,
+    ) -> Tuple[dict, Dict]:
+        """Run trusted text work with its caller-owned strict output contract."""
+
+        if (
+            not isinstance(schema, dict)
+            or schema.get("type") != "object"
+            or schema.get("additionalProperties") is not False
+        ):
+            raise LLMError("Codex 文本 JSON 请求必须提供严格的对象 schema")
         self.last_usage = {}
         if len(system) + len(user) > CODEX_MAX_PROMPT_CHARS:
             raise LLMError("Codex 请求过长，已保守停止；请缩小文档或候选范围")
@@ -730,7 +832,7 @@ class CodexCLIClient:
                 error = exc
             else:
                 try:
-                    return self._run(runtime_path, prompt, _schema_for(system))
+                    return self._run(runtime_path, prompt, dict(schema))
                 except LLMError as exc:
                     error = exc
                 finally:

@@ -124,6 +124,20 @@ class FakeTextClient:
         raise AssertionError(role)
 
 
+class SchemaAwareTextClient(FakeTextClient):
+    def __init__(self, events, *, conflict=False):
+        super().__init__(events, conflict=conflict)
+        self.schema_calls = []
+
+    def chat_json(self, _system, _user):
+        raise AssertionError("schema-aware clients must receive the host schema")
+
+    def chat_json_schema(self, system, user, schema):
+        request = json.loads(user)
+        self.schema_calls.append((request["binding"]["role"], schema))
+        return FakeTextClient.chat_json(self, system, user)
+
+
 class FakeVisionClient:
     model = "fake-vision-v2"
 
@@ -324,6 +338,68 @@ def test_production_bridge_calls_real_roles_in_order_and_compiles_each_candidate
             "reason": "restore the theorem boundary",
         }
     ]
+
+
+def test_production_text_roles_receive_their_exact_host_schemas(tmp_path):
+    events = []
+    text = SchemaAwareTextClient(events, conflict=True)
+
+    result, _observed, _compiler = _run(tmp_path, text_client=text)
+
+    assert result.orchestration.decision.verified is True
+    schemas_by_role = {role: schema for role, schema in text.schema_calls}
+    assert schemas_by_role["AI-1"] == analysis_production._FINDING_RESPONSE_SCHEMA
+    assert schemas_by_role["AI-2"] == analysis_production._FINDING_RESPONSE_SCHEMA
+    assert schemas_by_role["AI-4"] == analysis_production._PATCH_RESPONSE_SCHEMA
+    assert schemas_by_role["AI-6"] == analysis_production._ADJUDICATION_RESPONSE_SCHEMA
+
+
+def test_production_schemas_avoid_codex_unsupported_keywords():
+    schemas = (
+        analysis_production._FINDING_RESPONSE_SCHEMA,
+        analysis_production._PATCH_RESPONSE_SCHEMA,
+        analysis_production._ISSUE_REVIEW_RESPONSE_SCHEMA,
+        analysis_production._FINAL_REVIEW_RESPONSE_SCHEMA,
+        analysis_production._ADJUDICATION_RESPONSE_SCHEMA,
+    )
+    encoded = json.dumps(schemas, sort_keys=True)
+    assert '"oneOf"' not in encoded
+    assert '"uniqueItems"' not in encoded
+
+
+def test_host_rejects_a_finding_without_bound_evidence(tmp_path):
+    events = []
+    client = FakeTextClient(events)
+    original = client.chat_json
+
+    def remove_evidence(system, user):
+        response, usage = original(system, user)
+        if json.loads(user)["binding"]["role"] == "AI-1":
+            response = json.loads(json.dumps(response))
+            response["findings"][0]["exact_quotes"] = []
+            response["findings"][0]["source_pdf_regions"] = []
+        return response, usage
+
+    client.chat_json = remove_evidence
+    with pytest.raises(CallbackContractError, match="no bound evidence"):
+        _run(tmp_path, text_client=client)
+
+
+def test_host_rejects_duplicate_exact_quotes(tmp_path):
+    events = []
+    client = FakeTextClient(events)
+    original = client.chat_json
+
+    def duplicate_evidence(system, user):
+        response, usage = original(system, user)
+        if json.loads(user)["binding"]["role"] == "AI-1":
+            response = json.loads(json.dumps(response))
+            response["findings"][0]["exact_quotes"] = [TARGET, TARGET]
+        return response, usage
+
+    client.chat_json = duplicate_evidence
+    with pytest.raises(CallbackContractError, match="duplicate exact quotes"):
+        _run(tmp_path, text_client=client)
 
 
 def test_changed_candidate_uses_its_own_live_page_map_for_review(tmp_path):

@@ -149,7 +149,6 @@ _FINDING_RESPONSE_SCHEMA: dict[str, Any] = {
                     "exact_quotes": {
                         "type": "array",
                         "items": {"type": "string", "minLength": 1},
-                        "uniqueItems": True,
                     },
                     "source_pdf_regions": {
                         "type": "array",
@@ -159,10 +158,6 @@ _FINDING_RESPONSE_SCHEMA: dict[str, Any] = {
                     "suggestion": {"type": "string", "minLength": 1},
                     "blocker_reason": {"type": "string"},
                 },
-                "anyOf": [
-                    {"properties": {"exact_quotes": {"minItems": 1}}},
-                    {"properties": {"source_pdf_regions": {"minItems": 1}}},
-                ],
             },
         },
     },
@@ -175,7 +170,7 @@ _PATCH_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "binding": _BINDING_SCHEMA,
         "patch": {
-            "oneOf": [
+            "anyOf": [
                 {"type": "null"},
                 {
                     "type": "object",
@@ -1015,23 +1010,31 @@ class _ProductionCallbacks:
         with self._transport_evidence_lock:
             self.transport_evidence.append(evidence)
 
-    def _text(self, role: str, operation: str, request: object, system: str) -> dict[str, Any]:
+    def _text(
+        self,
+        role: str,
+        operation: str,
+        request: object,
+        system: str,
+        schema: Mapping[str, Any],
+    ) -> dict[str, Any]:
         client = self.text_clients.get(role)
         method = getattr(client, "chat_json", None)
-        if not callable(method):
-            raise ProductionAnalysisError(f"{role} has no chat_json client")
+        strict_method = getattr(client, "chat_json_schema", None)
+        if not callable(strict_method) and not callable(method):
+            raise ProductionAnalysisError(f"{role} has no text JSON client")
         source_number = self.source_page_numbers[request.binding.source_page_id]
         candidate_map = self._page_map_for_candidate(request.binding.candidate_hash)
-        payload, usage = _response_object(
-            method(
-                system,
-                _json_text_materials(
-                    request,
-                    candidate_pdf_page_numbers=candidate_map[source_number],
-                ),
-            ),
-            operation,
+        user = _json_text_materials(
+            request,
+            candidate_pdf_page_numbers=candidate_map[source_number],
         )
+        response = (
+            strict_method(system, user, dict(schema))
+            if callable(strict_method)
+            else method(system, user)
+        )
+        payload, usage = _response_object(response, operation)
         self._record_transport(request, operation, usage)
         return payload
 
@@ -1185,6 +1188,7 @@ class _ProductionCallbacks:
             "structure-findings",
             request,
             _AI1_PROMPT,
+            _FINDING_RESPONSE_SCHEMA,
         )
         return self._parse_findings(payload, request, "AI-1")
 
@@ -1194,6 +1198,7 @@ class _ProductionCallbacks:
             "content-math-findings",
             request,
             _AI2_PROMPT,
+            _FINDING_RESPONSE_SCHEMA,
         )
         return self._parse_findings(payload, request, "AI-2")
 
@@ -1213,6 +1218,7 @@ class _ProductionCallbacks:
             "local-patch",
             request,
             _AI4_PROMPT,
+            _PATCH_RESPONSE_SCHEMA,
         )
         root = _strict_object(payload, name="AI-4.response", required=("binding", "patch"))
         _validate_binding_echo(root["binding"], request, "AI-4")
@@ -1383,6 +1389,7 @@ class _ProductionCallbacks:
             "adjudication",
             request,
             _AI6_PROMPT,
+            _ADJUDICATION_RESPONSE_SCHEMA,
         )
         root = _strict_object(
             payload,
