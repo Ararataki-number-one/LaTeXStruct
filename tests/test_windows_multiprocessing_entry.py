@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import importlib.util
 import multiprocessing
+import os
 import runpy
 import subprocess
 import sys
@@ -97,6 +98,7 @@ def test_source_module_help_remains_a_non_frozen_no_op_startup():
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        env={**os.environ, "PYTHONIOENCODING": "cp1252:strict"},
         timeout=20,
         check=False,
     )

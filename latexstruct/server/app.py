@@ -1164,6 +1164,16 @@ def _run_bounded_visual_pool(
 
             if next_commit >= len(batches):
                 break
+            # Ordered commits can free capacity, and the fourth clean commit
+            # can raise the limit from four to six while earlier calls are
+            # still in flight.  Refill that newly available capacity before
+            # waiting for another completion; otherwise the coordinator can
+            # wait on two calls while four permitted slots remain empty.
+            if (
+                next_submit < len(batches)
+                and len(in_flight) + len(completed) < current_limit
+            ):
+                continue
             if not in_flight:
                 if next_submit < len(batches):
                     continue

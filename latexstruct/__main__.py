@@ -39,6 +39,18 @@ def main():
         sys.stdout = open(os.devnull, "w")
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w")
+    # GitHub Windows runners and some legacy terminals still expose a strict
+    # CP1252 stream.  Argparse's Chinese help text must not make ``--help``
+    # crash before the application can start.  Preserve the active encoding
+    # (UTF-8 consoles remain UTF-8) while making unrepresentable characters
+    # fail safe; ASCII option names are always emitted unchanged.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
 
     ap = argparse.ArgumentParser(prog="latexstruct")
     ap.add_argument("--server", action="store_true", help="只启动本地服务（浏览器访问）")
