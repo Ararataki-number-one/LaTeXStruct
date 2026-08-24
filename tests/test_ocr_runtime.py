@@ -175,6 +175,25 @@ def test_atomic_store_resume_skips_hash_verified_success_and_recovers_transient(
         )
 
 
+def test_recover_rejects_missing_or_tampered_success_response_sidecar(tmp_path):
+    source = b"%PDF-1.7\nsource"
+    snapshot = _snapshot(source=source, pages=(1,), source_total_pages=1)
+    store = OcrRunStore(tmp_path)
+    store.initialize(snapshot, source)
+    response = _response(make_page_id(1))
+    success = _success(store.load_record(snapshot.run_id, make_page_id(1)), response)
+    store.persist_record(snapshot.run_id, success, raw_response=response)
+    response_path = (
+        store.run_dir(snapshot.run_id)
+        / "responses"
+        / f"{success.page_id}-{success.raw_response_sha256}.json"
+    )
+
+    response_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(OcrStoreError, match="SHA-256"):
+        store.recover(snapshot.run_id)
+
+
 def test_store_serializes_record_read_with_atomic_commit(tmp_path, monkeypatch):
     """Polling must not hold a Windows read handle across ``os.replace``."""
 
@@ -317,6 +336,44 @@ def test_store_rejects_source_and_success_tex_tampering(tmp_path):
         store.recover(snapshot.run_id)
 
 
+def test_store_rejects_tampered_hash_bound_page_source_evidence(tmp_path):
+    source = b"%PDF-1.7\nsource"
+    snapshot = _snapshot(source=source, pages=(1,), source_total_pages=1)
+    store = OcrRunStore(tmp_path)
+    store.initialize(snapshot, source)
+    page_id = make_page_id(1)
+    record = store.load_record(snapshot.run_id, page_id).transition(
+        OcrPageStatus.RENDERING,
+        dpi=200,
+    )
+    digest = store.persist_page_source_evidence(
+        snapshot.run_id,
+        record,
+        {"equation_tag_regions": [{"label": "1", "bbox_normalized": [0.8, 0.4, 0.9, 0.5]}]},
+    )
+    record = record.transition(
+        OcrPageStatus.OCR_RUNNING,
+        image_sha256=hashlib.sha256(b"image").hexdigest(),
+        image_size_pixels=(1200, 1800),
+        dpi=200,
+        model="vision-model",
+        call_index=1,
+        source_evidence_sha256=digest,
+    )
+    store.persist_record(snapshot.run_id, record)
+    loaded = store.load_page_source_evidence(snapshot.run_id, record)
+    assert loaded["equation_tag_regions"][0]["label"] == "1"
+
+    evidence_path = (
+        store.run_dir(snapshot.run_id)
+        / "source-evidence"
+        / f"{page_id}-{digest}.json"
+    )
+    evidence_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(OcrStoreError, match="SHA-256"):
+        store.load_page_source_evidence(snapshot.run_id, record)
+
+
 def test_store_persists_exact_visual_input_without_overwrite(tmp_path):
     source = b"%PDF-1.7\nsource"
     snapshot = _snapshot(source=source, pages=(1,), source_total_pages=1)
@@ -416,6 +473,27 @@ def test_batch_validator_rejects_missing_duplicate_and_unknown_page_ids(pages, c
             response, ["ocr-page-000001", "ocr-page-000002"],
         )
     assert caught.value.code == code
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {
+            "pages": [_response("ocr-page-000001")],
+            "host_quality_flags": [],
+        },
+        {
+            "pages": [{
+                **_response("ocr-page-000001"),
+                "model_raw_latex": "untrusted host field",
+            }],
+        },
+    ],
+)
+def test_batch_validator_rejects_provider_attempts_to_inject_host_fields(response):
+    with pytest.raises(OcrBatchValidationError) as caught:
+        validate_ocr_batch_response(response, ["ocr-page-000001"])
+    assert caught.value.code == "TOP_LEVEL_SCHEMA"
 
 
 def test_batch_validator_returns_host_order_and_flags_latex_damage():
@@ -871,6 +949,25 @@ def test_fallback_provider_error_emits_sanitized_batch_attempt_once():
     assert "workspace" not in attempt.error_summary
     assert "privatecredential" not in attempt.error_summary
     assert {result.batch_id for result in results} == {attempt.batch_id}
+
+
+def test_batch_evidence_path_redaction_preserves_latex_math_commands():
+    mathematical_text = (
+        r"u\in V:\lvert N(u)\cap B\rvert and x\in C:\mathcal{P}(X)"
+    )
+    attempt = OcrBatchAttemptEvidence.provider_failure(
+        batch_id="ocr-batch-math",
+        page_ids=(make_page_id(1),),
+        error=(
+            mathematical_text
+            + r"; diagnostics=C:\Users\ZQY\private\request.json"
+        ),
+        category=OcrErrorCategory.UNKNOWN,
+    )
+
+    assert mathematical_text in attempt.error_summary
+    assert r"C:\Users\ZQY" not in attempt.error_summary
+    assert "[REDACTED_ABSOLUTE_PATH]" in attempt.error_summary
 
 
 def test_single_results_are_emitted_before_slowest_sibling_finishes():

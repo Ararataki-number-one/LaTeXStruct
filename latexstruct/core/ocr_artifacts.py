@@ -12,9 +12,26 @@ import hmac
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Mapping
 
-from .ocr_runtime import OcrPreviewStatus, OcrRunStore, OcrStoreError
+from .ocr_manifest import (
+    DEFAULT_MANIFEST_PATH,
+    ROLE_BASELINE_PDF,
+    ROLE_BASELINE_TEX,
+    OcrBaselineManifest,
+    OcrBaselineManifestError,
+    verify_ocr_baseline_manifest,
+)
+from .ocr_runtime import (
+    _OCR_BASELINE_PACKAGE_DIRECTORY,
+    _path_is_reparse_point,
+    _scan_ocr_bundle_tree,
+    _strict_ocr_bundle_relative_path,
+    OcrPreviewStatus,
+    OcrRunStore,
+    OcrStoreError,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +41,55 @@ class VerifiedOcrArtifact:
     filename: str
     media_type: str
     sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedOcrBaselineArtifact:
+    """Exact bytes for one role in a verified OCR baseline package."""
+
+    role: str
+    logical_path: str
+    path: Path
+    data: bytes
+    sha256: str
+    media_type: str
+
+    @property
+    def size(self) -> int:
+        return len(self.data)
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedOcrBaselineBundle:
+    """Fail-closed OCR baseline input for the optional analysis pipeline."""
+
+    root: Path
+    manifest_path: Path
+    manifest: OcrBaselineManifest
+    artifacts_by_role: Mapping[str, VerifiedOcrBaselineArtifact]
+
+    def require_role(self, role: str) -> VerifiedOcrBaselineArtifact:
+        try:
+            return self.artifacts_by_role[str(role)]
+        except KeyError as exc:
+            raise OcrStoreError(f"OCR baseline package has no {role} artifact") from exc
+
+    def get_role(self, role: str) -> VerifiedOcrBaselineArtifact | None:
+        return self.artifacts_by_role.get(str(role))
+
+    @property
+    def baseline_tex(self) -> VerifiedOcrBaselineArtifact:
+        return self.require_role(ROLE_BASELINE_TEX)
+
+    @property
+    def baseline_pdf(self) -> VerifiedOcrBaselineArtifact | None:
+        return self.get_role(ROLE_BASELINE_PDF)
+
+    def artifact_bytes(self) -> Mapping[str, bytes]:
+        return MappingProxyType({
+            artifact.logical_path: artifact.data
+            for artifact in self.artifacts_by_role.values()
+        })
 
 
 _ROLE_METADATA: Mapping[str, tuple[str, str]] = {
@@ -37,6 +103,10 @@ _ROLE_METADATA: Mapping[str, tuple[str, str]] = {
     "baseline-pdf": ("baseline.pdf", "application/pdf"),
     "compile-log": ("compile-baseline.log", "text/plain"),
     "baseline-manifest": ("baseline-manifest.json", "application/json"),
+    "ocr-baseline-manifest": (
+        "ocr_baseline_manifest.json",
+        "application/json",
+    ),
 }
 
 
@@ -66,6 +136,174 @@ def _verified(path: Path, expected: object, label: str) -> str:
     if normalized and not hmac.compare_digest(actual, normalized):
         raise OcrStoreError(f"{label} SHA-256 verification failed")
     return actual
+
+
+def _reject_duplicate_manifest_pairs(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise OcrStoreError(f"OCR baseline manifest has duplicate key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_manifest_constant(value: str) -> object:
+    raise OcrStoreError(f"OCR baseline manifest contains non-finite {value}")
+
+
+def _manifest_artifact_hints(manifest_bytes: bytes) -> list[tuple[str, str]]:
+    """Read only the role/path closure needed for a safe package scan.
+
+    These values are not trusted as evidence.  The complete canonical manifest
+    and every exact artifact byte are verified after the filesystem closure has
+    been established.
+    """
+    try:
+        payload = json.loads(
+            manifest_bytes.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_manifest_pairs,
+            parse_constant=_reject_nonfinite_manifest_constant,
+        )
+    except OcrStoreError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OcrStoreError("OCR baseline manifest is missing or corrupt") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("artifacts"), list):
+        raise OcrStoreError("OCR baseline manifest has no artifact descriptors")
+    hints: list[tuple[str, str]] = []
+    roles: set[str] = set()
+    paths: set[str] = set()
+    folded_paths: set[str] = set()
+    for descriptor in payload["artifacts"]:
+        if not isinstance(descriptor, dict):
+            raise OcrStoreError("OCR baseline artifact descriptor is invalid")
+        role = descriptor.get("role")
+        if not isinstance(role, str) or not role or role in roles:
+            raise OcrStoreError("OCR baseline artifact roles must be unique")
+        path = _strict_ocr_bundle_relative_path(
+            descriptor.get("path"),
+            f"OCR baseline {role} path",
+        )
+        if path == DEFAULT_MANIFEST_PATH:
+            raise OcrStoreError("OCR baseline artifact conflicts with its manifest")
+        if path in paths or path.casefold() in folded_paths:
+            raise OcrStoreError("OCR baseline artifact paths must be unique")
+        roles.add(role)
+        paths.add(path)
+        folded_paths.add(path.casefold())
+        hints.append((role, path))
+    if not hints:
+        raise OcrStoreError("OCR baseline manifest has no artifact descriptors")
+    return hints
+
+
+def _ocr_baseline_media_type(role: str, logical_path: str) -> str:
+    if role.endswith("_TEX") or logical_path.lower().endswith(".tex"):
+        return "application/x-tex"
+    if role.endswith("_PDF") or logical_path.lower().endswith(".pdf"):
+        return "application/pdf"
+    if role.startswith("COMPILE_LOG_") or logical_path.lower().endswith(".log"):
+        return "text/plain"
+    if logical_path.lower().endswith(".json"):
+        return "application/json"
+    return "application/octet-stream"
+
+
+def load_verified_ocr_baseline_bundle(
+    store: OcrRunStore,
+    run_id: str,
+) -> VerifiedOcrBaselineBundle:
+    """Load and recompute the immutable OCR-only baseline package.
+
+    The manifest is only a commit marker, never a trusted claim.  This loader
+    requires the directory to contain exactly the described files, checks the
+    independent source hash from the run snapshot, and returns the verified
+    bytes that an analysis caller must consume.
+    """
+    snapshot = store.load_snapshot(run_id)
+    store.verify_source(run_id)
+    manifest_relative = _strict_ocr_bundle_relative_path(
+        DEFAULT_MANIFEST_PATH,
+        "OCR baseline manifest path",
+    )
+    artifacts_root = store.run_dir(run_id) / "artifacts"
+    if not artifacts_root.is_dir() or _path_is_reparse_point(artifacts_root):
+        raise OcrStoreError("OCR artifacts root is not a plain directory")
+    package_root = artifacts_root / _OCR_BASELINE_PACKAGE_DIRECTORY
+    if not package_root.is_dir() or _path_is_reparse_point(package_root):
+        raise OcrStoreError("OCR baseline package is not available")
+    manifest_path = package_root.joinpath(*manifest_relative.split("/"))
+    manifest_parent = package_root
+    for part in manifest_relative.split("/")[:-1]:
+        manifest_parent = manifest_parent / part
+        if (
+            not manifest_parent.is_dir()
+            or _path_is_reparse_point(manifest_parent)
+        ):
+            raise OcrStoreError("OCR baseline manifest parent is not a plain directory")
+    if not manifest_path.is_file() or _path_is_reparse_point(manifest_path):
+        raise OcrStoreError("OCR baseline manifest is not available")
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+    except OSError as exc:
+        raise OcrStoreError("OCR baseline manifest cannot be read") from exc
+    hints = _manifest_artifact_hints(manifest_bytes)
+    expected_files = {manifest_relative, *(path for _, path in hints)}
+    actual_files, _ = _scan_ocr_bundle_tree(
+        package_root,
+        expected_files=expected_files,
+    )
+    if actual_files != expected_files:
+        missing = sorted(expected_files - actual_files)
+        raise OcrStoreError(
+            f"OCR baseline package is missing required files: {missing}"
+        )
+
+    artifact_bytes: dict[str, bytes] = {}
+    for _, logical_path in hints:
+        path = package_root.joinpath(*logical_path.split("/"))
+        if not path.is_file() or _path_is_reparse_point(path):
+            raise OcrStoreError(
+                f"OCR baseline artifact is not a plain file: {logical_path}"
+            )
+        try:
+            artifact_bytes[logical_path] = path.read_bytes()
+        except OSError as exc:
+            raise OcrStoreError(
+                f"OCR baseline artifact cannot be read: {logical_path}"
+            ) from exc
+    try:
+        manifest = verify_ocr_baseline_manifest(
+            manifest_bytes,
+            artifact_bytes,
+            expected_source_sha256=snapshot.source_sha256,
+        )
+    except OcrBaselineManifestError as exc:
+        raise OcrStoreError("OCR baseline package failed verification") from exc
+
+    verified_payload = manifest.to_dict()
+    descriptors = verified_payload["artifacts"]
+    artifacts_by_role: dict[str, VerifiedOcrBaselineArtifact] = {}
+    for descriptor in descriptors:
+        role = str(descriptor["role"])
+        logical_path = str(descriptor["path"])
+        data = artifact_bytes[logical_path]
+        artifacts_by_role[role] = VerifiedOcrBaselineArtifact(
+            role=role,
+            logical_path=logical_path,
+            path=package_root.joinpath(*logical_path.split("/")),
+            data=data,
+            sha256=str(descriptor["sha256"]),
+            media_type=_ocr_baseline_media_type(role, logical_path),
+        )
+    return VerifiedOcrBaselineBundle(
+        root=package_root,
+        manifest_path=manifest_path,
+        manifest=manifest,
+        artifacts_by_role=MappingProxyType(artifacts_by_role),
+    )
 
 
 def resolve_ocr_artifact(
@@ -137,6 +375,16 @@ def resolve_ocr_artifact(
         expected = manifest.get("raw_ocr_sha256") if normalized == "raw-ocr" else ""
         digest = _verified(path, expected, f"OCR artifact {normalized}")
         return VerifiedOcrArtifact(normalized, path, configured_name, media_type, digest)
+
+    if normalized == "ocr-baseline-manifest":
+        bundle = load_verified_ocr_baseline_bundle(store, run_id)
+        return VerifiedOcrArtifact(
+            normalized,
+            bundle.manifest_path,
+            configured_name,
+            media_type,
+            bundle.manifest.sha256,
+        )
 
     manifest_path = artifacts / "baseline-manifest.json"
     manifest = _load_json(manifest_path, "OCR baseline manifest")

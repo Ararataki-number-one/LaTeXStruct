@@ -152,6 +152,14 @@ def assess_ocr_quality(job: Mapping[str, Any], resources: Mapping[str, Any] | No
     blockers: list[dict] = []
     warnings: list[dict] = []
 
+    recovery_restore_error = str(job.get("recovery_restore_error") or "").strip()
+    if recovery_restore_error:
+        blockers.append({
+            "code": "recovery_evidence_invalid",
+            "message": "OCR 恢复证据日志损坏或哈希链校验失败",
+            "pages": [],
+        })
+
     if not terminal_complete:
         blockers.append({
             "code": "pages_incomplete",
@@ -245,7 +253,11 @@ def assess_ocr_quality(job: Mapping[str, Any], resources: Mapping[str, Any] | No
         # Standard mode keeps its compatibility promise: warnings remain
         # visible but do not turn a complete OCR snapshot into an error.
         page_gate_passed = terminal_complete and not any(
-            item.get("code") in {"pages_incomplete", "resources_unresolved"}
+            item.get("code") in {
+                "pages_incomplete",
+                "resources_unresolved",
+                "recovery_evidence_invalid",
+            }
             for item in blockers
         )
     workflow_gate_passed = page_gate_passed and resource_gate_passed is not False

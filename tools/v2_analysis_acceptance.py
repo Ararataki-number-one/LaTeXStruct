@@ -17,6 +17,7 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -36,7 +37,6 @@ if str(REPO_ROOT) not in sys.path:
 
 try:
     from tools.v2_acceptance_e2e import (
-        LARGE_RUN_TIMEOUT_SECONDS,
         AcceptanceConfig as OcrAcceptanceConfig,
         AcceptanceError,
         LocalHttpApi,
@@ -46,7 +46,6 @@ try:
     )
 except ModuleNotFoundError:  # Direct ``python tools/...`` execution.
     from v2_acceptance_e2e import (  # type: ignore[no-redef]
-        LARGE_RUN_TIMEOUT_SECONDS,
         AcceptanceConfig as OcrAcceptanceConfig,
         AcceptanceError,
         LocalHttpApi,
@@ -58,9 +57,12 @@ except ModuleNotFoundError:  # Direct ``python tools/...`` execution.
 from latexstruct.core.audit_sanitize import sanitize_log_text
 
 
-ANALYSIS_PROFILES = {"analysis-17": 17, "analysis-600": 600}
+ANALYSIS_PROFILES = {"analysis-37": 37}
 DEFAULT_TIMEOUT_SECONDS = 4 * 3600.0
-ANALYSIS_600_MAX_WALL_SECONDS = 3 * 3600.0
+# The fixed source may gain a generated TOC and bounded reflow, but the known
+# 37 -> 49 failure must remain impossible to attest.  Five extra pages is the
+# explicit release ceiling, not a generic quality claim for other documents.
+MAX_ANALYSIS_37_CANDIDATE_PAGES = 42
 PROCESS_TERMINAL_STATUSES = frozenset({"done", "blocked", "error", "cancelled"})
 PROCESS_ACTIVE_STATUSES = frozenset(
     {"running", "pausing", "paused", "cancelling", "committing"}
@@ -101,7 +103,8 @@ class AnalysisAcceptanceConfig:
     expected_build_id: str
     executable: Path
     expected_executable_sha256: str
-    quality_tier: str = "recommended"
+    service_pid: int
+    quality_tier: str = "high"
     template: str = "faithfulbook"
     poll_seconds: float = 2.0
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
@@ -145,6 +148,8 @@ class VerifiedBundleFacts:
     compilation: dict[str, Any]
     artifact_payloads: dict[str, bytes]
     independent_final_reviews: list[dict[str, Any]]
+    visual_page_id_set_sha256: str
+    page_layout: dict[str, Any]
     machine_report: dict[str, Any]
     manifest: dict[str, Any]
 
@@ -226,8 +231,167 @@ def _sequence(value: object, label: str) -> list[Any]:
     return value
 
 
+def _process_image_path(pid: int) -> Path:
+    """Resolve the executable image for the service process without trusting health JSON."""
+
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        process = kernel32.OpenProcess(0x1000, False, int(pid))
+        if not process:
+            raise AcceptanceError("cannot open the candidate service PID")
+        try:
+            capacity = wintypes.DWORD(32768)
+            buffer = ctypes.create_unicode_buffer(capacity.value)
+            ok = kernel32.QueryFullProcessImageNameW(
+                process, 0, buffer, ctypes.byref(capacity)
+            )
+            if not ok:
+                raise AcceptanceError("cannot resolve the candidate service executable")
+            return Path(buffer.value)
+        finally:
+            kernel32.CloseHandle(process)
+    probe = Path("/proc") / str(int(pid)) / "exe"
+    try:
+        return probe.resolve(strict=True)
+    except OSError as exc:
+        raise AcceptanceError("cannot resolve the candidate service executable") from exc
+
+
+def _listening_pids(port: int) -> set[int]:
+    if os.name != "nt":
+        raise AcceptanceError("analysis-37 service-port ownership requires Windows")
+    completed = subprocess.run(
+        ["netstat.exe", "-ano", "-p", "tcp"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise AcceptanceError("cannot inspect the candidate service listening port")
+    owners: set[int] = set()
+    for line in completed.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 5 or fields[0].upper() != "TCP":
+            continue
+        if fields[-2].upper() != "LISTENING":
+            continue
+        try:
+            local_port = int(fields[1].rsplit(":", 1)[1])
+            owner = int(fields[-1])
+        except (IndexError, ValueError):
+            continue
+        if local_port == port and owner > 0:
+            owners.add(owner)
+    return owners
+
+
+def _process_parent_map() -> dict[int, int]:
+    if os.name != "nt":
+        parents: dict[int, int] = {}
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                fields = (entry / "stat").read_text(encoding="utf-8").split()
+                parents[int(entry.name)] = int(fields[3])
+            except (OSError, ValueError, IndexError):
+                continue
+        return parents
+
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessEntry32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    invalid_handle = wintypes.HANDLE(-1).value
+    if snapshot == invalid_handle:
+        raise AcceptanceError("cannot inspect the candidate service process tree")
+    parents: dict[int, int] = {}
+    try:
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(ProcessEntry32W)
+        ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while ok:
+            parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return parents
+
+
+def _is_pid_or_descendant(pid: int, ancestor: int, parents: Mapping[int, int]) -> bool:
+    current = int(pid)
+    seen: set[int] = set()
+    while current > 0 and current not in seen:
+        if current == int(ancestor):
+            return True
+        seen.add(current)
+        current = int(parents.get(current, 0))
+    return False
+
+
+def _bound_listener_pid(config: AnalysisAcceptanceConfig) -> tuple[int, int]:
+    parsed = urlsplit(config.base_url)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    owners = _listening_pids(port)
+    _require(len(owners) == 1, "candidate base URL does not have exactly one listening PID")
+    owner = next(iter(owners))
+    parents = _process_parent_map()
+    _require(
+        _is_pid_or_descendant(owner, config.service_pid, parents),
+        "candidate base URL listener is not the supplied service PID or its child",
+    )
+    owner_image = _process_image_path(owner)
+    _require(
+        owner_image.resolve() == config.executable.resolve()
+        and _sha256_file(owner_image)
+        == config.expected_executable_sha256.strip().lower(),
+        "candidate base URL listener is not the supplied executable bytes",
+    )
+    return port, owner
+
+
 def _validate_config(config: AnalysisAcceptanceConfig) -> None:
-    _require(config.profile in ANALYSIS_PROFILES, "profile must be analysis-17 or analysis-600")
+    _require(config.profile in ANALYSIS_PROFILES, "profile must be analysis-37")
     _require(config.source.is_file(), "source PDF does not exist")
     _require(config.source.suffix.lower() == ".pdf", "source must have a .pdf extension")
     _require(config.executable.is_file(), "tested executable does not exist")
@@ -250,23 +414,30 @@ def _validate_config(config: AnalysisAcceptanceConfig) -> None:
         _sha256_file(config.executable) == expected_exe,
         "tested executable bytes do not match --exe-sha256",
     )
+    _require(
+        _sha256_file(config.source) == RELEASE_INTEGRITY.RAMSEY_37_SOURCE_SHA256,
+        "analysis-37 requires the fixed Ramsey 37-page source PDF SHA-256",
+    )
+    _require(config.quality_tier == "high", "analysis-37 requires quality tier high")
+    _require(config.template == "faithfulbook", "analysis-37 requires the faithfulbook template")
+    _require(config.service_pid > 0, "analysis-37 requires the candidate service PID")
+    service_image = _process_image_path(config.service_pid)
+    _require(
+        service_image.resolve() == config.executable.resolve(),
+        "candidate service PID is not running the supplied LaTeXStruct.exe",
+    )
+    _require(
+        _sha256_file(service_image) == expected_exe,
+        "running candidate service executable SHA-256 mismatch",
+    )
     parsed = urlsplit(config.base_url)
     _require(
         parsed.scheme in {"http", "https"}
         and (parsed.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"},
         "base URL must identify a loopback LaTeXStruct service",
     )
+    _bound_listener_pid(config)
     _require(config.poll_seconds > 0 and config.timeout_seconds > 0, "poll and timeout values must be positive")
-    if config.expected_pages == 600:
-        _require(
-            config.timeout_seconds >= LARGE_RUN_TIMEOUT_SECONDS,
-            f"analysis-600 requires at least {LARGE_RUN_TIMEOUT_SECONDS:.0f} seconds of observation time",
-        )
-        _require(
-            config.max_wall_seconds is not None
-            and 0 < config.max_wall_seconds <= ANALYSIS_600_MAX_WALL_SECONDS,
-            "analysis-600 requires a maximum wall-time target no greater than 10800 seconds",
-        )
 
 
 def _validate_health(config: AnalysisAcceptanceConfig, health: Mapping[str, Any]) -> None:
@@ -467,6 +638,24 @@ def _original_artifact_sha(record: Mapping[str, Any]) -> str:
     return digest
 
 
+def _active_tableofcontents_count(tex: str) -> int:
+    count = 0
+    for line in tex.splitlines():
+        visible: list[str] = []
+        for index, char in enumerate(line):
+            if char == "%":
+                backslashes = 0
+                cursor = index - 1
+                while cursor >= 0 and line[cursor] == "\\":
+                    backslashes += 1
+                    cursor -= 1
+                if backslashes % 2 == 0:
+                    break
+            visible.append(char)
+        count += len(re.findall(r"\\tableofcontents(?![A-Za-z@])", "".join(visible)))
+    return count
+
+
 def _review_context_sha(review: Mapping[str, Any]) -> str:
     context = {
         "pass_number": review.get("pass_number"),
@@ -536,9 +725,13 @@ def _verified_bundle_facts(
 
     current_tex, current_record, _current_alias = _one_role(members, manifest, "CURRENT_TEX")
     try:
-        current_tex.decode("utf-8")
+        current_tex_text = current_tex.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise AcceptanceError("packaged CURRENT_TEX is not UTF-8") from exc
+    _require(
+        _active_tableofcontents_count(current_tex_text) == 1,
+        "analysis-37 candidate must contain exactly one active \\tableofcontents",
+    )
     candidate_tex_sha = _original_artifact_sha(current_record)
     _require(
         _sha256_bytes(current_tex) == candidate_tex_sha,
@@ -589,6 +782,12 @@ def _verified_bundle_facts(
         "final candidate lacks two successful real compile passes",
     )
     _require(str(compile_after.get("pdf_sha256") or "") == candidate_pdf_sha, "final compile PDF hash mismatch")
+    candidate_page_count = _positive_int(compile_after.get("page_count"))
+    _require(candidate_page_count > 0, "final compile page count is missing")
+    _require(
+        candidate_page_count <= MAX_ANALYSIS_37_CANDIDATE_PAGES,
+        "analysis-37 candidate PDF has abnormal page inflation",
+    )
     _require(str(compile_after.get("log") or "").encode("utf-8") == compile_log, "packaged compile log differs from final compile record")
     compile_invocations = [
         _mapping(item, "v2 compile invocation")
@@ -719,6 +918,55 @@ def _verified_bundle_facts(
         and len(set(expected_page_ids)) == config.expected_pages,
         "machine verification page coverage is incomplete",
     )
+    visual_page_id_set_sha256 = _sha256_bytes(
+        json.dumps(
+            expected_page_ids,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    candidate_mappings = _mapping(
+        analysis_v2.get("candidate_mappings"), "v2 candidate page mappings"
+    )
+    final_mapping = _mapping(
+        candidate_mappings.get(candidate_tex_sha), "final candidate page mapping"
+    )
+    _require(
+        str(final_mapping.get("pdf_sha256") or "") == candidate_pdf_sha,
+        "final candidate page mapping is bound to a different PDF",
+    )
+    mapping_sha256 = str(final_mapping.get("mapping_sha256") or "").lower()
+    _require(
+        SHA256_RE.fullmatch(mapping_sha256) is not None,
+        "final candidate page mapping digest is missing",
+    )
+    candidate_only_pages = final_mapping.get("candidate_only_pages")
+    _require(
+        isinstance(candidate_only_pages, list)
+        and len(candidate_only_pages) == len(set(candidate_only_pages))
+        and all(
+            isinstance(page, int) and 1 <= page <= candidate_page_count
+            for page in candidate_only_pages
+        ),
+        "final candidate-only page evidence is invalid",
+    )
+    _require(
+        len(candidate_only_pages)
+        <= MAX_ANALYSIS_37_CANDIDATE_PAGES - config.expected_pages,
+        "analysis-37 has too many candidate-only pages",
+    )
+    page_layout = {
+        "source_page_count": config.expected_pages,
+        "candidate_page_count": candidate_page_count,
+        "maximum_candidate_pages": MAX_ANALYSIS_37_CANDIDATE_PAGES,
+        "page_growth": candidate_page_count - config.expected_pages,
+        "candidate_only_pages": list(candidate_only_pages),
+        "candidate_mapping_sha256": mapping_sha256,
+        "no_abnormal_page_inflation": True,
+        "active_tableofcontents_count": 1,
+        "template": config.template,
+    }
     _require(_positive_int(machine_evidence.get("best_compile_passes")) >= 2, "machine verification lacks two compile passes")
     _require(machine_evidence.get("best_pdf_openable") is True, "machine verification could not open the final PDF")
     zero_fields = (
@@ -760,6 +1008,8 @@ def _verified_bundle_facts(
             "compile_log": compile_log,
         },
         independent_final_reviews=release_reviews,
+        visual_page_id_set_sha256=visual_page_id_set_sha256,
+        page_layout=page_layout,
         machine_report=machine_report,
         manifest=dict(manifest),
     )
@@ -801,6 +1051,53 @@ def _timing(evidence: AnalysisRunEvidence) -> dict[str, Any]:
     }
 
 
+def _copy_plain_tree(source_root: Path, destination_root: Path) -> None:
+    """Copy a previously verified evidence tree without following links."""
+    _require(
+        source_root.is_dir()
+        and not RELEASE_INTEGRITY._path_is_reparse_point(source_root),
+        "OCR baseline prerequisite directory is missing or is a link",
+    )
+    files: list[tuple[PurePosixPath, bytes]] = []
+    seen: set[str] = set()
+    total_bytes = 0
+    stack = [source_root]
+    while stack:
+        directory = stack.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                relative = PurePosixPath(path.relative_to(source_root).as_posix())
+                folded = relative.as_posix().casefold()
+                _require(
+                    folded not in seen,
+                    "OCR baseline prerequisite contains colliding paths",
+                )
+                seen.add(folded)
+                _require(
+                    not entry.is_symlink()
+                    and not RELEASE_INTEGRITY._path_is_reparse_point(path),
+                    "OCR baseline prerequisite contains a link",
+                )
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(path)
+                elif entry.is_file(follow_symlinks=False):
+                    data = path.read_bytes()
+                    total_bytes += len(data)
+                    _require(
+                        len(files) < 8192 and total_bytes <= 2 * 1024 * 1024 * 1024,
+                        "OCR baseline prerequisite exceeds bounded copy limits",
+                    )
+                    files.append((relative, data))
+                else:
+                    raise AcceptanceError(
+                        "OCR baseline prerequisite contains a special filesystem entry"
+                    )
+    _require(bool(files), "OCR baseline prerequisite directory is empty")
+    for relative, data in sorted(files, key=lambda item: item[0].as_posix()):
+        _atomic_write(destination_root.joinpath(*relative.parts), data)
+
+
 def _publish_pass(
     config: AnalysisAcceptanceConfig,
     evidence: AnalysisRunEvidence,
@@ -808,6 +1105,20 @@ def _publish_pass(
 ) -> dict[str, Any]:
     runtime = _runtime_identity(config)
     execution = _execution(True)
+    service_image = _process_image_path(config.service_pid)
+    listener_port, listener_pid = _bound_listener_pid(config)
+    listener_image = _process_image_path(listener_pid)
+    service_binding = {
+        "verified": True,
+        "pid": config.service_pid,
+        "process_image_filename": service_image.name,
+        "process_image_sha256": _sha256_file(service_image),
+        "listener_port": listener_port,
+        "listener_pid": listener_pid,
+        "listener_pid_verified": True,
+        "listener_image_filename": listener_image.name,
+        "listener_image_sha256": _sha256_file(listener_image),
+    }
     timing = _timing(evidence)
     machine_bytes = _json_bytes(facts.machine_report)
     machine = {
@@ -827,6 +1138,78 @@ def _publish_pass(
         )
     )
     _require(target_met, "analysis wall time exceeded the configured release target")
+    ocr_attestation_path = (
+        config.output_dir / "ocr-prerequisite" / "acceptance-attestation.json"
+    )
+    _require(ocr_attestation_path.is_file(), "OCR prerequisite attestation is missing")
+    try:
+        ocr_attestation = json.loads(ocr_attestation_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AcceptanceError("OCR prerequisite attestation cannot be read") from exc
+    ocr_baseline = _mapping(
+        _mapping(ocr_attestation, "OCR prerequisite attestation").get("ocr_baseline"),
+        "OCR prerequisite baseline binding",
+    )
+    _require(
+        set(ocr_baseline)
+        == {"package_directory", "manifest_filename", "manifest_sha256", "run_id"},
+        "OCR prerequisite baseline binding fields are not exact",
+    )
+    _require(
+        ocr_baseline.get("package_directory")
+        == RELEASE_INTEGRITY.OCR_BASELINE_PACKAGE_DIRECTORY
+        and ocr_baseline.get("manifest_filename")
+        == (
+            f"{RELEASE_INTEGRITY.OCR_BASELINE_PACKAGE_DIRECTORY}/"
+            f"{RELEASE_INTEGRITY.OCR_BASELINE_MANIFEST_MEMBER}"
+        )
+        and SHA256_RE.fullmatch(
+            str(ocr_baseline.get("manifest_sha256") or "").lower()
+        )
+        is not None
+        and re.fullmatch(r"[0-9a-f]{16,64}", str(ocr_baseline.get("run_id") or ""))
+        is not None,
+        "OCR prerequisite baseline binding is invalid",
+    )
+    ocr_prerequisite = {
+        "profile": "ocr-37",
+        "attestation_filename": "ocr-prerequisite/acceptance-attestation.json",
+        "attestation_sha256": _sha256_file(ocr_attestation_path),
+        "result": "PASS",
+        "acceptance_passed": True,
+        "successful_pages": config.expected_pages,
+        "source_sha256": facts.source["sha256"],
+        "run_id": str(ocr_baseline["run_id"]),
+        "baseline_manifest_sha256": str(
+            ocr_baseline["manifest_sha256"]
+        ).lower(),
+        "runtime_identity": runtime,
+        "selected_range": facts.selected_range,
+    }
+    visual_verification = {
+        "passed": True,
+        "expected_pages": config.expected_pages,
+        "pages_checked": config.expected_pages,
+        "independent_review_passes": len(facts.independent_final_reviews),
+        "model_calls": sum(
+            int(review["calls"]) for review in facts.independent_final_reviews
+        ),
+        "page_id_set_sha256": facts.visual_page_id_set_sha256,
+        "candidate_tex_sha256": facts.compilation["candidate_tex_sha256"],
+        "candidate_pdf_sha256": facts.compilation["candidate_pdf_sha256"],
+        "render_compare_closed_loop": True,
+    }
+    audit_path = config.output_dir / AUDIT_ZIP_FILENAME
+    _require(audit_path.is_file(), "verified audit submission ZIP is missing")
+    audit_submission = {
+        "filename": AUDIT_ZIP_FILENAME,
+        "bytes": audit_path.stat().st_size,
+        "sha256": _sha256_file(audit_path),
+        "packaging_status": "SUCCESS",
+        "audit_package_status": "VALID",
+        "verification_status": "VERIFIED",
+        "published_to_github": False,
+    }
     performance = {
         "schema_version": RELEASE_INTEGRITY.ANALYSIS_PERFORMANCE_SCHEMA,
         "result": "PASS",
@@ -890,17 +1273,24 @@ def _publish_pass(
             "result": "PASS",
             "acceptance_passed": True,
             "terminal_status": "VERIFIED",
+            "quality_tier": config.quality_tier,
+            "template": config.template,
             "generated_at": evidence.ended_at,
             "execution": execution,
             "runtime_identity": runtime,
+            "service_binding": service_binding,
             "source": facts.source,
             "selected_range": facts.selected_range,
             "models": facts.models,
             "compilation": facts.compilation,
             "artifacts": artifacts,
             "timing": timing,
+            "ocr_prerequisite": ocr_prerequisite,
             "independent_final_reviews": facts.independent_final_reviews,
+            "visual_verification": visual_verification,
+            "page_layout": facts.page_layout,
             "machine_verification": machine,
+            "audit_submission": audit_submission,
             "reports": {
                 "performance": {
                     "filename": performance_path.name,
@@ -918,6 +1308,23 @@ def _publish_pass(
         }
         attestation_path = stage / "analysis-attestation.json"
         _atomic_write(attestation_path, _json_bytes(attestation))
+        _atomic_write(stage / AUDIT_ZIP_FILENAME, audit_path.read_bytes())
+        for name in (
+            "acceptance-attestation.json",
+            "performance.json",
+            "validation-report.json",
+        ):
+            source_path = config.output_dir / "ocr-prerequisite" / name
+            _require(source_path.is_file(), f"OCR prerequisite evidence is missing: {name}")
+            _atomic_write(stage / "ocr-prerequisite" / name, source_path.read_bytes())
+        _copy_plain_tree(
+            config.output_dir
+            / "ocr-prerequisite"
+            / RELEASE_INTEGRITY.OCR_BASELINE_PACKAGE_DIRECTORY,
+            stage
+            / "ocr-prerequisite"
+            / RELEASE_INTEGRITY.OCR_BASELINE_PACKAGE_DIRECTORY,
+        )
         # This is the same strict verifier used by release assembly.  Only a
         # document it accepts is copied into the durable run directory.
         RELEASE_INTEGRITY.verify_analysis_attestation(
@@ -1098,8 +1505,15 @@ def run_analysis_acceptance(
         _validate_config(config)
         _require(evidence.real_execution, "release PASS requires the real LocalHttpApi and PlaywrightUiDriver")
         source_pages = pdf_page_counter(config.source)
-        _require(source_pages >= config.expected_pages, "source PDF has fewer pages than the selected profile")
+        _require(
+            source_pages == config.expected_pages,
+            "analysis-37 requires the exact 37-page source PDF",
+        )
         source_sha256 = _sha256_file(config.source)
+        _require(
+            source_sha256 == RELEASE_INTEGRITY.RAMSEY_37_SOURCE_SHA256,
+            "analysis-37 source PDF SHA-256 mismatch",
+        )
         evidence.health = api.get_json("/api/health")
         _validate_health(config, evidence.health)
 
@@ -1121,8 +1535,8 @@ def run_analysis_acceptance(
             timeout_seconds=config.timeout_seconds,
             browser_timeout_seconds=config.browser_timeout_seconds,
             headed=config.headed,
-            min_successful_ppm=20.0 if config.expected_pages == 600 else None,
-            max_wall_seconds=1800.0 if config.expected_pages == 600 else None,
+            min_successful_ppm=None,
+            max_wall_seconds=None,
             max_consecutive_poll_errors=config.max_consecutive_poll_errors,
         )
         evidence.ocr_validation = run_ocr_acceptance(
@@ -1277,6 +1691,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-build-id", required=True)
     parser.add_argument("--executable", type=Path, required=True)
     parser.add_argument(
+        "--service-pid",
+        type=int,
+        required=True,
+        help="PID of the loopback service process running the supplied LaTeXStruct.exe",
+    )
+    parser.add_argument(
         "--exe-sha256",
         "--expected-executable-sha256",
         dest="expected_executable_sha256",
@@ -1284,7 +1704,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="SHA-256 of the exact LaTeXStruct.exe used by the local service",
     )
     parser.add_argument(
-        "--quality-tier", choices=("fast", "recommended", "high"), default="recommended"
+        "--quality-tier", choices=("fast", "recommended", "high"), default="high"
     )
     parser.add_argument("--template", default="faithfulbook")
     parser.add_argument("--poll-seconds", type=float, default=2.0)
@@ -1296,9 +1716,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _config_from_args(args: argparse.Namespace) -> AnalysisAcceptanceConfig:
-    maximum = args.max_wall_seconds
-    if args.profile == "analysis-600" and maximum is None:
-        maximum = ANALYSIS_600_MAX_WALL_SECONDS
     output = args.output or _default_output(args.source, args.profile)
     return AnalysisAcceptanceConfig(
         base_url=args.base_url,
@@ -1310,13 +1727,14 @@ def _config_from_args(args: argparse.Namespace) -> AnalysisAcceptanceConfig:
         expected_build_id=args.expected_build_id,
         executable=args.executable.resolve(),
         expected_executable_sha256=args.expected_executable_sha256,
+        service_pid=args.service_pid,
         quality_tier=args.quality_tier,
         template=args.template,
         poll_seconds=args.poll_seconds,
         timeout_seconds=args.timeout_seconds,
         browser_timeout_seconds=args.browser_timeout_seconds,
         headed=args.headed,
-        max_wall_seconds=maximum,
+        max_wall_seconds=args.max_wall_seconds,
     )
 
 

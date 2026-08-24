@@ -3,7 +3,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import zipfile
+from io import BytesIO
 from pathlib import Path
+
+import pytest
 
 
 TOOL = Path(__file__).resolve().parents[1] / "tools" / "v2_acceptance_e2e.py"
@@ -15,6 +19,23 @@ SPEC.loader.exec_module(MODULE)
 
 TEST_COMMIT = "c" * 40
 TEST_BUILD_ID = "build-200"
+
+
+def _recomputable_baseline_zip() -> tuple[bytes, bytes, str]:
+    from latexstruct.core.ocr_manifest import build_ocr_baseline_manifest
+    from tests.test_ocr_manifest import RUN_ID, _fixture
+
+    values = _fixture()
+    bundle = build_ocr_baseline_manifest(**values)
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("safe-unrelated-member.txt", b"ignored")
+        for path, data in bundle.files().items():
+            archive.writestr(
+                MODULE.OCR_BASELINE_ARCHIVE_PREFIX + path,
+                data,
+            )
+    return output.getvalue(), values["source"].data, RUN_ID
 
 
 class FakeClock:
@@ -177,6 +198,76 @@ def _config(tmp_path: Path, pdf: Path, pages: int = 17, **overrides):
     return MODULE.AcceptanceConfig(**values)
 
 
+def test_recomputable_baseline_subtree_is_verified_and_staged(tmp_path: Path):
+    package, source, run_id = _recomputable_baseline_zip()
+    pdf = tmp_path / "source.pdf"
+    pdf.write_bytes(source)
+    config = _config(tmp_path, pdf, pages=2)
+    config.output_dir.mkdir()
+    evidence = MODULE.RunEvidence()
+
+    class PackageApi:
+        def download(self, path: str):
+            assert path == f"/api/ocr/jobs/{run_id}/package"
+            return MODULE.HttpDownload(
+                package,
+                {"content-type": "application/zip"},
+                200,
+            )
+
+    MODULE._download_ocr_baseline_package(
+        PackageApi(),
+        run_id,
+        config,
+        evidence,
+        source_sha256=MODULE._sha256_bytes(source),
+    )
+
+    assert evidence.checks[-1].passed is True
+    assert evidence.ocr_baseline["run_id"] == run_id
+    manifest = (
+        config.output_dir
+        / MODULE.OCR_BASELINE_PACKAGE_DIRECTORY
+        / MODULE.OCR_BASELINE_MANIFEST_MEMBER
+    )
+    assert manifest.is_file()
+    assert MODULE._sha256_file(manifest) == evidence.ocr_baseline["manifest_sha256"]
+
+
+@pytest.mark.parametrize(
+    "bad_members",
+    [
+        [("../escape.txt", b"escape")],
+        [("Case.txt", b"one"), ("case.txt", b"two")],
+        [("C:/absolute.txt", b"absolute")],
+    ],
+)
+def test_ocr_package_zip_rejects_unsafe_or_colliding_members(bad_members):
+    package, source, _run_id = _recomputable_baseline_zip()
+    source_archive = zipfile.ZipFile(BytesIO(package), "r")
+    output = BytesIO()
+    with source_archive, zipfile.ZipFile(
+        output, "w", compression=zipfile.ZIP_DEFLATED
+    ) as archive:
+        for info in source_archive.infolist():
+            archive.writestr(info.filename, source_archive.read(info))
+        for name, data in bad_members:
+            archive.writestr(name, data)
+
+    with pytest.raises(MODULE.AcceptanceError):
+        MODULE._verified_ocr_baseline_members(
+            output.getvalue(),
+            expected_source_sha256=MODULE._sha256_bytes(source),
+        )
+
+
+def test_zip_member_validator_rejects_backslashes_before_extraction():
+    info = zipfile.ZipInfo("safe.txt")
+    info.filename = "back\\slash.txt"
+    with pytest.raises(MODULE.AcceptanceError, match="invalid ZIP member path"):
+        MODULE._strict_zip_member(info)
+
+
 def test_test_doubles_cannot_mint_release_pass_but_reports_are_recomputable(tmp_path: Path):
     source = b"%PDF-1.7\nsource bytes\n"
     pdf = tmp_path / "17-pages.pdf"
@@ -197,7 +288,8 @@ def test_test_doubles_cannot_mint_release_pass_but_reports_are_recomputable(tmp_
 
     assert result["acceptance_passed"] is False
     assert {item["id"] for item in result["failed_checks"]} == {
-        "real-runtime-drivers"
+        "real-runtime-drivers",
+        "ocr-baseline-binding",
     }
     assert ui.calls == [(1, 17, 17)]
     assert api.downloaded == list(MODULE.REQUIRED_ARTIFACTS)

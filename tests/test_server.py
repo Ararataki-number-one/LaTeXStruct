@@ -2181,6 +2181,7 @@ def test_pdf_render_failure_does_not_block_later_pages_and_retry_rerenders_missi
 
                 assert partial["status"] == "partial", partial
                 assert partial["pages"]["1"]["status"] == "done"
+                assert partial["pages"]["1"]["can_retry"] is False
                 assert partial["pages"]["2"]["status"] == "error"
                 assert partial["pages"]["2"]["preview_ready"] is False
                 assert partial["pages"]["2"]["can_retry"] is True
@@ -2197,7 +2198,8 @@ def test_pdf_render_failure_does_not_block_later_pages_and_retry_rerenders_missi
                 assert body["compile_status"] == "SOURCE_PREVIEW"
                 assert body["progress"] < 1.0
                 assert body["pages"]["2"]["preview_ready"] is True
-                assert render_calls == [(1, 200), (2, 200), (3, 200), (2, 300)]
+                assert sorted(render_calls[:3]) == [(1, 200), (2, 200), (3, 200)]
+                assert render_calls[3:] == [(2, 300)]
                 assert vision_calls == [1, 3, 2]
                 assert c.get(f"/api/ocr/jobs/{jid}/pages/2").status_code == 200
         finally:
@@ -2270,6 +2272,7 @@ def test_pdf_ocr_pause_stops_before_next_page_and_resumes_same_job():
                 assert calls == [1]
                 assert paused["pages"]["1"]["status"] == "done"
                 assert paused["pages"]["2"]["status"] == "pending"
+                assert paused["pages"]["2"]["attempts"] == 0
 
                 resumed = c.post(f"/api/ocr/jobs/{jid}/resume")
                 assert resumed.status_code == 200
@@ -2495,7 +2498,7 @@ def test_pdf_ocr_preview_revision_grows_after_each_page_without_finishing_early(
             assert int(final_preview.headers["x-latexstruct-ocr-chars"]) == len(final_preview.text)
             assert "original page 4" in final_preview.text
             assert final["usage"]["calls"] == 3
-            assert render_calls == [[2], [3], [4]]
+            assert sorted(render_calls) == [[2], [3], [4]]
         finally:
             allow_second.set()
             allow_third.set()
@@ -3729,16 +3732,23 @@ def test_ocr_quality_gate_retry_forwards_controlled_correction_feedback():
             corrected = next(
                 payload
                 for payload in response_payloads
-                if "Fig. 1.1. Visible caption" in str(payload.get("latex") or "")
-                and payload.get("figures")
+                if "Fig. 1.1. Visible caption" in str(
+                    (payload.get("transport_response") or {}).get("latex") or ""
+                )
+                and (payload.get("transport_response") or {}).get("figures")
             )
-            assert corrected["figures"][0]["path"] == (
+            assert corrected["model_raw_latex"] != (
+                corrected["transport_response"]["latex"]
+            )
+            assert corrected["transport_response"]["figures"][0]["path"] == (
                 "figures/page_0001_figure_01.png"
             )
-            assert corrected["figures"][0]["bbox_normalized"] == [
+            assert corrected["transport_response"]["figures"][0]["bbox_normalized"] == [
                 0.1, 0.1, 0.9, 0.8,
             ]
-            assert corrected["figures"][0]["bbox_pixels"] == [12, 12, 108, 96]
+            assert corrected["transport_response"]["figures"][0]["bbox_pixels"] == [
+                12, 12, 108, 96,
+            ]
         finally:
             with srv._ocr_jobs_lock:
                 job = srv._ocr_jobs.pop(jid, {}) if jid else {}
@@ -4391,6 +4401,65 @@ def test_ocr_import_rejects_unknown_structure_mode():
         response = c.post("/api/ocr/jobs/missing/import?mode=freeform-agent")
         assert response.status_code == 400
         assert "AI 或规则" in response.json()["detail"]
+
+
+def test_ocr_image_references_bind_v2_page_markers_without_legacy_breaks():
+    raw = "\n".join([
+        "% Page 1",
+        "Front matter without a figure.",
+        "% Page 23",
+        r"\includegraphics[width=0.46\linewidth,height=0.72\textheight,keepaspectratio]{figures/page_0023_figure_01.png}",
+        "% Page 27",
+        r"\includegraphics[width=0.43\linewidth,height=0.72\textheight,keepaspectratio]{figures/page_0027_figure_01.png}",
+    ])
+
+    references, unsupported = srv._ocr_image_references(raw)
+
+    assert unsupported == []
+    assert [item["source_page"] for item in references] == [23, 27]
+    assert [item["index"] for item in references] == [1, 1]
+    assert [item["width_hint"] for item in references] == [0.46, 0.43]
+
+
+def test_ocr_v2_figure_path_owns_source_page_when_no_break_exists():
+    references, unsupported = srv._ocr_image_references(
+        "% Page 1\n"
+        r"\includegraphics{figures/page_0023_figure_01.png}"
+    )
+
+    assert unsupported == []
+    assert references[0]["source_page"] == 23
+
+
+def test_bind_v2_figure_paths_rewrites_only_active_parser_visible_spans():
+    original = "\n".join([
+        r"% \includegraphics{images/page_23_1}",
+        r"\verb|\includegraphics{images/page_23_1}|",
+        r"\begin{verbatim}",
+        r"\includegraphics{images/page_23_1}",
+        r"\end{verbatim}",
+        r"\includegraphics [ width=.5\linewidth ] { images\page_23_1 }",
+    ])
+    figure = {
+        "path": "images/page_23_1",
+        "index": 1,
+        "bbox_normalized": [0.1, 0.2, 0.8, 0.7],
+        "bbox_pixels": [100, 200, 800, 700],
+    }
+
+    rebound, figures = srv._bind_v2_ocr_figure_paths(original, [figure], 23)
+
+    host_path = "figures/page_0023_figure_01.png"
+    assert rebound.count(host_path) == 1
+    assert r"% \includegraphics{images/page_23_1}" in rebound
+    assert r"\verb|\includegraphics{images/page_23_1}|" in rebound
+    assert "\n".join([
+        r"\begin{verbatim}",
+        r"\includegraphics{images/page_23_1}",
+        r"\end{verbatim}",
+    ]) in rebound
+    assert figures[0]["path"] == host_path
+    assert figures[0]["index"] == 1
 
 
 def test_ocr_import_never_opens_review_with_unresolved_images():

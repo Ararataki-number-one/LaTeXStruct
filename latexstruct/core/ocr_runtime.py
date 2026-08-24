@@ -20,7 +20,10 @@ import hmac
 import json
 import math
 import os
+import platform
 import re
+import stat
+import sys
 import threading
 import time
 import uuid
@@ -28,7 +31,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
@@ -37,6 +40,7 @@ OCR_RUNTIME_SCHEMA = "latexstruct-ocr-runtime-v1"
 OCR_PAGE_RECORD_SCHEMA = "latexstruct-ocr-page-record-v1"
 OCR_RAW_FREEZE_SCHEMA = "latexstruct-raw-ocr-freeze-v1"
 OCR_BASELINE_SCHEMA = "latexstruct-ocr-baseline-v1"
+OCR_PAGE_SOURCE_EVIDENCE_SCHEMA = "latexstruct-ocr-page-source-evidence-v1"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RUN_ID_RE = re.compile(r"^[0-9a-f]{16,64}$")
@@ -67,6 +71,7 @@ _OCR_TARGET_TEXT_BLOCK_PAGE_RATIO = 125.0 / 155.0
 _OCR_FIGURE_WIDTH_MIN = 0.25
 _OCR_FIGURE_WIDTH_MAX = 1.0
 _OCR_FIGURE_HEIGHT_MAX = 0.72
+_OCR_BASELINE_PACKAGE_DIRECTORY = "ocr-baseline"
 
 
 def _utc_now() -> str:
@@ -84,6 +89,96 @@ def _canonical_json(value: object) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _strict_ocr_bundle_relative_path(value: object, label: str) -> str:
+    """Validate one portable package path before it reaches ``pathlib``.
+
+    Manifest paths are POSIX paths even on Windows.  Rejecting normalization,
+    alternate separators, drive syntax, and Windows filename aliases here keeps
+    two logical artifact names from ever resolving to the same host file.
+    """
+    if not isinstance(value, str):
+        raise OcrStoreError(f"{label} must be a relative POSIX path")
+    path = value
+    if (
+        not path
+        or "\\" in path
+        or path.startswith("/")
+        or re.match(r"^[A-Za-z]:", path)
+        or path.startswith("//")
+        or "://" in path
+        or "\x00" in path
+    ):
+        raise OcrStoreError(f"{label} must be a relative POSIX path")
+    pure = PurePosixPath(path)
+    parts = pure.parts
+    if (
+        path != pure.as_posix()
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(":" in part or part.rstrip(" .") != part for part in parts)
+    ):
+        raise OcrStoreError(f"{label} must be a normalized relative POSIX path")
+    return path
+
+
+def _path_is_reparse_point(path: Path) -> bool:
+    """Return whether a path can redirect package I/O outside its tree."""
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return path.is_symlink() or bool(reparse_flag and attributes & reparse_flag)
+
+
+def _ocr_bundle_expected_directories(paths: set[str]) -> set[str]:
+    expected: set[str] = set()
+    for logical_path in paths:
+        parent = PurePosixPath(logical_path).parent
+        while parent.as_posix() != ".":
+            expected.add(parent.as_posix())
+            parent = parent.parent
+    return expected
+
+
+def _scan_ocr_bundle_tree(
+    package_root: Path,
+    *,
+    expected_files: set[str],
+) -> tuple[set[str], set[str]]:
+    """Scan a package without following links and reject unexpected entries."""
+    if not package_root.exists():
+        return set(), set()
+    if not package_root.is_dir() or _path_is_reparse_point(package_root):
+        raise OcrStoreError("OCR baseline package root is not a plain directory")
+    expected_directories = _ocr_bundle_expected_directories(expected_files)
+    actual_files: set[str] = set()
+    actual_directories: set[str] = set()
+    for entry in package_root.rglob("*"):
+        relative = entry.relative_to(package_root).as_posix()
+        if _path_is_reparse_point(entry):
+            raise OcrStoreError(f"OCR baseline package contains a link: {relative}")
+        if entry.is_dir():
+            actual_directories.add(relative)
+            if relative not in expected_directories:
+                raise OcrStoreError(
+                    f"OCR baseline package contains an extra directory: {relative}"
+                )
+        elif entry.is_file():
+            actual_files.add(relative)
+            if relative not in expected_files:
+                raise OcrStoreError(
+                    f"OCR baseline package contains an extra file: {relative}"
+                )
+        else:
+            raise OcrStoreError(
+                f"OCR baseline package contains an unsupported entry: {relative}"
+            )
+    if not actual_directories.issubset(expected_directories):
+        raise OcrStoreError("OCR baseline package directory closure is invalid")
+    return actual_files, actual_directories
 
 
 def _crop_ocr_figure_png(
@@ -223,20 +318,27 @@ def quality_tier_policy(value: object) -> OcrTierPolicy:
 
 class OcrPageStatus(str, Enum):
     PENDING = "PENDING"
+    CLASSIFYING = "CLASSIFYING"
+    EXTRACTING = "EXTRACTING"
     RENDERING = "RENDERING"
     QUEUED = "QUEUED"
+    VERIFYING = "VERIFYING"
     OCR_RUNNING = "OCR_RUNNING"
     VALIDATING = "VALIDATING"
     RETRYING = "RETRYING"
     SUCCESS = "SUCCESS"
     NEEDS_REVIEW = "NEEDS_REVIEW"
     FAILED = "FAILED"
+    PAUSED = "PAUSED"
     CANCELLED = "CANCELLED"
 
 
 _TRANSIENT_PAGE_STATUSES = frozenset({
+    OcrPageStatus.CLASSIFYING,
+    OcrPageStatus.EXTRACTING,
     OcrPageStatus.RENDERING,
     OcrPageStatus.QUEUED,
+    OcrPageStatus.VERIFYING,
     OcrPageStatus.OCR_RUNNING,
     OcrPageStatus.VALIDATING,
 })
@@ -251,33 +353,66 @@ _RESUMABLE_PAGE_STATUSES = frozenset({
     OcrPageStatus.RETRYING,
     OcrPageStatus.FAILED,
     OcrPageStatus.NEEDS_REVIEW,
+    OcrPageStatus.PAUSED,
 })
 _ALLOWED_PAGE_TRANSITIONS = {
     OcrPageStatus.PENDING: {
-        OcrPageStatus.RENDERING, OcrPageStatus.QUEUED, OcrPageStatus.CANCELLED,
+        OcrPageStatus.CLASSIFYING, OcrPageStatus.EXTRACTING,
+        OcrPageStatus.RENDERING, OcrPageStatus.QUEUED,
+        OcrPageStatus.PAUSED, OcrPageStatus.CANCELLED,
+    },
+    OcrPageStatus.CLASSIFYING: {
+        OcrPageStatus.EXTRACTING, OcrPageStatus.RENDERING,
+        OcrPageStatus.QUEUED, OcrPageStatus.RETRYING,
+        OcrPageStatus.FAILED, OcrPageStatus.PAUSED,
+        OcrPageStatus.CANCELLED,
+    },
+    OcrPageStatus.EXTRACTING: {
+        OcrPageStatus.RENDERING, OcrPageStatus.QUEUED,
+        OcrPageStatus.VERIFYING, OcrPageStatus.OCR_RUNNING,
+        OcrPageStatus.VALIDATING, OcrPageStatus.RETRYING,
+        OcrPageStatus.FAILED, OcrPageStatus.PAUSED,
+        OcrPageStatus.CANCELLED,
     },
     OcrPageStatus.RENDERING: {
-        OcrPageStatus.QUEUED, OcrPageStatus.OCR_RUNNING, OcrPageStatus.RETRYING,
-        OcrPageStatus.FAILED, OcrPageStatus.CANCELLED,
+        OcrPageStatus.QUEUED, OcrPageStatus.VERIFYING,
+        OcrPageStatus.OCR_RUNNING, OcrPageStatus.RETRYING,
+        OcrPageStatus.FAILED, OcrPageStatus.PAUSED,
+        OcrPageStatus.CANCELLED,
     },
     OcrPageStatus.QUEUED: {
-        OcrPageStatus.OCR_RUNNING, OcrPageStatus.RETRYING,
-        OcrPageStatus.FAILED, OcrPageStatus.CANCELLED,
+        OcrPageStatus.VERIFYING, OcrPageStatus.OCR_RUNNING,
+        OcrPageStatus.RETRYING, OcrPageStatus.FAILED,
+        OcrPageStatus.PAUSED, OcrPageStatus.CANCELLED,
+    },
+    OcrPageStatus.VERIFYING: {
+        OcrPageStatus.RENDERING, OcrPageStatus.VALIDATING,
+        OcrPageStatus.OCR_RUNNING,
+        OcrPageStatus.RETRYING, OcrPageStatus.FAILED,
+        OcrPageStatus.PAUSED, OcrPageStatus.CANCELLED,
     },
     OcrPageStatus.OCR_RUNNING: {
         OcrPageStatus.VALIDATING, OcrPageStatus.RETRYING,
-        OcrPageStatus.FAILED, OcrPageStatus.CANCELLED,
+        OcrPageStatus.FAILED, OcrPageStatus.PAUSED,
+        OcrPageStatus.CANCELLED,
     },
     OcrPageStatus.VALIDATING: {
         OcrPageStatus.SUCCESS, OcrPageStatus.NEEDS_REVIEW, OcrPageStatus.RETRYING,
-        OcrPageStatus.FAILED, OcrPageStatus.CANCELLED,
+        OcrPageStatus.FAILED, OcrPageStatus.PAUSED,
+        OcrPageStatus.CANCELLED,
     },
     OcrPageStatus.RETRYING: {
-        OcrPageStatus.RENDERING, OcrPageStatus.QUEUED, OcrPageStatus.OCR_RUNNING,
-        OcrPageStatus.VALIDATING, OcrPageStatus.FAILED, OcrPageStatus.CANCELLED,
+        OcrPageStatus.CLASSIFYING, OcrPageStatus.EXTRACTING,
+        OcrPageStatus.RENDERING, OcrPageStatus.QUEUED,
+        OcrPageStatus.VERIFYING, OcrPageStatus.OCR_RUNNING,
+        OcrPageStatus.VALIDATING, OcrPageStatus.FAILED,
+        OcrPageStatus.PAUSED, OcrPageStatus.CANCELLED,
     },
     OcrPageStatus.NEEDS_REVIEW: {OcrPageStatus.RETRYING, OcrPageStatus.CANCELLED},
     OcrPageStatus.FAILED: {OcrPageStatus.RETRYING, OcrPageStatus.CANCELLED},
+    OcrPageStatus.PAUSED: {
+        OcrPageStatus.PENDING, OcrPageStatus.RETRYING, OcrPageStatus.CANCELLED,
+    },
     OcrPageStatus.SUCCESS: {OcrPageStatus.SUCCESS},
     OcrPageStatus.CANCELLED: {OcrPageStatus.CANCELLED},
 }
@@ -337,6 +472,7 @@ class OcrRunSnapshot:
     source_images: tuple[Mapping[str, object], ...] = ()
     visual_source_sha256: str = ""
     config_sha256: str = ""
+    pipeline_contract: Mapping[str, object] = field(default_factory=dict)
     schema_version: str = OCR_RUNTIME_SCHEMA
 
     def __post_init__(self) -> None:
@@ -417,6 +553,42 @@ class OcrRunSnapshot:
         object.__setattr__(self, "source_images", source_images)
         object.__setattr__(self, "visual_source_sha256", visual_sha)
         object.__setattr__(self, "config_sha256", config_sha256)
+        pipeline_contract = dict(self.pipeline_contract or {})
+        forbidden_contract_keys = [
+            str(key) for key in pipeline_contract
+            if any(token in str(key).casefold() for token in (
+                "api_key", "authorization", "password", "access_token",
+                "refresh_token", "credential", "user_home", "temp_dir",
+                "cache_dir", "project_root", "compile_workdir",
+            ))
+        ]
+        if forbidden_contract_keys:
+            raise ValueError(
+                "pipeline_contract contains sensitive/path fields: "
+                f"{forbidden_contract_keys[0]}"
+            )
+        try:
+            contract_bytes = _canonical_json(pipeline_contract)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("pipeline_contract must contain JSON values") from exc
+        if len(contract_bytes) > 512_000:
+            raise ValueError("pipeline_contract is too large")
+        page_strategies = pipeline_contract.get("page_strategies") or []
+        if page_strategies:
+            if not isinstance(page_strategies, list) or len(page_strategies) != len(pages):
+                raise ValueError(
+                    "pipeline_contract page_strategies must describe every selected page"
+                )
+            expected_ids = [make_page_id(index) for index in range(1, len(pages) + 1)]
+            actual_ids = [
+                str(item.get("page_id") or "") if isinstance(item, Mapping) else ""
+                for item in page_strategies
+            ]
+            if actual_ids != expected_ids:
+                raise ValueError(
+                    "pipeline_contract page_strategies are not in stable page_id order"
+                )
+        object.__setattr__(self, "pipeline_contract", _freeze(pipeline_contract))
         object.__setattr__(self, "schema_version", OCR_RUNTIME_SCHEMA)
 
     def page_identity(self, task_index: int) -> tuple[str, int]:
@@ -447,6 +619,7 @@ class OcrRunSnapshot:
             "source_images": thaw_json(self.source_images),
             "visual_source_sha256": self.visual_source_sha256,
             "config_sha256": self.config_sha256,
+            "pipeline_contract": thaw_json(self.pipeline_contract),
         }
 
     @classmethod
@@ -476,6 +649,7 @@ class OcrRunSnapshot:
             source_images=tuple(value.get("source_images") or ()),
             visual_source_sha256=value.get("visual_source_sha256", ""),
             config_sha256=value.get("config_sha256", ""),
+            pipeline_contract=value.get("pipeline_contract") or {},
         )
 
 
@@ -512,6 +686,7 @@ def make_run_snapshot(
     source_images: Sequence[Mapping[str, object]] = (),
     visual_source_bytes: bytes = b"",
     runtime_options: Mapping[str, object] | None = None,
+    pipeline_contract: Mapping[str, object] | None = None,
     run_id: str = "",
     started_at: str = "",
 ) -> OcrRunSnapshot:
@@ -536,6 +711,47 @@ def make_run_snapshot(
     max_retries = int(options.get("max_retries", policy.max_retries))
     batch_size = int(options.get("batch_size", policy.batch_size))
     concurrency_limit = int(options.get("concurrency_limit", policy.concurrency_limit))
+    verification_dpi = int(options.get("verification_dpi", 160))
+    retry_dpi = int(options.get("retry_dpi", policy.retry_dpi))
+    verification_batch_size = int(options.get("verification_batch_size", 4))
+    requested_contract = dict(pipeline_contract or {})
+    contract = {
+        "project_id": "",
+        "document_strategy": "UNKNOWN",
+        "page_strategies": [],
+        "verification_model": str(ocr_model or ""),
+        "strong_model": "",
+        "prompt_version": "unknown",
+        "response_schema_version": "latexstruct-ocr-page-response-v2",
+        "git_commit": "unknown",
+        "build_id": "unknown",
+        # Unknown provenance is deliberately fail-closed: it may not be
+        # represented as a clean release build.
+        "dirty": True,
+        "python_version": platform.python_version() or sys.version.split()[0],
+        "operating_system": platform.platform(),
+        "latex_engine": "unknown",
+        "verification_dpi": verification_dpi,
+        "full_ocr_dpi": initial_dpi,
+        "retry_dpi": retry_dpi,
+        "verification_batch_size": verification_batch_size,
+        "ocr_batch_size": batch_size,
+        "concurrency_limit": concurrency_limit,
+        "max_input_tokens": int(options.get("max_input_tokens", 0)),
+        "max_output_tokens": int(options.get("max_output_tokens", 0)),
+        "max_requests": int(options.get("max_requests", 0)),
+        "max_strong_model_calls": int(options.get("max_strong_model_calls", 0)),
+        "max_cost": float(options.get("max_cost", 0.0)),
+        "max_wall_time_minutes": float(options.get("max_wall_time_minutes", 0.0)),
+        "target_30_min_applicable": bool(
+            tier is OcrQualityTier.RECOMMENDED and int(source_total_pages) == 600
+        ),
+        "target_30_min_not_applicable_reason": (
+            "" if tier is OcrQualityTier.RECOMMENDED and int(source_total_pages) == 600
+            else "requires an authorized real 600-page recommended-tier run"
+        ),
+    }
+    contract.update(requested_contract)
     frozen_config = {
         "api_backend": str(api_backend or ""),
         "ocr_model": str(ocr_model or ""),
@@ -544,6 +760,7 @@ def make_run_snapshot(
         "max_retries": max_retries,
         "batch_size": batch_size,
         "concurrency_limit": concurrency_limit,
+        "pipeline_contract": contract,
         "runtime_options": options,
         "source_images": thaw_json(tuple(source_images)),
         "visual_source_sha256": (
@@ -575,6 +792,7 @@ def make_run_snapshot(
             _sha256_bytes(bytes(visual_source_bytes)) if visual_source_bytes else ""
         ),
         config_sha256=_sha256_bytes(_canonical_json(frozen_config)),
+        pipeline_contract=contract,
     )
 
 
@@ -592,6 +810,7 @@ class OcrPageRecord:
     batch_call: bool = False
     batch_id: str = ""
     raw_response_sha256: str = ""
+    source_evidence_sha256: str = ""
     raw_tex: str = ""
     cleaned_tex: str = ""
     tex_sha256: str = ""
@@ -600,6 +819,7 @@ class OcrPageRecord:
     elapsed_seconds: float | None = None
     retry_count: int = 0
     quality_issues: tuple[Mapping[str, object], ...] = ()
+    host_quality_flags: tuple[Mapping[str, object], ...] = ()
     unresolved_regions: tuple[Mapping[str, object], ...] = ()
     usage: Mapping[str, object] = field(default_factory=dict)
     error_reason: str = ""
@@ -620,6 +840,11 @@ class OcrPageRecord:
         image_sha = _validate_sha256(self.image_sha256, "image_sha256", allow_empty=True)
         response_sha = _validate_sha256(
             self.raw_response_sha256, "raw_response_sha256", allow_empty=True,
+        )
+        source_evidence_sha = _validate_sha256(
+            self.source_evidence_sha256,
+            "source_evidence_sha256",
+            allow_empty=True,
         )
         tex_sha = _validate_sha256(self.tex_sha256, "tex_sha256", allow_empty=True)
         size = tuple(self.image_size_pixels or ())
@@ -648,6 +873,7 @@ class OcrPageRecord:
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "image_sha256", image_sha)
         object.__setattr__(self, "raw_response_sha256", response_sha)
+        object.__setattr__(self, "source_evidence_sha256", source_evidence_sha)
         object.__setattr__(self, "tex_sha256", tex_sha)
         object.__setattr__(self, "image_size_pixels", size)
         object.__setattr__(self, "dpi", int(self.dpi or 0))
@@ -662,6 +888,9 @@ class OcrPageRecord:
         object.__setattr__(self, "elapsed_seconds", None if elapsed is None else float(elapsed))
         object.__setattr__(self, "retry_count", int(self.retry_count))
         object.__setattr__(self, "quality_issues", tuple(_freeze(item) for item in self.quality_issues))
+        object.__setattr__(self, "host_quality_flags", tuple(
+            _freeze(item) for item in self.host_quality_flags
+        ))
         object.__setattr__(self, "unresolved_regions", tuple(
             _freeze(item) for item in self.unresolved_regions
         ))
@@ -712,6 +941,7 @@ class OcrPageRecord:
             "batch_call": self.batch_call,
             "batch_id": self.batch_id,
             "raw_response_sha256": self.raw_response_sha256,
+            "source_evidence_sha256": self.source_evidence_sha256,
             "raw_tex": self.raw_tex,
             "cleaned_tex": self.cleaned_tex,
             "tex_sha256": self.tex_sha256,
@@ -720,6 +950,7 @@ class OcrPageRecord:
             "elapsed_seconds": self.elapsed_seconds,
             "retry_count": self.retry_count,
             "quality_issues": thaw_json(self.quality_issues),
+            "host_quality_flags": thaw_json(self.host_quality_flags),
             "unresolved_regions": thaw_json(self.unresolved_regions),
             "usage": thaw_json(self.usage),
             "error_reason": self.error_reason,
@@ -743,6 +974,7 @@ class OcrPageRecord:
             batch_call=value.get("batch_call", False),
             batch_id=value.get("batch_id", ""),
             raw_response_sha256=value.get("raw_response_sha256", ""),
+            source_evidence_sha256=value.get("source_evidence_sha256", ""),
             raw_tex=value.get("raw_tex", ""),
             cleaned_tex=value.get("cleaned_tex", ""),
             tex_sha256=value.get("tex_sha256", ""),
@@ -751,6 +983,7 @@ class OcrPageRecord:
             elapsed_seconds=value.get("elapsed_seconds"),
             retry_count=value.get("retry_count", 0),
             quality_issues=tuple(value.get("quality_issues") or ()),
+            host_quality_flags=tuple(value.get("host_quality_flags") or ()),
             unresolved_regions=tuple(value.get("unresolved_regions") or ()),
             usage=value.get("usage") or {},
             error_reason=value.get("error_reason", ""),
@@ -832,6 +1065,7 @@ class OcrRunStore:
             (directory / "pages").mkdir(exist_ok=True)
             (directory / "page-images").mkdir(exist_ok=True)
             (directory / "responses").mkdir(exist_ok=True)
+            (directory / "source-evidence").mkdir(exist_ok=True)
             (directory / "artifacts").mkdir(exist_ok=True)
             snapshot_path = directory / "run-snapshot.json"
             snapshot_bytes = _canonical_json(snapshot.to_dict())
@@ -1010,6 +1244,307 @@ class OcrRunStore:
                 raise OcrStoreError("persisted OCR page image SHA-256 verification failed")
             return path
 
+    def persist_page_source_evidence(
+        self,
+        run_id: str,
+        record: OcrPageRecord,
+        evidence: Mapping[str, object],
+    ) -> str:
+        """Append one hash-addressed host evidence snapshot for a page attempt.
+
+        Source inventories are extracted before the provider call and may grow
+        on a later retry (for example when formula crops are enabled).  Each
+        version is therefore append-only; the page record atomically points to
+        the exact version used by its current attempt.
+        """
+        with self._lock:
+            snapshot = self.load_snapshot(run_id)
+            self._validate_record_identity(snapshot, record)
+            body = dict(evidence or {})
+            body.update({
+                "schema_version": OCR_PAGE_SOURCE_EVIDENCE_SCHEMA,
+                "run_id": snapshot.run_id,
+                "page_id": record.page_id,
+                "source_page": record.source_page,
+                "task_index": record.task_index,
+            })
+            data = _canonical_json(body)
+            if len(data) > 2_000_000:
+                raise OcrStoreError("OCR page source evidence exceeds the 2 MB safety bound")
+            digest = _sha256_bytes(data)
+            path = self.run_dir(run_id) / "source-evidence" / (
+                f"{record.page_id}-{digest}.json"
+            )
+            if path.exists():
+                if path.is_symlink() or path.read_bytes() != data:
+                    raise OcrStoreError("immutable OCR source evidence hash collision")
+            else:
+                self._atomic_write(path, data)
+            return digest
+
+    def load_page_source_evidence(
+        self,
+        run_id: str,
+        record: OcrPageRecord,
+    ) -> dict[str, object]:
+        """Load and hash-check the source inventories used by this page record."""
+        with self._lock:
+            snapshot = self.load_snapshot(run_id)
+            self._validate_record_identity(snapshot, record)
+            digest = record.source_evidence_sha256
+            if not digest:
+                raise OcrStoreError("OCR page record has no source evidence binding")
+            path = self.run_dir(run_id) / "source-evidence" / (
+                f"{record.page_id}-{digest}.json"
+            )
+            try:
+                data = path.read_bytes()
+            except OSError as exc:
+                raise OcrStoreError("OCR page source evidence is missing") from exc
+            if (
+                path.is_symlink()
+                or len(data) > 2_000_000
+                or not hmac.compare_digest(_sha256_bytes(data), digest)
+            ):
+                raise OcrStoreError("OCR page source evidence SHA-256 verification failed")
+            try:
+                value = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise OcrStoreError("OCR page source evidence is corrupt") from exc
+            if not isinstance(value, dict) or any(
+                value.get(key) != expected
+                for key, expected in {
+                    "schema_version": OCR_PAGE_SOURCE_EVIDENCE_SCHEMA,
+                    "run_id": snapshot.run_id,
+                    "page_id": record.page_id,
+                    "source_page": record.source_page,
+                    "task_index": record.task_index,
+                }.items()
+            ):
+                raise OcrStoreError("OCR page source evidence identity mismatch")
+            return value
+
+    def load_raw_response(self, run_id: str, record: OcrPageRecord) -> object:
+        """Return a successful page's exact saved response after hash checking."""
+        with self._lock:
+            snapshot = self.load_snapshot(run_id)
+            self._validate_record_identity(snapshot, record)
+            if not record.raw_response_sha256:
+                raise OcrStoreError("OCR page record has no raw response binding")
+            path = self.run_dir(run_id) / "responses" / (
+                f"{record.page_id}-{record.raw_response_sha256}.json"
+            )
+            try:
+                data = path.read_bytes()
+            except OSError as exc:
+                raise OcrStoreError("saved OCR response is missing") from exc
+            if (
+                path.is_symlink()
+                or not hmac.compare_digest(
+                    _sha256_bytes(data), record.raw_response_sha256
+                )
+            ):
+                raise OcrStoreError("saved OCR response SHA-256 mismatch")
+            try:
+                return json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise OcrStoreError("saved OCR response is corrupt") from exc
+
+    def verify_saved_response(
+        self,
+        run_id: str,
+        record: OcrPageRecord,
+    ) -> Mapping[str, object]:
+        """Verify a final page response and bind its raw and cleaned layers.
+
+        New v2 pages persist a host-owned envelope: the exact provider payload
+        remains under ``model_raw_response`` while ``transport_response`` is the
+        strict, cleaned four-field page object that was committed.  Legacy
+        standard runs may still contain that four-field object at the root.
+        """
+        with self._lock:
+            snapshot = self.load_snapshot(run_id)
+            self._validate_record_identity(snapshot, record)
+            payload = self.load_raw_response(run_id, record)
+            transport = payload
+            host_envelope = False
+            if (
+                isinstance(payload, Mapping)
+                and payload.get("schema_version")
+                == "latexstruct-ocr-visual-response-v1"
+            ):
+                host_envelope = True
+                expected_keys = {
+                    "schema_version",
+                    "page_id",
+                    "source_page",
+                    "task_index",
+                    "call_index",
+                    "gate_applied",
+                    "source_evidence_sha256",
+                    "candidate_tex",
+                    "candidate_tex_sha256",
+                    "verification_batch_id",
+                    "verification_response_sha256",
+                    "model_raw_response",
+                    "verification_page",
+                    "visual_mode",
+                    "patched_block_ids",
+                    "transport_response",
+                    "host_quality_flags",
+                }
+                if set(payload) != expected_keys or any(
+                    payload.get(key) != expected
+                    for key, expected in {
+                        "page_id": record.page_id,
+                        "source_page": record.source_page,
+                        "task_index": record.task_index,
+                        "call_index": record.call_index,
+                        "source_evidence_sha256": record.source_evidence_sha256,
+                    }.items()
+                ):
+                    raise OcrStoreError(
+                        f"saved visual verifier envelope identity mismatch: {record.page_id}"
+                    )
+                if payload.get("gate_applied") is not True:
+                    raise OcrStoreError(
+                        f"saved visual verifier page lacks its host gate: {record.page_id}"
+                    )
+                candidate_tex = str(payload.get("candidate_tex") or "")
+                if (
+                    candidate_tex != record.raw_tex
+                    or not hmac.compare_digest(
+                        str(payload.get("candidate_tex_sha256") or ""),
+                        _sha256_bytes(candidate_tex.encode("utf-8")),
+                    )
+                ):
+                    raise OcrStoreError(
+                        f"saved visual candidate TEX binding mismatch: {record.page_id}"
+                    )
+                model_raw_response = payload.get("model_raw_response")
+                if not hmac.compare_digest(
+                    str(payload.get("verification_response_sha256") or ""),
+                    _sha256_bytes(_canonical_json(model_raw_response)),
+                ):
+                    raise OcrStoreError(
+                        f"saved visual response hash mismatch: {record.page_id}"
+                    )
+                verification_page = payload.get("verification_page")
+                if (
+                    not isinstance(verification_page, Mapping)
+                    or verification_page.get("page_id") != record.page_id
+                    or str(verification_page.get("verdict") or "")
+                    not in {"PASS", "PATCH"}
+                    or verification_page.get("reading_order_ok") is not True
+                    or verification_page.get("coverage_ok") is not True
+                ):
+                    raise OcrStoreError(
+                        f"saved visual verifier verdict is not acceptable: {record.page_id}"
+                    )
+                if thaw_json(record.host_quality_flags) != list(
+                    payload.get("host_quality_flags") or []
+                ):
+                    raise OcrStoreError(
+                        f"saved visual verifier flags mismatch: {record.page_id}"
+                    )
+                transport = payload.get("transport_response")
+            elif (
+                isinstance(payload, Mapping)
+                and payload.get("schema_version")
+                == "latexstruct-ocr-host-response-v1"
+            ):
+                host_envelope = True
+                expected_keys = {
+                    "schema_version",
+                    "page_id",
+                    "source_page",
+                    "task_index",
+                    "call_index",
+                    "gate_applied",
+                    "source_evidence_sha256",
+                    "model_raw_latex",
+                    "model_raw_response",
+                    "transport_response",
+                    "host_quality_flags",
+                    "formula_evidence",
+                    "batch_parent",
+                }
+                if set(payload) != expected_keys or any(
+                    payload.get(key) != expected
+                    for key, expected in {
+                        "page_id": record.page_id,
+                        "source_page": record.source_page,
+                        "task_index": record.task_index,
+                        "call_index": record.call_index,
+                        "source_evidence_sha256": record.source_evidence_sha256,
+                    }.items()
+                ):
+                    raise OcrStoreError(
+                        f"saved OCR host envelope identity mismatch: {record.page_id}"
+                    )
+                if (
+                    snapshot.quality_tier == OcrQualityTier.HIGH
+                    and payload.get("gate_applied") is not True
+                ):
+                    raise OcrStoreError(
+                        f"high-quality OCR page lacks its host gate: {record.page_id}"
+                    )
+                if str(payload.get("model_raw_latex") or "") != record.raw_tex:
+                    raise OcrStoreError(
+                        f"saved OCR raw TEX binding mismatch: {record.page_id}"
+                    )
+                if thaw_json(record.host_quality_flags) != list(
+                    payload.get("host_quality_flags") or []
+                ):
+                    raise OcrStoreError(
+                        f"saved OCR host quality flags mismatch: {record.page_id}"
+                    )
+                transport = payload.get("transport_response")
+            elif (
+                snapshot.quality_tier == OcrQualityTier.HIGH
+                and record.source_evidence_sha256
+            ):
+                raise OcrStoreError(
+                    f"high-quality OCR page lacks its host response envelope: {record.page_id}"
+                )
+
+            try:
+                validated = validate_ocr_batch_response(
+                    transport,
+                    [record.page_id],
+                    page_context_by_page_id={record.page_id: {
+                        "source_page": record.source_page,
+                        "image_size_pixels": record.image_size_pixels,
+                    }},
+                )[0]
+            except OcrBatchValidationError as exc:
+                raise OcrStoreError(
+                    f"saved OCR transport response is invalid: {record.page_id}"
+                ) from exc
+            if host_envelope and validated.latex != record.cleaned_tex:
+                raise OcrStoreError(
+                    f"saved OCR cleaned TEX binding mismatch: {record.page_id}"
+                )
+            if (
+                not host_envelope
+                and isinstance(transport, Mapping)
+                and str(transport.get("latex") or "") != record.raw_tex
+            ):
+                raise OcrStoreError(
+                    f"saved legacy OCR raw TEX binding mismatch: {record.page_id}"
+                )
+            if thaw_json(validated.unresolved_regions) != thaw_json(
+                record.unresolved_regions
+            ):
+                raise OcrStoreError(
+                    f"saved OCR unresolved-region binding mismatch: {record.page_id}"
+                )
+            if not isinstance(transport, Mapping):
+                raise OcrStoreError(
+                    f"saved OCR transport response is not an object: {record.page_id}"
+                )
+            return transport
+
     def materialize_figure_assets(
         self,
         run_id: str,
@@ -1029,21 +1564,8 @@ class OcrRunStore:
                     raise OcrStoreError(
                         f"figure assets require a successful page: {record.page_id}"
                     )
-                response_path = self.run_dir(run_id) / "responses" / (
-                    f"{record.page_id}-{record.raw_response_sha256}.json"
-                )
                 try:
-                    raw_bytes = response_path.read_bytes()
-                except OSError as exc:
-                    raise OcrStoreError(
-                        f"saved OCR response is missing: {record.page_id}"
-                    ) from exc
-                if not hmac.compare_digest(_sha256_bytes(raw_bytes), record.raw_response_sha256):
-                    raise OcrStoreError(
-                        f"saved OCR response SHA-256 mismatch: {record.page_id}"
-                    )
-                try:
-                    raw_response = json.loads(raw_bytes.decode("utf-8"))
+                    raw_response = self.verify_saved_response(run_id, record)
                     validated = validate_ocr_batch_response(
                         raw_response,
                         [record.page_id],
@@ -1052,7 +1574,7 @@ class OcrRunStore:
                             "image_size_pixels": record.image_size_pixels,
                         }},
                     )[0]
-                except (UnicodeDecodeError, json.JSONDecodeError, OcrBatchValidationError) as exc:
+                except (OcrStoreError, OcrBatchValidationError) as exc:
                     raise OcrStoreError(
                         f"saved OCR figure evidence is invalid: {record.page_id}"
                     ) from exc
@@ -1163,11 +1685,15 @@ class OcrRunStore:
             recovered: list[OcrPageRecord] = []
             for record in self.list_records(run_id):
                 self._validate_record_identity(snapshot, record)
-                if record.status == OcrPageStatus.SUCCESS:
+                if record.status in {
+                    OcrPageStatus.SUCCESS,
+                    OcrPageStatus.NEEDS_REVIEW,
+                }:
                     if not record.tex_sha256 or _sha256_bytes(
                         record.cleaned_tex.encode("utf-8")
                     ) != record.tex_sha256:
-                        raise OcrStoreError(f"successful page TEX hash mismatch: {record.page_id}")
+                        raise OcrStoreError(f"final page TEX hash mismatch: {record.page_id}")
+                    self.verify_saved_response(run_id, record)
                 updated = record.recovered_after_interruption()
                 if updated is not record:
                     self.persist_record(run_id, updated)
@@ -1203,7 +1729,11 @@ class OcrRunStore:
                 if record.source_page != snapshot.selected_pages[record.task_index - 1]:
                     raise OcrStoreError(f"page order mismatch while merging: {record.page_id}")
                 body = _strip_host_page_markers(record.cleaned_tex).strip()
-                marker = f"% Page {record.source_page}"
+                marker = "\n".join((
+                    f"% Page {record.source_page}",
+                    "% LaTeXStruct-Page: "
+                    f"page_id={record.page_id} source_page={record.source_page}",
+                ))
                 if body:
                     fragments.append(f"{marker}\n{body}")
                 else:
@@ -1344,6 +1874,154 @@ class OcrRunStore:
                 self._atomic_write(directory / name, pdf)
             self._atomic_write(marker_path, _canonical_json(manifest))
             return manifest
+
+    def save_ocr_baseline_bundle(
+        self,
+        run_id: str,
+        bundle: object,
+    ) -> Path:
+        """Commit a recomputable OCR baseline bundle as a write-once package.
+
+        Artifact bytes are written independently and the canonical manifest is
+        always the final commit marker.  An interrupted first write can be
+        resumed only when every already-present byte is identical.  Once the
+        manifest exists, missing, extra, renamed, or changed package content is
+        treated as corruption rather than silently repaired.
+        """
+        from .ocr_manifest import (
+            DEFAULT_MANIFEST_PATH,
+            OcrBaselineManifestBundle,
+            OcrBaselineManifestError,
+            verify_ocr_baseline_manifest,
+        )
+
+        if not isinstance(bundle, OcrBaselineManifestBundle):
+            raise TypeError("bundle must be an OcrBaselineManifestBundle")
+        with self._lock:
+            snapshot = self.load_snapshot(run_id)
+            original_paths: set[str] = set()
+            original_folded_paths: set[str] = set()
+            for item in bundle.artifacts:
+                if not isinstance(item, tuple) or len(item) != 2:
+                    raise OcrStoreError("OCR baseline artifact entry is invalid")
+                logical_path = _strict_ocr_bundle_relative_path(
+                    item[0],
+                    "OCR baseline artifact path",
+                )
+                if logical_path in original_paths:
+                    raise OcrStoreError("OCR baseline bundle contains duplicate paths")
+                if logical_path.casefold() in original_folded_paths:
+                    raise OcrStoreError(
+                        "OCR baseline bundle paths collide on a case-insensitive filesystem"
+                    )
+                original_paths.add(logical_path)
+                original_folded_paths.add(logical_path.casefold())
+            try:
+                supplied = dict(bundle.files(DEFAULT_MANIFEST_PATH))
+            except (TypeError, ValueError, OcrBaselineManifestError) as exc:
+                raise OcrStoreError("OCR baseline bundle paths are invalid") from exc
+            manifest_path = _strict_ocr_bundle_relative_path(
+                DEFAULT_MANIFEST_PATH,
+                "OCR baseline manifest path",
+            )
+            if manifest_path not in supplied:
+                raise OcrStoreError("OCR baseline bundle is missing its manifest")
+
+            files: dict[str, bytes] = {}
+            casefolded_paths: set[str] = set()
+            for raw_path, raw_data in supplied.items():
+                logical_path = _strict_ocr_bundle_relative_path(
+                    raw_path,
+                    "OCR baseline bundle path",
+                )
+                folded = logical_path.casefold()
+                if folded in casefolded_paths:
+                    raise OcrStoreError(
+                        "OCR baseline bundle paths collide on a case-insensitive filesystem"
+                    )
+                casefolded_paths.add(folded)
+                if not isinstance(raw_data, bytes | bytearray | memoryview):
+                    raise OcrStoreError("OCR baseline bundle values must be bytes")
+                files[logical_path] = bytes(raw_data)
+
+            manifest_bytes = files[manifest_path]
+            artifact_bytes = {
+                path: data for path, data in files.items() if path != manifest_path
+            }
+            try:
+                verify_ocr_baseline_manifest(
+                    manifest_bytes,
+                    artifact_bytes,
+                    expected_source_sha256=snapshot.source_sha256,
+                )
+            except OcrBaselineManifestError as exc:
+                raise OcrStoreError("OCR baseline bundle failed verification") from exc
+
+            artifacts_root = self.run_dir(run_id) / "artifacts"
+            if (
+                not artifacts_root.is_dir()
+                or _path_is_reparse_point(artifacts_root)
+            ):
+                raise OcrStoreError("OCR artifacts root is not a plain directory")
+            package_root = artifacts_root / _OCR_BASELINE_PACKAGE_DIRECTORY
+            expected_files = set(files)
+            try:
+                package_root.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise OcrStoreError(
+                    "OCR baseline package directory cannot be created"
+                ) from exc
+            actual_files, _ = _scan_ocr_bundle_tree(
+                package_root,
+                expected_files=expected_files,
+            )
+            manifest_target = package_root.joinpath(*manifest_path.split("/"))
+
+            if manifest_path in actual_files:
+                if actual_files != expected_files:
+                    raise OcrStoreError(
+                        "committed OCR baseline package is missing required files"
+                    )
+                for logical_path, expected in files.items():
+                    target = package_root.joinpath(*logical_path.split("/"))
+                    if not target.is_file() or target.read_bytes() != expected:
+                        raise OcrStoreError(
+                            "immutable OCR baseline package already differs: "
+                            f"{logical_path}"
+                        )
+                return manifest_target
+
+            for logical_path in sorted(artifact_bytes):
+                target = package_root.joinpath(*logical_path.split("/"))
+                if target.exists():
+                    if (
+                        not target.is_file()
+                        or _path_is_reparse_point(target)
+                        or target.read_bytes() != artifact_bytes[logical_path]
+                    ):
+                        raise OcrStoreError(
+                            "uncommitted OCR baseline artifact already differs: "
+                            f"{logical_path}"
+                        )
+                    continue
+                self._atomic_write(target, artifact_bytes[logical_path])
+
+            # Recheck every staged artifact immediately before the manifest
+            # becomes the immutable package commit marker.
+            for logical_path, expected in artifact_bytes.items():
+                target = package_root.joinpath(*logical_path.split("/"))
+                if (
+                    not target.is_file()
+                    or _path_is_reparse_point(target)
+                    or target.read_bytes() != expected
+                ):
+                    raise OcrStoreError(
+                        f"OCR baseline artifact changed before commit: {logical_path}"
+                    )
+            if manifest_target.exists():
+                raise OcrStoreError("OCR baseline manifest appeared during package commit")
+            self._atomic_write(manifest_target, manifest_bytes)
+            return manifest_target
 
     @staticmethod
     def _response_bytes(response: object) -> bytes:
@@ -1603,7 +2281,9 @@ def validate_ocr_batch_response(
     if any(_PAGE_ID_RE.fullmatch(item) is None for item in expected):
         raise ValueError("expected_page_ids contains an invalid page_id")
     payload = _model_payload(response)
+    unknown_top_level = False
     if isinstance(payload, Mapping) and isinstance(payload.get("pages"), list):
+        unknown_top_level = set(payload) != {"pages"}
         values = payload["pages"]
     elif isinstance(payload, list):
         values = payload
@@ -1625,12 +2305,24 @@ def validate_ocr_batch_response(
         raise OcrBatchValidationError("MISSING_PAGE_ID", f"missing OCR page_id: {missing[0]}")
     if len(values) != len(expected):
         raise OcrBatchValidationError("PAGE_ID_COVERAGE", "OCR response page count does not match request")
+    if unknown_top_level:
+        raise OcrBatchValidationError(
+            "TOP_LEVEL_SCHEMA", "OCR response contains unknown top-level properties"
+        )
     by_id = {str(item["page_id"]): item for item in values}
     references = dict(reference_text_by_page_id or {})
     page_contexts = dict(page_context_by_page_id or {})
     output: list[ValidatedOcrPage] = []
     for page_id in expected:
         item = by_id[page_id]
+        allowed_page_keys = {
+            "page_id", "latex", "figures", "unresolved_regions",
+        }
+        if set(item) != allowed_page_keys:
+            raise OcrBatchValidationError(
+                "TOP_LEVEL_SCHEMA",
+                f"{page_id} contains unknown or missing page properties",
+            )
         latex = item.get("latex")
         figures = item.get("figures")
         unresolved = item.get("unresolved_regions")
@@ -2077,6 +2769,7 @@ class OcrPageRequest:
 class OcrExecutionResult:
     request: OcrPageRequest
     page: ValidatedOcrPage | None
+    raw_response: object | None = field(default=None, repr=False)
     error: str = ""
     error_category: OcrErrorCategory | None = None
     retry_instruction: str = ""
@@ -2099,7 +2792,23 @@ _BATCH_EVIDENCE_CREDENTIAL_RE = re.compile(
     r"\s*[:=]\s*[^\s,;\]\}\"']+",
 )
 _BATCH_EVIDENCE_WINDOWS_PATH_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])(?:[A-Z]:[\\/]|\\\\)[^\r\n\t\"'<>|]+",
+    r"(?ix)(?<![A-Za-z0-9_])(?:"
+    # Common Windows roots may contain spaces and are safe to identify without
+    # confusing a TeX control sequence such as ``C:\\mathcal`` for a path.
+    r"[A-Z]:[\\/](?:Users|Documents[ ]and[ ]Settings|Windows|ProgramData|"
+    r"Program[ ]Files(?:[ ]\(x86\))?|Temp|tmp)(?:[\\/][^\r\n\t\"'<>|{}]*)?"
+    r"|"
+    # For arbitrary drive roots, require a filename extension.  This covers
+    # diagnostic files while preserving mathematical text such as
+    # ``u\\in V:\\lvert N(u)\\cap B\\rvert``.
+    r"[A-Z]:[\\/][^\r\n\t\"'<>|{}\s,;]+(?:[\\/][^\r\n\t\"'<>|{}\s,;]+)*"
+    r"\.[A-Za-z0-9]{1,16}"
+    r"|"
+    # A UNC path must contain both a server and a share component; a bare TeX
+    # line break followed by a command therefore cannot match this branch.
+    r"\\\\[A-Za-z0-9._-]+[\\/][A-Za-z0-9$._ -]+"
+    r"(?:[\\/][^\r\n\t\"'<>|{}]*)?"
+    r")",
 )
 _BATCH_EVIDENCE_POSIX_PATH_RE = re.compile(
     r"(?<![:A-Za-z0-9_.-])/(?:"
@@ -2331,6 +3040,7 @@ class BoundedOcrExecutor:
             batch = tuple(requests[offset:offset + self.batch_size])
             batch_id = f"ocr-batch-{uuid.uuid4().hex[:12]}"
             emitted_incrementally = False
+            raw: object | None = None
             try:
                 raw = batch_call(batch)
                 pages = validate_ocr_batch_response(
@@ -2352,6 +3062,7 @@ class BoundedOcrExecutor:
                     OcrExecutionResult(
                         request=request,
                         page=by_id[request.page_id],
+                        raw_response=thaw_json(by_id[request.page_id].raw_object),
                         batch_id=batch_id,
                         batch_size=len(batch),
                         used_batch=True,
@@ -2419,6 +3130,7 @@ class BoundedOcrExecutor:
         on_result: Callable[[OcrExecutionResult], None] | None = None,
     ) -> list[OcrExecutionResult]:
         def invoke(request: OcrPageRequest) -> OcrExecutionResult:
+            raw: object | None = None
             try:
                 raw = single_call(request)
                 page = validate_ocr_batch_response(
@@ -2433,6 +3145,7 @@ class BoundedOcrExecutor:
                 return OcrExecutionResult(
                     request=request,
                     page=page,
+                    raw_response=raw,
                     batch_id=batch_id,
                     batch_size=1,
                     used_batch=False,
@@ -2442,6 +3155,7 @@ class BoundedOcrExecutor:
                 return OcrExecutionResult(
                     request=request,
                     page=None,
+                    raw_response=raw,
                     error=str(exc)[:1000],
                     error_category=OcrErrorCategory.UNKNOWN,
                     retry_instruction=(
@@ -2464,6 +3178,12 @@ class BoundedOcrExecutor:
                 return OcrExecutionResult(
                     request=request,
                     page=None,
+                    raw_response=(
+                        getattr(exc, "model_raw_response", None)
+                        or ({
+                            "latex": str(getattr(exc, "model_raw_latex", "") or ""),
+                        } if getattr(exc, "model_raw_latex", "") else None)
+                    ),
                     error=str(exc)[:1000],
                     error_category=category,
                     retry_instruction=str(getattr(exc, "retry_instruction", "") or "")[:1600],

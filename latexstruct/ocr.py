@@ -194,6 +194,11 @@ class OcrPageTranscription:
     reference_text_chars: int = 0
     quality_flags: List[dict] = field(default_factory=list)
     formula_evidence: List[dict] = field(default_factory=list)
+    # Preserve the provider's parsed response before any host cleanup.  ``tex``
+    # is the host-validated/normalized transport fragment and must never be
+    # presented as the model's raw LaTeX in immutable audit records.
+    model_raw_latex: str = ""
+    model_raw_response: Dict = field(default_factory=dict)
 
 
 def make_host_ocr_page_request(
@@ -234,6 +239,8 @@ class _OcrQualityGateError(LLMError):
         super().__init__(message)
         self.retry_instruction = retry_instruction
         self.retry_state = dict(retry_state or {})
+        self.model_raw_latex = ""
+        self.model_raw_response = {}
 
 
 def _quality_retry_state(retry_state: dict, key: str = "", value=None) -> dict:
@@ -967,7 +974,7 @@ _OCR_RELATION_COMMANDS = {
     "neq": "!=", "ne": "!=", "gt": ">", "lt": "<",
 }
 _OCR_REFERENCE_RELATION_SLOT = "[RELATION_FROM_PIXELS]"
-_OCR_REFERENCE_RELATION_SYMBOL_RE = re.compile(r">=|<=|!=|==|[<>=≤≥≠≦≧]")
+_OCR_REFERENCE_RELATION_SYMBOL_RE = re.compile(r">=|<=|!=|==|[<>=≤≥≠≦≧⩽⩾]")
 _OCR_RELATION_OPERAND = (
     r"(?:[A-Za-z][A-Za-z0-9']*|\d+(?:\.\d+)?)"
     r"(?:\s*[_^]\s*[A-Za-z0-9']+)*"
@@ -1223,7 +1230,8 @@ def _canonical_relation_text(text: str) -> str:
         value,
     )
     for source, target in (
-        ("≥", ">="), ("≧", ">="), ("≤", "<="), ("≦", "<="), ("≠", "!="),
+        ("≥", ">="), ("≧", ">="), ("⩾", ">="),
+        ("≤", "<="), ("≦", "<="), ("⩽", "<="), ("≠", "!="),
     ):
         value = value.replace(source, f" {target} ")
     value = re.sub(r"\\[()\[\]]", " ", value)
@@ -1288,8 +1296,8 @@ def pdf_page_relation_regions(pdf_path: str, page_no: int) -> List[dict]:
                 continue
             raw_operator = operator_match.group(0)
             operator = {
-                ">=": ">=", "≤": "<=", "≦": "<=", "<=": "<=",
-                "≥": ">=", "≧": ">=", "!=": "!=", "≠": "!=",
+                ">=": ">=", "≤": "<=", "≦": "<=", "⩽": "<=", "<=": "<=",
+                "≥": ">=", "≧": ">=", "⩾": ">=", "!=": "!=", "≠": "!=",
                 "==": "=", "=": "=", ">": ">", "<": "<",
             }.get(raw_operator)
             if operator is None:
@@ -1419,7 +1427,7 @@ def pdf_page_equation_tag_regions(pdf_path: str, page_no: int) -> List[dict]:
             text = unicodedata.normalize("NFKC", str(value or "")).strip()
             if not text or _PDF_EQUATION_TAG_WORD_RE.fullmatch(text):
                 return False
-            if any(char in "=<>±×÷≤≥≠≈∼∑∏∫√∞−" for char in text):
+            if any(char in "=<>±×÷≤≥≦≧⩽⩾≠≈∼∑∏∫√∞−" for char in text):
                 return True
             greek_or_math = False
             for char in text:
@@ -1726,6 +1734,72 @@ def _footnote_page_lines(payload: dict) -> List[dict]:
     return result
 
 
+def _footnote_digit_runs(lines: List[dict]) -> List[dict]:
+    """Join adjacent same-baseline digits into one prospective note marker.
+
+    Born-digital PDFs expose ``10`` and ``11`` as separate characters.  Treating
+    each glyph as a marker both truncated two-digit notes and let an interior
+    subscript such as ``C4-free`` masquerade as a page-bottom definition.
+    """
+    result = []
+    for line_index, line in enumerate(lines):
+        characters = line.get("characters") or []
+        position = 0
+        while position < len(characters):
+            first = characters[position]
+            if not str(first.get("char") or "").isdigit():
+                position += 1
+                continue
+            members = [first]
+            cursor = position + 1
+            while cursor < len(characters) and len(members) < 3:
+                previous = members[-1]
+                current = characters[cursor]
+                if not str(current.get("char") or "").isdigit():
+                    break
+                try:
+                    previous_size = float(previous.get("size") or 0.0)
+                    current_size = float(current.get("size") or 0.0)
+                    gap = float(current["bbox"][0]) - float(previous["bbox"][2])
+                    baseline_delta = abs(
+                        float(current["bbox"][3]) - float(previous["bbox"][3])
+                    )
+                except (KeyError, TypeError, ValueError, IndexError):
+                    break
+                if (
+                    abs(current_size - previous_size) > 0.35
+                    or gap < -0.5
+                    or gap > max(1.5, 0.20 * max(previous_size, current_size))
+                    or baseline_delta > 1.0
+                ):
+                    break
+                members.append(current)
+                cursor += 1
+            visible_before = [
+                item for item in characters[:position]
+                if not str(item.get("char") or "").isspace()
+            ]
+            run = dict(first)
+            run.update({
+                "char": "".join(str(item.get("char") or "") for item in members),
+                "bbox": [
+                    min(float(item["bbox"][0]) for item in members),
+                    min(float(item["bbox"][1]) for item in members),
+                    max(float(item["bbox"][2]) for item in members),
+                    max(float(item["bbox"][3]) for item in members),
+                ],
+                "size": _footnote_font_mode(members),
+                "line_index": line_index,
+                "line_position": position,
+                "line_position_end": position + len(members) - 1,
+                "members": tuple(members),
+                "first_nonspace_on_line": not visible_before,
+            })
+            result.append(run)
+            position = cursor
+    return result
+
+
 def _footnote_horizontal_rules(page, text_left: float, text_width: float) -> List[dict]:
     """Return short left-aligned horizontal vector rules in the lower page body."""
     rect = page.rect
@@ -1777,8 +1851,13 @@ def _footnote_stacked_script(candidate: dict, characters: List[dict], body_size:
     x0, y0, x1, y1 = candidate["bbox"]
     center_y = (y0 + y1) / 2.0
     width = max(0.1, x1 - x0)
+    members = tuple(candidate.get("members") or ())
     for other in characters:
-        if other is candidate or str(other.get("char") or "").isspace():
+        if (
+            other is candidate
+            or any(other is member for member in members)
+            or str(other.get("char") or "").isspace()
+        ):
             continue
         try:
             other_size = float(other.get("size") or 0.0)
@@ -1801,13 +1880,14 @@ def _footnote_math_script_context(candidate: dict, line: dict) -> bool:
     """Reject clear inline math scripts while leaving ambiguous cases for vision."""
     characters = line.get("characters") or []
     position = int(candidate.get("line_position") or 0)
+    position_end = int(candidate.get("line_position_end") or position)
     previous = next(
         (characters[index] for index in range(position - 1, -1, -1)
          if not characters[index]["char"].isspace()),
         None,
     )
     following = next(
-        (characters[index] for index in range(position + 1, len(characters))
+        (characters[index] for index in range(position_end + 1, len(characters))
          if not characters[index]["char"].isspace()),
         None,
     )
@@ -1887,15 +1967,17 @@ def _footnote_regions_from_page(page, page_no: int) -> List[dict]:
     text_right = max(line["bbox"][2] for line in wide_lines)
     text_width = max(1.0, text_right - text_left)
 
+    marker_runs = _footnote_digit_runs(lines)
     definition_candidates = []
-    for item in all_characters:
+    for item in marker_runs:
         value = str(item.get("char") or "")
         size = float(item.get("size") or 0.0)
         x0, y0, x1, y1 = item["bbox"]
         center_y = (y0 + y1) / 2.0
         if not (
-            len(value) == 1
+            1 <= len(value) <= 3
             and value.isdigit()
+            and bool(item.get("first_nonspace_on_line"))
             and not _OCR_MATH_FONT_RE.search(str(item.get("font") or ""))
             and 0.48 * body_size <= size <= 0.72 * body_size
             and 0.70 * page_height <= center_y <= 0.95 * page_height
@@ -1905,7 +1987,7 @@ def _footnote_regions_from_page(page, page_no: int) -> List[dict]:
         nearby_body = [
             other for other in all_characters
             if (
-                other is not item
+                not any(other is member for member in (item.get("members") or ()))
                 and other["bbox"][0] >= x1 - 0.5
                 and other["bbox"][0] <= text_right + 0.01 * page_width
                 and abs(
@@ -1941,7 +2023,7 @@ def _footnote_regions_from_page(page, page_no: int) -> List[dict]:
     for definition_index, definition in enumerate(definition_candidates):
         marker = str(definition["char"])
         references = []
-        for candidate in all_characters:
+        for candidate in marker_runs:
             if candidate is definition or str(candidate.get("char") or "") != marker:
                 continue
             size = float(candidate.get("size") or 0.0)
@@ -1992,9 +2074,13 @@ def _footnote_regions_from_page(page, page_no: int) -> List[dict]:
             max(item["bbox"][2] for item in definition_characters),
             max(item["bbox"][3] for item in definition_characters),
         ]
+        definition_members = tuple(definition.get("members") or ())
         note_characters = [
             item for item in definition_characters
-            if item is not definition and float(item.get("size") or 0.0) >= 0.65 * body_size
+            if (
+                not any(item is member for member in definition_members)
+                and float(item.get("size") or 0.0) >= 0.65 * body_size
+            )
         ]
         note_size = _footnote_font_mode(note_characters)
         if not (0.72 * body_size <= note_size <= 1.02 * body_size):
@@ -3450,8 +3536,11 @@ def _normalize_codex_figures(
             raise LLMError(f"Codex OCR 第 {position} 个插图 bbox 过小")
         if box_width * box_height > 0.88 or (box_width > 0.96 and box_height > 0.90):
             raise LLMError(f"Codex OCR 第 {position} 个插图 bbox 接近整页，已拒绝")
-        tolerance_x = max(4.0, width * 0.035)
-        tolerance_y = max(4.0, height * 0.035)
+        # Keep the inner Codex adapter identical to the outer immutable v2
+        # validator so an inner pass cannot be rejected later by a stricter
+        # second tolerance and consume a pointless retry.
+        tolerance_x = max(4.0, width * 0.02)
+        tolerance_y = max(4.0, height * 0.02)
         if (
             abs(px0 - nx0 * width) > tolerance_x
             or abs(px1 - nx1 * width) > tolerance_x
@@ -4149,6 +4238,7 @@ def transcribe_page_result(
     )
     raw_figures = []
     raw_framed_insets = None
+    model_raw_response: Dict = {}
     structured = False
     try:
         if formula_attached:
@@ -4162,6 +4252,7 @@ def transcribe_page_result(
             if not isinstance(response, dict) or not isinstance(response.get("latex"), str):
                 raise LLMError("Codex OCR 结构化响应缺少 latex")
             raw = response["latex"]
+            model_raw_response = dict(response)
             raw_figures = response.get("figures")
             raw_framed_insets = response.get("framed_insets")
             structured = True
@@ -4172,6 +4263,7 @@ def transcribe_page_result(
             if not isinstance(response, dict) or not isinstance(response.get("latex"), str):
                 raise LLMError("Codex OCR 结构化响应缺少 latex")
             raw = response["latex"]
+            model_raw_response = dict(response)
             raw_figures = response.get("figures")
             raw_framed_insets = response.get("framed_insets")
             structured = True
@@ -4182,6 +4274,11 @@ def transcribe_page_result(
                 raw = chat_vision_bytes(OCR_SYSTEM_PROMPT, user, png_bytes)
             else:
                 raw = client.chat_vision(OCR_SYSTEM_PROMPT, user, encode_image(png_bytes))
+            model_raw_response = {
+                "latex": str(raw),
+                "figures": [],
+                "framed_insets": [],
+            }
     except LLMError as e:
         msg = str(e)
         # Codex 自带明确的登录/模型/额度指引；不要把本机后端错误误报成
@@ -4203,74 +4300,87 @@ def transcribe_page_result(
                 "qwen3.7-flash（推荐）或 qwen3-vl-flash"
             ) from None
         raise
-    text = _clean_page_output(raw)
-    if not text:
-        raise LLMError(f"第 {page_no} 页转写为空")
-    hint = _sanitize_pdf_text_hint(reference_text) if reference_text else ""
-    _validate_visible_caption_labels(text, hint, page_no)
-    quality_flags: List[dict] = []
-    if hint:
-        quality_flags.extend(_validate_reference_relations(
+    try:
+        text = _clean_page_output(raw)
+        if not text:
+            raise LLMError(f"第 {page_no} 页转写为空")
+        hint = _sanitize_pdf_text_hint(reference_text) if reference_text else ""
+        _validate_visible_caption_labels(text, hint, page_no)
+        quality_flags: List[dict] = []
+        if hint:
+            quality_flags.extend(_validate_reference_relations(
+                text,
+                hint,
+                page_no,
+                client,
+                png_bytes,
+                reference_relation_regions or [],
+                footnote_regions=reference_footnote_regions or [],
+                retry_state=quality_retry_state,
+            ))
+        quality_flags.extend(_validate_divider_integrity(
             text,
-            hint,
             page_no,
             client,
             png_bytes,
-            reference_relation_regions or [],
-            footnote_regions=reference_footnote_regions or [],
+            reference_divider_regions or [],
             retry_state=quality_retry_state,
         ))
-    quality_flags.extend(_validate_divider_integrity(
-        text,
-        page_no,
-        client,
-        png_bytes,
-        reference_divider_regions or [],
-        retry_state=quality_retry_state,
-    ))
-    quality_flags.extend(_validate_equation_tag_integrity(
-        text,
-        page_no,
-        reference_equation_tag_regions or [],
-    ))
-    quality_flags.extend(_validate_footnote_integrity(
-        text,
-        page_no,
-        client,
-        png_bytes,
-        reference_footnote_regions or [],
-        retry_state=quality_retry_state,
-    ))
-    quality_flags.extend(_validate_framed_inset_integrity(
-        text,
-        page_no,
-        raw_framed_insets,
-        image_size,
-        reference_framed_insets or [],
-        structured=structured,
-        retry_state=quality_retry_state,
-    ))
-    _validate_italic_terms_not_math(text, reference_italic_terms or [], page_no)
-    figures = (
-        _normalize_codex_figures(text, raw_figures, image_size)
-        if structured and image_size is not None else []
-    )
-    if figures:
-        text, figures = _normalize_structured_figure_layout(text, figures)
-    return OcrPageTranscription(
-        tex=f"% Page {page_no}\n{text}",
-        figures=figures,
-        image_size_pixels=list(image_size or ()),
-        reference_text_chars=len(hint),
-        quality_flags=quality_flags,
-        formula_evidence=[
-            {
-                **record,
-                "attached": formula_attached,
-            }
-            for record in formula_records
-        ],
-    )
+        quality_flags.extend(_validate_equation_tag_integrity(
+            text,
+            page_no,
+            reference_equation_tag_regions or [],
+        ))
+        quality_flags.extend(_validate_footnote_integrity(
+            text,
+            page_no,
+            client,
+            png_bytes,
+            reference_footnote_regions or [],
+            retry_state=quality_retry_state,
+        ))
+        quality_flags.extend(_validate_framed_inset_integrity(
+            text,
+            page_no,
+            raw_framed_insets,
+            image_size,
+            reference_framed_insets or [],
+            structured=structured,
+            retry_state=quality_retry_state,
+        ))
+        _validate_italic_terms_not_math(text, reference_italic_terms or [], page_no)
+        figures = (
+            _normalize_codex_figures(text, raw_figures, image_size)
+            if structured and image_size is not None else []
+        )
+        if figures:
+            text, figures = _normalize_structured_figure_layout(text, figures)
+        return OcrPageTranscription(
+            tex=f"% Page {page_no}\n{text}",
+            figures=figures,
+            image_size_pixels=list(image_size or ()),
+            reference_text_chars=len(hint),
+            quality_flags=quality_flags,
+            formula_evidence=[
+                {
+                    **record,
+                    "attached": formula_attached,
+                }
+                for record in formula_records
+            ],
+            model_raw_latex=str(raw),
+            model_raw_response=model_raw_response,
+        )
+    except Exception as exc:
+        # A deterministic host gate may reject a paid response.  Attach the
+        # exact parsed provider payload so the recovery chain can retain that
+        # attempt instead of replacing it with only an error summary.
+        try:
+            exc.model_raw_latex = str(raw)
+            exc.model_raw_response = model_raw_response
+        except (AttributeError, TypeError):
+            pass
+        raise
 
 
 def transcribe_page(

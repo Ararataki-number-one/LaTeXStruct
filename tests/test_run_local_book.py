@@ -33,6 +33,7 @@ class FakeApi:
             {
                 "status": "done", "phase": "原始 OCR 已就绪", "done": 2, "total": 2,
                 "page": 2, "raw_revision": 2, "state_revision": 5, "errors": [],
+                "quality_report": {"page_gate_passed": True, "blockers": []},
             },
         ]
         self.analysis_statuses = [
@@ -60,6 +61,7 @@ class FakeApi:
                 "analysis_backend": payload["analysis_backend"],
                 "codex_model": payload["codex_model"],
                 "codex_reasoning_effort": payload["codex_reasoning_effort"],
+                "review_enabled": payload["review_enabled"],
             }
         if path == "/api/ocr/jobs/ocr-1/start":
             return {"id": "ocr-1", "status": "running"}
@@ -201,6 +203,7 @@ def test_runner_retries_ocr_and_exports_blocked_analysis(tmp_path):
         "analysis_backend": "codex_cli",
         "codex_model": "",
         "codex_reasoning_effort": "medium",
+        "review_enabled": True,
     }
     assert set(result["artifacts"]) == {
         "ocr-preview.tex",
@@ -221,6 +224,7 @@ def test_runner_retries_ocr_and_exports_blocked_analysis(tmp_path):
         "analysis_backend": "codex_cli",
         "codex_reasoning_effort": "medium",
         "codex_model": "",
+        "review_enabled": True,
     }
     start_call = next(call for call in api.calls if call[1].endswith("/start"))
     assert start_call[2]["form"]["quality_profile"] == "publication"
@@ -233,6 +237,19 @@ def test_runner_retries_ocr_and_exports_blocked_analysis(tmp_path):
     assert reloaded["phase"] == "complete"
     assert reloaded["artifacts"]["ocr-project.zip"]["sha256"]
     assert any(item["kind"] == "exports_saved" for item in reloaded["diagnostics"])
+
+
+def test_runner_refuses_done_without_explicit_machine_page_gate(tmp_path):
+    store = _new_store(tmp_path)
+    api = FakeApi()
+    api.ocr_statuses[-1].pop("quality_report")
+    runner = BookRunner(api, store, poll_seconds=0.05, sleep=lambda _seconds: None)
+
+    with pytest.raises(RunnerError, match="机器页面质量门没有明确通过"):
+        runner.execute()
+
+    assert not any(call[1] == "/api/ocr/jobs/ocr-1/import" for call in api.calls)
+    assert (store.output_dir / "ocr-result.tex").is_file()
 
 
 class PauseApi:

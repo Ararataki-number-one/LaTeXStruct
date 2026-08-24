@@ -100,33 +100,74 @@ AI 复查与 OCR 模型；开启「系统凭据管理器」后，密钥会存入
 ## 发布新版本（不可变候选验收后发布）
 
 ```powershell
-# 1) 修改 latexstruct/_version.py 后同步生成元数据
+# 1) 在候选分支完成代码、门禁和发布说明；修改版本后同步元数据
 $version = "X.Y.Z"
 python packaging/sync_version.py --version $version
-# 2) 精确暂存本次改动（避免把无关未跟踪文件带入发布），提交并推送 main
-git add -u
-git add <本次新增文件路径...>
+# 2) 只按精确路径暂存候选实现；禁止 git add . / git add -A / git add -u
+git add -- <本次修改和新增的精确文件路径...>
 git status --short
-git commit -m "release: v$version"
-git push origin HEAD:main
-# 3) 手动构建一次不可变候选；下载该 run 的候选，用同一 EXE 完成
-#    ocr-17、ocr-600、analysis-17、analysis-600 四项真实验收
-gh workflow run build.yml --ref main -f version=$version
+git commit -m "release: prepare v$version candidate"
+git push origin HEAD:<candidate-branch>
+$testedCommit = (git rev-parse HEAD).Trim()
+# 3) 在该精确 commit 手动构建一次不可变候选；等待成功并下载资产
+#    analysis-37 严格完整验收（内嵌 ocr-37、分析/审阅、双遍编译、
+#    两轮逐页视觉闭环、机器验证和 AI 审计包）
+gh workflow run build.yml --ref <candidate-branch> -f version=$version
+# 记录成功 run 的数字 ID 为 $candidateRunId，并下载到 <candidate-assets-dir>
 # 真实验收机一次性安装 Python Playwright 与 Chromium；浏览器二进制只进入
 # Playwright 的本机缓存，不进入仓库、安装包或便携包
 python -m pip install -e ".[server,acceptance]"
 python -m playwright install chromium
-# 4) 提交 release/acceptance/v$version/ 下的验收声明并推送 main；全部门禁通过后再打 tag
+# 4) 由下载的精确 EXE 启动隔离 loopback 服务。验收器会同时核对
+#    启动 PID、端口监听 PID/子进程树、两个进程镜像 SHA 和 health identity。
+$candidateProcess = Start-Process -FilePath <candidate-LaTeXStruct.exe> `
+  -ArgumentList '--server','--port','18080' -WindowStyle Hidden -PassThru
+python tools/v2_analysis_acceptance.py `
+  "<SOME RECENT RESULTS IN RAMSEY THEORY.pdf>" --profile analysis-37 `
+  --base-url http://127.0.0.1:18080 --quality-tier high --template faithfulbook `
+  --service-pid $candidateProcess.Id --expected-commit $testedCommit `
+  --expected-build-id $candidateRunId `
+  --executable <candidate-LaTeXStruct.exe> --exe-sha256 <candidate-exe-sha256>
+# 5) 本地门禁复算完整私有工件后，只生成
+#    release/acceptance/v$version/release-attestation.json 哈希投影。不得提交源 PDF、
+#    candidate.pdf、逐页图或 analysis-audit-submission.zip。
+python packaging/release_integrity.py assemble-attestations `
+  --version $version --commit $testedCommit `
+  --analysis-run-37 <local-analysis-37-output> `
+  --output "release/acceptance/v$version/release-attestation.json"
+# 6) 在本地先复核投影和已下载候选资产；任一命令失败都停止
+python packaging/release_integrity.py verify-attestation `
+  --manifest "release/acceptance/v$version/release-attestation.json" `
+  --version $version --commit $testedCommit
+python packaging/release_integrity.py verify-candidate-assets `
+  --manifest "release/acceptance/v$version/release-attestation.json" `
+  --version $version --commit $testedCommit `
+  --assets-manifest <candidate-assets-dir>/release-assets.json `
+  --checksums <candidate-assets-dir>/SHA256SUMS.txt `
+  --assets-dir <candidate-assets-dir>
+# 7) 只暂存哈希投影，单独提交；以保留 tested commit 祖先关系的方式合并 main
+git add -- "release/acceptance/v$version/release-attestation.json"
+git status --short
+git commit -m "release: attest v$version analysis-37"
+# 禁止 squash/rebase 掉 $testedCommit；将当前分支正常合并入 main，推送并等待 main CI 成功
+git push origin HEAD:<candidate-branch>
+git switch main
+git pull --ff-only origin main
+git merge --no-ff <candidate-branch>
+git push origin main
+# 8) main 上述提交成为当前 HEAD 且 CI 成功后，才在该 HEAD 打稳定 tag
 git tag "v$version"
 git push origin "v$version"
-# 5) tag workflow 复算并发布已验收候选的原始字节；不会重新构建资产
+# 9) tag workflow 复算并发布已验收候选的原始字节；不会重新构建资产
 ```
 
 ## 当前状态（v2.0.0）
 
 > `v2.0.0-rc.1` 是明确标记为 **UNVERIFIED** 的 GitHub 预发行版，供提前试用与反馈；其
 > Windows 二进制内部版本仍显示 `2.0.0`，不会进入稳定版自动更新通道。该 RC 尚未完成
-> 17/600 页 OCR 与分析四项同候选真实验收，不应被视为稳定版或出版质量证明。
+> 新的 `analysis-37` 同候选严格完整验收，不应被视为稳定版或出版质量证明。
+>
+> 代码测试通过，600 页 / 30 分钟真实端到端性能尚未验证。
 
 - v2.0.0 把“忠实 OCR 与基线恢复”和“OCR 后 AI 自动整理”明确分离。OCR 运行使用不可变快照、
   稳定页面 ID、逐页原子保存和断点恢复；批量或并发始终有界，失败只影响对应任务单元，原始 OCR
@@ -155,11 +196,18 @@ git push origin "v$version"
 - 界面中的 100% 仅表示本次计划阶段已执行到终点，不等于 `VERIFIED`。独立复核、第二遍 AI 复查、
   编译、视觉闭环或最终门禁任一缺失/失败时，结果仍为 `COMPLETED_WITH_ISSUES`、`UNVERIFIED`
   或失败状态，不会因进度值自动提升；
-- v2.0.0 只有在 `ocr-17`、`ocr-600`、`analysis-17`、`analysis-600` 四项真实验收全部通过并
-  绑定同一候选字节后才能发布；单次较小样本诊断不能替代 600 页门禁，也不构成整书性能声明。
-  每份 analysis 验收还必须携带 `candidate.tex`、`candidate.pdf` 和 `compile.log` 原始文件；
-  正式门会复算其字节数与 SHA-256，并把这些文件原样复制进发布 evidence，只有哈希字符串的旧证据
-  会被拒绝。
+- v2.0.0 只有在 `analysis-37` 真实完整验收通过后才能发布。该 profile 固定使用
+  `SOME RECENT RESULTS IN RAMSEY THEORY.pdf` 的 37 页原文（SHA-256
+  `29074289719d99d7fc89f528cc0b140c27be679ea5d2477fe517eff741e7757c`），并内嵌同一运行时身份的
+  `ocr-37` PASS。只有真实 `candidate.tex`、`candidate.pdf`、`compile.log`、全部 37 页的两轮独立
+  视觉复核、零阻塞机器验证和有效 AI 审计包全部通过，才能生成发布投影。
+  验收还强制 `high` 档、`faithfulbook`、且恰好一个活动 `\tableofcontents`；最终 PDF 页数和
+  candidate-only 页映射会被投影，成品超过 42 页时作为异常膨胀直接拒绝。验收器同时核对
+  loopback 服务 PID 对应的进程镜像就是传入的 `LaTeXStruct.exe`，且字节 SHA 与候选完全一致。
+  本地门禁复算这些私有工件的字节数与 SHA-256；GitHub 仅保存哈希投影，不上传源 PDF、
+  候选 PDF、逐页图或完整审计包。tag CI 能复核投影与候选 commit/build/EXE 的绑定，
+  但在不上传私有工件的约束下，不能二次打开这些本地字节。
+  代码测试通过，600 页 / 30 分钟真实端到端性能尚未验证。
 
 - OCR 导入会从冻结、哈希绑定的源 PDF 字节复算并校验真实总页数，任务快照和 manifest 不再把
   多页 PDF 误记为 1 页；受 v1.2.8 缺陷影响的旧项目只有在最新不可变审计快照独立证明同一 PDF、
@@ -270,7 +318,9 @@ git push origin "v$version"
 - Windows 凭据管理器开启后，配置文件只存占位符；凭据写入失败会中止保存，不会静默
   降级为明文。未开启时，界面会明确提示密钥保存在本机配置文件中；
 - 手动候选 workflow 执行完整测试、构建、Windows 安装/卸载与升级冒烟；tag workflow 重跑
-  测试门、核验四项真实验收并复算先前候选字节。任一门禁失败都不会发布，tag 阶段不重建资产。
+  测试门、核验严格 `analysis-37` 完整验收投影并复算先前候选字节。最终安装器完成签名后还会
+  再次静默安装，并逐字节核对其中的 `LaTeXStruct.exe` 与被打包候选 EXE 的 SHA-256；任一门禁
+  失败都不会发布，tag 阶段不重建资产。
 
 核心保证：只改结构不改内容（撤销全部编辑后与原文逐字符一致的机器校验，失败自动回退）、
 AI 只做决策不生成正文、歧义项一律保守保留并列入汇报。

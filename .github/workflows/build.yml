@@ -479,6 +479,51 @@ jobs:
           Get-ChildItem dist/LaTeXStruct-setup-*.exe | ForEach-Object {
             & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
           }
+      - name: 最终安装器字节绑定（签名后静默安装 → EXE SHA → 卸载）
+        shell: pwsh
+        run: |
+          $setups = @(Get-ChildItem dist/LaTeXStruct-setup-*.exe)
+          if ($setups.Count -ne 1) {
+            Write-Error "签名后必须且只能有一个安装器，实际为 $($setups.Count) 个"
+            exit 1
+          }
+          $setup = $setups[0]
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\LaTeXStruct-Final-Asset-Smoke'
+          $installedExe = Join-Path $dir 'LaTeXStruct.exe'
+          $uninstaller = Join-Path $dir 'unins000.exe'
+          try {
+            $install = Start-Process -FilePath $setup.FullName -ArgumentList `
+              '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$dir" `
+              -Wait -PassThru
+            if ($install.ExitCode -ne 0) {
+              throw "最终安装器静默安装失败，exit=$($install.ExitCode)"
+            }
+            if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
+              throw '最终安装器没有安装 LaTeXStruct.exe'
+            }
+            $candidateHash = (Get-FileHash -Algorithm SHA256 -LiteralPath 'dist/LaTeXStruct.exe').Hash.ToLowerInvariant()
+            $installedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installedExe).Hash.ToLowerInvariant()
+            if ($installedHash -ne $candidateHash) {
+              throw "最终安装器内 EXE 与候选 EXE 字节不一致: candidate=$candidateHash installed=$installedHash"
+            }
+            Write-Host "最终安装器已安装候选精确 EXE 字节: $candidateHash"
+          } finally {
+            if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+              $uninstall = Start-Process -FilePath $uninstaller -ArgumentList `
+                '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+              if ($uninstall.ExitCode -ne 0) {
+                Write-Error "最终安装器静默卸载失败，exit=$($uninstall.ExitCode)"
+              }
+            }
+          }
+          foreach ($i in 1..10) {
+            if (-not (Test-Path -LiteralPath $installedExe)) { break }
+            Start-Sleep -Seconds 1
+          }
+          if (Test-Path -LiteralPath $installedExe) {
+            Write-Error '最终安装器静默卸载后仍残留 EXE'
+            exit 1
+          }
       - name: 打包便携版与第三方许可证
         shell: pwsh
         run: |
@@ -509,10 +554,10 @@ jobs:
             dist/SHA256SUMS.txt
 
   release_attested_candidate:
-    name: 发布四项真实验收过的原始候选字节（仅 tag）
+    name: 发布严格 37 页完整验收过的原始候选字节（仅 tag）
     needs: test
     # 带连字符的 tag 是明确标注的预发行版；它们只能由人工以 prerelease
-    # 方式发布，不能进入或削弱下方稳定版四项真实验收门。
+    # 方式发布，不能进入或削弱下方稳定版 37 页完整验收门。
     if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: windows-latest
     permissions:
@@ -534,7 +579,7 @@ jobs:
           }
           python -c "import latexstruct; assert latexstruct.__version__=='$v', f'版本不匹配: {latexstruct.__version__} vs $v'"
           "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: 发布门（定位已完成且四项真实验收过的候选 run）
+      - name: 发布门（定位已完成且严格 37 页完整验收过的候选 run）
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -549,7 +594,7 @@ jobs:
           }
           $manifest = "release/acceptance/v$env:APP_VERSION/release-attestation.json"
           if (-not (Test-Path -LiteralPath $manifest)) {
-            Write-Error "缺少四份真实验收声明（ocr-17、ocr-600、analysis-17、analysis-600）: $manifest"
+            Write-Error "缺少严格 analysis-37 真实验收的隐私安全哈希投影: $manifest"
             exit 1
           }
           try {
@@ -571,7 +616,8 @@ jobs:
           }
           # 验收 JSON 本身会产生后续提交，因此不可能与被测 commit 自引用。
           # 被测 commit 到 tag 之间仅允许加入验收证据和发布说明；任何运行时代码
-          # 变化都要求重新构建候选、重新执行 OCR/分析的真实 17/600 页验收。
+          # 变化都要求重新构建候选、重新执行同一 37 页文档的
+          # OCR、分析/审阅、编译、全页视觉闭环和审计包验证。
           $evidencePrefix = "release/acceptance/v$env:APP_VERSION/"
           $changedPaths = @(git diff --name-only "$attestedCommit..$env:GITHUB_SHA")
           if ($LASTEXITCODE -ne 0) {
@@ -587,10 +633,37 @@ jobs:
               exit 1
             }
           }
+          $evidenceFiles = @(
+            git ls-tree -r --name-only "$env:GITHUB_SHA" -- $evidencePrefix
+          )
+          if (
+            $evidenceFiles.Count -ne 1 -or
+            [string]$evidenceFiles[0] -ne $manifest
+          ) {
+            Write-Error '验收目录只能提交 release-attestation.json 哈希投影；禁止上传源 PDF、候选 PDF、逐页图或完整审计包'
+            exit 1
+          }
+          $forbiddenEvidence = @(
+            git ls-tree -r --name-only "$env:GITHUB_SHA" |
+              Where-Object {
+                $leaf = Split-Path -Leaf ([string]$_)
+                $leaf -eq 'SOME RECENT RESULTS IN RAMSEY THEORY.pdf' -or
+                $leaf -eq 'candidate.pdf' -or
+                $leaf -eq 'analysis-audit-submission.zip' -or
+                (
+                  ([string]$_).Replace('\','/').StartsWith('release/acceptance/') -and
+                  [IO.Path]::GetExtension($leaf) -match '^\.(pdf|png|jpg|jpeg)$'
+                )
+              }
+          )
+          if ($forbiddenEvidence.Count -gt 0) {
+            Write-Error "仓库包含禁止公开的 37 页验收工件: $($forbiddenEvidence -join ', ')"
+            exit 1
+          }
           python packaging/release_integrity.py verify-attestation `
             --manifest $manifest --version $env:APP_VERSION --commit $attestedCommit
           if ($LASTEXITCODE -ne 0) {
-            Write-Error '四份真实验收声明未通过发布门；缺少 analysis-17/analysis-600 时禁止发布'
+            Write-Error 'analysis-37 真实完整验收的哈希投影未通过发布门'
             exit 1
           }
           python packaging/release_integrity.py verify-release-notes `
@@ -634,7 +707,7 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ env.CANDIDATE_RUN_ID }}
-      - name: 复算候选资产并绑定四项真实验收
+      - name: 复算候选资产并绑定严格 37 页完整验收
         shell: pwsh
         run: |
           $manifest = "release/acceptance/v$env:APP_VERSION/release-attestation.json"
@@ -644,7 +717,7 @@ jobs:
             --assets-manifest dist/release-assets.json `
             --checksums dist/SHA256SUMS.txt --assets-dir dist
           if ($LASTEXITCODE -ne 0) {
-            Write-Error '候选资产不是四 profile 实际验收过的精确字节，禁止发布'
+            Write-Error '候选资产不是 analysis-37 实际验收过的精确字节，禁止发布'
             exit 1
           }
       - name: 生成当前版本中文发布说明

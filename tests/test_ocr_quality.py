@@ -93,6 +93,19 @@ def test_standard_profile_keeps_findings_as_visible_warnings():
     }
 
 
+@pytest.mark.parametrize("profile", ["standard", "publication"])
+def test_recovery_evidence_integrity_error_blocks_every_profile(profile):
+    job = _job(profile)
+    job["recovery_restore_error"] = "recovery attempt hash mismatch"
+
+    report = assess_ocr_quality(job)
+
+    assert report["page_gate_passed"] is False
+    assert "recovery_evidence_invalid" in {
+        item["code"] for item in report["blockers"]
+    }
+
+
 def test_publication_requires_frozen_source_identity_but_standard_only_warns():
     publication = _job()
     publication["_source_sha256"] = ""

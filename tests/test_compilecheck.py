@@ -78,6 +78,20 @@ def test_artifact_captures_complete_pdf_and_full_sanitized_log(monkeypatch):
     assert artifact["compile_input_sha256"] == artifact["input_manifest"][
         "manifest_sha256"
     ]
+    assert artifact["command"] == [
+        "xelatex-test",
+        "-interaction=nonstopmode",
+        "-halt-on-error",
+        "main.tex",
+    ]
+    assert artifact["command_history"] == [artifact["command"]]
+    assert artifact["compile_workdir"].startswith(
+        compilecheck.COMPILE_WORKDIR_ID_PREFIX
+    )
+    assert len(artifact["compile_workdir"].removeprefix(
+        compilecheck.COMPILE_WORKDIR_ID_PREFIX
+    )) == 64
+    assert str(workdirs[0]) not in artifact["compile_workdir"]
     assert artifact["log_path"] == "main.log"
     assert "early-log-evidence" in artifact["log"]
     assert "<compile-workdir>" in artifact["log"]
@@ -286,6 +300,9 @@ def test_unavailable_engine_requires_source_preview(monkeypatch):
     assert artifact["exit_code"] is None
     assert artifact["timed_out"] is False
     assert artifact["passes_attempted"] == 0
+    assert artifact["command"] == []
+    assert artifact["command_history"] == []
+    assert artifact["compile_workdir"] is None
     assert artifact["input_manifest"]["schema"] == (
         "latexstruct-compile-input-set-v1"
     )
@@ -537,6 +554,9 @@ def test_xdvipdfmx_windows_crash_retries_with_healthy_engine(
     assert artifact["engine"] == expected_fallback
     assert artifact["preview_status"] == COMPILED
     assert "0xc0000417" in artifact["log"]
+    assert all("\\" not in command[0] and "/" not in command[0]
+               for command in artifact["command_history"])
+    assert artifact["command"] in artifact["command_history"]
 
 
 def test_failed_lualatex_fallback_continues_to_alternate_xelatex(monkeypatch):

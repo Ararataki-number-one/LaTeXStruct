@@ -268,6 +268,48 @@ def test_synthetic_pdf_accepts_left_and_right_equation_columns_without_body_nois
     ]
 
 
+def test_equation_tag_geometry_accepts_slanted_unicode_relation_evidence():
+    class _Rect:
+        x0 = 0.0
+        y0 = 0.0
+        x1 = 600.0
+        y1 = 800.0
+        width = 600.0
+        height = 800.0
+
+    class _Page:
+        rect = _Rect()
+
+        def get_text(self, _kind, sort=True):
+            assert sort is True
+            return [
+                (510.0, 200.0, 530.0, 212.0, "(26)", 1, 0, 0),
+                (220.0, 200.0, 300.0, 212.0, "x⩽y", 1, 1, 0),
+                (510.0, 300.0, 530.0, 312.0, "(36)", 2, 0, 0),
+                (220.0, 300.0, 300.0, 312.0, "u⩾v", 2, 1, 0),
+            ]
+
+    class _Document:
+        page_count = 1
+
+        def __getitem__(self, index):
+            assert index == 0
+            return _Page()
+
+        def close(self):
+            pass
+
+    class _Fitz:
+        @staticmethod
+        def open(_path):
+            return _Document()
+
+    with patch.dict(sys.modules, {"fitz": _Fitz}):
+        regions = pdf_page_equation_tag_regions("book.pdf", 1)
+
+    assert [item["label_hint"] for item in regions] == ["26", "36"]
+
+
 def test_pdf_equation_tag_geometry_failure_is_not_silently_an_empty_inventory():
     class _Page:
         def get_text(self, *_args, **_kwargs):

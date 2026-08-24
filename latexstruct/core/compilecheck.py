@@ -40,6 +40,7 @@ COMPILE_FAILED = "FAILED"
 COMPILE_TIMEOUT = "TIMEOUT"
 COMPILE_UNAVAILABLE = "UNAVAILABLE"
 COMPILE_INPUT_MANIFEST_SCHEMA = "latexstruct-compile-input-set-v1"
+COMPILE_WORKDIR_ID_PREFIX = "compile-workdir:sha256:"
 
 # A broken TeX helper (notably ``xdvipdfmx.exe``) can otherwise display a
 # modal Windows "application error" dialog. Such a dialog blocks unattended
@@ -217,6 +218,7 @@ def _run_latex_engine(
     environment: dict[str, str],
     passes_requested: int,
     no_pdf: bool = False,
+    command_history: list[list[str]] | None = None,
 ) -> tuple[object, int, int, int]:
     """Run one TeX engine deterministically for the requested pass count."""
     process: object = None
@@ -233,6 +235,11 @@ def _run_latex_engine(
         if no_pdf:
             command.append("-no-pdf")
         command.append("main.tex")
+        if command_history is not None:
+            # Capture the command before execution so a timeout still retains
+            # exact invocation evidence.  Public serialization strips only
+            # the executable's local directory below.
+            command_history.append(list(command))
         try:
             process = subprocess.run(
                 command,
@@ -252,6 +259,34 @@ def _run_latex_engine(
         if return_code != 0:
             break
     return process, return_code, passes_attempted, passes_completed
+
+
+def _compile_workdir_identifier(workdir: str) -> str:
+    """Return an opaque per-directory identifier without exposing its path."""
+    normalized = os.path.normcase(os.path.abspath(str(workdir)))
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"{COMPILE_WORKDIR_ID_PREFIX}{digest}"
+
+
+def _public_compile_command(command: list[str]) -> list[str]:
+    """Remove only the executable directory from an actual command."""
+    if not command:
+        return []
+    public = [str(token) for token in command]
+    public[0] = public[0].replace("\\", "/").rsplit("/", 1)[-1]
+    return public
+
+
+def _public_compile_commands(command_history: list[list[str]]) -> list[list[str]]:
+    return [_public_compile_command(command) for command in command_history]
+
+
+def _selected_engine_command(command_history: list[list[str]]) -> list[str]:
+    """Return the last actual TeX-engine command, excluding a PDF driver."""
+    for command in reversed(command_history):
+        if command and command[-1] == "main.tex":
+            return _public_compile_command(command)
+    return _public_compile_command(command_history[-1]) if command_history else []
 
 
 def _clear_failed_engine_outputs(workdir: str) -> None:
@@ -537,11 +572,16 @@ def compile_latex_artifact(
             "passes_requested": 0,
             "passes_attempted": 0,
             "passes_completed": 0,
+            "command": [],
+            "command_history": [],
+            "compile_workdir": None,
             "input_manifest": input_manifest,
             "compile_input_sha256": input_manifest["manifest_sha256"],
         }
 
     workdir = tempfile.mkdtemp(prefix="ls-compile-")
+    compile_workdir = _compile_workdir_identifier(workdir)
+    command_history: list[list[str]] = []
     process = None
     engine_exe = exe
     fallback_notices: list[str] = []
@@ -569,6 +609,7 @@ def compile_latex_artifact(
                     timeout=timeout,
                     environment=compiler_environment,
                     passes_requested=passes_requested,
+                    command_history=command_history,
                 )
                 first_log = _read_compile_log(workdir, process)
                 fallback_engines: list[str] = []
@@ -622,14 +663,22 @@ def compile_latex_artifact(
                         environment=fallback_environment,
                         passes_requested=passes_requested,
                         no_pdf=fallback_is_xelatex,
+                        command_history=command_history,
                     )
                     if fallback_is_xelatex and Path(workdir, "main.xdv").is_file():
                         tex_return_code = return_code
                         driver_exe = str(
                             Path(fallback_exe).with_name("xdvipdfmx.exe")
                         )
+                        driver_command = [
+                            driver_exe,
+                            "-o",
+                            "main.pdf",
+                            "main.xdv",
+                        ]
+                        command_history.append(driver_command)
                         process = subprocess.run(
-                            [driver_exe, "-o", "main.pdf", "main.xdv"],
+                            driver_command,
                             cwd=workdir,
                             capture_output=True,
                             timeout=timeout,
@@ -718,6 +767,9 @@ def compile_latex_artifact(
             "passes_requested": passes_requested,
             "passes_attempted": passes_attempted,
             "passes_completed": passes_completed,
+            "command": _selected_engine_command(command_history),
+            "command_history": _public_compile_commands(command_history),
+            "compile_workdir": compile_workdir,
             "input_manifest": input_manifest,
             "compile_input_sha256": input_manifest["manifest_sha256"],
         }

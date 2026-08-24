@@ -366,16 +366,23 @@ class BookRunner:
             "analysis_backend": "codex_cli",
             "codex_reasoning_effort": options.get("reasoning_effort", "medium"),
             "codex_model": options.get("codex_model", ""),
+            # The v2 production bridge fails closed unless independent review
+            # was explicitly enabled.  A whole-book runner must not inherit a
+            # stale disabled setting from an unrelated interactive session.
+            "review_enabled": True,
         }
         config = self.api.json("PUT", "/api/config", payload=payload, retryable=True)
         if config.get("analysis_backend") != "codex_cli":
             raise RunnerError("LaTeXStruct 未接受 codex_cli 后端设置")
         if config.get("codex_reasoning_effort") != payload["codex_reasoning_effort"]:
             raise RunnerError("LaTeXStruct 未接受指定的 Codex 推理强度")
+        if config.get("review_enabled") is not True:
+            raise RunnerError("LaTeXStruct 未启用 v2 所需的独立 AI 复查")
         self.state["applied_config"] = {
             "analysis_backend": "codex_cli",
             "codex_model": config.get("codex_model", ""),
             "codex_reasoning_effort": config.get("codex_reasoning_effort"),
+            "review_enabled": config.get("review_enabled"),
         }
         self.store.note("codex_ready", "Codex ChatGPT 登录态与统一后端设置已确认")
 
@@ -469,6 +476,22 @@ class BookRunner:
                     self.store.phase("paused", "ocr")
                     raise RunnerError("OCR 已安全暂停；使用 resume 子命令继续")
             elif current == "done":
+                quality_report = status.get("quality_report")
+                if (
+                    not isinstance(quality_report, dict)
+                    or quality_report.get("page_gate_passed") is not True
+                ):
+                    self._save_ocr_artifacts(allow_partial=True)
+                    blocker = (
+                        (quality_report.get("blockers") or [{}])[0]
+                        if isinstance(quality_report, dict) else {}
+                    )
+                    raise RunnerError(
+                        str(
+                            blocker.get("message")
+                            or "OCR 服务返回 done，但机器页面质量门没有明确通过；未进入分析"
+                        )
+                    )
                 self.store.phase("ocr_done", "")
                 return status
             elif current in {"partial", "error"}:
@@ -853,7 +876,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--end-page", type=int)
     run.add_argument("--dpi", type=int, default=220, help="出版审校渲染 DPI（200-300）")
     run.add_argument("--ocr-retries", type=int, default=2)
-    run.add_argument("--reasoning-effort", choices=("low", "medium"), default="medium")
+    run.add_argument(
+        "--reasoning-effort",
+        choices=("low", "medium", "high", "xhigh"),
+        default="medium",
+    )
     run.add_argument("--codex-model", default="", help="留空使用 Codex 默认模型")
     run.add_argument("--name", default="")
     run.add_argument("--title", default="")

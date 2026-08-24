@@ -3,10 +3,15 @@ import test from "node:test";
 
 import {
   buildOcrArtifacts,
+  buildOcrEstimate,
   buildOcrProgress,
   buildOcrRecoveryPresentation,
+  formatOcrCost,
+  formatOcrInteger,
   legacyOcrQualityProfile,
   normalizeOcrQualityTier,
+  openOcrProjectWithoutAnalysis,
+  ocrStrategyLabel,
   ocrPagePresentation,
 } from "../src/ocrPresentation.js";
 
@@ -104,6 +109,174 @@ test("OCR artifacts use new URLs while preserving the legacy raw TEX endpoint", 
   assert.equal(legacy.baselinePdf.available, false);
 });
 
+test("start estimate uses only backend ranges and never invents zero for missing data", () => {
+  const estimate = buildOcrEstimate({
+    ocr_estimates: {
+      recommended: {
+        basis_pages: 37,
+        calls: { min: 8, max: 12 },
+        duration_seconds: [90, 180],
+        cost: { min: 0.1, max: 0.2, currency: "USD" },
+      },
+    },
+  }, 37, "recommended");
+  assert.equal(estimate.callsText, "8–12 次");
+  assert.equal(estimate.durationText, "1 分 30 秒–3 分 0 秒");
+  assert.equal(estimate.costText, "$0.1–0.2");
+
+  const missing = buildOcrEstimate({}, 37, "recommended");
+  assert.equal(missing.callsText, "待后端评估");
+  assert.equal(missing.durationText, "待后端评估");
+  assert.equal(missing.costText, "无法估算");
+  assert.doesNotMatch(`${missing.callsText}${missing.durationText}${missing.costText}`, /\b0\b/);
+
+  const wrongSelection = buildOcrEstimate({
+    estimate: { basis_pages: 600, calls: [100, 120] },
+  }, 37, "recommended");
+  assert.equal(wrongSelection.callsText, "待后端评估");
+});
+
+test("per-page estimates are scaled only when the backend explicitly marks them per page", () => {
+  const estimate = buildOcrEstimate({
+    estimate: {
+      per_page: {
+        calls: [0.2, 0.3],
+        duration_seconds: [5, 8],
+        cost: [0.001, 0.002],
+      },
+      currency: "CNY",
+    },
+  }, 10, "recommended");
+  assert.equal(estimate.callsText, "2–3 次");
+  assert.equal(estimate.durationText, "50 秒–1 分 20 秒");
+  assert.equal(estimate.costText, "¥0.01–0.02");
+});
+
+test("nested measured metrics expose all runtime fields without turning missing values into zero", () => {
+  const progress = buildOcrProgress({
+    status: "running",
+    progress_metrics: {
+      current_pages: [11, 12],
+      current_concurrency: 3,
+      current_batch_size: 4,
+      current_dpi: 160,
+      rate_limited: false,
+      current_strategy: "object_layer_verified",
+    },
+    performance_metrics: {
+      elapsed_ms: 120000,
+      pages: {
+        selected: 37,
+        coverage_completed: 10,
+        by_final_status: { SUCCESS: 8, NEEDS_REVIEW: 1, FAILED: 1 },
+      },
+      throughput: {
+        average_pages_per_minute: 5,
+        recent_pages_per_minute: 6,
+        eta_seconds: 324,
+      },
+      requests: { total: 7 },
+      usage: {
+        input_tokens: 1000,
+        output_tokens: 250,
+        cost: 0.125,
+        currency: "USD",
+        cost_coverage: { complete: true },
+      },
+    },
+    cost_report: {
+      measurement_coverage: {
+        input_tokens: { complete: true },
+        output_tokens: { complete: true },
+        cost: { complete: true },
+      },
+    },
+  });
+  assert.equal(progress.selectedPages, 37);
+  assert.equal(progress.completed, 10);
+  assert.equal(progress.inFlight, 0);
+  assert.equal(progress.failed, 1);
+  assert.equal(progress.concurrency, 3);
+  assert.equal(progress.batchSize, 4);
+  assert.equal(progress.dpi, 160);
+  assert.equal(progress.rateLimitStatus, "未限流");
+  assert.equal(progress.totalTokens, 1250);
+  assert.equal(progress.tokenCoverageComplete, true);
+  assert.equal(progress.cost, 0.125);
+  assert.equal(progress.costCoverageComplete, true);
+  assert.equal(progress.strategyLabel, "对象层验证");
+  assert.equal(progress.requestCount, 7);
+
+  const unknown = buildOcrProgress({ status: "running" });
+  assert.equal(unknown.concurrency, null);
+  assert.equal(unknown.batchSize, null);
+  assert.equal(unknown.totalTokens, null);
+  assert.equal(unknown.cost, null);
+  assert.equal(unknown.rateLimitStatus, "未知");
+  assert.equal(unknown.strategyLabel, "未知");
+  assert.equal(formatOcrInteger(unknown.totalTokens), "未知");
+  assert.equal(formatOcrCost(unknown.cost), "未知");
+  assert.equal(ocrStrategyLabel("crop_review"), "局部裁片识别");
+});
+
+test("final artifacts distinguish syntax baseline and evidence correction and retain failed compile status", () => {
+  const artifacts = buildOcrArtifacts({
+    status: "done",
+    compile_status: "compile_failed",
+    baseline_project_id: "project-123",
+    artifacts: {
+      raw_ocr_tex: { url: "/raw.tex" },
+      baseline_tex: { url: "/baseline.tex" },
+      evidence_corrected_tex: { url: "/corrected.tex" },
+      baseline_pdf: { available: false, status: "COMPILE_FAILED" },
+      baseline_project_zip: { url: "/baseline.zip" },
+    },
+  });
+  assert.equal(artifacts.raw.label, "不可变 OCR 原稿 TEX");
+  assert.equal(artifacts.baselineTex.label, "纯语法恢复 OCR 基线 TEX");
+  assert.equal(artifacts.evidenceCorrectedTex.available, true);
+  assert.equal(artifacts.baselineProject.url, "/baseline.zip");
+  assert.equal(artifacts.compileStatus, "COMPILE_FAILED");
+  assert.equal(artifacts.projectId, "project-123");
+});
+
+test("open project creates an OCR project through /open and never calls /import", async () => {
+  const calls = [];
+  const opened = [];
+  const result = await openOcrProjectWithoutAnalysis({
+    jobId: "ocr-job-123",
+    request: async (url, options) => {
+      calls.push({ url, options });
+      return { json: async () => ({ id: "project-456", reused: false }) };
+    },
+    navigate: (projectId) => opened.push(projectId),
+  });
+  assert.deepEqual(calls, [{
+    url: "/api/ocr/jobs/ocr-job-123/open",
+    options: { method: "POST" },
+  }]);
+  assert.equal(calls.some(({ url }) => url.includes("/import")), false);
+  assert.deepEqual(opened, ["project-456"]);
+  assert.equal(result.id, "project-456");
+});
+
+test("open project navigates an existing project without making any API request", async () => {
+  let requestCount = 0;
+  const opened = [];
+  const result = await openOcrProjectWithoutAnalysis({
+    jobId: "ocr-job-123",
+    existingProjectId: "project-existing",
+    request: async () => {
+      requestCount += 1;
+      throw new Error("request must not run");
+    },
+    navigate: (projectId) => opened.push(projectId),
+  });
+  assert.equal(requestCount, 0);
+  assert.deepEqual(opened, ["project-existing"]);
+  assert.deepEqual(result, { id: "project-existing", reused: true });
+});
+
 test("restart recovery counts PENDING records even when stale metrics say zero", () => {
   const progress = buildOcrProgress({
     status: "partial",
@@ -195,4 +368,23 @@ test("active OCR keeps its running label instead of being presented as a termina
   assert.equal(presentation.incompleteCount, 2);
   assert.equal(presentation.statusLabel, "");
   assert.equal(presentation.title, "");
+});
+
+test("cancelled OCR remains terminal but is never presented as completed", () => {
+  const presentation = buildOcrRecoveryPresentation({
+    status: "cancelled",
+    total: 3,
+    pages: {
+      1: { source_page: 1, final_status: "SUCCESS" },
+      2: { source_page: 2, final_status: "CANCELLED" },
+      3: { source_page: 3, final_status: "PENDING" },
+    },
+  });
+  assert.equal(presentation.complete, false);
+  assert.equal(presentation.statusLabel, "已安全取消");
+  assert.match(presentation.title, /OCR 已取消/);
+  assert.match(presentation.detail, /不会显示为成功完成/);
+
+  const artifacts = buildOcrArtifacts({ id: "cancelled", status: "cancelled", raw_revision: 1 });
+  assert.equal(artifacts.raw.available, true);
 });

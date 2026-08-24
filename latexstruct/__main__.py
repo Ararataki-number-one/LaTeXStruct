@@ -89,4 +89,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Keep the source entry point safe on Windows as well.  The stdlib
+    # implementation is a no-op outside frozen workers, and the guard keeps a
+    # spawned ``__mp_main__`` import from recursively starting the UI/server.
+    from multiprocessing import freeze_support
+
+    freeze_support()
+    raise SystemExit(main())

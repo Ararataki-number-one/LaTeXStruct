@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import zipfile
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 
@@ -27,18 +29,20 @@ RUN_ID = "e" * 12
 def _config(tmp_path: Path) -> MODULE.AnalysisAcceptanceConfig:
     source = tmp_path / "source.pdf"
     source.write_bytes(b"%PDF-1.7\nsource\n")
+    MODULE.RELEASE_INTEGRITY.RAMSEY_37_SOURCE_SHA256 = MODULE._sha256_file(source)
     executable = tmp_path / "LaTeXStruct.exe"
     executable.write_bytes(b"candidate executable")
     return MODULE.AnalysisAcceptanceConfig(
         base_url="http://127.0.0.1:8080",
         source=source,
-        profile="analysis-17",
+        profile="analysis-37",
         output_dir=tmp_path / "evidence",
         expected_version="2.0.0",
         expected_commit=TEST_COMMIT,
         expected_build_id=TEST_BUILD_ID,
         executable=executable,
         expected_executable_sha256=MODULE._sha256_file(executable),
+        service_pid=os.getpid(),
     )
 
 
@@ -54,9 +58,14 @@ def _artifact(role: str, path: str, body: bytes, **extra):
 
 
 def _verified_bundle(config: MODULE.AnalysisAcceptanceConfig):
-    page_ids = [f"page-{page:04d}" for page in range(1, 18)]
+    page_ids = [
+        f"page-{page:04d}" for page in range(1, config.expected_pages + 1)
+    ]
     source = config.source.read_bytes()
-    current_tex = b"\\documentclass{article}\n\\begin{document}x\\end{document}\n"
+    current_tex = (
+        b"\\documentclass{article}\n\\begin{document}\n"
+        b"\\tableofcontents\nx\n\\end{document}\n"
+    )
     current_pdf = b"%PDF-1.7\ncompiled\n"
     compile_log = b"pass 1 ok\npass 2 ok\n"
     source_sha = MODULE._sha256_bytes(source)
@@ -124,6 +133,7 @@ def _verified_bundle(config: MODULE.AnalysisAcceptanceConfig):
                 "exit_code": 0,
                 "timed_out": False,
                 "passes_completed": 2,
+                "page_count": 38,
                 "pdf_sha256": pdf_sha,
                 "log": compile_log.decode("utf-8"),
             },
@@ -138,8 +148,8 @@ def _verified_bundle(config: MODULE.AnalysisAcceptanceConfig):
                 "decision": {"verified": True, "status": "VERIFIED", "failures": []},
                 "snapshot": {
                     "source_pdf_hash": source_sha,
-                    "page_range": list(range(1, 18)),
-                    "page_count": 17,
+                    "page_range": list(range(1, config.expected_pages + 1)),
+                    "page_count": config.expected_pages,
                     "models": [
                         {"role": "AI-1", "model_id": "structure-model"},
                         {"role": "AI-2", "model_id": "analysis-model"},
@@ -148,6 +158,18 @@ def _verified_bundle(config: MODULE.AnalysisAcceptanceConfig):
                     ],
                 },
                 "transport_invocations": transport,
+                "candidate_mappings": {
+                    tex_sha: {
+                        "candidate_hash": tex_sha,
+                        "pdf_sha256": pdf_sha,
+                        "mapping_sha256": "4" * 64,
+                        "candidate_only_pages": [1],
+                        "map": {
+                            str(page): [page + 1]
+                            for page in range(1, config.expected_pages + 1)
+                        },
+                    }
+                },
                 "compile_invocations": [
                     {
                         "candidate_hash": tex_sha,
@@ -191,11 +213,11 @@ def _verified_bundle(config: MODULE.AnalysisAcceptanceConfig):
             }
         },
         "source_pdf": {
-            "page_count": 17,
+            "page_count": config.expected_pages,
             "selected_page_range": {
                 "start": 1,
-                "end": 17,
-                "pages": list(range(1, 18)),
+                "end": config.expected_pages,
+                "pages": list(range(1, config.expected_pages + 1)),
             },
         },
         "artifacts": [
@@ -266,8 +288,43 @@ def test_direct_cli_help_can_import_workspace_package():
     )
 
     assert result.returncode == 0, result.stderr
-    assert "analysis-17" in result.stdout
+    assert "analysis-37" in result.stdout
     assert "--exe-sha256" in result.stdout
+    assert "--service-pid" in result.stdout
+
+
+def test_analysis_37_config_rejects_non_high_and_wrong_template(
+    tmp_path: Path, monkeypatch
+):
+    config = _config(tmp_path)
+    monkeypatch.setattr(MODULE, "_process_image_path", lambda _pid: config.executable)
+    monkeypatch.setattr(MODULE, "_listening_pids", lambda _port: {config.service_pid})
+    monkeypatch.setattr(MODULE, "_process_parent_map", lambda: {config.service_pid: 0})
+    with pytest.raises(MODULE.AcceptanceError, match="quality tier high"):
+        MODULE._validate_config(replace(config, quality_tier="recommended"))
+    with pytest.raises(MODULE.AcceptanceError, match="faithfulbook"):
+        MODULE._validate_config(replace(config, template="other"))
+
+
+def test_analysis_37_config_binds_running_service_image(tmp_path: Path, monkeypatch):
+    config = _config(tmp_path)
+    other = tmp_path / "other.exe"
+    other.write_bytes(b"different service")
+    monkeypatch.setattr(MODULE, "_process_image_path", lambda _pid: other)
+    with pytest.raises(MODULE.AcceptanceError, match="not running the supplied"):
+        MODULE._validate_config(config)
+
+
+def test_analysis_37_rejects_base_url_owned_by_another_process(
+    tmp_path: Path, monkeypatch
+):
+    config = _config(tmp_path)
+    other_pid = config.service_pid + 10000
+    monkeypatch.setattr(MODULE, "_process_image_path", lambda _pid: config.executable)
+    monkeypatch.setattr(MODULE, "_listening_pids", lambda _port: {other_pid})
+    monkeypatch.setattr(MODULE, "_process_parent_map", lambda: {other_pid: 0})
+    with pytest.raises(MODULE.AcceptanceError, match="listener is not the supplied"):
+        MODULE._validate_config(config)
 
 
 def test_local_http_api_post_json_uses_real_post_body(monkeypatch):
@@ -301,7 +358,9 @@ def test_audit_zip_requires_recomputable_sha256sums():
         MODULE._read_audit_zip(_audit_zip(corrupt_digest=True))
 
 
-def test_verified_bundle_can_publish_schema_compatible_attestation(tmp_path: Path):
+def test_verified_bundle_publishes_analysis_37_evidence_bindings(
+    tmp_path: Path, monkeypatch
+):
     config = _config(tmp_path)
     config.output_dir.mkdir()
     members, manifest = _verified_bundle(config)
@@ -309,7 +368,7 @@ def test_verified_bundle_can_publish_schema_compatible_attestation(tmp_path: Pat
         config=config,
         members=members,
         manifest=manifest,
-        source_pages=17,
+        source_pages=37,
         source_sha256=MODULE._sha256_file(config.source),
         backend="api",
         expected_project_id=PROJECT_ID,
@@ -322,26 +381,77 @@ def test_verified_bundle_can_publish_schema_compatible_attestation(tmp_path: Pat
         completed_terminal_run=True,
         real_execution=True,
     )
+    ocr_dir = config.output_dir / "ocr-prerequisite"
+    ocr_dir.mkdir()
+    baseline_sha256 = "7" * 64
+    baseline_run_id = "8" * 32
+    (ocr_dir / "acceptance-attestation.json").write_text(
+        json.dumps({
+            "ocr_baseline": {
+                "package_directory": MODULE.RELEASE_INTEGRITY.OCR_BASELINE_PACKAGE_DIRECTORY,
+                "manifest_filename": (
+                    f"{MODULE.RELEASE_INTEGRITY.OCR_BASELINE_PACKAGE_DIRECTORY}/"
+                    f"{MODULE.RELEASE_INTEGRITY.OCR_BASELINE_MANIFEST_MEMBER}"
+                ),
+                "manifest_sha256": baseline_sha256,
+                "run_id": baseline_run_id,
+            }
+        }) + "\n",
+        encoding="utf-8",
+    )
+    for name in ("performance.json", "validation-report.json"):
+        (ocr_dir / name).write_text("{}\n", encoding="utf-8")
+    baseline_manifest = (
+        ocr_dir
+        / MODULE.RELEASE_INTEGRITY.OCR_BASELINE_PACKAGE_DIRECTORY
+        / MODULE.RELEASE_INTEGRITY.OCR_BASELINE_MANIFEST_MEMBER
+    )
+    baseline_manifest.parent.mkdir(parents=True)
+    baseline_manifest.write_text("{}\n", encoding="utf-8")
+    (config.output_dir / MODULE.AUDIT_ZIP_FILENAME).write_bytes(
+        b"PK\x03\x04verified-private-audit"
+    )
+    monkeypatch.setattr(
+        MODULE.RELEASE_INTEGRITY,
+        "verify_analysis_attestation",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(MODULE, "_process_image_path", lambda _pid: config.executable)
+    monkeypatch.setattr(MODULE, "_listening_pids", lambda _port: {config.service_pid})
+    monkeypatch.setattr(
+        MODULE, "_process_parent_map", lambda: {config.service_pid: 0}
+    )
 
     validation = MODULE._publish_pass(config, evidence, facts)
-    verified = MODULE.RELEASE_INTEGRITY.verify_analysis_attestation(
-        config.output_dir,
-        expected_pages=17,
-        version="2.0.0",
-        commit=TEST_COMMIT,
+    attestation = json.loads(
+        (config.output_dir / "analysis-attestation.json").read_text(encoding="utf-8")
     )
 
     assert validation["terminal_status"] == "VERIFIED"
-    assert verified["result"] == "PASS"
-    assert verified["profile"] == "analysis-17"
-    assert len(verified["independent_final_reviews"]) == 2
+    assert attestation["result"] == "PASS"
+    assert attestation["profile"] == "analysis-37"
+    assert attestation["ocr_prerequisite"]["profile"] == "ocr-37"
+    assert attestation["ocr_prerequisite"]["run_id"] == baseline_run_id
+    assert (
+        attestation["ocr_prerequisite"]["baseline_manifest_sha256"]
+        == baseline_sha256
+    )
+    assert attestation["visual_verification"]["pages_checked"] == 37
+    assert attestation["visual_verification"]["model_calls"] == 74
+    assert attestation["audit_submission"]["published_to_github"] is False
+    assert attestation["quality_tier"] == "high"
+    assert attestation["template"] == "faithfulbook"
+    assert attestation["page_layout"]["candidate_page_count"] == 38
+    assert attestation["service_binding"]["listener_pid"] == config.service_pid
+    assert attestation["service_binding"]["listener_pid_verified"] is True
+    assert len(attestation["independent_final_reviews"]) == 2
     expected_artifacts = {
         "candidate_tex": members["stages/30_current.tex"],
         "candidate_pdf": members["previews/current.pdf"],
         "compile_log": members["audit/compile_current.log"],
     }
     for role, payload in expected_artifacts.items():
-        record = verified["artifacts"][role]
+        record = attestation["artifacts"][role]
         path = config.output_dir / record["filename"]
         assert path.read_bytes() == payload
         assert record["bytes"] == len(payload)
@@ -367,7 +477,7 @@ def test_verified_bundle_rejects_current_tex_that_is_not_the_packaged_candidate(
             config=config,
             members=members,
             manifest=manifest,
-            source_pages=17,
+            source_pages=37,
             source_sha256=MODULE._sha256_file(config.source),
             backend="api",
             expected_project_id=PROJECT_ID,
@@ -387,7 +497,7 @@ def test_test_doubles_only_emit_fail_diagnostics(tmp_path: Path):
         config,
         api=FakeApi(),
         ui_driver=FakeUi(),
-        pdf_page_counter=lambda _path: 17,
+        pdf_page_counter=lambda _path: 37,
     )
     attestation = json.loads(
         (config.output_dir / "analysis-attestation.json").read_text(encoding="utf-8")
@@ -401,7 +511,7 @@ def test_test_doubles_only_emit_fail_diagnostics(tmp_path: Path):
     with pytest.raises(MODULE.RELEASE_INTEGRITY.ReleaseIntegrityError):
         MODULE.RELEASE_INTEGRITY.verify_analysis_attestation(
             config.output_dir,
-            expected_pages=17,
+            expected_pages=37,
             version="2.0.0",
             commit=TEST_COMMIT,
         )
@@ -417,7 +527,7 @@ def test_unverified_audit_manifest_is_never_promoted(tmp_path: Path):
             config=config,
             members=members,
             manifest=manifest,
-            source_pages=17,
+            source_pages=37,
             source_sha256=MODULE._sha256_file(config.source),
             backend="api",
             expected_project_id=PROJECT_ID,

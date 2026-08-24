@@ -15,6 +15,7 @@ from latexstruct.ocr import (
     OcrConfig,
     OcrPageTranscription,
     _active_footnote_signatures,
+    _footnote_digit_runs,
     _footnote_geometry_relation_backfill,
     _page_request,
     _relation_occurrences,
@@ -25,6 +26,42 @@ from latexstruct.ocr import (
     transcribe_page_result,
     transcribe_pdf,
 )
+
+
+def _digit_char(value, position, x0, *, size=7.97):
+    return {
+        "char": value,
+        "bbox": [x0, 100.0, x0 + 4.2, 108.0],
+        "size": size,
+        "font": "CMR8",
+        "line_position": position,
+    }
+
+
+def test_footnote_digit_runs_keep_two_digit_markers_and_reject_interior_subscripts():
+    first = _digit_char("1", 0, 84.0)
+    second = _digit_char("0", 1, 88.2)
+    interior = _digit_char("4", 1, 80.4)
+    lines = [
+        {
+            "characters": [first, second, {"char": "N", "bbox": [92.4, 100, 99, 110], "size": 9.96}],
+        },
+        {
+            "characters": [
+                {"char": "C", "bbox": [72, 100, 80.4, 112], "size": 11.96},
+                interior,
+                {"char": "-", "bbox": [84.6, 100, 88.5, 112], "size": 11.96},
+            ],
+        },
+    ]
+
+    runs = _footnote_digit_runs(lines)
+
+    assert runs[0]["char"] == "10"
+    assert runs[0]["first_nonspace_on_line"] is True
+    assert runs[0]["line_position_end"] == 1
+    assert runs[1]["char"] == "4"
+    assert runs[1]["first_nonspace_on_line"] is False
 
 
 def _sized_png(width=1000, height=1400):

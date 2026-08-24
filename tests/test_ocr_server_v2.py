@@ -229,6 +229,212 @@ def test_partial_raw_preview_does_not_unlock_merge_progress(tmp_path: Path):
     assert state["progress"] < 0.5
 
 
+def test_codex_v2_prefers_host_validator_and_retries_equation_gate(
+    tmp_path: Path,
+):
+    """Codex v2 must not bypass the host's publisher-quality validators."""
+    srv._store = ProjectStore(root=str(tmp_path / "projects"))
+    srv._config = None
+    calls: list[str] = []
+
+    class HostValidatedCodex:
+        backend = "codex_cli"
+
+        def __init__(self):
+            self.cfg = SimpleNamespace(model="gpt-5.4", api_key="")
+            self.last_usage: dict[str, int] = {}
+
+        def chat_vision_json_bytes(self, *_args, **_kwargs):
+            raise AssertionError("generic JSON OCR bypassed the host validator")
+
+        def chat_vision_json_images_bytes(self, *_args, **_kwargs):
+            raise AssertionError("generic batch OCR bypassed the host validator")
+
+        def chat_vision_structured_bytes(self, _system, user, _image):
+            calls.append(user)
+            total = 10 if len(calls) == 1 else 12
+            self.last_usage = {
+                "prompt_tokens": total - 2,
+                "completion_tokens": 2,
+                "total_tokens": total,
+            }
+            tag = "" if len(calls) == 1 else r" \tag{1}"
+            return {
+                "latex": (
+                    "```latex\n"
+                    "A sufficiently long faithful paragraph precedes "
+                    rf"\begin{{equation}}x=1{tag}\end{{equation}}."
+                    "\n```"
+                ),
+                "figures": [],
+                "framed_insets": [],
+            }
+
+    fake_codex = HostValidatedCodex()
+    equation_region = {
+        "evidence_id": "p1-equation-tag-1",
+        "label_hint": "1",
+        "bbox_normalized": [0.848, 0.20, 0.883, 0.22],
+        "source": "isolated_right_margin_pdf_word_geometry",
+    }
+
+    import pymupdf
+
+    image_document = pymupdf.open()
+    image_page = image_document.new_page(width=120, height=120)
+    image_page.insert_text((12, 20), "x = 1                                      (1)")
+    page_png = image_page.get_pixmap(alpha=False).tobytes("png")
+    image_document.close()
+
+    def fake_render(_path, pages, _dpi):
+        assert list(pages) == [1]
+        yield 1, page_png
+
+    baseline = OcrBaselineResult(
+        tex="twice compiled equation baseline",
+        log="pass 1 exit 0\npass 2 exit 0",
+        preview_status=OcrPreviewStatus.COMPILED,
+        pdf_bytes=b"%PDF-1.7\ncompiled equation baseline\n",
+        exit_code=0,
+        successful_passes=2,
+        syntax_repairs=(),
+        error_lines=(),
+        engine="xelatex",
+    )
+    http = TestClient(srv.create_app())
+    jid = ""
+    try:
+        with patch(
+            "latexstruct.ocr.pdf_document_info_bytes",
+            return_value={"pages": 1, "outline": []},
+        ):
+            inspected = http.post(
+                "/api/ocr/inspect",
+                files={"file": ("equation.pdf", b"%PDF-1.7\nfake", "application/pdf")},
+            )
+        assert inspected.status_code == 200, inspected.text
+        jid = inspected.json()["id"]
+        with (
+            patch.object(
+                srv,
+                "_build_ocr_client",
+                return_value=(fake_codex, "gpt-5.4", "codex_cli"),
+            ),
+            patch("latexstruct.ocr.iter_pdf_pages", fake_render),
+            patch(
+                "latexstruct.ocr.pdf_page_text_hint",
+                return_value="A sufficiently long faithful equation x = 1 (1).",
+            ),
+            patch("latexstruct.ocr.pdf_page_italic_terms", return_value=[]),
+            patch("latexstruct.ocr.pdf_page_relation_regions", return_value=[]),
+            patch("latexstruct.ocr.pdf_page_divider_regions", return_value=[]),
+            patch(
+                "latexstruct.ocr.pdf_page_equation_tag_regions",
+                return_value=[equation_region],
+            ),
+            patch("latexstruct.ocr.pdf_page_framed_insets", return_value=[]),
+            patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
+            patch(
+                "latexstruct.server.app._prepare_page_formula_evidence",
+                return_value=[],
+            ),
+            patch(
+                "latexstruct.core.ocr_baseline.compile_ocr_baseline",
+                return_value=baseline,
+            ),
+            patch("latexstruct.server.app._ocr_retry_wait", return_value=None),
+        ):
+            started = http.post(
+                f"/api/ocr/jobs/{jid}/start",
+                data={
+                    "start_page": "1",
+                    "end_page": "1",
+                    "dpi": "200",
+                    "quality_profile": "publication",
+                    "quality_tier": "high",
+                    "output_template": "faithfulbook",
+                },
+            )
+            assert started.status_code == 200, started.text
+            for _ in range(400):
+                state = http.get(f"/api/ocr/jobs/{jid}").json()
+                if state.get("terminal_epoch") is not None:
+                    break
+                time.sleep(0.01)
+
+        assert state["status"] == "done", json.dumps(
+            {"state": state, "calls": calls}, ensure_ascii=False, indent=2
+        )
+        assert state["compile_status"] == "COMPILED"
+        assert state["pages"]["1"]["attempts"] == 2
+        assert state["pages"]["1"]["can_retry"] is False
+        assert state["usage"]["calls"] == 2
+        assert state["usage"]["total_tokens"] == 22
+        assert len(calls) == 2
+        assert "publisher_equation_tag_evidence" in calls[0]
+        assert "retry_correction" in calls[1]
+        cleanup_dirs = []
+        with srv._ocr_jobs_lock:
+            internal_page = dict(srv._ocr_jobs[jid]["pages"][1])
+            v2_store = srv._ocr_jobs[jid]["_v2_store"]
+            v2_snapshot = srv._ocr_jobs[jid]["_v2_snapshot"]
+            cleanup_dirs.append(str(srv._ocr_jobs[jid].get("dir") or ""))
+            page_usage = list(
+                srv._ocr_jobs[jid]["_v2_page_usage"][internal_page["page_id"]]
+            )
+        assert [entry["usage"]["total_tokens"] for entry in page_usage] == [10, 12]
+        assert internal_page["quality_flags"] == [{
+            "type": "equation_tag_integrity_evidence",
+            "status": "source_geometry_and_active_match",
+            "needs_review": False,
+            "evidence_id": "p1-equation-tag-1",
+            "label": "1",
+            "bbox_normalized": [0.848, 0.20, 0.883, 0.22],
+            "source": "isolated_right_margin_pdf_word_geometry",
+            "verifier": "pdf_geometry_plus_full_page_visual_and_active_latex",
+        }]
+        record = v2_store.load_record(v2_snapshot.run_id, internal_page["page_id"])
+        assert record.raw_tex.startswith("```latex\n")
+        assert "```" not in record.cleaned_tex
+        assert record.raw_tex != record.cleaned_tex
+        response_envelope = v2_store.load_raw_response(v2_snapshot.run_id, record)
+        assert response_envelope["model_raw_latex"] == record.raw_tex
+        assert response_envelope["model_raw_response"]["latex"] == record.raw_tex
+        assert response_envelope["transport_response"]["latex"] == record.cleaned_tex
+        source_evidence = v2_store.load_page_source_evidence(
+            v2_snapshot.run_id, record
+        )
+        assert source_evidence["equation_tag_regions"] == [equation_region]
+        assert record.to_dict()["host_quality_flags"] == internal_page["quality_flags"]
+
+        # Simulate a process restart: inventories and trusted host flags must
+        # come back from their hash-bound sidecars, not from runtime issues.
+        with srv._ocr_jobs_lock:
+            srv._ocr_jobs.pop(jid, None)
+        restored = http.get(f"/api/ocr/jobs/{jid}").json()
+        assert restored["status"] == "done"
+        assert restored["quality_report"]["counts"]["equation_tags_expected"] == 1
+        assert restored["quality_report"]["counts"]["equation_tags_verified"] == 1
+        with srv._ocr_jobs_lock:
+            restored_page = dict(srv._ocr_jobs[jid]["pages"][1])
+            cleanup_dirs.append(str(srv._ocr_jobs[jid].get("dir") or ""))
+        assert restored_page["equation_tag_regions"] == [equation_region]
+        assert restored_page["quality_flags"] == internal_page["quality_flags"]
+        frozen_retry = http.post(f"/api/ocr/jobs/{jid}/pages/1/retry")
+        assert frozen_retry.status_code == 409
+    finally:
+        if jid:
+            with srv._ocr_jobs_lock:
+                job = srv._ocr_jobs.pop(jid, {})
+            import shutil
+
+            cleanup_dirs = locals().get("cleanup_dirs", [])
+            cleanup_dirs.append(str(job.get("dir") or ""))
+            for directory in set(cleanup_dirs):
+                if directory:
+                    shutil.rmtree(directory, ignore_errors=True)
+
+
 def test_restart_resume_retries_only_failed_page_and_second_resume_freezes(tmp_path: Path):
     store, run_id = _setup_store(tmp_path, (1, 2))
     _persist_result(store, run_id, 1, 1, success=True)
@@ -386,6 +592,67 @@ def test_completed_run_restores_and_serves_only_hash_verified_artifacts(tmp_path
     assert hashlib.sha256(raw.content).hexdigest() == raw.headers["x-latexstruct-sha256"]
     bad = client.get(f"/api/ocr/jobs/{run_id}/artifacts/../../secret")
     assert bad.status_code in {404, 405}
+
+
+def test_open_creates_verified_baseline_project_without_starting_analysis(
+    tmp_path: Path,
+):
+    store, run_id = _setup_store(tmp_path, (1,))
+    _persist_result(store, run_id, 1, 1, success=True)
+    store.freeze_raw_ocr(run_id)
+    baseline_tex = "Syntax repaired baseline that is safe to open."
+    store.save_compile_baseline(
+        run_id,
+        baseline_tex=baseline_tex,
+        compile_log="pass 1 exit 0\npass 2 exit 0",
+        preview_status=OcrPreviewStatus.COMPILED,
+        exit_code=0,
+        successful_passes=2,
+        pdf_bytes=b"%PDF-1.7\ncompiled\n",
+    )
+    with srv._ocr_jobs_lock:
+        srv._ocr_jobs.clear()
+
+    client = TestClient(srv.create_app())
+    restored = client.get(f"/api/ocr/jobs/{run_id}")
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["status"] == "done"
+
+    with (
+        patch(
+            "latexstruct.ocr.image_pixel_size",
+            return_value=(1200, 1800),
+        ),
+        patch("latexstruct.ocr.pdf_page_count_bytes", return_value=1),
+        patch.object(
+            srv._process_jobs,
+            "create",
+            side_effect=AssertionError("opening an OCR baseline started analysis"),
+        ) as create_process,
+    ):
+        opened = client.post(f"/api/ocr/jobs/{run_id}/open")
+
+    assert opened.status_code == 200, opened.text
+    payload = opened.json()
+    assert payload["analysis_started"] is False
+    assert payload["processed"] is False
+    assert payload["process"] is None
+    assert payload["ocr_snapshot_id"]
+    create_process.assert_not_called()
+
+    pid = payload["id"]
+    project = client.get(f"/api/projects/{pid}")
+    assert project.status_code == 200, project.text
+    assert project.json()["kind"] == "ocr"
+    assert project.json()["mode"] == "rule"
+    assert client.get(f"/api/projects/{pid}/source").text == baseline_tex
+    assert srv._process_jobs.active(pid) is None
+    assert srv._process_jobs.latest(pid) is None
+    with srv._ocr_jobs_lock:
+        job = srv._ocr_jobs[run_id]
+        assert job["baseline_project_id"] == pid
+        assert job["imported_project_id"] == pid
+        assert job["imported_processed"] is False
 
 
 def test_analysis_entry_uses_only_hash_verified_twice_compiled_baseline(tmp_path: Path):

@@ -28,23 +28,51 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
+from pathlib import PurePosixPath
+from types import ModuleType
 from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import urljoin, urlsplit
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+
+def _load_release_integrity() -> ModuleType:
+    name = "_latexstruct_release_integrity_for_ocr_acceptance"
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    path = REPO_ROOT / "packaging" / "release_integrity.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load the release-integrity verifier")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+RELEASE_INTEGRITY = _load_release_integrity()
+
 SCHEMA_VERSION = "latexstruct-v2-ocr-acceptance/2"
-ATTESTATION_SCHEMA = "latexstruct-v2-ocr-acceptance-attestation/1"
+ATTESTATION_SCHEMA = RELEASE_INTEGRITY.RUN_ATTESTATION_SCHEMA
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 COMMIT_RE = re.compile(r"[0-9a-f]{40,64}")
 DEFAULT_ACCEPTANCE_TIMEOUT_SECONDS = 3600.0
@@ -70,6 +98,12 @@ REQUIRED_ARTIFACTS = (
     "snapshot",
     "baseline-manifest",
 )
+OCR_BASELINE_ARCHIVE_PREFIX = "evidence/ocr-baseline/"
+OCR_BASELINE_PACKAGE_DIRECTORY = RELEASE_INTEGRITY.OCR_BASELINE_PACKAGE_DIRECTORY
+OCR_BASELINE_MANIFEST_MEMBER = RELEASE_INTEGRITY.OCR_BASELINE_MANIFEST_MEMBER
+MAX_PACKAGE_MEMBERS = 8192
+MAX_PACKAGE_MEMBER_BYTES = 512 * 1024 * 1024
+MAX_PACKAGE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 
 
 class AcceptanceError(RuntimeError):
@@ -138,6 +172,7 @@ class RunEvidence:
     final_snapshot: dict[str, Any] = field(default_factory=dict)
     poll_history: list[dict[str, Any]] = field(default_factory=list)
     artifacts: dict[str, DownloadedArtifact] = field(default_factory=dict)
+    ocr_baseline: dict[str, str] = field(default_factory=dict)
     checks: list[Check] = field(default_factory=list)
     execution_errors: list[str] = field(default_factory=list)
     overall_started_at: str = ""
@@ -500,6 +535,186 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
             "utf-8"
         ),
     )
+
+
+def _strict_zip_member(info: zipfile.ZipInfo) -> tuple[str, bool]:
+    name = str(info.filename or "")
+    if not name or "\x00" in name or "\\" in name:
+        raise AcceptanceError("OCR package contains an invalid ZIP member path")
+    is_directory = info.is_dir()
+    logical = name[:-1] if is_directory and name.endswith("/") else name
+    if (
+        not logical
+        or logical.startswith("/")
+        or re.match(r"^[A-Za-z]:", logical)
+    ):
+        raise AcceptanceError("OCR package contains an absolute ZIP member path")
+    member = PurePosixPath(logical)
+    if (
+        member.as_posix() != logical
+        or any(part in {"", ".", ".."} for part in member.parts)
+    ):
+        raise AcceptanceError("OCR package contains a non-normalized ZIP member path")
+    if info.flag_bits & 0x1:
+        raise AcceptanceError("OCR package contains an encrypted ZIP member")
+    mode = (int(info.external_attr) >> 16) & 0xFFFF
+    file_type = stat.S_IFMT(mode)
+    allowed_types = {0, stat.S_IFDIR if is_directory else stat.S_IFREG}
+    if file_type not in allowed_types or stat.S_ISLNK(mode):
+        raise AcceptanceError("OCR package contains a link or special ZIP member")
+    if info.file_size < 0 or info.file_size > MAX_PACKAGE_MEMBER_BYTES:
+        raise AcceptanceError("OCR package ZIP member exceeds the size limit")
+    if (
+        info.file_size > 0
+        and info.compress_size <= 0
+        and info.compress_type != zipfile.ZIP_STORED
+    ):
+        raise AcceptanceError("OCR package ZIP member has invalid compression metadata")
+    if (
+        info.compress_size > 0
+        and info.file_size / info.compress_size > 2000
+    ):
+        raise AcceptanceError("OCR package ZIP member compression ratio is unsafe")
+    return logical, is_directory
+
+
+def _verified_ocr_baseline_members(
+    package_bytes: bytes,
+    *,
+    expected_source_sha256: str,
+) -> tuple[dict[str, bytes], object]:
+    """Read only the recomputable baseline subtree from a fully validated ZIP."""
+    if not bytes(package_bytes).startswith(b"PK"):
+        raise AcceptanceError("OCR package response is not a ZIP archive")
+    try:
+        archive = zipfile.ZipFile(BytesIO(package_bytes), "r")
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise AcceptanceError("OCR package response is not a valid ZIP archive") from exc
+    with archive:
+        infos = archive.infolist()
+        if not infos or len(infos) > MAX_PACKAGE_MEMBERS:
+            raise AcceptanceError("OCR package ZIP member count is invalid")
+        total_declared = sum(int(info.file_size) for info in infos)
+        if total_declared > MAX_PACKAGE_TOTAL_BYTES:
+            raise AcceptanceError("OCR package uncompressed size exceeds the limit")
+        identities: set[str] = set()
+        folded_identities: set[str] = set()
+        selected: list[tuple[zipfile.ZipInfo, str]] = []
+        for info in infos:
+            logical, is_directory = _strict_zip_member(info)
+            folded = logical.casefold()
+            if logical in identities or folded in folded_identities:
+                raise AcceptanceError("OCR package contains duplicate ZIP member paths")
+            identities.add(logical)
+            folded_identities.add(folded)
+            if not is_directory and logical.startswith(OCR_BASELINE_ARCHIVE_PREFIX):
+                relative = logical[len(OCR_BASELINE_ARCHIVE_PREFIX):]
+                if not relative:
+                    raise AcceptanceError("OCR baseline ZIP member path is empty")
+                selected.append((info, relative))
+        if not selected:
+            raise AcceptanceError("OCR package lacks the recomputable baseline subtree")
+        files: dict[str, bytes] = {}
+        selected_total = 0
+        for info, relative in selected:
+            try:
+                with archive.open(info, "r") as stream:
+                    chunks: list[bytes] = []
+                    size = 0
+                    while True:
+                        chunk = stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        selected_total += len(chunk)
+                        if (
+                            size > MAX_PACKAGE_MEMBER_BYTES
+                            or selected_total > MAX_PACKAGE_TOTAL_BYTES
+                        ):
+                            raise AcceptanceError(
+                                "OCR baseline package exceeds the extraction limit"
+                            )
+                        chunks.append(chunk)
+            except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+                raise AcceptanceError("OCR baseline ZIP member failed CRC validation") from exc
+            if size != info.file_size:
+                raise AcceptanceError("OCR baseline ZIP member size changed while reading")
+            files[relative] = b"".join(chunks)
+
+    manifest_bytes = files.get(OCR_BASELINE_MANIFEST_MEMBER)
+    if manifest_bytes is None:
+        raise AcceptanceError("OCR baseline package manifest is missing")
+    artifacts = {
+        path: data
+        for path, data in files.items()
+        if path != OCR_BASELINE_MANIFEST_MEMBER
+    }
+    try:
+        from latexstruct.core.ocr_manifest import (
+            OcrBaselineManifestError,
+            verify_ocr_baseline_manifest,
+        )
+    except ImportError as exc:
+        raise AcceptanceError(
+            "OCR baseline production recomputation code is unavailable"
+        ) from exc
+    try:
+        verified = verify_ocr_baseline_manifest(
+            manifest_bytes,
+            artifacts,
+            expected_source_sha256=expected_source_sha256,
+        )
+    except OcrBaselineManifestError as exc:
+        raise AcceptanceError(
+            f"OCR baseline package failed production recomputation: {exc}"
+        ) from exc
+    return files, verified
+
+
+def _download_ocr_baseline_package(
+    api: AcceptanceApi,
+    job_id: str,
+    config: AcceptanceConfig,
+    evidence: RunEvidence,
+    *,
+    source_sha256: str,
+) -> None:
+    try:
+        response = api.download(f"/api/ocr/jobs/{job_id}/package")
+        if response.status != 200:
+            raise AcceptanceError("OCR package endpoint did not return HTTP 200")
+        media_type = str(response.headers.get("content-type") or "").split(";", 1)[0]
+        if media_type.strip().lower() not in {"application/zip", "application/x-zip-compressed"}:
+            raise AcceptanceError("OCR package endpoint did not return a ZIP media type")
+        files, verified = _verified_ocr_baseline_members(
+            response.body,
+            expected_source_sha256=source_sha256,
+        )
+        payload = verified.to_dict()
+        run_id = str(payload.get("run_id") or "")
+        if run_id != job_id:
+            raise AcceptanceError("OCR baseline package run_id differs from the UI job")
+        package_root = config.output_dir / OCR_BASELINE_PACKAGE_DIRECTORY
+        if package_root.exists():
+            raise AcceptanceError("OCR baseline evidence directory already exists")
+        for relative, data in sorted(files.items()):
+            target = package_root.joinpath(*PurePosixPath(relative).parts)
+            _atomic_write(target, data)
+        evidence.ocr_baseline = {
+            "package_directory": OCR_BASELINE_PACKAGE_DIRECTORY,
+            "manifest_filename": (
+                f"{OCR_BASELINE_PACKAGE_DIRECTORY}/{OCR_BASELINE_MANIFEST_MEMBER}"
+            ),
+            "manifest_sha256": verified.sha256,
+            "run_id": run_id,
+        }
+        evidence.add_check(
+            "ocr-baseline-package",
+            True,
+            dict(evidence.ocr_baseline),
+        )
+    except (AcceptanceError, OSError, ValueError) as exc:
+        evidence.add_check("ocr-baseline-package", False, str(exc))
 
 
 def count_pdf_pages(path: Path) -> int:
@@ -931,6 +1146,23 @@ def _evaluate(
             "downloaded_sha256": source_artifact.sha256 if source_artifact else None,
         },
     )
+    baseline_binding = evidence.ocr_baseline
+    _check(
+        evidence,
+        "ocr-baseline-binding",
+        bool(baseline_binding)
+        and baseline_binding.get("package_directory")
+        == OCR_BASELINE_PACKAGE_DIRECTORY
+        and baseline_binding.get("manifest_filename")
+        == f"{OCR_BASELINE_PACKAGE_DIRECTORY}/{OCR_BASELINE_MANIFEST_MEMBER}"
+        and SHA256_RE.fullmatch(
+            str(baseline_binding.get("manifest_sha256") or "")
+        )
+        is not None
+        and evidence.ui is not None
+        and baseline_binding.get("run_id") == evidence.ui.job_id,
+        baseline_binding or "recomputable OCR baseline package is unavailable",
+    )
     snapshot_payload, snapshot_problem = _load_snapshot_artifact(config, evidence)
     try:
         snapshot_source_pages = int(snapshot_payload.get("source_total_pages") or 0)
@@ -1253,6 +1485,7 @@ def _acceptance_attestation(
                 "sha256": _sha256_file(validation_path),
             },
         },
+        "ocr_baseline": dict(evidence.ocr_baseline),
     }
 
 
@@ -1351,6 +1584,14 @@ def run_acceptance(
         _download_artifacts(
             api, evidence.ui.job_id, config, evidence, compile_status
         )
+        if evidence.real_execution:
+            _download_ocr_baseline_package(
+                api,
+                evidence.ui.job_id,
+                config,
+                evidence,
+                source_sha256=source_sha256,
+            )
         evaluation = _evaluate(
             config,
             evidence,
@@ -1388,6 +1629,44 @@ def run_acceptance(
         _atomic_write_json(
             config.output_dir / "acceptance-attestation.json", attestation
         )
+        if validation.get("acceptance_passed") is True:
+            try:
+                RELEASE_INTEGRITY.verify_run_attestation(
+                    config.output_dir,
+                    expected_pages=config.expected_pages,
+                    version=config.expected_version,
+                    commit=config.expected_commit.lower(),
+                    expected_source_sha256=source_sha256,
+                )
+            except Exception as exc:  # noqa: BLE001 - release boundary fails closed
+                message = f"release-integrity self-verification failed: {exc}"
+                evidence.execution_errors.append(message[:1000])
+                evidence.add_check(
+                    "release-integrity-self-verification",
+                    False,
+                    message[:1000],
+                )
+                performance, validation = _reports(
+                    config,
+                    evidence,
+                    evaluation,
+                    source_pages=source_pages,
+                    source_sha256=source_sha256,
+                )
+                _atomic_write_json(performance_path, performance)
+                _atomic_write_json(validation_path, validation)
+                attestation = _acceptance_attestation(
+                    config,
+                    evidence,
+                    performance_path,
+                    validation_path,
+                    performance,
+                    validation,
+                )
+                _atomic_write_json(
+                    config.output_dir / "acceptance-attestation.json",
+                    attestation,
+                )
     return validation
 
 
@@ -1493,8 +1772,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"performance: {config.output_dir / 'performance.json'}")
     print(f"attestation: {config.output_dir / 'acceptance-attestation.json'}")
     print(
-        "release note: this runner emits OCR evidence only; a release also "
-        "requires independent analysis-17 and analysis-600 attestations"
+        "release note: this standalone runner emits diagnostic OCR evidence only; "
+        "the stable gate requires strict analysis-37 with its nested ocr-37 prerequisite"
     )
     if validation.get("execution_errors"):
         for error in validation["execution_errors"]:
