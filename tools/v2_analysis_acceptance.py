@@ -231,6 +231,36 @@ def _sequence(value: object, label: str) -> list[Any]:
     return value
 
 
+def _fresh_import_identity(response: object) -> tuple[str, str]:
+    payload = _mapping(response, "OCR import response")
+    _require(
+        payload.get("reused", False) is False,
+        "OCR import unexpectedly reused a project",
+    )
+    _require(
+        payload.get("processed") is False,
+        "OCR import did not create an unprocessed project",
+    )
+    project_id = payload.get("id")
+    _require(
+        isinstance(project_id, str)
+        and re.fullmatch(r"[0-9a-f]{12}", project_id) is not None,
+        "OCR import returned an invalid project id",
+    )
+    process = _mapping(payload.get("process"), "OCR import process task")
+    process_job_id = process.get("id")
+    _require(
+        isinstance(process_job_id, str)
+        and re.fullmatch(r"[0-9a-f]{12}", process_job_id) is not None,
+        "OCR import did not start a valid analysis task",
+    )
+    _require(
+        process.get("pid") == project_id,
+        "OCR import analysis task belongs to a different project",
+    )
+    return project_id, process_job_id
+
+
 def _process_image_path(pid: int) -> Path:
     """Resolve the executable image for the service process without trusting health JSON."""
 
@@ -1567,11 +1597,9 @@ def run_analysis_acceptance(
         evidence.import_response = api.post_json(
             f"/api/ocr/jobs/{job_id}/import?{query}"
         )
-        evidence.project_id = str(evidence.import_response.get("id") or "")
-        _require(re.fullmatch(r"[0-9a-f]{32}", evidence.project_id) is not None, "OCR import returned an invalid project id")
-        process = _mapping(evidence.import_response.get("process"), "OCR import process task")
-        evidence.process_job_id = str(process.get("id") or "")
-        _require(re.fullmatch(r"[0-9a-f]{12}", evidence.process_job_id) is not None, "OCR import did not start a valid analysis task")
+        evidence.project_id, evidence.process_job_id = _fresh_import_identity(
+            evidence.import_response
+        )
         evidence.process_terminal = _poll_process(
             api,
             config,

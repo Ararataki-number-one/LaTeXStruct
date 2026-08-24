@@ -22,7 +22,7 @@ SPEC.loader.exec_module(MODULE)
 
 TEST_COMMIT = "c" * 40
 TEST_BUILD_ID = "200"
-PROJECT_ID = "d" * 32
+PROJECT_ID = "d" * 12
 RUN_ID = "e" * 12
 
 
@@ -347,6 +347,102 @@ def test_local_http_api_post_json_uses_real_post_body(monkeypatch):
     assert captured["method"] == "POST"
     assert json.loads(captured["body"].decode("utf-8")) == {"标题": "测试"}
     assert captured["headers"]["Content-Type"].startswith("application/json")
+
+
+def test_fresh_import_identity_accepts_exact_project_and_process_ids():
+    response = {
+        "id": PROJECT_ID,
+        "processed": False,
+        "reused": False,
+        "process": {"id": RUN_ID, "pid": PROJECT_ID},
+    }
+
+    assert MODULE._fresh_import_identity(response) == (PROJECT_ID, RUN_ID)
+    response.pop("reused")
+    assert MODULE._fresh_import_identity(response) == (PROJECT_ID, RUN_ID)
+
+
+@pytest.mark.parametrize(
+    "project_id",
+    ["d" * 11, "d" * 13, "d" * 32, "D" * 12, "../project-id", 123, None],
+)
+def test_fresh_import_identity_rejects_invalid_project_ids(project_id: object):
+    response = {
+        "id": project_id,
+        "processed": False,
+        "reused": False,
+        "process": {"id": RUN_ID, "pid": project_id},
+    }
+
+    with pytest.raises(MODULE.AcceptanceError, match="invalid project id"):
+        MODULE._fresh_import_identity(response)
+
+
+@pytest.mark.parametrize(
+    "process_id", ["e" * 11, "e" * 13, "E" * 12, "../process", 123, None]
+)
+def test_fresh_import_identity_rejects_invalid_process_ids(process_id: object):
+    response = {
+        "id": PROJECT_ID,
+        "processed": False,
+        "reused": False,
+        "process": {"id": process_id, "pid": PROJECT_ID},
+    }
+
+    with pytest.raises(MODULE.AcceptanceError, match="valid analysis task"):
+        MODULE._fresh_import_identity(response)
+
+
+@pytest.mark.parametrize("reused", [True, None, 0, 1, "false", "true"])
+def test_fresh_import_identity_rejects_invalid_reused_state(reused: object):
+    response = {
+        "id": PROJECT_ID,
+        "processed": False,
+        "reused": reused,
+        "process": {"id": RUN_ID, "pid": PROJECT_ID},
+    }
+    with pytest.raises(MODULE.AcceptanceError, match="unexpectedly reused"):
+        MODULE._fresh_import_identity(response)
+
+
+@pytest.mark.parametrize("processed", [True, None, 0, 1, "false"])
+def test_fresh_import_identity_rejects_invalid_processed_state(processed: object):
+    response = {
+        "id": PROJECT_ID,
+        "processed": processed,
+        "reused": False,
+        "process": {"id": RUN_ID, "pid": PROJECT_ID},
+    }
+    with pytest.raises(MODULE.AcceptanceError, match="unprocessed project"):
+        MODULE._fresh_import_identity(response)
+
+
+@pytest.mark.parametrize("process_pid", ["a" * 12, 123, None])
+def test_fresh_import_identity_rejects_cross_project_analysis_task(
+    process_pid: object,
+):
+    response = {
+        "id": PROJECT_ID,
+        "processed": False,
+        "reused": False,
+        "process": {"id": RUN_ID, "pid": process_pid},
+    }
+
+    with pytest.raises(MODULE.AcceptanceError, match="different project"):
+        MODULE._fresh_import_identity(response)
+
+
+@pytest.mark.parametrize("process", [None, [], "task"])
+def test_fresh_import_identity_requires_process_object(process: object):
+    response = {
+        "id": PROJECT_ID,
+        "processed": False,
+        "reused": False,
+        "process": process,
+    }
+
+    with pytest.raises(MODULE.AcceptanceError, match="process task"):
+        MODULE._fresh_import_identity(response)
 
 
 def test_audit_zip_requires_recomputable_sha256sums():
