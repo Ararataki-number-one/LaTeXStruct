@@ -72,6 +72,7 @@ from ..core.ocr_artifacts import (
 from ..core.ocr_runtime import (
     AdaptivePageConcurrency,
     BoundedOcrExecutor,
+    OcrBatchValidationError,
     OcrErrorCategory,
     OcrPageRecord,
     OcrPageStatus,
@@ -91,6 +92,7 @@ from ..core.ocr_runtime import (
     quality_tier_policy,
     inspect_latex_fragment,
     thaw_json,
+    validate_ocr_batch_response,
 )
 from ..core.ocr_sources import (
     MULTI_IMAGE_DERIVATION_ID,
@@ -12695,10 +12697,43 @@ def create_app(updated_from: str = "") -> FastAPI:
                     page["current_strategy"] = "完整视觉 OCR"
                     _bump_ocr_state(job)
                 return False
-            issues = inspect_latex_fragment(
-                resolution.candidate_tex,
-                reference_text=classification.candidate_tex,
-            )
+            candidate_transport = {
+                "page_id": classification.page_id,
+                "latex": resolution.candidate_tex,
+                "figures": [],
+                "unresolved_regions": [],
+            }
+            try:
+                validated = validate_ocr_batch_response(
+                    candidate_transport,
+                    [classification.page_id],
+                    reference_text_by_page_id={
+                        classification.page_id: classification.candidate_tex,
+                    },
+                    page_context_by_page_id={
+                        classification.page_id: {
+                            "source_page": classification.source_page_number,
+                            "image_size_pixels": tuple(
+                                page.get("image_size_pixels") or ()
+                            ),
+                        },
+                    },
+                )[0]
+            except OcrBatchValidationError as exc:
+                with _ocr_jobs_lock:
+                    page["candidate_strategy"] = "FULL_OCR_REQUIRED"
+                    page["quality_flags"] = [
+                        {
+                            "type": "object_candidate_validation",
+                            "code": exc.code,
+                            "severity": "error",
+                            "message": _safe_task_error(exc),
+                            "needs_review": True,
+                        }
+                    ]
+                    _bump_ocr_state(job)
+                return False
+            issues = list(validated.issues)
             if any(issue.retryable or issue.severity == "error" for issue in issues):
                 with _ocr_jobs_lock:
                     page["candidate_strategy"] = "FULL_OCR_REQUIRED"
@@ -12714,10 +12749,10 @@ def create_app(updated_from: str = "") -> FastAPI:
                 return False
             record = store.load_record(snapshot.run_id, classification.page_id)
             transport = {
-                "page_id": classification.page_id,
-                "latex": resolution.candidate_tex,
-                "figures": [],
-                "unresolved_regions": [],
+                "page_id": validated.page_id,
+                "latex": validated.latex,
+                "figures": thaw_json(validated.figures),
+                "unresolved_regions": thaw_json(validated.unresolved_regions),
             }
             flags = [{
                 "type": "visual_verifier",
@@ -12770,7 +12805,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 OcrPageStatus.SUCCESS,
                 raw_response_sha256=hashlib.sha256(raw_bytes).hexdigest(),
                 raw_tex=classification.candidate_tex,
-                cleaned_tex=resolution.candidate_tex,
+                cleaned_tex=validated.latex,
                 ended_at=_iso_now(),
                 elapsed_seconds=elapsed,
                 quality_issues=(
@@ -12798,13 +12833,13 @@ def create_app(updated_from: str = "") -> FastAPI:
                     "syntax_checked": True,
                 },
                 raw_response=envelope,
-                page_tex=resolution.candidate_tex,
+                page_tex=validated.latex,
                 final_status="SUCCESS",
                 visual_verification=verification,
                 syntax_checked=True,
             )
             with _ocr_jobs_lock:
-                page["tex"] = resolution.candidate_tex
+                page["tex"] = validated.latex
                 page["status"] = "done"
                 page["error"] = ""
                 page["low_conf"] = False

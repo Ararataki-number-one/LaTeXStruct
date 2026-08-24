@@ -148,7 +148,8 @@ def assess_ocr_quality(job: Mapping[str, Any], resources: Mapping[str, Any] | No
                 missing_provenance_pages.append(page_no)
 
     status = str(job.get("status") or "")
-    terminal_complete = bool(selected) and status == "done" and len(done_pages) == len(selected)
+    pages_complete = bool(selected) and len(done_pages) == len(selected)
+    terminal_complete = pages_complete and status == "done"
     blockers: list[dict] = []
     warnings: list[dict] = []
 
@@ -160,11 +161,17 @@ def assess_ocr_quality(job: Mapping[str, Any], resources: Mapping[str, Any] | No
             "pages": [],
         })
 
-    if not terminal_complete:
+    if not pages_complete:
         blockers.append({
             "code": "pages_incomplete",
             "message": "所选页面尚未全部成功转写",
             "pages": error_pages[:100],
+        })
+    elif status != "done":
+        blockers.append({
+            "code": "workflow_finalize_incomplete",
+            "message": "所有页面均已转写，但 OCR 冻结、资源整理或基线编译尚未完成",
+            "pages": [],
         })
 
     strict_findings = (
@@ -255,6 +262,7 @@ def assess_ocr_quality(job: Mapping[str, Any], resources: Mapping[str, Any] | No
         page_gate_passed = terminal_complete and not any(
             item.get("code") in {
                 "pages_incomplete",
+                "workflow_finalize_incomplete",
                 "resources_unresolved",
                 "recovery_evidence_invalid",
             }

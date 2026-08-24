@@ -161,6 +161,24 @@ def test_incomplete_job_is_never_ready_and_profile_is_allowlisted():
         normalize_ocr_quality_profile("publication; rm")
 
 
+def test_completed_pages_report_postprocessing_failure_separately():
+    job = _job()
+    job["status"] = "partial"
+
+    report = assess_ocr_quality(job)
+
+    assert report["status"] == "blocked"
+    assert report["page_gate_passed"] is False
+    assert report["counts"]["completed_pages"] == 2
+    assert report["counts"]["failed_or_incomplete_pages"] == 0
+    assert report["pages"]["failed_or_incomplete"] == []
+    assert report["blockers"] == [{
+        "code": "workflow_finalize_incomplete",
+        "message": "所有页面均已转写，但 OCR 冻结、资源整理或基线编译尚未完成",
+        "pages": [],
+    }]
+
+
 def test_publication_document_inventory_requires_matching_equation_and_footnote_evidence():
     job = _job()
     job["pages"][3].update({

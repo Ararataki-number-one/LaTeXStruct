@@ -435,6 +435,244 @@ def test_codex_v2_prefers_host_validator_and_retries_equation_gate(
                     shutil.rmtree(directory, ignore_errors=True)
 
 
+def test_visual_fast_path_cleans_boundary_folio_before_freeze(tmp_path: Path):
+    """A verified object candidate must use the same host cleanup as full OCR."""
+    from latexstruct.core.ocr_pipeline import SourceClassification
+    from latexstruct.core.ocr_schema import (
+        DocumentStrategy,
+        PageBlock,
+        PageBlockType,
+        PageClassification,
+        PageFeatures,
+        PageStrategy,
+    )
+
+    srv._store = ProjectStore(root=str(tmp_path / "projects"))
+    srv._config = None
+    source = b"%PDF-1.7\nvisual fast-path folio regression\n"
+    page_id = make_page_id(1)
+    body = (
+        "A sufficiently long bibliography paragraph is preserved exactly, "
+        "including its final verified email address."
+    )
+    candidate_tex = f"{body}\n\n37"
+    block_hash = hashlib.sha256(candidate_tex.encode("utf-8")).hexdigest()
+    features = PageFeatures(
+        page_width=612,
+        page_height=792,
+        rotation=0,
+        has_text_objects=True,
+        text_character_count=len(candidate_tex),
+        printable_character_ratio=1,
+        unicode_replacement_ratio=0,
+        garbled_character_ratio=0,
+        font_mapping_health=1,
+        text_block_count=1,
+        image_count=0,
+        image_coverage_ratio=0,
+        single_full_page_image=False,
+        math_symbol_density=0,
+        formula_region_count=0,
+        double_column_likelihood=0,
+        text_pixel_alignment_confidence=1,
+        reading_order_confidence=1,
+    )
+    block = PageBlock(
+        block_id=f"{page_id}-block-0001-{block_hash[:12]}",
+        block_type=PageBlockType.TEXT,
+        bbox=(72, 72, 540, 730),
+        reading_order=1,
+        plain_text=candidate_tex,
+        style_features={},
+        math_likelihood=0,
+        source_object_hash=block_hash,
+        candidate_latex=candidate_tex,
+    )
+    page_classification = PageClassification(
+        page_id=page_id,
+        source_page_number=37,
+        selected_index=1,
+        strategy=PageStrategy.BORN_DIGITAL_CLEAN,
+        features=features,
+        blocks=(block,),
+        source_page_object_hash=hashlib.sha256(b"source-page-37").hexdigest(),
+        source_text_layer_sha256=hashlib.sha256(
+            candidate_tex.encode("utf-8")
+        ).hexdigest(),
+        candidate_tex=candidate_tex,
+    )
+    classification = SourceClassification(
+        source_sha256=hashlib.sha256(source).hexdigest(),
+        source_type="pdf",
+        document_strategy=DocumentStrategy.BORN_DIGITAL_FAST,
+        pages=(page_classification,),
+    )
+
+    class VisualVerifier:
+        backend = "codex_cli"
+
+        def __init__(self):
+            self.cfg = SimpleNamespace(model="gpt-5.4", api_key="")
+            self.last_usage: dict[str, int] = {}
+            self.calls = 0
+
+        def chat_vision_json_bytes(self, _system, user, _image, _schema):
+            self.calls += 1
+            request = json.loads(user)
+            usage = {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10}
+            self.last_usage = usage
+            return ({
+                "batch_id": request["batch_id"],
+                "pages": [{
+                    "page_id": page_id,
+                    "verdict": "PASS",
+                    "reading_order_ok": True,
+                    "coverage_ok": True,
+                    "block_findings": [],
+                    "missing_regions": [],
+                    "unresolved_regions": [],
+                }],
+            }, usage)
+
+        def chat_vision_json_images_bytes(self, *_args, **_kwargs):
+            raise AssertionError("single-page verifier must not use a batch image call")
+
+        def chat_vision_structured_bytes(self, *_args, **_kwargs):
+            raise AssertionError("verified object page must not fall through to full OCR")
+
+    verifier = VisualVerifier()
+    import pymupdf
+
+    image_document = pymupdf.open()
+    image_page = image_document.new_page(width=120, height=120)
+    image_page.insert_text((12, 20), "Verified bibliography page 37")
+    page_png = image_page.get_pixmap(alpha=False).tobytes("png")
+    image_document.close()
+
+    def fake_render(_path, pages, _dpi):
+        assert list(pages) == [37]
+        yield 37, page_png
+
+    baseline = OcrBaselineResult(
+        tex="twice compiled visual fast-path baseline",
+        log="pass 1 exit 0\npass 2 exit 0",
+        preview_status=OcrPreviewStatus.COMPILED,
+        pdf_bytes=b"%PDF-1.7\ncompiled visual fast-path baseline\n",
+        exit_code=0,
+        successful_passes=2,
+        syntax_repairs=(),
+        error_lines=(),
+        engine="xelatex",
+    )
+    http = TestClient(srv.create_app())
+    jid = ""
+    cleanup_dirs: list[str] = []
+    try:
+        with patch(
+            "latexstruct.ocr.pdf_document_info_bytes",
+            return_value={"pages": 37, "outline": []},
+        ):
+            inspected = http.post(
+                "/api/ocr/inspect",
+                files={"file": ("folio.pdf", source, "application/pdf")},
+            )
+        assert inspected.status_code == 200, inspected.text
+        jid = inspected.json()["id"]
+        with (
+            patch.object(
+                srv,
+                "_build_ocr_client",
+                return_value=(verifier, "gpt-5.4", "codex_cli"),
+            ),
+            patch(
+                "latexstruct.core.ocr_pipeline.classify_source_pages",
+                return_value=classification,
+            ),
+            patch("latexstruct.ocr.iter_pdf_pages", fake_render),
+            patch("latexstruct.ocr.pdf_page_text_hint", return_value=candidate_tex),
+            patch("latexstruct.ocr.pdf_page_italic_terms", return_value=[]),
+            patch("latexstruct.ocr.pdf_page_relation_regions", return_value=[]),
+            patch("latexstruct.ocr.pdf_page_divider_regions", return_value=[]),
+            patch("latexstruct.ocr.pdf_page_equation_tag_regions", return_value=[]),
+            patch("latexstruct.ocr.pdf_page_framed_insets", return_value=[]),
+            patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
+            patch(
+                "latexstruct.server.app._prepare_page_formula_evidence",
+                return_value=[],
+            ),
+            patch(
+                "latexstruct.core.ocr_baseline.compile_ocr_baseline",
+                return_value=baseline,
+            ),
+        ):
+            started = http.post(
+                f"/api/ocr/jobs/{jid}/start",
+                data={
+                    "start_page": "37",
+                    "end_page": "37",
+                    "dpi": "200",
+                    "quality_profile": "publication",
+                    "quality_tier": "high",
+                    "output_template": "faithfulbook",
+                },
+            )
+            assert started.status_code == 200, started.text
+            for _ in range(400):
+                state = http.get(f"/api/ocr/jobs/{jid}").json()
+                if state.get("terminal_epoch") is not None:
+                    break
+                time.sleep(0.01)
+
+        assert state["status"] == "done", json.dumps(
+            state, ensure_ascii=False, indent=2
+        )
+        assert state["raw_frozen"] is True
+        assert state["compile_status"] == "COMPILED"
+        assert verifier.calls == 1
+        with srv._ocr_jobs_lock:
+            live_job = srv._ocr_jobs[jid]
+            store = live_job["_v2_store"]
+            snapshot = live_job["_v2_snapshot"]
+            internal_tex = live_job["pages"][37]["tex"]
+            cleanup_dirs.append(str(live_job.get("dir") or ""))
+        record = store.load_record(snapshot.run_id, page_id)
+        assert record.raw_tex == candidate_tex
+        assert record.cleaned_tex == body
+        assert internal_tex == body
+        transport = store.verify_saved_response(snapshot.run_id, record)
+        assert transport["latex"] == body
+        assets, figure_manifest = store.materialize_figure_assets(snapshot.run_id)
+        assert assets == {}
+        assert figure_manifest["figures"] == []
+        evidence_tex = (
+            store.run_dir(snapshot.run_id)
+            / "pages"
+            / "page-000001"
+            / "page.tex"
+        ).read_text(encoding="utf-8")
+        assert evidence_tex == body
+        frozen_tex = (
+            store.run_dir(snapshot.run_id) / "artifacts" / "raw-ocr.tex"
+        ).read_text(encoding="utf-8")
+        assert "\n37\n" not in frozen_tex
+
+        with srv._ocr_jobs_lock:
+            srv._ocr_jobs.pop(jid, None)
+        restored = http.get(f"/api/ocr/jobs/{jid}").json()
+        assert restored["status"] == "done"
+        assert restored["raw_frozen"] is True
+    finally:
+        if jid:
+            with srv._ocr_jobs_lock:
+                job = srv._ocr_jobs.pop(jid, {})
+            import shutil
+
+            cleanup_dirs.append(str(job.get("dir") or ""))
+            for directory in set(cleanup_dirs):
+                if directory:
+                    shutil.rmtree(directory, ignore_errors=True)
+
+
 def test_restart_resume_retries_only_failed_page_and_second_resume_freezes(tmp_path: Path):
     store, run_id = _setup_store(tmp_path, (1, 2))
     _persist_result(store, run_id, 1, 1, success=True)

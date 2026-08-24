@@ -1564,8 +1564,8 @@ class OcrRunStore:
                     raise OcrStoreError(
                         f"figure assets require a successful page: {record.page_id}"
                     )
+                raw_response = self.verify_saved_response(run_id, record)
                 try:
-                    raw_response = self.verify_saved_response(run_id, record)
                     validated = validate_ocr_batch_response(
                         raw_response,
                         [record.page_id],
@@ -1574,7 +1574,7 @@ class OcrRunStore:
                             "image_size_pixels": record.image_size_pixels,
                         }},
                     )[0]
-                except (OcrStoreError, OcrBatchValidationError) as exc:
+                except OcrBatchValidationError as exc:
                     raise OcrStoreError(
                         f"saved OCR figure evidence is invalid: {record.page_id}"
                     ) from exc
