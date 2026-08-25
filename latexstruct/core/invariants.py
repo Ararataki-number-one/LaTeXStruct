@@ -53,6 +53,22 @@ _BODY_TEXT_STYLE_RE = re.compile(
     r"\s*\{",
     re.IGNORECASE,
 )
+_BODY_HEADING_COMMAND_RE = re.compile(
+    r"\\(?:chapter|section|subsection|subsubsection|paragraph|subparagraph)"
+    r"\*?\s*(?:\[[^\]\r\n]*\]\s*)?\{",
+    re.IGNORECASE,
+)
+_BODY_PRESENTATION_ENV_RE = re.compile(
+    r"\\(?:begin|end)\{(?:center|flushleft|flushright)\}",
+    re.IGNORECASE,
+)
+_CENTER_ENV_RE = re.compile(
+    r"\\begin\{center\}(.*?)\\end\{center\}",
+    re.IGNORECASE | re.DOTALL,
+)
+_NUMBERED_VISIBLE_HEADING_RE = re.compile(
+    r"^\s*\d+(?:\.\d+)*\.?\s+.+$", re.UNICODE
+)
 
 
 def _norm(s: str) -> str:
@@ -164,6 +180,60 @@ def _unwrap_body_text_styles(text: str) -> str:
     return "".join(output)
 
 
+def _unwrap_heading_commands(text: str) -> str:
+    """Replace semantic heading commands by their visible title bodies."""
+    output: List[str] = []
+    cursor = 0
+    while True:
+        match = _BODY_HEADING_COMMAND_RE.search(text, cursor)
+        if match is None:
+            output.append(text[cursor:])
+            break
+        opening = text.find("{", match.start(), match.end())
+        end = _balanced_group_end(text, opening)
+        if end is None:
+            output.append(text[cursor:])
+            break
+        output.append(text[cursor:match.start()])
+        body = _unwrap_body_text_styles(text[opening + 1:end - 1])
+        output.append(" " + body + " ")
+        cursor = end
+    return "".join(output)
+
+
+def _plain_visible_heading(value: str) -> str:
+    value = _unwrap_heading_commands(value)
+    value = _unwrap_body_text_styles(value)
+    value = _BODY_PRESENTATION_ENV_RE.sub(" ", value)
+    value = re.sub(r"\\(?:quad|qquad|enspace|,|;|!)", " ", value)
+    value = value.replace(r"\\", " ")
+    value = re.sub(r"\\[A-Za-z@]+\*?", " ", value)
+    value = value.replace("{", " ").replace("}", " ")
+    return " ".join(value.split())
+
+
+def heading_title_tokens(text: str) -> List[str]:
+    """Return ordered visible heading fingerprints for patch safety gates."""
+    body = _document_body(text)
+    titles: List[tuple[int, str]] = []
+    for match in _BODY_HEADING_COMMAND_RE.finditer(body):
+        opening = body.find("{", match.start(), match.end())
+        end = _balanced_group_end(body, opening)
+        if end is None:
+            continue
+        title = _plain_visible_heading(body[opening + 1:end - 1])
+        if title:
+            titles.append((match.start(), title))
+    for match in _CENTER_ENV_RE.finditer(body):
+        content = _plain_visible_heading(match.group(1))
+        if _NUMBERED_VISIBLE_HEADING_RE.match(content) or content.casefold() in {
+            "references", "bibliography", "introduction", "concluding remarks"
+        }:
+            titles.append((match.start(), content))
+    titles.sort(key=lambda item: item[0])
+    return [title for _offset, title in titles]
+
+
 def _strip_scanner_semantic_prefixes(text: str, pack=None) -> str:
     """Use the production scanner's exact title/proof vocabulary and bounds."""
     from .scanner import _proof_metadata, _title_metadata
@@ -200,8 +270,10 @@ def _strip_scanner_semantic_prefixes(text: str, pack=None) -> str:
 def body_text_tokens(text: str, pack=None) -> List[str]:
     """Ordered BODY_TEXT tokens after removing only known structure wrappers."""
     value = _masked(_document_body(text))
+    value = _unwrap_heading_commands(value)
     value = _strip_scanner_semantic_prefixes(value, pack=pack)
     value = _unwrap_body_text_styles(value)
+    value = _BODY_PRESENTATION_ENV_RE.sub(" ", value)
     value = _BODY_ENV_RE.sub(" ", value)
     value = re.sub(
         r"\\ifcsname\s+qedsymbol\\endcsname\s*"
@@ -238,6 +310,7 @@ def check_invariants(
     after: str,
     *,
     check_body_text: bool = False,
+    check_heading_titles: bool = False,
     pack=None,
 ) -> Dict:
     """返回各不变量对比结果；ok=True 表示全部一致。"""
@@ -257,6 +330,18 @@ def check_invariants(
         )
     else:
         out["body_text"] = {
+            "checked": False,
+            "equal": True,
+            "before_count": 0,
+            "after_count": 0,
+            "first_difference_index": None,
+        }
+    if check_heading_titles:
+        out["heading_titles"] = _ordered_diff(
+            heading_title_tokens(before), heading_title_tokens(after)
+        )
+    else:
+        out["heading_titles"] = {
             "checked": False,
             "equal": True,
             "before_count": 0,

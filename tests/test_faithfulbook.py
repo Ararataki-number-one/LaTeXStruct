@@ -401,8 +401,9 @@ def test_faithfulbook_compiles_when_xelatex_is_available():
     source = r"""\documentclass[11pt]{book}
 \usepackage{amsmath}
 \usepackage{amsthm}
-\usepackage{algorithm}
-\usepackage{algpseudocode}
+\usepackage{float}
+\newfloat{algorithm}{tbp}{loa}
+\floatname{algorithm}{Algorithm}
 \newtheorem{theorem}{Theorem}[chapter]
 \begin{document}
 \tableofcontents
@@ -412,7 +413,7 @@ def test_faithfulbook_compiles_when_xelatex_is_available():
 \begin{proof}Immediate.\end{proof}
 \begin{algorithm}
 \caption{Breadth-first search}
-\begin{algorithmic}\State Visit a vertex.\end{algorithmic}
+Visit a vertex.
 \end{algorithm}
 \clearpage
 % Page 2

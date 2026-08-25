@@ -28,6 +28,7 @@ from .parser import Block, Document
 from .scanner import (
     BOX_ENVS,
     MATH_ENVS,
+    OCR_PAGE_ANCHOR_RULE_IDS,
     PROOF_RE,
     SECTION_START_RE,
     THEOREM_LIKE_ENVS,
@@ -35,6 +36,7 @@ from .scanner import (
     _first_nonempty_line,
     _match_title,
     _semantic_view,
+    ocr_page_anchor_prefix,
 )
 
 
@@ -723,6 +725,127 @@ def _next_top_level_content_block(doc: Document, end_line: int) -> Optional[Bloc
     return min(candidates, key=lambda block: (block.span.start_line, block.span.end_line))
 
 
+_OCR_PAGE_TERMINAL_STYLED_SENTENCE_RE = re.compile(
+    r"^\s*\\(?:emph|textit)\{.+[.!?。]\}\s*(?:%[^\n]*)?$",
+    re.S,
+)
+_OCR_PAGE_IN_FACT_SAME_CONCLUSION_RE = re.compile(
+    r"^In fact, the same conclusion holds\b.+[.!?]\s*$",
+    re.I | re.S,
+)
+_OCR_PAGE_DEFINITION_CALLBACK_RE = re.compile(
+    r"^(?:They|We|The authors)\s+(?:apply|use)\s+this definition\b",
+    re.I,
+)
+_OCR_PAGE_FORMAL_LABELS = {
+    "lemma": "Lemma",
+    "theorem": "Theorem",
+}
+
+
+def _top_level_content_blocks_after(
+    doc: Document,
+    end_line: int,
+    *,
+    limit: int,
+) -> list[Block]:
+    """Return the next distinct top-level source atoms after *end_line*."""
+    ordered = sorted(
+        (
+            block for block in doc.blocks
+            if block.span.start_line > end_line
+            and not (block.kind == "env" and block.name == "document")
+            and not block.in_env
+        ),
+        key=lambda block: (block.span.start_line, block.span.end_line, block.id),
+    )
+    result: list[Block] = []
+    consumed_until = end_line
+    for block in ordered:
+        if block.span.start_line <= consumed_until:
+            continue
+        if block.kind == "para" and _is_ocr_page_separator_text(block.text):
+            consumed_until = block.span.end_line
+            continue
+        result.append(block)
+        consumed_until = block.span.end_line
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _plain_unwrapped_paragraph(block: Block) -> str:
+    if block.kind != "para" or block.in_env:
+        return ""
+    first = _first_nonempty_line(block.text)
+    if not first:
+        return ""
+    semantic, wrapper = _semantic_view(first)
+    if wrapper is not None:
+        return ""
+    remainder = block.text[block.text.find(first) + len(first):]
+    return (semantic + remainder).strip()
+
+
+def _ocr_page_anchor_statement_certificate(
+    doc: Document,
+    cand,
+    end: int,
+) -> bool:
+    """Prove one of the narrowly observed OCR page-start statement exits.
+
+    This is not a general typography heuristic.  It applies only after the
+    canonical host page prefix has been revalidated and recognizes two exact
+    evidence shapes from the authorized 37-page diagnostic: a terminal styled
+    sentence followed by the matching result's proof, or a definition ending
+    in a display immediately followed by an explicit definition callback.
+    """
+    env = str(getattr(cand, "env_hint", "") or "").rstrip("*").lower()
+    payload = getattr(cand, "payload", {}) or {}
+    if env in _OCR_PAGE_FORMAL_LABELS:
+        lines = doc.text.split("\n")
+        if not (1 <= end <= len(lines)):
+            return False
+        terminal = lines[end - 1]
+        if _OCR_PAGE_TERMINAL_STYLED_SENTENCE_RE.fullmatch(terminal) is None:
+            return False
+        number = str(payload.get("number", "") or "").strip()
+        if not number:
+            return False
+        following = _top_level_content_blocks_after(doc, end, limit=2)
+        if not following:
+            return False
+        first_text = _plain_unwrapped_paragraph(following[0])
+        if not first_text:
+            return False
+        proof_index = 0
+        if _OCR_PAGE_IN_FACT_SAME_CONCLUSION_RE.fullmatch(first_text):
+            proof_index = 1
+        if proof_index >= len(following):
+            return False
+        proof_text = _plain_unwrapped_paragraph(following[proof_index])
+        label = _OCR_PAGE_FORMAL_LABELS[env]
+        return bool(re.match(
+            rf"^The proof of {label} {re.escape(number)}\b",
+            proof_text,
+            re.I,
+        ))
+
+    if env == "definition":
+        remainder = str(payload.get("title_remainder", "") or "").strip()
+        if not re.search(r"\bsuch that\s*$", remainder, re.I):
+            return False
+        if not _closed_display_atom(doc, end):
+            return False
+        following = _top_level_content_blocks_after(doc, end, limit=1)
+        if len(following) != 1:
+            return False
+        callback = _plain_unwrapped_paragraph(following[0])
+        return bool(_OCR_PAGE_DEFINITION_CALLBACK_RE.match(callback))
+
+    return False
+
+
 def _deterministic_statement_is_closed(doc: Document, start: int, end: int) -> bool:
     """Prove a formal statement has a local source-level closing boundary.
 
@@ -892,6 +1015,18 @@ def legalize_deterministic_wrap(
     if d.action != "wrap" or not d.body_span:
         setattr(d, "_legalize_error", "确定性结构项缺少可验证的 wrap 范围")
         return
+    page_anchor_rule = getattr(cand, "rule_id", "") in OCR_PAGE_ANCHOR_RULE_IDS
+    if page_anchor_rule:
+        page_prefix = ocr_page_anchor_prefix(doc, cand)
+        payload = getattr(cand, "payload", {}) or {}
+        if (
+            page_prefix is None
+            or payload.get("ocr_page_anchor_line") != page_prefix["line"]
+            or payload.get("ocr_page_id") != page_prefix["page_id"]
+            or getattr(cand, "block_id", None) != page_prefix["block_id"]
+        ):
+            setattr(d, "_legalize_error", "宿主 OCR 页锚点前缀与当前源块不一致")
+            return
     if getattr(cand, "kind", "") == "proof":
         if d.env != "proof":
             setattr(d, "_legalize_error", "证明锚点的目标环境不是 proof")
@@ -968,6 +1103,9 @@ def legalize_deterministic_wrap(
             ):
                 setattr(d, "_legalize_error", "规则终点之后仍有语法承接段，未锁定该范围")
                 return
+    if page_anchor_rule and not _ocr_page_anchor_statement_certificate(doc, cand, end):
+        setattr(d, "_legalize_error", "页首形式结构缺少类型、编号与退出原子完全匹配的独立证书")
+        return
     d.body_span = (start, end)
 
 

@@ -39,6 +39,22 @@ def test_inventory_api_is_stable_and_source_derived():
     assert finding.source_sha256 == anchor.source_sha256
 
 
+def test_inventory_detects_only_bounded_wrapped_named_proof_titles():
+    source = "\n".join([
+        r"\textbf{Proof of \textcolor{cyan}{Theorem 2.1}.} Body.",
+        r"\textit{Proof of the upper bound in Theorem 1.2.} More.",
+        r"Proof of the upper bound for a heuristic. Ordinary discussion.",
+        r"\href{https://example.invalid}{Proof of Theorem 9.9.} Not trusted.",
+    ])
+
+    inventory = inventory_document(parse_latex(source))
+    proofs = [item for item in inventory.anchors if item.suggested_env == "proof"]
+
+    assert len(proofs) == 2
+    assert [item.start_line for item in proofs] == [1, 2]
+    assert all(item.raw_text in source for item in proofs)
+
+
 def test_scanner_reconciles_sharp_bounds_titles_beyond_paragraph_head():
     source = (
         "Lead-in for the first result.\n"

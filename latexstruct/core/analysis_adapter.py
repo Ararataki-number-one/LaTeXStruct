@@ -12,16 +12,25 @@ from __future__ import annotations
 
 import difflib
 import json
+import math
 import os
 import re
 import shutil
 import tempfile
+from collections import Counter
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
+from ..pricing import estimate_call_cost
+from .analysis_budget import (
+    ActualUsage,
+    AnalysisBudget,
+    BudgetClaim,
+    BudgetUsage,
+)
 from .analysis_runtime import (
     AnalysisQualityRuntime,
     CandidateRecord,
@@ -30,7 +39,17 @@ from .analysis_runtime import (
     PatchApplication,
     decide_final_status,
 )
+from .analysis_orchestrator import PageAnalysisInput
+from .analysis_risk import (
+    PageRiskPreflightInput,
+    build_page_risk_admission,
+    coerce_page_risk_admission,
+)
 from .analysis_schema import (
+    ANALYSIS_PERFORMANCE_BENCHMARK_PAGE_COUNT,
+    ANALYSIS_PERFORMANCE_BENCHMARK_SECONDS,
+    ANALYSIS_RESPONSE_SCHEMA_VERSIONS,
+    AnalysisCacheKey,
     AnalysisFinalStatus,
     AnalysisRunSnapshot,
     CompileState,
@@ -40,8 +59,13 @@ from .analysis_schema import (
     ModelBinding,
     PageMapEntry,
     PageRisk,
+    PageRiskAdmission,
+    PageRiskRouteClosure,
+    PageRouteCallKey,
+    PageRouteRecord,
     PageStatus,
     PageUnit,
+    PerformanceTargetStatus,
     QualityVector,
     ReviewResult,
     Severity,
@@ -99,6 +123,53 @@ class AnalysisRunArchiveResult:
     rollback_count: int = 0
     review_pass_count: int = 0
     evidence_source: str = "missing-or-legacy"
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionAnalysisArchiveEvidence:
+    """Exact typed production evidence admitted by the archive boundary.
+
+    This object is deliberately separate from the legacy ``verification``
+    dictionary.  An authoritative snapshot may only be archived when the
+    caller supplies the same production snapshot, deterministic risk
+    admission inputs and result, exact page inputs, route closure, and the
+    unhashed configuration whose digest is already bound into the snapshot.
+    """
+
+    snapshot: AnalysisRunSnapshot
+    page_risk_admission: PageRiskAdmission
+    page_inputs: tuple[PageAnalysisInput, ...]
+    page_route_closure: PageRiskRouteClosure
+    analysis_configuration: Mapping[str, object]
+    analysis_configuration_sha256: str
+    risk_preflight: tuple[PageRiskPreflightInput, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.snapshot, AnalysisRunSnapshot):
+            raise TypeError("production archive snapshot has an invalid type")
+        if not isinstance(self.page_risk_admission, PageRiskAdmission):
+            raise TypeError("production page-risk admission has an invalid type")
+        page_inputs = tuple(self.page_inputs)
+        if not page_inputs or any(
+            not isinstance(item, PageAnalysisInput) for item in page_inputs
+        ):
+            raise TypeError("production page inputs must be typed and non-empty")
+        risk_preflight = tuple(self.risk_preflight)
+        if not risk_preflight or any(
+            not isinstance(item, PageRiskPreflightInput)
+            for item in risk_preflight
+        ):
+            raise TypeError("production risk preflight must be typed and non-empty")
+        if not isinstance(self.page_route_closure, PageRiskRouteClosure):
+            raise TypeError("production page-route closure has an invalid type")
+        if not isinstance(self.analysis_configuration, Mapping):
+            raise TypeError("production analysis configuration must be an object")
+        digest = str(self.analysis_configuration_sha256 or "").lower()
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError("production analysis configuration hash is invalid")
+        object.__setattr__(self, "page_inputs", page_inputs)
+        object.__setattr__(self, "risk_preflight", risk_preflight)
+        object.__setattr__(self, "analysis_configuration_sha256", digest)
 
 
 class AnalysisArchiveError(ValueError):
@@ -178,6 +249,519 @@ def _pretty_json_bytes(value: object) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+_PRODUCTION_ARCHIVE_FILES = {
+    "audit/page_risk_admission.json",
+    "audit/page_inputs.json",
+    "audit/page_route_closure.json",
+    "audit/analysis_configuration.json",
+    "audit/risk_preflight.json",
+}
+_PAGE_INPUTS_SCHEMA = "latexstruct-production-page-inputs-archive-v2"
+_RISK_PREFLIGHT_SCHEMA = "latexstruct-page-risk-preflight-archive-v2"
+_ANALYSIS_CONFIGURATION_SCHEMA = (
+    "latexstruct-production-analysis-configuration-archive-v2"
+)
+
+
+def _strict_json_value(value: object, *, label: str) -> Any:
+    """Return a detached JSON-native value or reject non-canonical evidence."""
+
+    try:
+        return json.loads(canonical_json_bytes(value))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise AnalysisArchiveError(f"{label} is not strict JSON evidence") from exc
+
+
+def _risk_preflight_page_payload(value: PageRiskPreflightInput) -> dict[str, Any]:
+    payload = _strict_json_value(asdict(value), label="page-risk preflight input")
+    if not isinstance(payload, dict):  # pragma: no cover - dataclass root invariant
+        raise AnalysisArchiveError("page-risk preflight input is not an object")
+    return payload
+
+
+def _risk_preflight_archive_payload(
+    values: Sequence[PageRiskPreflightInput],
+) -> dict[str, Any]:
+    pages = [_risk_preflight_page_payload(item) for item in values]
+    return {
+        "schema": _RISK_PREFLIGHT_SCHEMA,
+        "pages": pages,
+        "risk_preflight_sha256": sha256_bytes(canonical_json_bytes(pages)),
+    }
+
+
+def _coerce_risk_preflight_archive(
+    value: object,
+) -> tuple[PageRiskPreflightInput, ...]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema",
+        "pages",
+        "risk_preflight_sha256",
+    }:
+        raise AnalysisArchiveError("archived risk preflight fields are not exact")
+    if value.get("schema") != _RISK_PREFLIGHT_SCHEMA:
+        raise AnalysisArchiveError("archived risk preflight schema is unsupported")
+    pages = value.get("pages")
+    if not isinstance(pages, list) or not pages:
+        raise AnalysisArchiveError("archived risk preflight pages are missing")
+    if value.get("risk_preflight_sha256") != sha256_bytes(
+        canonical_json_bytes(pages)
+    ):
+        raise AnalysisArchiveError("archived risk preflight digest is forged")
+    field_names = set(PageRiskPreflightInput.__dataclass_fields__)
+    output: list[PageRiskPreflightInput] = []
+    for raw in pages:
+        if not isinstance(raw, Mapping) or set(raw) != field_names:
+            raise AnalysisArchiveError("archived risk preflight page fields are not exact")
+        item = dict(raw)
+        for name in (
+            "unresolved_region_hashes",
+            "candidate_pdf_page_ids",
+        ):
+            source = item[name]
+            if not isinstance(source, list):
+                raise AnalysisArchiveError(
+                    f"archived risk preflight {name} must be a list"
+                )
+            item[name] = tuple(source)
+        for name in (
+            "ocr_quality_issues",
+            "host_quality_flags",
+            "machine_visual_anomalies",
+        ):
+            source = item[name]
+            if source is not None:
+                if not isinstance(source, list):
+                    raise AnalysisArchiveError(
+                        f"archived risk preflight {name} must be a list or null"
+                    )
+                item[name] = tuple(source)
+        checks = item["ocr_coverage_checks"]
+        if checks is not None and not isinstance(checks, Mapping):
+            raise AnalysisArchiveError(
+                "archived risk preflight coverage checks are invalid"
+            )
+        try:
+            output.append(PageRiskPreflightInput(**item))
+        except (TypeError, ValueError) as exc:
+            raise AnalysisArchiveError(
+                "archived risk preflight page is invalid"
+            ) from exc
+    return tuple(output)
+
+
+def _page_input_payload(value: PageAnalysisInput) -> dict[str, Any]:
+    page_unit = _strict_json_value(
+        _jsonable(value.page_unit), label="production PageUnit"
+    )
+    if not isinstance(page_unit, dict):  # pragma: no cover - dataclass root invariant
+        raise AnalysisArchiveError("production PageUnit is not an object")
+    source_page = bytes(value.source_pdf_page)
+    candidate_ids = list(value.page_unit.candidate_pdf_page_ids)
+    core = {
+        "page_unit": page_unit,
+        "source_pdf_page": {
+            "bytes": len(source_page),
+            "sha256": sha256_bytes(source_page),
+        },
+        "baseline_tex_region": value.baseline_tex_region,
+        "baseline_tex_region_sha256": sha256_text(value.baseline_tex_region),
+        "source_text_layer_sha256": sha256_text(value.page_unit.source_text_layer),
+        "candidate_pdf_page_ids_sha256": sha256_bytes(
+            canonical_json_bytes(candidate_ids)
+        ),
+    }
+    return {
+        **core,
+        "page_input_sha256": sha256_bytes(canonical_json_bytes(core)),
+    }
+
+
+def _page_inputs_archive_payload(
+    values: Sequence[PageAnalysisInput],
+) -> dict[str, Any]:
+    pages = [_page_input_payload(item) for item in values]
+    return {
+        "schema": _PAGE_INPUTS_SCHEMA,
+        "pages": pages,
+        "page_inputs_sha256": sha256_bytes(canonical_json_bytes(pages)),
+    }
+
+
+def _analysis_configuration_archive_payload(
+    configuration: Mapping[str, object],
+    claimed_sha256: str,
+) -> dict[str, Any]:
+    canonical = _strict_json_value(
+        configuration, label="production analysis configuration"
+    )
+    if not isinstance(canonical, dict):
+        raise AnalysisArchiveError("production analysis configuration is not an object")
+    digest = sha256_bytes(canonical_json_bytes(canonical))
+    if claimed_sha256 != digest:
+        raise AnalysisArchiveError("production analysis configuration hash is forged")
+    return {
+        "schema": _ANALYSIS_CONFIGURATION_SCHEMA,
+        "analysis_configuration": canonical,
+        "analysis_configuration_sha256": digest,
+    }
+
+
+def _coerce_page_route_closure(value: object) -> PageRiskRouteClosure:
+    if isinstance(value, PageRiskRouteClosure):
+        return value
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_version",
+        "admission_sha256",
+        "final_candidate_hash",
+        "pages",
+        "pages_sha256",
+        "risk_counts",
+        "route_call_keys",
+        "route_call_keys_sha256",
+        "closure_sha256",
+    }:
+        raise AnalysisArchiveError("archived page-route closure fields are not exact")
+    raw_pages = value.get("pages")
+    raw_calls = value.get("route_call_keys")
+    if not isinstance(raw_pages, list) or not isinstance(raw_calls, list):
+        raise AnalysisArchiveError("archived page-route closure arrays are invalid")
+    try:
+        pages = tuple(
+            PageRouteRecord(
+                **{
+                    **dict(item),
+                    "anomaly_reasons": tuple(item["anomaly_reasons"]),
+                }
+            )
+            for item in raw_pages
+            if isinstance(item, Mapping)
+        )
+        calls = tuple(
+            PageRouteCallKey(**dict(item))
+            for item in raw_calls
+            if isinstance(item, Mapping)
+        )
+        if len(pages) != len(raw_pages) or len(calls) != len(raw_calls):
+            raise ValueError("route arrays contain non-object members")
+        closure = PageRiskRouteClosure(
+            schema_version=str(value["schema_version"]),
+            admission_sha256=str(value["admission_sha256"]),
+            final_candidate_hash=str(value["final_candidate_hash"]),
+            pages=pages,
+            route_call_keys=calls,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AnalysisArchiveError("archived page-route closure is invalid") from exc
+    if closure.to_dict() != dict(value):
+        raise AnalysisArchiveError("archived page-route closure derivations are forged")
+    return closure
+
+
+def _validate_page_input_archive(
+    value: object,
+) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema",
+        "pages",
+        "page_inputs_sha256",
+    }:
+        raise AnalysisArchiveError("archived production page-input fields are not exact")
+    if value.get("schema") != _PAGE_INPUTS_SCHEMA:
+        raise AnalysisArchiveError("archived production page-input schema is unsupported")
+    pages = value.get("pages")
+    if not isinstance(pages, list) or not pages:
+        raise AnalysisArchiveError("archived production page inputs are missing")
+    if value.get("page_inputs_sha256") != sha256_bytes(
+        canonical_json_bytes(pages)
+    ):
+        raise AnalysisArchiveError("archived production page-input digest is forged")
+    page_fields = {
+        "page_unit",
+        "source_pdf_page",
+        "baseline_tex_region",
+        "baseline_tex_region_sha256",
+        "source_text_layer_sha256",
+        "candidate_pdf_page_ids_sha256",
+        "page_input_sha256",
+    }
+    unit_fields = set(PageUnit.__dataclass_fields__)
+    validated: list[Mapping[str, Any]] = []
+    for raw in pages:
+        if not isinstance(raw, Mapping) or set(raw) != page_fields:
+            raise AnalysisArchiveError("archived production page-input page is malformed")
+        core = {key: raw[key] for key in page_fields if key != "page_input_sha256"}
+        if raw["page_input_sha256"] != sha256_bytes(canonical_json_bytes(core)):
+            raise AnalysisArchiveError("archived production page-input hash is forged")
+        unit = raw["page_unit"]
+        source_page = raw["source_pdf_page"]
+        region = raw["baseline_tex_region"]
+        if (
+            not isinstance(unit, Mapping)
+            or set(unit) != unit_fields
+            or not isinstance(source_page, Mapping)
+            or set(source_page) != {"bytes", "sha256"}
+            or type(source_page["bytes"]) is not int
+            or source_page["bytes"] < 1
+            or re.fullmatch(r"[0-9a-f]{64}", str(source_page["sha256"] or ""))
+            is None
+            or not isinstance(region, str)
+            or raw["baseline_tex_region_sha256"] != sha256_text(region)
+            or unit.get("source_page_hash") != source_page["sha256"]
+            or raw["source_text_layer_sha256"]
+            != sha256_text(str(unit.get("source_text_layer", "")))
+        ):
+            raise AnalysisArchiveError("archived production page-input evidence is invalid")
+        candidate_ids = unit.get("candidate_pdf_page_ids")
+        if (
+            not isinstance(candidate_ids, list)
+            or raw["candidate_pdf_page_ids_sha256"]
+            != sha256_bytes(canonical_json_bytes(candidate_ids))
+        ):
+            raise AnalysisArchiveError(
+                "archived production candidate page-map hash is invalid"
+            )
+        validated.append(raw)
+    return tuple(validated)
+
+
+def _validate_production_archive_payloads(
+    *,
+    snapshot: Mapping[str, Any],
+    page_risk_admission: PageRiskAdmission,
+    page_inputs_archive: Mapping[str, Any],
+    page_route_closure: PageRiskRouteClosure,
+    analysis_configuration_archive: Mapping[str, Any],
+    risk_preflight_archive: Mapping[str, Any],
+    source_pdf_hash: str,
+    baseline_tex_hash: str,
+    baseline_pdf_hash: str,
+    current_tex_hash: str,
+) -> None:
+    """Independently rederive all production-only archive bindings."""
+
+    if not isinstance(snapshot, Mapping):
+        raise AnalysisArchiveError("production archive snapshot is invalid")
+    evidence_hashes = snapshot.get("evidence_hashes")
+    page_map = snapshot.get("page_map")
+    if not isinstance(evidence_hashes, Mapping) or not isinstance(page_map, list):
+        raise AnalysisArchiveError("production snapshot lacks typed evidence or page map")
+    if (
+        snapshot.get("source_pdf_hash") != source_pdf_hash
+        or snapshot.get("baseline_tex_hash") != baseline_tex_hash
+        or snapshot.get("baseline_pdf_hash") != baseline_pdf_hash
+        or page_risk_admission.source_pdf_sha256 != source_pdf_hash
+        or page_risk_admission.baseline_tex_sha256 != baseline_tex_hash
+        or page_risk_admission.baseline_pdf_sha256 != baseline_pdf_hash
+        or evidence_hashes.get("ocr_page_records_hash")
+        != page_risk_admission.ocr_page_records_sha256
+        or evidence_hashes.get("page_risk_admission_hash")
+        != page_risk_admission.digest
+    ):
+        raise AnalysisArchiveError("production page-risk admission is snapshot-stale")
+
+    if not isinstance(analysis_configuration_archive, Mapping) or set(
+        analysis_configuration_archive
+    ) != {
+        "schema",
+        "analysis_configuration",
+        "analysis_configuration_sha256",
+    }:
+        raise AnalysisArchiveError("production analysis configuration archive is malformed")
+    if (
+        analysis_configuration_archive.get("schema")
+        != _ANALYSIS_CONFIGURATION_SCHEMA
+    ):
+        raise AnalysisArchiveError("production analysis configuration schema is unsupported")
+    configuration = analysis_configuration_archive.get("analysis_configuration")
+    if not isinstance(configuration, Mapping):
+        raise AnalysisArchiveError("production analysis configuration is missing")
+    configuration_sha256 = sha256_bytes(canonical_json_bytes(configuration))
+    if (
+        analysis_configuration_archive.get("analysis_configuration_sha256")
+        != configuration_sha256
+        or snapshot.get("config_hash") != configuration_sha256
+        or evidence_hashes.get("analysis_config_hash") != configuration_sha256
+    ):
+        raise AnalysisArchiveError("production analysis configuration binding is forged")
+
+    risk_preflight = _coerce_risk_preflight_archive(risk_preflight_archive)
+    try:
+        rebuilt_admission = build_page_risk_admission(
+            source_pdf_sha256=page_risk_admission.source_pdf_sha256,
+            ocr_page_records_sha256=page_risk_admission.ocr_page_records_sha256,
+            ocr_runtime_page_records_sha256=(
+                page_risk_admission.ocr_runtime_page_records_sha256
+            ),
+            baseline_tex_sha256=page_risk_admission.baseline_tex_sha256,
+            baseline_pdf_sha256=page_risk_admission.baseline_pdf_sha256,
+            page_inputs=risk_preflight,
+        )
+    except (TypeError, ValueError) as exc:
+        raise AnalysisArchiveError(
+            "production risk preflight cannot reproduce the admission"
+        ) from exc
+    if (
+        rebuilt_admission.canonical_payload()
+        != page_risk_admission.canonical_payload()
+    ):
+        raise AnalysisArchiveError(
+            "production risk classification or low-risk sample is forged"
+        )
+
+    page_input_payloads = _validate_page_input_archive(page_inputs_archive)
+    if not page_map or len(page_map) != len(risk_preflight) or len(page_map) != len(
+        page_input_payloads
+    ) or len(page_map) != len(page_risk_admission.pages):
+        raise AnalysisArchiveError("production page evidence coverage is incomplete")
+    admission_by_id = {
+        item.summary.source_page_id: item for item in page_risk_admission.pages
+    }
+    preflight_by_id = {item.source_page_id: item for item in risk_preflight}
+    input_by_id: dict[str, Mapping[str, Any]] = {}
+    expected_ids: list[str] = []
+    for entry in page_map:
+        if not isinstance(entry, Mapping):
+            raise AnalysisArchiveError("production snapshot page-map entry is invalid")
+        page_id = str(entry.get("source_page_id") or "")
+        page_number = entry.get("source_page_number")
+        candidate_ids = entry.get("candidate_pdf_page_ids")
+        if (
+            not page_id
+            or type(page_number) is not int
+            or not isinstance(candidate_ids, list)
+            or page_id in expected_ids
+        ):
+            raise AnalysisArchiveError("production snapshot page-map identity is invalid")
+        expected_ids.append(page_id)
+    for raw in page_input_payloads:
+        unit = raw["page_unit"]
+        page_id = str(unit.get("source_page_id") or "")
+        if not page_id or page_id in input_by_id:
+            raise AnalysisArchiveError("production page-input identity is duplicated")
+        input_by_id[page_id] = raw
+    if (
+        list(admission_by_id) != expected_ids
+        or list(preflight_by_id) != expected_ids
+        or list(input_by_id) != expected_ids
+    ):
+        raise AnalysisArchiveError("production page identities or ordering differ")
+
+    sampled_ids = set(
+        page_risk_admission.low_risk_sampling.selected_page_ids
+    )
+    for entry in page_map:
+        page_id = str(entry["source_page_id"])
+        page_number = int(entry["source_page_number"])
+        candidate_ids = list(entry["candidate_pdf_page_ids"])
+        admitted = admission_by_id[page_id]
+        preflight = preflight_by_id[page_id]
+        archived_input = input_by_id[page_id]
+        unit = archived_input["page_unit"]
+        source_text = preflight.source_pdf_text or ""
+        if (
+            admitted.summary.source_page_number != page_number
+            or preflight.source_page_number != page_number
+            or unit.get("source_page_number") != page_number
+            or tuple(candidate_ids) != tuple(preflight.candidate_pdf_page_ids)
+            or candidate_ids != unit.get("candidate_pdf_page_ids")
+            or admitted.summary.candidate_page_ids_hash
+            != sha256_bytes(canonical_json_bytes(candidate_ids))
+            or admitted.summary.source_page_object_hash
+            != str(preflight.source_page_object_hash or "").lower()
+            or admitted.summary.source_pdf_text_hash != sha256_text(source_text)
+            or archived_input["baseline_tex_region"]
+            != preflight.baseline_tex_region
+            or admitted.summary.baseline_tex_region_hash
+            != archived_input["baseline_tex_region_sha256"]
+            or unit.get("baseline_tex_start_anchor")
+            != entry.get("tex_page_marker")
+            or unit.get("risk_level") != admitted.risk_level.value
+            or unit.get("risk_reasons") != list(admitted.risk_reasons)
+        ):
+            raise AnalysisArchiveError(
+                f"production page-input binding differs for {page_id}"
+            )
+
+    closure = page_route_closure
+    if (
+        closure.admission_sha256 != page_risk_admission.digest
+        or closure.final_candidate_hash != current_tex_hash
+        or len(closure.pages) != len(expected_ids)
+    ):
+        raise AnalysisArchiveError("production page-route closure is stale")
+    closure_ids = [item.source_page_id for item in closure.pages]
+    if closure_ids != expected_ids:
+        raise AnalysisArchiveError("production page-route coverage is incomplete")
+    for item in closure.pages:
+        admitted = admission_by_id[item.source_page_id]
+        if (
+            item.source_page_number != admitted.summary.source_page_number
+            or item.admitted_risk != admitted.risk_level
+            or item.sampled_low_risk != (item.source_page_id in sampled_ids)
+            or item.final_candidate_hash != current_tex_hash
+        ):
+            raise AnalysisArchiveError(
+                f"production page-route risk/sample binding differs for {item.source_page_id}"
+            )
+    snapshot_hash = snapshot.get("snapshot_hash")
+    for item in closure.route_call_keys:
+        if (
+            item.source_page_id not in admission_by_id
+            or item.snapshot_hash != snapshot_hash
+        ):
+            raise AnalysisArchiveError("production page-route call identity is stale")
+
+
+def _validated_typed_production_archive_evidence(
+    *,
+    evidence: ProductionAnalysisArchiveEvidence,
+    authoritative_snapshot: AnalysisRunSnapshot,
+    source_pdf_hash: str,
+    baseline_tex_hash: str,
+    baseline_pdf_hash: str,
+    current_tex_hash: str,
+) -> dict[str, Mapping[str, Any]]:
+    if evidence.snapshot.to_dict() != authoritative_snapshot.to_dict():
+        raise AnalysisArchiveError(
+            "production archive evidence snapshot differs from the authority"
+        )
+    admission_payload = evidence.page_risk_admission.to_dict()
+    page_inputs_payload = _page_inputs_archive_payload(evidence.page_inputs)
+    route_payload = evidence.page_route_closure.to_dict()
+    configuration_payload = _analysis_configuration_archive_payload(
+        evidence.analysis_configuration,
+        evidence.analysis_configuration_sha256,
+    )
+    risk_preflight_payload = _risk_preflight_archive_payload(
+        evidence.risk_preflight
+    )
+    snapshot_payload = _strict_json_value(
+        authoritative_snapshot.to_dict(), label="authoritative production snapshot"
+    )
+    if not isinstance(snapshot_payload, dict):  # pragma: no cover - typed root
+        raise AnalysisArchiveError("authoritative production snapshot is not an object")
+    _validate_production_archive_payloads(
+        snapshot=snapshot_payload,
+        page_risk_admission=evidence.page_risk_admission,
+        page_inputs_archive=page_inputs_payload,
+        page_route_closure=evidence.page_route_closure,
+        analysis_configuration_archive=configuration_payload,
+        risk_preflight_archive=risk_preflight_payload,
+        source_pdf_hash=source_pdf_hash,
+        baseline_tex_hash=baseline_tex_hash,
+        baseline_pdf_hash=baseline_pdf_hash,
+        current_tex_hash=current_tex_hash,
+    )
+    return {
+        "page_risk_admission": admission_payload,
+        "page_inputs": page_inputs_payload,
+        "page_route_closure": route_payload,
+        "analysis_configuration": configuration_payload,
+        "risk_preflight": risk_preflight_payload,
+    }
 
 
 def stable_source_page_id(source_pdf_sha256: str, page_number: int) -> str:
@@ -891,14 +1475,29 @@ def _performance_payload(
     total_pages: int,
     decision: VerificationDecision,
 ) -> dict[str, Any]:
+    page_count_eligible = total_pages == ANALYSIS_PERFORMANCE_BENCHMARK_PAGE_COUNT
     if value is None:
         return {
             "schema": "latexstruct-analysis-performance-v2",
             "available": False,
             "total_pages": total_pages,
             "final_status": decision.status.value,
-            "target_seconds": 10800.0,
-            "target_met": False,
+            "target_seconds": ANALYSIS_PERFORMANCE_BENCHMARK_SECONDS,
+            "benchmark_page_count": ANALYSIS_PERFORMANCE_BENCHMARK_PAGE_COUNT,
+            "benchmark_eligible": page_count_eligible,
+            "target_status": PerformanceTargetStatus.NOT_EVALUATED.value,
+            "target_evaluated": False,
+            "target_met": None,
+            "input_tokens": None,
+            "output_tokens": None,
+            "cached_tokens": None,
+            "total_tokens": None,
+            "usage_complete": False,
+            "cache_status": "DISABLED",
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "estimated_cost_cny": None,
+            "cost_status": "UNKNOWN",
             "missing": ["real_timing_and_model_usage_metrics"],
         }
     raw = _jsonable(value)
@@ -909,9 +1508,1073 @@ def _performance_payload(
         raw["recorded_final_status"] = previous
     raw["final_status"] = decision.status.value
     raw.setdefault("schema", "latexstruct-analysis-performance-v2")
-    raw.setdefault("available", True)
-    raw.setdefault("total_pages", total_pages)
+    raw["available"] = raw.get("available") is True
+    recorded_total_pages = raw.get("total_pages")
+    if recorded_total_pages is not None and recorded_total_pages != total_pages:
+        raw["recorded_total_pages"] = recorded_total_pages
+    raw["total_pages"] = total_pages
+    usage_complete = raw.get("usage_complete") is True
+    token_fields = ("input_tokens", "output_tokens", "cached_tokens", "total_tokens")
+    tokens_are_integers = not any(
+        type(raw.get(field)) is not int or raw.get(field) < 0
+        for field in token_fields
+    )
+    token_algebra_valid = bool(
+        tokens_are_integers
+        and raw.get("total_tokens")
+        == raw.get("input_tokens") + raw.get("output_tokens")
+        and raw.get("cached_tokens") <= raw.get("input_tokens")
+    )
+    if not usage_complete or not token_algebra_valid:
+        invalid_reasons = []
+        if usage_complete and tokens_are_integers:
+            if raw.get("total_tokens") != (
+                raw.get("input_tokens") + raw.get("output_tokens")
+            ):
+                invalid_reasons.append("total_tokens_mismatch")
+            if raw.get("cached_tokens") > raw.get("input_tokens"):
+                invalid_reasons.append("cached_tokens_exceed_input_tokens")
+        elif usage_complete:
+            invalid_reasons.append("token_counts_are_not_non_negative_integers")
+        for field in token_fields:
+            recorded = raw.get(field)
+            if recorded is not None:
+                raw.setdefault(f"recorded_{field}", recorded)
+            raw[field] = None
+        raw["usage_complete"] = False
+        if invalid_reasons:
+            raw["usage_validation_errors"] = invalid_reasons
+    cache_status = str(raw.get("cache_status") or "DISABLED").strip().upper()
+    if cache_status not in {"DISABLED", "ENABLED"}:
+        raw["recorded_cache_status"] = raw.get("cache_status")
+        cache_status = "DISABLED"
+    raw["cache_status"] = cache_status
+    if cache_status == "DISABLED":
+        raw["cache_hits"] = 0
+        raw["cache_misses"] = 0
+    if (
+        raw.get("usage_complete") is not True
+        or raw.get("cost_status") != "ESTIMATED"
+        or not isinstance(raw.get("estimated_cost_cny"), (int, float))
+        or isinstance(raw.get("estimated_cost_cny"), bool)
+        or not math.isfinite(float(raw.get("estimated_cost_cny") or 0.0))
+        or raw.get("estimated_cost_cny") < 0
+        or raw.get("billing_mode") == "chatgpt_subscription"
+    ):
+        recorded_cost = raw.get("estimated_cost_cny")
+        if recorded_cost is not None:
+            raw.setdefault("recorded_estimated_cost_cny", recorded_cost)
+        raw["estimated_cost_cny"] = None
+        raw["cost_status"] = "UNKNOWN"
+    recorded_target_seconds = raw.get("target_seconds")
+    raw.setdefault("target_seconds", ANALYSIS_PERFORMANCE_BENCHMARK_SECONDS)
+    raw["benchmark_page_count"] = ANALYSIS_PERFORMANCE_BENCHMARK_PAGE_COUNT
+
+    recorded_benchmark_eligible = raw.get("benchmark_eligible")
+    benchmark_eligible = bool(
+        page_count_eligible
+        and recorded_target_seconds == ANALYSIS_PERFORMANCE_BENCHMARK_SECONDS
+    )
+    raw["benchmark_eligible"] = benchmark_eligible
+    recorded_target_met = raw.get("target_met")
+    recorded_target_status = raw.get("target_status")
+    checked_pages = raw.get("checked_pages")
+    elapsed_seconds = raw.get("elapsed_seconds")
+    elapsed_is_real = (
+        isinstance(elapsed_seconds, (int, float))
+        and not isinstance(elapsed_seconds, bool)
+        and math.isfinite(elapsed_seconds)
+        and elapsed_seconds > 0
+    )
+    measurement_complete = bool(
+        raw["available"]
+        and recorded_benchmark_eligible is True
+        and benchmark_eligible
+        and checked_pages == ANALYSIS_PERFORMANCE_BENCHMARK_PAGE_COUNT
+        and elapsed_is_real
+    )
+    if not measurement_complete:
+        if recorded_target_met is not None:
+            raw["recorded_target_met"] = recorded_target_met
+        if recorded_target_status not in {None, PerformanceTargetStatus.NOT_EVALUATED.value}:
+            raw["recorded_target_status"] = recorded_target_status
+        raw["target_status"] = PerformanceTargetStatus.NOT_EVALUATED.value
+        raw["target_evaluated"] = False
+        raw["target_met"] = None
+        return raw
+
+    target_met = bool(
+        elapsed_seconds <= ANALYSIS_PERFORMANCE_BENCHMARK_SECONDS
+        and decision.status in {
+            AnalysisFinalStatus.VERIFIED,
+            AnalysisFinalStatus.COMPLETED_WITH_ISSUES,
+        }
+    )
+    computed_status = (
+        PerformanceTargetStatus.PASSED.value
+        if target_met
+        else PerformanceTargetStatus.FAILED.value
+    )
+    if recorded_target_met is not None and recorded_target_met is not target_met:
+        raw["recorded_target_met"] = recorded_target_met
+    if recorded_target_status not in {None, computed_status}:
+        raw["recorded_target_status"] = recorded_target_status
+    raw["target_status"] = computed_status
+    raw["target_evaluated"] = True
+    raw["target_met"] = target_met
     return raw
+
+
+def _material_hash_pairs(value: object) -> tuple[tuple[str, str], ...] | None:
+    if isinstance(value, Mapping):
+        items = tuple(sorted((str(key), str(item)) for key, item in value.items()))
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        normalized = []
+        for item in value:
+            if (
+                not isinstance(item, Sequence)
+                or isinstance(item, (str, bytes))
+                or len(item) != 2
+            ):
+                return None
+            normalized.append((str(item[0]), str(item[1])))
+        items = tuple(sorted(normalized))
+    else:
+        return None
+    if not items or len({key for key, _value in items}) != len(items):
+        return None
+    if any(not re.fullmatch(r"[0-9a-f]{64}", digest) for _key, digest in items):
+        return None
+    return items
+
+
+def _audit_usage_mapping(value: object) -> dict[str, Any] | None:
+    if isinstance(value, Mapping):
+        return {str(key): item for key, item in value.items()}
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return None
+    result: dict[str, Any] = {}
+    for item in value:
+        if (
+            not isinstance(item, Sequence)
+            or isinstance(item, (str, bytes))
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or item[0] in result
+        ):
+            return None
+        result[item[0]] = item[1]
+    return result
+
+
+def _audit_usage_value(
+    usage: Mapping[str, Any],
+    *names: str,
+) -> tuple[int | None, bool, bool]:
+    values = [usage[name] for name in names if name in usage]
+    if not values:
+        return None, False, True
+    if any(type(value) is not int or value < 0 for value in values):
+        return None, True, False
+    if len(set(values)) != 1:
+        return None, True, False
+    return int(values[0]), True, True
+
+
+def _audit_strict_usage(
+    usage: Mapping[str, Any],
+) -> tuple[dict[str, int | None], bool]:
+    input_tokens, input_present, input_valid = _audit_usage_value(
+        usage, "input_tokens", "prompt_tokens"
+    )
+    output_tokens, output_present, output_valid = _audit_usage_value(
+        usage, "output_tokens", "completion_tokens"
+    )
+    cached_tokens, cached_present, cached_valid = _audit_usage_value(
+        usage, "cached_input_tokens", "cached_tokens"
+    )
+    details = usage.get("prompt_tokens_details")
+    if details is not None:
+        if not isinstance(details, Mapping):
+            cached_valid = False
+        elif "cached_tokens" in details:
+            nested, nested_present, nested_valid = _audit_usage_value(
+                details, "cached_tokens"
+            )
+            cached_valid = cached_valid and nested_valid
+            if nested_present:
+                if cached_present and cached_tokens != nested:
+                    cached_valid = False
+                else:
+                    cached_tokens = nested
+                    cached_present = True
+    total_tokens, total_present, total_valid = _audit_usage_value(
+        usage, "total_tokens"
+    )
+    complete = bool(
+        input_present
+        and output_present
+        and input_valid
+        and output_valid
+        and cached_valid
+        and total_valid
+    )
+    cached_tokens = 0 if cached_tokens is None else cached_tokens
+    if input_tokens is not None and cached_tokens > input_tokens:
+        complete = False
+    derived_total = (
+        input_tokens + output_tokens
+        if input_tokens is not None and output_tokens is not None
+        else None
+    )
+    if total_present:
+        if derived_total is None or total_tokens != derived_total:
+            complete = False
+    else:
+        total_tokens = derived_total
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_tokens": cached_tokens if cached_valid else None,
+        "total_tokens": total_tokens if total_valid else None,
+    }, complete
+
+
+_PRODUCTION_USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cached_tokens",
+    "total_tokens",
+    "usage_complete",
+    "observed_input_tokens",
+    "observed_output_tokens",
+    "observed_cached_tokens",
+    "observed_total_tokens",
+    "transport_call_count",
+    "usage_observed_call_count",
+    "usage_missing_call_count",
+    "transport_attempt_count",
+    "observed_transport_attempt_count",
+    "usage_observed_attempt_count",
+    "usage_missing_attempt_count",
+    "attempt_evidence_complete",
+    "cache_hits",
+    "cache_misses",
+    "cache_status",
+    "estimated_cost_cny",
+    "cost_status",
+    "pricing_sources",
+    "billing_mode",
+    "role_call_counts",
+)
+
+_PRODUCTION_CACHE_CLOSURE_FIELDS = (
+    "orchestration_invocation_count",
+    "cache_hit_evidence_count",
+)
+
+_PRODUCTION_ATTEMPT_FAILURE_STAGES = frozenset(
+    {
+        "",
+        "http_error",
+        "invalid_json",
+        "invalid_response_envelope",
+        "missing_turn_evidence",
+        "network_error",
+        "runtime_failure_without_turn_evidence",
+        "timeout",
+        "turn_failed",
+    }
+)
+
+_CACHE_ROLE_OPERATIONS = {
+    "AI-1": "structure-findings",
+    "AI-2": "content-math-findings",
+    "AI-3": "visual-findings",
+}
+_CACHE_ELIGIBLE_OPERATIONS = frozenset(_CACHE_ROLE_OPERATIONS.values())
+
+
+def _validate_performance_accounting(
+    recorded: object,
+    recomputed: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    if not isinstance(recorded, Mapping):
+        raise AnalysisArchiveError(f"{label} performance accounting is missing")
+    mismatches = [
+        field
+        for field in _PRODUCTION_USAGE_FIELDS
+        if recorded.get(field) != recomputed.get(field)
+    ]
+    # Old immutable artifacts predate explicit cache-hit evidence.  Once a
+    # producer records either closure counter, both become mandatory and are
+    # recomputed from the archived invocation evidence rather than trusted.
+    if any(field in recorded for field in _PRODUCTION_CACHE_CLOSURE_FIELDS):
+        mismatches.extend(
+            field
+            for field in _PRODUCTION_CACHE_CLOSURE_FIELDS
+            if recorded.get(field) != recomputed.get(field)
+        )
+    if mismatches:
+        raise AnalysisArchiveError(
+            f"{label} performance accounting differs from transport attempts: "
+            + ",".join(mismatches)
+        )
+
+
+def _recompute_transport_accounting(
+    *,
+    transports: Sequence[Mapping[str, Any]],
+    invocations: Sequence[Mapping[str, Any]],
+    snapshot: Mapping[str, Any],
+    cache_hits: Sequence[Mapping[str, Any]] = (),
+    cache_enabled: bool = False,
+) -> dict[str, Any]:
+    observed_input = observed_output = observed_cached = observed_total = 0
+    observed_attempts = complete_attempts = complete_calls = 0
+    attempt_closure_complete = True
+    normalized_attempts: list[tuple[str, dict[str, Any]]] = []
+    billing_modes: set[str] = set()
+    role_counts: Counter[str] = Counter(
+        str(item.get("binding", {}).get("role") or "")
+        for item in invocations
+        if isinstance(item.get("binding"), Mapping)
+    )
+
+    for transport in transports:
+        role = str(transport.get("role") or "")
+        top_usage = _audit_usage_mapping(transport.get("usage"))
+        attempts = transport.get("attempts")
+        closure_flag = transport.get("attempt_evidence_complete")
+        if top_usage is None or not isinstance(attempts, list) or type(closure_flag) is not bool:
+            raise AnalysisArchiveError("production transport usage evidence is malformed")
+        parsed_attempts: list[tuple[Mapping[str, Any], dict[str, Any]]] = []
+        for expected_number, attempt in enumerate(attempts, 1):
+            failure_stage = attempt.get("failure_stage") if isinstance(attempt, Mapping) else None
+            if (
+                not isinstance(attempt, Mapping)
+                or type(attempt.get("attempt_number")) is not int
+                or attempt.get("attempt_number") != expected_number
+                or type(attempt.get("succeeded")) is not bool
+                or type(attempt.get("usage_complete")) is not bool
+                or not isinstance(failure_stage, str)
+                or failure_stage not in _PRODUCTION_ATTEMPT_FAILURE_STAGES
+                or (attempt.get("succeeded") is True and failure_stage != "")
+                or (attempt.get("succeeded") is False and failure_stage == "")
+            ):
+                raise AnalysisArchiveError("production transport attempt is malformed")
+            usage = _audit_usage_mapping(attempt.get("usage"))
+            if usage is None:
+                raise AnalysisArchiveError("production transport attempt usage is malformed")
+            _normalized, strictly_complete = _audit_strict_usage(usage)
+            if attempt.get("usage_complete") is True and not strictly_complete:
+                raise AnalysisArchiveError("production transport attempt usage closure is forged")
+            parsed_attempts.append((attempt, usage))
+        computed_closure = bool(
+            parsed_attempts
+            and parsed_attempts[-1][0].get("succeeded") is True
+            and not any(
+                attempt.get("succeeded") is True for attempt, _usage in parsed_attempts[:-1]
+            )
+            and parsed_attempts[-1][1] == top_usage
+        )
+        if closure_flag is not computed_closure:
+            raise AnalysisArchiveError("production transport attempt closure is stale or forged")
+        call_complete = computed_closure
+        if not call_complete:
+            attempt_closure_complete = False
+
+        observed_attempts += len(parsed_attempts)
+        for attempt, usage in parsed_attempts:
+            normalized, strictly_complete = _audit_strict_usage(usage)
+            attempt_complete = bool(attempt.get("usage_complete") is True and strictly_complete)
+            call_complete = call_complete and attempt_complete
+            if attempt_complete:
+                complete_attempts += 1
+            input_tokens = normalized["input_tokens"]
+            output_tokens = normalized["output_tokens"]
+            cached_tokens = normalized["cached_tokens"]
+            total_tokens = normalized["total_tokens"]
+            if input_tokens is not None:
+                observed_input += input_tokens
+            if output_tokens is not None:
+                observed_output += output_tokens
+            if cached_tokens is not None:
+                observed_cached += cached_tokens
+            if total_tokens is not None:
+                observed_total += total_tokens
+            elif input_tokens is not None or output_tokens is not None:
+                observed_total += (input_tokens or 0) + (output_tokens or 0)
+            normalized_attempts.append((role, {**usage, **normalized}))
+            billing_mode = str(usage.get("billing_mode") or "").strip()
+            if billing_mode:
+                billing_modes.add(billing_mode)
+        if call_complete:
+            complete_calls += 1
+
+    expected_calls = len(invocations)
+    transport_calls = len(transports)
+    calls_succeeded = all(item.get("succeeded") is True for item in invocations)
+    usage_complete = bool(
+        expected_calls > 0
+        and calls_succeeded
+        and attempt_closure_complete
+        and complete_calls == transport_calls
+        and expected_calls == transport_calls + len(cache_hits)
+    )
+    input_total = observed_input if usage_complete else None
+    output_total = observed_output if usage_complete else None
+    cached_total = observed_cached if usage_complete else None
+    total = observed_total if usage_complete else None
+
+    model_ids = {
+        str(item.get("role")): str(item.get("model_id") or "")
+        for item in snapshot.get("models", [])
+        if isinstance(item, Mapping)
+    }
+    cost_total = 0.0
+    pricing_sources: set[str] = set()
+    cost_complete = usage_complete
+    for role, normalized_usage in normalized_attempts:
+        if str(normalized_usage.get("billing_mode") or "").strip() == (
+            "chatgpt_subscription"
+        ):
+            cost_complete = False
+            continue
+        estimate = estimate_call_cost(model_ids.get(role, ""), normalized_usage)
+        if estimate is None:
+            cost_complete = False
+            continue
+        cost_total += float(estimate["cny"])
+        pricing_sources.add(str(estimate["source"]))
+
+    billing_mode: str | None
+    if len(billing_modes) == 1:
+        billing_mode = next(iter(billing_modes))
+    elif billing_modes:
+        billing_mode = "MIXED"
+    else:
+        billing_mode = None
+    missing_calls = max(
+        transport_calls - complete_calls,
+        expected_calls - len(cache_hits) - complete_calls,
+        0,
+    )
+    cache_misses = (
+        sum(
+            str(item.get("operation") or "") in _CACHE_ELIGIBLE_OPERATIONS
+            for item in transports
+        )
+        if cache_enabled
+        else 0
+    )
+    return {
+        "input_tokens": input_total,
+        "output_tokens": output_total,
+        "cached_tokens": cached_total,
+        "total_tokens": total,
+        "usage_complete": usage_complete,
+        "observed_input_tokens": observed_input,
+        "observed_output_tokens": observed_output,
+        "observed_cached_tokens": observed_cached,
+        "observed_total_tokens": observed_total,
+        "orchestration_invocation_count": expected_calls,
+        "transport_call_count": transport_calls,
+        "usage_observed_call_count": complete_calls,
+        "usage_missing_call_count": max(0, missing_calls),
+        "transport_attempt_count": (
+            observed_attempts if attempt_closure_complete else None
+        ),
+        "observed_transport_attempt_count": observed_attempts,
+        "usage_observed_attempt_count": complete_attempts,
+        "usage_missing_attempt_count": (
+            max(0, observed_attempts - complete_attempts)
+            if attempt_closure_complete else None
+        ),
+        "attempt_evidence_complete": attempt_closure_complete,
+        "cache_hits": len(cache_hits) if cache_enabled else 0,
+        "cache_misses": cache_misses,
+        "cache_hit_evidence_count": len(cache_hits),
+        "cache_status": "ENABLED" if cache_enabled else "DISABLED",
+        "estimated_cost_cny": round(cost_total, 6) if cost_complete else None,
+        "cost_status": "ESTIMATED" if cost_complete else "UNKNOWN",
+        "pricing_sources": sorted(pricing_sources) if cost_complete else [],
+        "billing_mode": billing_mode,
+        "role_call_counts": [list(item) for item in sorted(role_counts.items())],
+    }
+
+
+_BUDGET_REPLAY_INTEGER_FIELDS = (
+    "observed_input_tokens",
+    "observed_output_tokens",
+    "accounted_input_tokens",
+    "accounted_output_tokens",
+    "requests",
+    "strong_model_calls",
+    "unknown_input_token_requests",
+    "unknown_output_token_requests",
+    "unknown_cost_requests",
+    "committed_reservations",
+)
+_BUDGET_REPLAY_FLOAT_FIELDS = ("observed_cost", "accounted_cost")
+
+
+def _actual_usage_equal(left: ActualUsage, right: ActualUsage) -> bool:
+    return (
+        left.input_tokens == right.input_tokens
+        and left.output_tokens == right.output_tokens
+        and (
+            left.cost is None
+            and right.cost is None
+            or (
+                left.cost is not None
+                and right.cost is not None
+                and math.isclose(
+                    left.cost,
+                    right.cost,
+                    rel_tol=1e-12,
+                    abs_tol=1e-12,
+                )
+            )
+        )
+    )
+
+
+def _closed_transport_actual_usage(
+    transport: Mapping[str, Any],
+    *,
+    snapshot: Mapping[str, Any],
+) -> ActualUsage:
+    """Independently derive one closed transport settlement from every attempt."""
+
+    attempts = transport.get("attempts")
+    if transport.get("attempt_evidence_complete") is not True or not isinstance(
+        attempts, list
+    ):
+        raise AnalysisArchiveError("production transport budget settlement is not closed")
+    model_ids = {
+        str(item.get("role")): str(item.get("model_id") or "")
+        for item in snapshot.get("models", [])
+        if isinstance(item, Mapping)
+    }
+    model_id = model_ids.get(str(transport.get("role") or ""), "")
+    if not model_id:
+        raise AnalysisArchiveError("production transport budget model binding is missing")
+
+    input_values: list[int] = []
+    output_values: list[int] = []
+    cost_values: list[float] = []
+    input_complete = output_complete = cost_complete = True
+    for attempt in attempts:
+        if not isinstance(attempt, Mapping):  # guarded by transport validation
+            raise AnalysisArchiveError("production transport budget attempt is malformed")
+        usage = _audit_usage_mapping(attempt.get("usage"))
+        if usage is None:
+            raise AnalysisArchiveError("production transport budget usage is malformed")
+        normalized, strictly_complete = _audit_strict_usage(usage)
+        input_tokens = normalized["input_tokens"]
+        output_tokens = normalized["output_tokens"]
+        if input_tokens is None:
+            input_complete = False
+        else:
+            input_values.append(input_tokens)
+        if output_tokens is None:
+            output_complete = False
+        else:
+            output_values.append(output_tokens)
+        if (
+            not strictly_complete
+            or str(usage.get("billing_mode") or "").strip()
+            == "chatgpt_subscription"
+        ):
+            cost_complete = False
+            continue
+        estimate = estimate_call_cost(model_id, {**usage, **normalized})
+        if estimate is None:
+            cost_complete = False
+        else:
+            cost_values.append(float(estimate["cny"]))
+    return ActualUsage(
+        input_tokens=sum(input_values) if input_complete else None,
+        output_tokens=sum(output_values) if output_complete else None,
+        cost=sum(cost_values) if cost_complete else None,
+    )
+
+
+def _validate_production_budget_semantics(
+    *,
+    analysis_v2: Mapping[str, Any],
+    transports: Sequence[Mapping[str, Any]],
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind terminal budget aggregates to strict per-transport settlements."""
+
+    state_present = "budget_state" in analysis_v2
+    usage_present = "budget_usage" in analysis_v2
+    if not state_present and not usage_present:
+        return {
+            "budget_evidence_present": False,
+            "budget_closure_complete": False,
+            "budget_closure_failures": ["analysis_budget_evidence_missing"],
+        }
+    if state_present is not usage_present:
+        raise AnalysisArchiveError("production budget state/usage evidence is incomplete")
+    raw_state = analysis_v2.get("budget_state")
+    raw_usage = analysis_v2.get("budget_usage")
+    if not isinstance(raw_state, Mapping) or not isinstance(raw_usage, Mapping):
+        raise AnalysisArchiveError("production budget state/usage evidence is malformed")
+    try:
+        budget = AnalysisBudget.from_dict(dict(raw_state), clock=lambda: 0.0)
+        usage = BudgetUsage.from_dict(dict(raw_usage))
+    except (TypeError, ValueError) as exc:
+        raise AnalysisArchiveError("production budget state/usage evidence is malformed") from exc
+    normalized_state = budget.to_dict()
+    if dict(raw_state) != normalized_state or raw_state.get("usage") != dict(raw_usage):
+        raise AnalysisArchiveError("production budget state and usage disagree")
+
+    totals: dict[str, int | float] = {
+        name: 0 for name in _BUDGET_REPLAY_INTEGER_FIELDS
+    }
+    totals.update({name: 0.0 for name in _BUDGET_REPLAY_FLOAT_FIELDS})
+    expected_unbounded: set[str] = set()
+    limits = budget.limits
+    for transport in transports:
+        raw_claim = transport.get("budget_claim")
+        raw_actual = transport.get("budget_actual_usage")
+        if not isinstance(raw_claim, Mapping) or not isinstance(raw_actual, Mapping):
+            raise AnalysisArchiveError(
+                "production transport budget claim/settlement evidence is missing"
+            )
+        try:
+            claim = BudgetClaim.from_dict(dict(raw_claim))
+            actual = ActualUsage.from_dict(dict(raw_actual))
+        except (TypeError, ValueError) as exc:
+            raise AnalysisArchiveError(
+                "production transport budget claim/settlement evidence is malformed"
+            ) from exc
+        attempts = transport.get("attempts")
+        if (
+            not isinstance(attempts, list)
+            or len(attempts) > claim.requests
+            or claim.strong_model_calls
+            != (claim.requests if transport.get("role") == "AI-6" else 0)
+        ):
+            raise AnalysisArchiveError(
+                "production transport budget claim conflicts with attempt/role evidence"
+            )
+        if transport.get("attempt_evidence_complete") is True:
+            expected_actual = _closed_transport_actual_usage(
+                transport,
+                snapshot=snapshot,
+            )
+            if not _actual_usage_equal(actual, expected_actual):
+                raise AnalysisArchiveError(
+                    "production transport budget settlement differs from attempt usage"
+                )
+
+        totals["requests"] += claim.requests
+        totals["strong_model_calls"] += claim.strong_model_calls
+        totals["committed_reservations"] += 1
+        for dimension, observed_name, accounted_name, unknown_name, limit_name in (
+            (
+                "input_tokens",
+                "observed_input_tokens",
+                "accounted_input_tokens",
+                "unknown_input_token_requests",
+                "max_input_tokens",
+            ),
+            (
+                "output_tokens",
+                "observed_output_tokens",
+                "accounted_output_tokens",
+                "unknown_output_token_requests",
+                "max_output_tokens",
+            ),
+            (
+                "cost",
+                "observed_cost",
+                "accounted_cost",
+                "unknown_cost_requests",
+                "max_cost",
+            ),
+        ):
+            actual_value = getattr(actual, dimension)
+            if actual_value is None:
+                claim_value = getattr(claim, dimension)
+                totals[accounted_name] += claim_value
+                totals[unknown_name] += claim.requests
+                if claim_value == 0 and getattr(limits, limit_name) > 0:
+                    expected_unbounded.add(dimension)
+            else:
+                totals[observed_name] += actual_value
+                totals[accounted_name] += actual_value
+
+    replayed = BudgetUsage(
+        **totals,
+        cancelled_reservations=0,
+        wall_time_minutes=usage.wall_time_minutes,
+    )
+    if (
+        usage.cancelled_reservations != 0
+        or any(
+            getattr(replayed, name) != getattr(usage, name)
+            for name in _BUDGET_REPLAY_INTEGER_FIELDS
+        )
+        or any(
+            not math.isclose(
+                getattr(replayed, name),
+                getattr(usage, name),
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+            for name in _BUDGET_REPLAY_FLOAT_FIELDS
+        )
+    ):
+        raise AnalysisArchiveError(
+            "production budget usage does not close over transport settlements"
+        )
+    if set(normalized_state["unbounded_unknown_dimensions"]) != expected_unbounded:
+        raise AnalysisArchiveError(
+            "production budget uncertainty does not close over transport settlements"
+        )
+
+    failures: list[str] = []
+    if normalized_state["reservations"]:
+        failures.append("analysis_budget_reservations_not_terminal")
+    if normalized_state["stop_reason"] is not None:
+        failures.append("analysis_budget_stop_recorded")
+    for usage_name, limit_name in (
+        ("accounted_input_tokens", "max_input_tokens"),
+        ("accounted_output_tokens", "max_output_tokens"),
+        ("accounted_cost", "max_cost"),
+        ("requests", "max_requests"),
+        ("strong_model_calls", "max_strong_model_calls"),
+        ("wall_time_minutes", "max_wall_time_minutes"),
+    ):
+        maximum = getattr(limits, limit_name)
+        if maximum > 0 and getattr(usage, usage_name) > maximum:
+            failures.append(f"analysis_budget_limit_exceeded:{usage_name}")
+    return {
+        "budget_evidence_present": True,
+        "budget_closure_complete": not failures,
+        "budget_closure_failures": failures,
+        "budget_usage": usage.to_dict(),
+    }
+
+
+def _production_transport_closure_failures(
+    accounting: Mapping[str, object],
+) -> tuple[str, ...]:
+    """Return stable reasons when provider-call accounting cannot prove closure."""
+
+    failures: list[str] = []
+    if accounting.get("usage_complete") is not True:
+        failures.append("analysis_transport_usage_incomplete")
+    if accounting.get("attempt_evidence_complete") is not True:
+        failures.append("analysis_transport_attempt_evidence_incomplete")
+    missing_calls = accounting.get("usage_missing_call_count")
+    if type(missing_calls) is not int or missing_calls != 0:
+        failures.append("analysis_transport_call_closure_incomplete")
+    missing_attempts = accounting.get("usage_missing_attempt_count")
+    if type(missing_attempts) is not int or missing_attempts != 0:
+        failures.append("analysis_transport_attempt_usage_incomplete")
+    transport_count = accounting.get("transport_call_count")
+    attempt_count = accounting.get("transport_attempt_count")
+    if (
+        type(transport_count) is not int
+        or transport_count < 1
+        or type(attempt_count) is not int
+        or attempt_count < transport_count
+    ):
+        failures.append("analysis_transport_count_closure_incomplete")
+    budget_failures = accounting.get("budget_closure_failures")
+    if accounting.get("budget_closure_complete") is not True:
+        failures.append("analysis_budget_evidence_incomplete")
+        if isinstance(budget_failures, list) and all(
+            isinstance(item, str) for item in budget_failures
+        ):
+            failures.extend(budget_failures)
+    return tuple(dict.fromkeys(failures))
+
+
+def _apply_production_transport_closure(
+    decision: VerificationDecision,
+    accounting: Mapping[str, object],
+) -> VerificationDecision:
+    closure_failures = _production_transport_closure_failures(accounting)
+    if not closure_failures:
+        return decision
+    status = (
+        AnalysisFinalStatus.COMPLETED_WITH_ISSUES
+        if decision.status == AnalysisFinalStatus.VERIFIED
+        else decision.status
+    )
+    return replace(
+        decision,
+        status=status,
+        verified=False,
+        failures=tuple(
+            dict.fromkeys(
+                (
+                    *decision.failures,
+                    "analysis_transport_evidence_incomplete",
+                    *closure_failures,
+                )
+            )
+        ),
+    )
+
+
+def _apply_production_authority_gate(
+    decision: VerificationDecision,
+    *,
+    authoritative_snapshot_present: bool,
+) -> VerificationDecision:
+    """Never promote supplied/nested evidence without the host snapshot authority."""
+
+    if authoritative_snapshot_present or not decision.verified:
+        return decision
+    return replace(
+        decision,
+        status=AnalysisFinalStatus.COMPLETED_WITH_ISSUES,
+        verified=False,
+        failures=tuple(
+            dict.fromkeys(
+                (*decision.failures, "analysis_production_authority_missing")
+            )
+        ),
+    )
+
+
+def _production_transport_identity(
+    operation: object,
+    value: Mapping[str, Any],
+) -> tuple[object, ...] | None:
+    material_hashes = _material_hash_pairs(value.get("material_hashes"))
+    if material_hashes is None:
+        return None
+    fields = tuple(
+        value.get(name)
+        for name in (
+            "role",
+            "candidate_hash",
+            "source_page_id",
+            "issue_id",
+            "snapshot_hash",
+            "prompt_version",
+            "response_schema_version",
+        )
+    )
+    if any(not isinstance(item, str) or not item for item in fields):
+        return None
+    return (str(operation), *fields[:4], material_hashes, *fields[4:])
+
+
+def _validate_cache_hit_evidence(
+    value: Mapping[str, Any],
+    *,
+    snapshot: Mapping[str, Any],
+) -> tuple[object, ...]:
+    operation = value.get("operation")
+    role = value.get("role")
+    if (
+        _CACHE_ROLE_OPERATIONS.get(str(role)) != operation
+        or value.get("binding_echo_validated") is not True
+    ):
+        raise AnalysisArchiveError("production cache-hit role or validation is forged")
+    identity = _production_transport_identity(operation, value)
+    if identity is None:
+        raise AnalysisArchiveError("production cache-hit identity is malformed")
+    material_pairs = _material_hash_pairs(value.get("material_hashes"))
+    if material_pairs is None:
+        raise AnalysisArchiveError("production cache-hit materials are malformed")
+    material_hashes = dict(material_pairs)
+    required_materials = {
+        "source_pdf_page_hash",
+        "baseline_tex_region_hash",
+        "current_tex_region_hash",
+        "current_pdf_page_hash",
+    }
+    if set(material_hashes) != required_materials:
+        raise AnalysisArchiveError("production cache-hit materials are incomplete")
+    model_ids = {
+        str(item.get("role")): str(item.get("model_id") or "")
+        for item in snapshot.get("models", [])
+        if isinstance(item, Mapping)
+    }
+    model_id = value.get("model_id")
+    tool_version = value.get("tool_version")
+    if (
+        not isinstance(model_id, str)
+        or not model_id
+        or model_ids.get(str(role)) != model_id
+        or not isinstance(tool_version, str)
+        or tool_version != snapshot.get("application_version")
+    ):
+        raise AnalysisArchiveError("production cache-hit model or tool binding is stale")
+    try:
+        key = AnalysisCacheKey(
+            snapshot_hash=str(value.get("snapshot_hash") or ""),
+            source_page_id=str(value.get("source_page_id") or ""),
+            source_page_hash=material_hashes["source_pdf_page_hash"],
+            baseline_tex_region_hash=material_hashes[
+                "baseline_tex_region_hash"
+            ],
+            current_tex_region_hash=material_hashes["current_tex_region_hash"],
+            current_render_hash=material_hashes["current_pdf_page_hash"],
+            prompt_version=str(value.get("prompt_version") or ""),
+            response_schema_version=str(
+                value.get("response_schema_version") or ""
+            ),
+            model_id=model_id,
+            tool_version=tool_version,
+            audit_role=f"{role}:{operation}",
+        )
+    except (TypeError, ValueError) as exc:
+        raise AnalysisArchiveError("production cache-hit key is malformed") from exc
+    if (
+        value.get("cache_key_sha256") != key.digest
+        or re.fullmatch(r"[0-9a-f]{64}", str(value.get("response_sha256") or ""))
+        is None
+    ):
+        raise AnalysisArchiveError("production cache-hit digest is forged")
+    return identity
+
+
+def _validate_production_analysis_semantics(
+    *,
+    authoritative_snapshot: Mapping[str, Any],
+    analysis_v2: object,
+) -> dict[str, Any]:
+    """Require a full snapshot/call closure, not merely matching file hashes."""
+
+    if not isinstance(analysis_v2, Mapping):
+        raise AnalysisArchiveError("production analysis_v2 evidence is missing")
+    recorded_snapshot = analysis_v2.get("snapshot")
+    if not isinstance(recorded_snapshot, Mapping) or dict(recorded_snapshot) != dict(
+        authoritative_snapshot
+    ):
+        raise AnalysisArchiveError(
+            "recorded production snapshot differs field-by-field from authority"
+        )
+
+    snapshot_hash = authoritative_snapshot.get("snapshot_hash")
+    prompt_version = authoritative_snapshot.get("prompt_version")
+    run_id = authoritative_snapshot.get("run_id")
+    if not all(
+        isinstance(value, str) and value
+        for value in (snapshot_hash, prompt_version, run_id)
+    ):
+        raise AnalysisArchiveError("authoritative production snapshot is incomplete")
+
+    transports = analysis_v2.get("transport_invocations")
+    invocations = analysis_v2.get("invocations")
+    cache_evidence_present = "cache_hit_evidence" in analysis_v2
+    cache_hits = analysis_v2.get("cache_hit_evidence", [])
+    if not isinstance(transports, list):
+        raise AnalysisArchiveError("production transport evidence is malformed")
+    if not isinstance(cache_hits, list):
+        raise AnalysisArchiveError("production cache-hit evidence is malformed")
+    if not transports and not cache_hits:
+        raise AnalysisArchiveError(
+            "production transport/cache evidence is empty"
+            if cache_evidence_present
+            else "production transport evidence is empty"
+        )
+    if not isinstance(invocations, list) or not invocations:
+        raise AnalysisArchiveError("production orchestration invocation evidence is empty")
+
+    transport_identities = []
+    for item in transports:
+        if not isinstance(item, Mapping):
+            raise AnalysisArchiveError("production transport evidence is malformed")
+        operation = item.get("operation")
+        expected_schema = ANALYSIS_RESPONSE_SCHEMA_VERSIONS.get(str(operation))
+        if (
+            expected_schema is None
+            or item.get("snapshot_hash") != snapshot_hash
+            or item.get("prompt_version") != prompt_version
+            or item.get("response_schema_version") != expected_schema
+        ):
+            raise AnalysisArchiveError(
+                "production transport snapshot, prompt, or response schema binding is stale"
+            )
+        identity = _production_transport_identity(operation, item)
+        if identity is None:
+            raise AnalysisArchiveError("production transport identity is malformed")
+        transport_identities.append(identity)
+
+    cache_hit_identities = []
+    for item in cache_hits:
+        if not isinstance(item, Mapping):
+            raise AnalysisArchiveError("production cache-hit evidence is malformed")
+        operation = item.get("operation")
+        expected_schema = ANALYSIS_RESPONSE_SCHEMA_VERSIONS.get(str(operation))
+        if (
+            expected_schema is None
+            or item.get("snapshot_hash") != snapshot_hash
+            or item.get("prompt_version") != prompt_version
+            or item.get("response_schema_version") != expected_schema
+        ):
+            raise AnalysisArchiveError(
+                "production cache-hit snapshot, prompt, or response schema binding is stale"
+            )
+        cache_hit_identities.append(
+            _validate_cache_hit_evidence(item, snapshot=authoritative_snapshot)
+        )
+
+    invocation_identities = []
+    for item in invocations:
+        if not isinstance(item, Mapping):
+            raise AnalysisArchiveError("production invocation evidence is malformed")
+        operation = item.get("operation")
+        binding = item.get("binding")
+        expected_schema = ANALYSIS_RESPONSE_SCHEMA_VERSIONS.get(str(operation))
+        if (
+            not isinstance(binding, Mapping)
+            or expected_schema is None
+            or binding.get("run_id") != run_id
+            or binding.get("snapshot_hash") != snapshot_hash
+            or binding.get("prompt_version") != prompt_version
+            or binding.get("response_schema_version") != expected_schema
+        ):
+            raise AnalysisArchiveError(
+                "production invocation snapshot, prompt, or response schema binding is stale"
+            )
+        identity = _production_transport_identity(operation, binding)
+        if identity is None:
+            raise AnalysisArchiveError("production invocation identity is malformed")
+        invocation_identities.append(identity)
+
+    if (
+        Counter(transport_identities) + Counter(cache_hit_identities)
+        != Counter(invocation_identities)
+    ):
+        raise AnalysisArchiveError(
+            "production transport/cache evidence does not close over orchestration invocations"
+        )
+    accounting = _recompute_transport_accounting(
+        transports=transports,
+        invocations=invocations,
+        snapshot=authoritative_snapshot,
+        cache_hits=cache_hits,
+        cache_enabled=cache_evidence_present,
+    )
+    accounting.update(
+        _validate_production_budget_semantics(
+            analysis_v2=analysis_v2,
+            transports=transports,
+            snapshot=authoritative_snapshot,
+        )
+    )
+    _validate_performance_accounting(
+        analysis_v2.get("performance"),
+        accounting,
+        label="recorded production",
+    )
+    return accounting
 
 
 def _atomic_commit(builder: _ArchiveBuilder, destination: Path) -> None:
@@ -952,6 +2615,8 @@ def freeze_pipeline_analysis_run(
     source_page_hashes: Mapping[int, str] | None = None,
     quality_vector: QualityVector | Mapping[str, Any] | None = None,
     performance_metrics: Mapping[str, Any] | object | None = None,
+    authoritative_snapshot: AnalysisRunSnapshot | None = None,
+    production_evidence: ProductionAnalysisArchiveEvidence | None = None,
     processing_failed: bool = False,
     workflow_version: str = "analysis-loop-v2",
     prompt_version: str = "analysis-prompts-v2",
@@ -992,12 +2657,63 @@ def freeze_pipeline_analysis_run(
     baseline_pdf_hash = sha256_bytes(baseline_pdf)
     current_pdf_hash = sha256_bytes(current_pdf) if current_pdf else ""
     model_bindings = _coerce_models(models)
-    page_entries = _coerce_page_map(
-        value=page_map,
-        source_pdf_hash=source_pdf_hash,
-        candidate_pdf_hash=current_pdf_hash,
-        page_range=selected,
-    )
+    production_archive_payloads: dict[str, Mapping[str, Any]] | None = None
+    if authoritative_snapshot is not None:
+        if not isinstance(authoritative_snapshot, AnalysisRunSnapshot):
+            raise AnalysisArchiveError("authoritative_snapshot has an invalid type")
+        snapshot = authoritative_snapshot
+        stale = snapshot.stale_reasons(
+            source_pdf_hash=source_pdf_hash,
+            raw_ocr_tex_hash=raw_hash,
+            baseline_tex_hash=baseline_hash,
+            page_range=selected,
+        )
+        if (
+            stale
+            or snapshot.run_id != run_id
+            or snapshot.project_id != project_id
+            or snapshot.page_count != int(page_count)
+            or snapshot.baseline_pdf_hash != baseline_pdf_hash
+            or snapshot.evidence_hashes is None
+            or not snapshot.page_map
+        ):
+            raise AnalysisArchiveError(
+                "authoritative production snapshot differs from archive inputs: "
+                + ",".join(stale or ("identity_or_evidence",))
+            )
+        page_entries = tuple(snapshot.page_map)
+        if not isinstance(production_evidence, ProductionAnalysisArchiveEvidence):
+            raise AnalysisArchiveError(
+                "authoritative production snapshot requires typed production_evidence"
+            )
+        try:
+            production_archive_payloads = (
+                _validated_typed_production_archive_evidence(
+                    evidence=production_evidence,
+                    authoritative_snapshot=snapshot,
+                    source_pdf_hash=source_pdf_hash,
+                    baseline_tex_hash=baseline_hash,
+                    baseline_pdf_hash=baseline_pdf_hash,
+                    current_tex_hash=current_hash,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            if isinstance(exc, AnalysisArchiveError):
+                raise
+            raise AnalysisArchiveError(
+                "authoritative production archive evidence is invalid"
+            ) from exc
+    else:
+        if production_evidence is not None:
+            raise AnalysisArchiveError(
+                "production_evidence requires an authoritative_snapshot"
+            )
+        page_entries = _coerce_page_map(
+            value=page_map,
+            source_pdf_hash=source_pdf_hash,
+            candidate_pdf_hash=current_pdf_hash,
+            page_range=selected,
+        )
 
     ledger, unbound_decisions = _ledger_from_decisions(
         decision_items=tuple(artifacts.decision_items),
@@ -1007,6 +2723,12 @@ def freeze_pipeline_analysis_run(
         current_tex=artifacts.current_tex,
     )
     verification_dict = dict(artifacts.verification or {})
+    production_accounting: dict[str, Any] | None = None
+    if authoritative_snapshot is not None:
+        production_accounting = _validate_production_analysis_semantics(
+            authoritative_snapshot=snapshot.to_dict(),
+            analysis_v2=verification_dict.get("analysis_v2"),
+        )
     if verification_evidence is not None:
         supplied_evidence = _coerce_verification_evidence(verification_evidence)
     else:
@@ -1032,54 +2754,75 @@ def freeze_pipeline_analysis_run(
         "models": _jsonable(model_bindings),
         "caller_config": _jsonable(config or {}),
     }
-    snapshot = AnalysisRunSnapshot(
-        run_id=run_id,
-        project_id=project_id,
-        workflow_version=workflow_version,
-        prompt_version=prompt_version,
-        application_version=application_version,
-        source_pdf_hash=source_pdf_hash,
-        raw_ocr_tex_hash=raw_hash,
-        baseline_tex_hash=baseline_hash,
-        baseline_pdf_hash=baseline_pdf_hash,
-        page_count=int(page_count),
-        page_range=selected,
-        latex_engine=latex_engine,
-        models=model_bindings,
-        concurrency_limit=int(concurrency_limit),
-        started_at=started_at or datetime.now(timezone.utc).isoformat(),
-        page_map=page_entries,
-        initial_compile_state=initial_compile_state,
-        initial_issue_counts=tuple(initial_ledger_counts.items()),
-        config_hash=sha256_bytes(canonical_json_bytes(configuration)),
-    )
+    if authoritative_snapshot is None:
+        snapshot = AnalysisRunSnapshot(
+            run_id=run_id,
+            project_id=project_id,
+            workflow_version=workflow_version,
+            prompt_version=prompt_version,
+            application_version=application_version,
+            source_pdf_hash=source_pdf_hash,
+            raw_ocr_tex_hash=raw_hash,
+            baseline_tex_hash=baseline_hash,
+            baseline_pdf_hash=baseline_pdf_hash,
+            page_count=int(page_count),
+            page_range=selected,
+            latex_engine=latex_engine,
+            models=model_bindings,
+            concurrency_limit=int(concurrency_limit),
+            started_at=started_at or datetime.now(timezone.utc).isoformat(),
+            page_map=page_entries,
+            initial_compile_state=initial_compile_state,
+            initial_issue_counts=tuple(initial_ledger_counts.items()),
+            config_hash=sha256_bytes(canonical_json_bytes(configuration)),
+        )
 
-    risks = dict(page_risks or {})
-    supplied_page_hashes = dict(source_page_hashes or {})
-    runtime_page_units = []
-    for entry in page_entries:
-        risk_value = risks.get(entry.source_page_number, PageRisk.R0)
-        risk = risk_value if isinstance(risk_value, PageRisk) else PageRisk(str(risk_value))
-        page_hash = supplied_page_hashes.get(entry.source_page_number)
-        if not page_hash:
-            page_hash = sha256_bytes(canonical_json_bytes({
-                "source_pdf_sha256": source_pdf_hash,
-                "source_page_number": entry.source_page_number,
-            }))
-        runtime_page_units.append(PageUnit(
-            source_page_id=entry.source_page_id,
-            source_page_number=entry.source_page_number,
-            source_page_hash=page_hash,
-            baseline_tex_start_anchor=f"baseline:{baseline_hash[:16]}:{entry.source_page_id}:start",
-            baseline_tex_end_anchor=f"baseline:{baseline_hash[:16]}:{entry.source_page_id}:end",
-            current_tex_start_anchor=f"current:{current_hash[:16]}:{entry.source_page_id}:start",
-            current_tex_end_anchor=f"current:{current_hash[:16]}:{entry.source_page_id}:end",
-            candidate_pdf_page_ids=entry.candidate_pdf_page_ids,
-            current_render_paths=("candidates/best/candidate.pdf",) if current_pdf else (),
-            risk_level=risk,
-            risk_reasons=() if risk == PageRisk.R0 else ("host-supplied risk",),
-            current_status=PageStatus.PENDING,
-        ))
+    if production_evidence is not None:
+        # Preserve the exact production PageUnits.  The authoritative path may
+        # not replace missing classifier output with adapter-invented R3 pages.
+        runtime_page_units = [
+            item.page_unit for item in production_evidence.page_inputs
+        ]
+    else:
+        risks = dict(page_risks or {})
+        supplied_page_hashes = dict(source_page_hashes or {})
+        runtime_page_units = []
+        for entry in page_entries:
+            risk_supplied = entry.source_page_number in risks
+            risk_value = risks.get(entry.source_page_number, PageRisk.R3)
+            risk = (
+                risk_value
+                if isinstance(risk_value, PageRisk)
+                else PageRisk(str(risk_value))
+            )
+            risk_reasons = (
+                (() if risk == PageRisk.R0 else ("host-supplied risk",))
+                if risk_supplied
+                else (
+                    "page risk classifier unavailable",
+                    "full page review required",
+                )
+            )
+            page_hash = supplied_page_hashes.get(entry.source_page_number)
+            if not page_hash:
+                page_hash = sha256_bytes(canonical_json_bytes({
+                    "source_pdf_sha256": source_pdf_hash,
+                    "source_page_number": entry.source_page_number,
+                }))
+            runtime_page_units.append(PageUnit(
+                source_page_id=entry.source_page_id,
+                source_page_number=entry.source_page_number,
+                source_page_hash=page_hash,
+                baseline_tex_start_anchor=f"baseline:{baseline_hash[:16]}:{entry.source_page_id}:start",
+                baseline_tex_end_anchor=f"baseline:{baseline_hash[:16]}:{entry.source_page_id}:end",
+                current_tex_start_anchor=f"current:{current_hash[:16]}:{entry.source_page_id}:start",
+                current_tex_end_anchor=f"current:{current_hash[:16]}:{entry.source_page_id}:end",
+                candidate_pdf_page_ids=entry.candidate_pdf_page_ids,
+                current_render_paths=("candidates/best/candidate.pdf",) if current_pdf else (),
+                risk_level=risk,
+                risk_reasons=risk_reasons,
+                current_status=PageStatus.PENDING,
+            ))
 
     attempted_evidence = supplied_evidence or _host_verification_evidence(
         verification=verification_dict,
@@ -1256,6 +2999,18 @@ def freeze_pipeline_analysis_run(
         unbound_decisions=unbound_decisions,
         runtime=runtime,
     )
+    decision = _apply_production_authority_gate(
+        decision,
+        authoritative_snapshot_present=authoritative_snapshot is not None,
+    )
+    if production_accounting is not None:
+        # The adapter is a second trust boundary.  Do not let otherwise-complete
+        # machine evidence promote a production run after its provider-call
+        # attempt or usage closure has become incomplete in transit/archive.
+        decision = _apply_production_transport_closure(
+            decision,
+            production_accounting,
+        )
     checked_page_ids = set(evidence.checked_page_ids)
     page_units = []
     for unit in runtime_page_units:
@@ -1393,7 +3148,43 @@ def freeze_pipeline_analysis_run(
         total_pages=len(selected),
         decision=decision,
     )
-    builder.add_json("audit/analysis_run_snapshot.json", snapshot, role="ANALYSIS_RUN_SNAPSHOT")
+    if production_accounting is not None:
+        _validate_performance_accounting(
+            performance_payload,
+            production_accounting,
+            label="archived",
+        )
+    builder.add_json(
+        "audit/analysis_run_snapshot.json",
+        snapshot.to_dict(),
+        role="ANALYSIS_RUN_SNAPSHOT",
+    )
+    if production_archive_payloads is not None:
+        builder.add_json(
+            "audit/page_risk_admission.json",
+            production_archive_payloads["page_risk_admission"],
+            role="PAGE_RISK_ADMISSION",
+        )
+        builder.add_json(
+            "audit/page_inputs.json",
+            production_archive_payloads["page_inputs"],
+            role="PRODUCTION_PAGE_INPUTS",
+        )
+        builder.add_json(
+            "audit/page_route_closure.json",
+            production_archive_payloads["page_route_closure"],
+            role="PAGE_RISK_ROUTE_CLOSURE",
+        )
+        builder.add_json(
+            "audit/analysis_configuration.json",
+            production_archive_payloads["analysis_configuration"],
+            role="ANALYSIS_CONFIGURATION",
+        )
+        builder.add_json(
+            "audit/risk_preflight.json",
+            production_archive_payloads["risk_preflight"],
+            role="PAGE_RISK_PREFLIGHT",
+        )
     builder.add_json("audit/page_units.json", page_units, role="PAGE_UNITS")
     builder.add_json("audit/issue_ledger.json", ledger_payload, role="ISSUE_LEDGER")
     builder.add_json("audit/formal_inventory.json", formal_inventory, role="FORMAL_INVENTORY")
@@ -1485,7 +3276,7 @@ def freeze_pipeline_analysis_run(
 
 
 def verify_frozen_analysis_run(run_directory: str | Path) -> bool:
-    """Recompute the complete run SHA256SUMS without trusting its manifest."""
+    """Recompute hashes and production snapshot/transport semantic closure."""
 
     root = Path(run_directory)
     manifest = root / "audit" / "SHA256SUMS"
@@ -1511,16 +3302,159 @@ def verify_frozen_analysis_run(run_directory: str | Path) -> bool:
     }
     if actual != set(expected):
         return False
-    return all(
-        sha256_bytes((root / PurePosixPath(path)).read_bytes()) == digest
-        for path, digest in expected.items()
-    )
+    try:
+        if not all(
+            sha256_bytes((root / PurePosixPath(path)).read_bytes()) == digest
+            for path, digest in expected.items()
+        ):
+            return False
+        snapshot = json.loads(
+            (root / "audit" / "analysis_run_snapshot.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        verification = json.loads(
+            (root / "audit" / "verification.json").read_text(encoding="utf-8")
+        )
+        performance = json.loads(
+            (root / "audit" / "performance_metrics.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        final_decision = json.loads(
+            (root / "audit" / "final_decision.json").read_text(encoding="utf-8")
+        )
+        if (
+            not isinstance(snapshot, dict)
+            or not isinstance(verification, dict)
+            or not isinstance(performance, dict)
+            or not isinstance(final_decision, dict)
+        ):
+            return False
+        stored_snapshot_hash = snapshot.get("snapshot_hash")
+        canonical_snapshot = dict(snapshot)
+        canonical_snapshot.pop("snapshot_hash", None)
+        if (
+            not isinstance(stored_snapshot_hash, str)
+            or sha256_bytes(canonical_json_bytes(canonical_snapshot))
+            != stored_snapshot_hash
+        ):
+            return False
+        decision_status = final_decision.get("status")
+        decision_verified = final_decision.get("verified")
+        decision_failures = final_decision.get("failures")
+        if (
+            decision_status not in {item.value for item in AnalysisFinalStatus}
+            or type(decision_verified) is not bool
+            or not isinstance(decision_failures, list)
+            or any(not isinstance(item, str) for item in decision_failures)
+            or performance.get("final_status") != decision_status
+            or decision_verified
+            != (decision_status == AnalysisFinalStatus.VERIFIED.value)
+        ):
+            return False
+        has_production_authority = snapshot.get("evidence_hashes") is not None
+        if not has_production_authority and (
+            decision_status == AnalysisFinalStatus.VERIFIED.value
+            or decision_verified is True
+        ):
+            return False
+        present_production_files = {
+            path for path in _PRODUCTION_ARCHIVE_FILES if (root / path).is_file()
+        }
+        if has_production_authority:
+            if present_production_files != _PRODUCTION_ARCHIVE_FILES:
+                return False
+            admission = coerce_page_risk_admission(json.loads(
+                (root / "audit" / "page_risk_admission.json").read_text(
+                    encoding="utf-8"
+                )
+            ))
+            page_inputs_archive = json.loads(
+                (root / "audit" / "page_inputs.json").read_text(encoding="utf-8")
+            )
+            route_closure = _coerce_page_route_closure(json.loads(
+                (root / "audit" / "page_route_closure.json").read_text(
+                    encoding="utf-8"
+                )
+            ))
+            configuration_archive = json.loads(
+                (root / "audit" / "analysis_configuration.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            risk_preflight_archive = json.loads(
+                (root / "audit" / "risk_preflight.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            source_pdf_hash = sha256_bytes(
+                (root / "inputs" / "source.pdf").read_bytes()
+            )
+            baseline_tex_hash = sha256_text(
+                (root / "baseline" / "baseline.tex").read_text(encoding="utf-8")
+            )
+            baseline_pdf_hash = sha256_bytes(
+                (root / "baseline" / "baseline.pdf").read_bytes()
+            )
+            current_tex_hash = sha256_text(
+                (root / "candidates" / "round_001" / "candidate.tex").read_text(
+                    encoding="utf-8"
+                )
+            )
+            _validate_production_archive_payloads(
+                snapshot=snapshot,
+                page_risk_admission=admission,
+                page_inputs_archive=page_inputs_archive,
+                page_route_closure=route_closure,
+                analysis_configuration_archive=configuration_archive,
+                risk_preflight_archive=risk_preflight_archive,
+                source_pdf_hash=source_pdf_hash,
+                baseline_tex_hash=baseline_tex_hash,
+                baseline_pdf_hash=baseline_pdf_hash,
+                current_tex_hash=current_tex_hash,
+            )
+        elif present_production_files:
+            return False
+        if has_production_authority:
+            accounting = _validate_production_analysis_semantics(
+                authoritative_snapshot=snapshot,
+                analysis_v2=verification.get("analysis_v2"),
+            )
+            _validate_performance_accounting(
+                performance,
+                accounting,
+                label="archived",
+            )
+            closure_failures = _production_transport_closure_failures(accounting)
+            required_failures = {
+                "analysis_transport_evidence_incomplete",
+                *closure_failures,
+            }
+            if closure_failures and (
+                decision_status == AnalysisFinalStatus.VERIFIED.value
+                or decision_verified is not False
+                or not required_failures.issubset(decision_failures)
+            ):
+                return False
+    except (
+        OSError,
+        UnicodeError,
+        KeyError,
+        ValueError,
+        TypeError,
+        json.JSONDecodeError,
+        AnalysisArchiveError,
+    ):
+        return False
+    return True
 
 
 __all__ = [
     "AnalysisArchiveError",
     "AnalysisRunArchiveResult",
     "AnalysisRunArtifacts",
+    "ProductionAnalysisArchiveEvidence",
     "freeze_pipeline_analysis_run",
     "stable_source_page_id",
     "verify_frozen_analysis_run",

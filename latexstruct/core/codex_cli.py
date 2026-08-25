@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import json
 import math
 import os
@@ -20,9 +21,15 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
-from .ai import ALLOWED_WRAP_ENVS, LLMClient, LLMError, RoleConfig
+from .ai import (
+    ALLOWED_WRAP_ENVS,
+    LLMClient,
+    LLMError,
+    RoleConfig,
+    _transport_usage_complete,
+)
 from .prompts import DECIDE_SYSTEM_PROTOCOL, REVIEW_SYSTEM_PROTOCOL
 
 CODEX_BACKEND = "codex_cli"
@@ -605,33 +612,88 @@ def _schema_for(system: str) -> Dict:
     raise LLMError("Codex 后端只允许结构判断或复查 JSON 请求")
 
 
-def _usage_from_jsonl(text: str) -> Dict:
+def _normalized_codex_usage(raw: object) -> Dict:
+    if not isinstance(raw, dict):
+        raw = {}
+    usage_payload_present = bool(raw)
     usage: Dict = {}
+
+    def normalized(value: object) -> object:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+            or int(value) != value
+        ):
+            # Preserve the provider value so strict accounting can reject it;
+            # dropping it could make a conflicting alias look authoritative.
+            return value
+        return int(value)
+
+    alias_groups = (
+        (("input_tokens", "prompt_tokens"), "input_tokens"),
+        (("cached_input_tokens", "cached_tokens"), "cached_tokens"),
+        (("output_tokens", "completion_tokens"), "output_tokens"),
+    )
+    for aliases, canonical in alias_groups:
+        present = [(name, normalized(raw[name])) for name in aliases if name in raw]
+        if not present:
+            continue
+        if len(present) == 1:
+            usage[canonical] = present[0][1]
+            continue
+        # Keep both raw aliases. Production must see disagreement or invalid
+        # values rather than a normalized first-wins projection.
+        for name, value in present:
+            usage[name] = value
+        if canonical not in usage:
+            usage[canonical] = present[0][1]
+    if usage_payload_present and "cached_tokens" not in usage:
+        usage["cached_tokens"] = 0
+    if "total_tokens" in raw:
+        usage["total_tokens"] = normalized(raw["total_tokens"])
+    elif (
+        type(usage.get("input_tokens")) is int
+        and type(usage.get("output_tokens")) is int
+    ):
+        usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+    usage["backend"] = CODEX_BACKEND
+    usage["billing_mode"] = CODEX_BILLING_MODE
+    return usage
+
+
+def _transport_attempts_from_jsonl(text: str) -> Tuple[Dict[str, Any], ...]:
+    """Return only explicit terminal Codex turn events, in emitted order."""
+
+    attempts = []
     for line in (text or "").splitlines():
         try:
             event = json.loads(line)
         except (TypeError, json.JSONDecodeError):
             continue
-        if not isinstance(event, dict) or event.get("type") != "turn.completed":
+        if not isinstance(event, dict) or event.get("type") not in {
+            "turn.completed", "turn.failed",
+        }:
             continue
-        raw = event.get("usage") or {}
-        if not isinstance(raw, dict):
-            continue
-        input_tokens = raw.get("input_tokens", 0)
-        cached_tokens = raw.get("cached_input_tokens", raw.get("cached_tokens", 0))
-        output_tokens = raw.get("output_tokens", 0)
-        numbers = (input_tokens, cached_tokens, output_tokens)
-        if not all(isinstance(item, (int, float)) and math.isfinite(item) for item in numbers):
-            continue
-        usage = {
-            "input_tokens": max(0, int(input_tokens)),
-            "cached_tokens": max(0, int(cached_tokens)),
-            "output_tokens": max(0, int(output_tokens)),
-        }
-        usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
-    usage["backend"] = CODEX_BACKEND
-    usage["billing_mode"] = CODEX_BILLING_MODE
-    return usage
+        usage = _normalized_codex_usage(event.get("usage"))
+        attempts.append({
+            "succeeded": event.get("type") == "turn.completed",
+            "usage": usage,
+            "usage_complete": _transport_usage_complete(usage),
+            "failure_stage": (
+                "" if event.get("type") == "turn.completed" else "turn_failed"
+            ),
+        })
+    return tuple(attempts)
+
+
+def _usage_from_jsonl(text: str) -> Dict:
+    attempts = _transport_attempts_from_jsonl(text)
+    for attempt in reversed(attempts):
+        if attempt["succeeded"] is True:
+            return dict(attempt["usage"])
+    return _normalized_codex_usage({})
 
 
 def _friendly_failure(diagnostic: str, returncode: int) -> str:
@@ -755,6 +817,7 @@ class CodexCLIClient:
         self.backend = CODEX_BACKEND
         self.billing_mode = CODEX_BILLING_MODE
         self._usage_local = threading.local()
+        self._transport_attempts_local = threading.local()
         self.last_usage: Dict = {}
         self._runtime_path: Optional[Path] = None
         self._runtime_lock = threading.Lock()
@@ -773,6 +836,41 @@ class CodexCLIClient:
     @last_usage.setter
     def last_usage(self, value: Dict) -> None:
         self._usage_local.value = dict(value) if isinstance(value, dict) else {}
+
+    @property
+    def last_transport_attempts(self) -> Tuple[Dict[str, Any], ...]:
+        """Explicit Codex turns from the current caller's latest logical call."""
+
+        return tuple(
+            copy.deepcopy(item)
+            for item in getattr(self._transport_attempts_local, "value", ())
+        )
+
+    def _reset_transport_attempts(self) -> None:
+        self._transport_attempts_local.value = []
+
+    def _record_transport_attempt(
+        self,
+        *,
+        succeeded: bool,
+        usage: Mapping[str, Any] | None,
+        usage_complete: bool | None = None,
+        failure_stage: str = "",
+    ) -> None:
+        records = list(getattr(self._transport_attempts_local, "value", ()))
+        raw_usage = dict(usage) if isinstance(usage, Mapping) else {}
+        measured_complete = _transport_usage_complete(raw_usage)
+        records.append({
+            "attempt_number": len(records) + 1,
+            "succeeded": bool(succeeded),
+            "usage": copy.deepcopy(raw_usage),
+            "usage_complete": bool(
+                measured_complete
+                and (usage_complete is None or usage_complete is True)
+            ),
+            "failure_stage": str(failure_stage or ""),
+        })
+        self._transport_attempts_local.value = records
 
     def _ensure_runtime(self) -> Path:
         # 每个客户端只做一次无模型探测；逐页 OCR 或候选批次不重复执行
@@ -807,6 +905,7 @@ class CodexCLIClient:
         ):
             raise LLMError("Codex 文本 JSON 请求必须提供严格的对象 schema")
         self.last_usage = {}
+        self._reset_transport_attempts()
         if len(system) + len(user) > CODEX_MAX_PROMPT_CHARS:
             raise LLMError("Codex 请求过长，已保守停止；请缩小文档或候选范围")
         runtime_path = self._ensure_runtime()
@@ -870,6 +969,7 @@ class CodexCLIClient:
     ) -> dict:
         """用 Codex 转写受控页图，并返回可验证的插图坐标。"""
         self.last_usage = {}
+        self._reset_transport_attempts()
         if len(system) + len(user_text) > CODEX_MAX_PROMPT_CHARS:
             raise LLMError("Codex OCR 请求过长，已保守停止")
         suffix = self._validated_image_suffix(image_bytes)
@@ -928,6 +1028,7 @@ class CodexCLIClient:
     ) -> dict:
         """转写一张整页图，并在同一次 Codex 请求中附加至多四张局部图。"""
         self.last_usage = {}
+        self._reset_transport_attempts()
         if len(system) + len(user_text) > CODEX_MAX_PROMPT_CHARS:
             raise LLMError("Codex OCR 请求过长，已保守停止")
         if isinstance(image_bytes_list, (bytes, bytearray, str)):
@@ -1009,6 +1110,7 @@ class CodexCLIClient:
     ) -> Tuple[dict, Dict]:
         """Run a generic, tool-disabled visual classifier with a strict schema."""
         self.last_usage = {}
+        self._reset_transport_attempts()
         if len(system) + len(user_text) > CODEX_MAX_PROMPT_CHARS:
             raise LLMError("Codex 视觉复核请求过长，已保守停止")
         suffix = self._validated_image_suffix(image_bytes)
@@ -1050,6 +1152,7 @@ class CodexCLIClient:
     ) -> Tuple[dict, Dict]:
         """Review several independent page-pair images in one Codex run."""
         self.last_usage = {}
+        self._reset_transport_attempts()
         if len(system) + len(user_text) > CODEX_MAX_PROMPT_CHARS:
             raise LLMError("Codex 视觉批量复核请求过长，已保守停止")
         if isinstance(images, (bytes, bytearray, str)):
@@ -1177,12 +1280,42 @@ class CodexCLIClient:
                     check=False,
                 )
             except subprocess.TimeoutExpired:
+                # The child was started and may already have reached the
+                # provider, but no authoritative token record was returned.
+                self._record_transport_attempt(
+                    succeeded=False,
+                    usage={},
+                    usage_complete=False,
+                    failure_stage="timeout",
+                )
                 if operation == "OCR":
                     raise LLMError("Codex OCR 超时，本页未写入结果") from None
                 raise LLMError("Codex 分析超时，原项目保持不变") from None
             except (OSError, subprocess.SubprocessError):
                 raise LLMError("Codex runtime 无法启动，原项目保持不变") from None
             self.last_usage = _usage_from_jsonl(completed.stdout)
+            terminal_attempts = _transport_attempts_from_jsonl(completed.stdout)
+            if terminal_attempts:
+                for attempt in terminal_attempts:
+                    self._record_transport_attempt(
+                        succeeded=attempt["succeeded"] is True,
+                        usage=attempt["usage"],
+                        usage_complete=attempt["usage_complete"] is True,
+                        failure_stage=str(attempt.get("failure_stage") or ""),
+                    )
+            else:
+                # A process result without a terminal turn event cannot prove
+                # whether a provider request was sent or billed.
+                self._record_transport_attempt(
+                    succeeded=completed.returncode == 0,
+                    usage=self.last_usage,
+                    usage_complete=False,
+                    failure_stage=(
+                        "missing_turn_evidence"
+                        if completed.returncode == 0
+                        else "runtime_failure_without_turn_evidence"
+                    ),
+                )
             if completed.returncode != 0:
                 raise LLMError(_friendly_failure(
                     f"{completed.stderr or ''}\n{completed.stdout or ''}",

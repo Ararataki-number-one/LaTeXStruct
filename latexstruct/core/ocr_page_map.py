@@ -32,6 +32,10 @@ _RESERVED_TARGET_RE = re.compile(
     r"\\hypertarget\s*\{\s*(ocr-page-[0-9]{6})\s*\}\s*\{",
     re.I,
 )
+_NULL_DIRECT_DEST_RE = re.compile(
+    r"/(ocr-page-[0-9]{6})\s*\[\s*null(?:\s|/|\])",
+    re.I,
+)
 
 
 class OcrPageMapError(ValueError):
@@ -311,8 +315,17 @@ def _pdf_named_destinations(
 
         with pymupdf.open(stream=data, filetype="pdf") as document:
             page_count = int(document.page_count)
+            direct_kind, direct_value = document.xref_get_key(
+                document.pdf_catalog(), "Dests"
+            )
+            if direct_kind == "dict" and _NULL_DIRECT_DEST_RE.search(
+                str(direct_value)
+            ):
+                _fail("compiled PDF destination is out of range")
             names = document.resolve_names()
             page_heights = tuple(float(document[index].rect.height) for index in range(page_count))
+    except OcrPageMapError:
+        raise
     except Exception as exc:
         raise OcrPageMapError("baseline PDF cannot be opened or resolve named destinations") from exc
     if page_count < 1 or not isinstance(names, Mapping):

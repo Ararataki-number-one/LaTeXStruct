@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from unittest.mock import patch
 
 try:
@@ -19,6 +20,7 @@ except ImportError:  # pragma: no cover
 import latexstruct.server.app as srv
 from latexstruct.core.analysis_adapter import verify_frozen_analysis_run
 from latexstruct.core.analysis_runtime import AnalysisQualityRuntime, CandidateRepository
+from latexstruct.core.analysis_schema import AnalysisFinalStatus
 
 
 SAMPLE = (
@@ -179,3 +181,131 @@ def test_background_result_uses_job_id_and_archive_failure_is_nonfatal():
         assert failed["verified"] is False
         assert failed["relative_path"] is None
         assert "C:/private/path" not in failed["error"]
+
+
+def test_archive_is_not_reported_ready_when_immediate_hash_recheck_fails():
+    with WorkspaceTmp() as tmp:
+        client = _client(tmp)
+        pid = _create(client)
+        with (
+            patch("latexstruct.core.compilecheck.compile_latex", side_effect=_fake_compile),
+            patch(
+                "latexstruct.server.app.verify_frozen_analysis_run",
+                return_value=False,
+            ) as verify_archive,
+        ):
+            response = client.post(f"/api/projects/{pid}/process")
+
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["ok"] is True
+        failed = payload["analysis_archive"]
+        assert failed["archive_status"] == "FAILED"
+        assert failed["final_status"] == "FAILED_BEST_RETAINED"
+        assert failed["verified"] is False
+        assert failed["relative_path"] is None
+        assert failed["verification"]["status"] == "UNVERIFIED"
+        assert verify_archive.call_count == 1
+
+
+def test_server_never_reports_verified_archive_without_production_authority():
+    with WorkspaceTmp() as tmp:
+        client = _client(tmp)
+        pid = _create(client)
+        forged = SimpleNamespace(
+            run_directory=Path(tmp) / "forged-analysis-archive",
+            status=AnalysisFinalStatus.VERIFIED,
+            verified=True,
+        )
+        with (
+            patch("latexstruct.core.compilecheck.compile_latex", side_effect=_fake_compile),
+            patch(
+                "latexstruct.server.app.freeze_pipeline_analysis_run",
+                return_value=forged,
+            ),
+            patch(
+                "latexstruct.server.app.verify_frozen_analysis_run",
+                return_value=True,
+            ),
+        ):
+            response = client.post(f"/api/projects/{pid}/process")
+
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["ok"] is True
+        summary = payload["analysis_archive"]
+        assert summary["archive_status"] == "FAILED"
+        assert summary["verified"] is False
+        assert summary["verification"]["status"] == "UNVERIFIED"
+        assert summary["verification"]["verified"] is False
+        assert "safe_to_export" not in summary
+
+
+def test_server_packages_authoritative_pipeline_fields_as_typed_archive_evidence():
+    with WorkspaceTmp() as tmp:
+        client = _client(tmp)
+        pid = _create(client)
+        run_pipeline = srv.run_pipeline
+        authoritative_snapshot = object.__new__(srv.AnalysisRunSnapshot)
+        object.__setattr__(authoritative_snapshot, "page_count", 1)
+        object.__setattr__(authoritative_snapshot, "page_range", (1,))
+        object.__setattr__(authoritative_snapshot, "models", ())
+        object.__setattr__(authoritative_snapshot, "prompt_version", "production-v2")
+        page_risk_admission = object()
+        page_inputs = (object(),)
+        page_route_closure = object()
+        analysis_configuration = {"source": "production-pipeline"}
+        analysis_configuration_sha256 = "a" * 64
+        risk_preflight = (object(),)
+        typed_evidence = object()
+
+        def pipeline_with_authority(*args, **kwargs):
+            result = run_pipeline(*args, **kwargs)
+            result.analysis_v2_authoritative_snapshot = authoritative_snapshot
+            result.analysis_v2_page_risk_admission = page_risk_admission
+            result.analysis_v2_production_page_inputs = page_inputs
+            result.analysis_v2_page_route_closure = page_route_closure
+            result.analysis_v2_analysis_configuration = analysis_configuration
+            result.analysis_v2_analysis_configuration_sha256 = (
+                analysis_configuration_sha256
+            )
+            result.analysis_v2_typed_risk_preflight = risk_preflight
+            result.analysis_v2_baseline_tex = SAMPLE
+            result.analysis_v2_baseline_pdf = b"%PDF-production-baseline"
+            return result
+
+        with (
+            patch("latexstruct.core.compilecheck.compile_latex", side_effect=_fake_compile),
+            patch(
+                "latexstruct.server.app.run_pipeline",
+                side_effect=pipeline_with_authority,
+            ),
+            patch(
+                "latexstruct.server.app.ProductionAnalysisArchiveEvidence",
+                autospec=True,
+                return_value=typed_evidence,
+            ) as evidence_factory,
+            patch(
+                "latexstruct.server.app.freeze_pipeline_analysis_run",
+                side_effect=OSError("controlled archive stop"),
+            ) as freeze_archive,
+        ):
+            response = client.post(f"/api/projects/{pid}/process")
+
+        assert response.status_code == 200, response.text
+        summary = response.json()["analysis_archive"]
+        assert summary["archive_status"] == "FAILED"
+        assert summary["verified"] is False
+        evidence_factory.assert_called_once_with(
+            snapshot=authoritative_snapshot,
+            page_risk_admission=page_risk_admission,
+            page_inputs=page_inputs,
+            page_route_closure=page_route_closure,
+            analysis_configuration=analysis_configuration,
+            analysis_configuration_sha256=analysis_configuration_sha256,
+            risk_preflight=risk_preflight,
+        )
+        assert freeze_archive.call_count == 1
+        freeze_kwargs = freeze_archive.call_args.kwargs
+        assert freeze_kwargs["authoritative_snapshot"] is authoritative_snapshot
+        assert freeze_kwargs["production_evidence"] is typed_evidence

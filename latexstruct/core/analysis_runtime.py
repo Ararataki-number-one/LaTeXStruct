@@ -13,16 +13,26 @@ from __future__ import annotations
 import copy
 import difflib
 import json
+import math
 import os
 import re
 import shutil
+import stat
 import tempfile
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from .analysis_recovery import (
+    RecoveryValidationError,
+    assert_plain_storage_path,
+    path_is_link_or_reparse,
+    parse_strict_json_bytes,
+)
 from .analysis_schema import (
+    ANALYSIS_PERFORMANCE_BENCHMARK_PAGE_COUNT,
+    ANALYSIS_PERFORMANCE_BENCHMARK_SECONDS,
     AnalysisCacheKey,
     AnalysisFinalStatus,
     AnalysisRunSnapshot,
@@ -32,6 +42,7 @@ from .analysis_schema import (
     IssueStatus,
     PageUnit,
     PatchOperationKind,
+    PerformanceTargetStatus,
     QualityVector,
     ReviewResult,
     SEVERITY_ORDER,
@@ -47,6 +58,13 @@ from .invariants import body_text_tokens, check_invariants
 
 class LedgerTransitionError(ValueError):
     pass
+
+
+class AnalysisCacheIntegrityError(RuntimeError):
+    """A cache path is unsafe, so paid transport must not continue."""
+
+    retryable = False
+    fatal_analysis = True
 
 
 class PatchRejected(ValueError):
@@ -658,18 +676,363 @@ def make_candidate_id(round_index: int, tex_sha256: str) -> str:
 
 
 def _json_bytes(value: object) -> bytes:
-    return (
-        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str)
-        + "\n"
-    ).encode("utf-8")
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise CandidateStoreError(
+            "candidate evidence is not strictly JSON serializable"
+        ) from exc
+    return (encoded + "\n").encode("utf-8")
+
+
+_BASELINE_INPUT_DIRECTORY = "baseline-input"
+_BASELINE_INPUT_FILES = frozenset({
+    "baseline.tex",
+    "baseline.pdf",
+    "compile.log",
+    "metadata.json",
+})
+
+_CANDIDATE_REQUIRED_FILES = frozenset({
+    "candidate.tex",
+    "compile.log",
+    "patch.json",
+    "candidate.diff",
+    "issue_ledger.json",
+    "quality_vector.json",
+    "review.json",
+    "candidate.json",
+})
+_CANDIDATE_JSON_FILES = frozenset({
+    "patch.json",
+    "issue_ledger.json",
+    "quality_vector.json",
+    "review.json",
+    "candidate.json",
+})
+_CANDIDATE_METADATA_FIELDS = frozenset({
+    "candidate_id",
+    "parent_candidate_id",
+    "round_index",
+    "tex_sha256",
+    "pdf_sha256",
+    "quality",
+    "disposition",
+    "reason",
+    "artifact_directory",
+})
+_QUALITY_VECTOR_FIELDS = frozenset({
+    "fully_compiled",
+    "silent_page_omissions",
+    "silent_text_losses",
+    "unauthorized_math_changes",
+    "open_critical",
+    "open_high",
+    "formal_errors",
+    "structure_reference_errors",
+    "footnote_figure_equation_errors",
+    "severe_visual_errors",
+    "ordinary_layout_errors",
+})
+
+
+def _storage_entry_exists(path: Path) -> bool:
+    try:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise CandidateStoreError(f"cannot inspect candidate storage path: {path}") from exc
+
+
+def _assert_plain_candidate_path(path: Path, *, label: str) -> None:
+    try:
+        assert_plain_storage_path(path)
+    except RecoveryValidationError as exc:
+        raise CandidateStoreError(f"{label} is unsafe") from exc
+
+
+def _read_candidate_file(path: Path) -> bytes:
+    _assert_plain_candidate_path(path, label="candidate artifact path")
+    try:
+        linked = path_is_link_or_reparse(path)
+    except RecoveryValidationError as exc:
+        raise CandidateStoreError("cannot inspect candidate artifact path") from exc
+    if linked:
+        raise CandidateStoreError("candidate artifact is a link or reparse point")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise CandidateStoreError(f"cannot open candidate artifact: {path.name}") from exc
+    try:
+        item_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(item_stat.st_mode):
+            raise CandidateStoreError(
+                f"candidate artifact is not a regular file: {path.name}"
+            )
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        payload = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    _assert_plain_candidate_path(path, label="candidate artifact path")
+    return payload
+
+
+def _write_new_candidate_file(path: Path, payload: bytes) -> None:
+    _assert_plain_candidate_path(path.parent, label="candidate staging directory")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:  # pragma: no cover - defensive OS contract check
+                raise OSError("short write while persisting candidate artifact")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    _assert_plain_candidate_path(path, label="candidate staging artifact")
+
+
+def _remove_candidate_temp(path: Path) -> None:
+    try:
+        item_stat = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if path_is_link_or_reparse(path):
+        if stat.S_ISDIR(item_stat.st_mode):
+            os.rmdir(path)
+        else:
+            path.unlink()
+        return
+    if stat.S_ISDIR(item_stat.st_mode):
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _directory_matches_payloads(directory: Path, payloads: Mapping[str, bytes]) -> bool:
+    if not _storage_entry_exists(directory):
+        return False
+    _assert_plain_candidate_path(directory, label="candidate directory")
+    if path_is_link_or_reparse(directory):
+        raise CandidateStoreError("candidate directory is a link or reparse point")
+    try:
+        directory_stat = os.lstat(directory)
+        entries = tuple(os.scandir(directory))
+    except OSError as exc:
+        raise CandidateStoreError("cannot inspect immutable candidate directory") from exc
+    if not stat.S_ISDIR(directory_stat.st_mode):
+        raise CandidateStoreError("immutable candidate path is not a directory")
+    if {entry.name for entry in entries} != set(payloads):
+        return False
+    for name, expected in payloads.items():
+        if _read_candidate_file(directory / name) != expected:
+            return False
+    return True
+
+
+def _quality_vector_from_json(value: Any) -> QualityVector:
+    if not isinstance(value, dict) or set(value) != _QUALITY_VECTOR_FIELDS:
+        raise CandidateStoreError("candidate quality vector schema is not exact")
+    if type(value["fully_compiled"]) is not bool:
+        raise CandidateStoreError("candidate fully_compiled value is not boolean")
+    for name in _QUALITY_VECTOR_FIELDS - {"fully_compiled"}:
+        count = value[name]
+        if type(count) is not int or count < 0:
+            raise CandidateStoreError(f"candidate quality count is invalid: {name}")
+    return QualityVector(**value)
 
 
 class CandidateRepository:
     """Write-once candidate directories committed with one same-volume rename."""
 
     def __init__(self, root: str | Path) -> None:
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.root = Path(os.path.abspath(os.fspath(root)))
+        try:
+            assert_plain_storage_path(self.root)
+            self.root.mkdir(parents=True, exist_ok=True)
+            assert_plain_storage_path(self.root)
+            root_stat = os.lstat(self.root)
+            root_is_link = path_is_link_or_reparse(self.root)
+        except (OSError, RecoveryValidationError) as exc:
+            raise CandidateStoreError("candidate repository root is unsafe") from exc
+        if root_is_link or not stat.S_ISDIR(root_stat.st_mode):
+            raise CandidateStoreError("candidate repository root is not a plain directory")
+
+    def _reuse_exact_candidate(
+        self,
+        *,
+        destination: Path,
+        payloads: Mapping[str, bytes],
+        record: CandidateRecord,
+    ) -> CandidateRecord:
+        try:
+            exact = _directory_matches_payloads(destination, payloads)
+        except (CandidateStoreError, OSError, RecoveryValidationError) as exc:
+            raise CandidateStoreError(
+                "immutable candidate already exists with unsafe or invalid evidence"
+            ) from exc
+        if not exact:
+            raise CandidateStoreError(
+                "immutable candidate already exists with different or invalid evidence"
+            )
+        return record
+
+    def save_baseline_input_checkpoint(
+        self,
+        *,
+        run_id: str,
+        tex: str,
+        pdf: bytes,
+        compile_log: str,
+        compile_passes: int,
+        pdf_openable: bool,
+    ) -> Mapping[str, Any]:
+        """Atomically freeze recovery evidence before model discovery.
+
+        This checkpoint deliberately is not a ``CandidateRecord`` and does
+        not initialize the history-best controller.  It preserves the
+        already-verified baseline inputs when the first discovery wave fails,
+        while allowing the real selection baseline to be created later with
+        the completed issue ledger.  Repeating the call with byte-identical
+        evidence is idempotent; existing evidence is never overwritten.
+        """
+
+        normalized_run_id = str(run_id).strip()
+        tex_bytes = str(tex).encode("utf-8")
+        pdf_bytes = bytes(pdf)
+        log_bytes = str(compile_log).encode("utf-8")
+        passes = int(compile_passes)
+        if not normalized_run_id:
+            raise CandidateStoreError("baseline input checkpoint requires a run id")
+        if passes < 2 or not pdf_openable or not pdf_bytes:
+            raise CandidateStoreError(
+                "baseline input checkpoint requires an openable two-pass PDF"
+            )
+        metadata: dict[str, Any] = {
+            "artifact_type": "latexstruct-analysis-baseline-input-v1",
+            "run_id": normalized_run_id,
+            "baseline_tex_sha256": sha256_bytes(tex_bytes),
+            "baseline_pdf_sha256": sha256_bytes(pdf_bytes),
+            "compile_log_sha256": sha256_bytes(log_bytes),
+            "compile_passes": passes,
+            "pdf_openable": True,
+        }
+        destination = self.root / _BASELINE_INPUT_DIRECTORY
+        if destination.exists():
+            if not self.verify_baseline_input_checkpoint():
+                raise CandidateStoreError(
+                    "immutable baseline input checkpoint is missing or invalid"
+                )
+            existing = json.loads(
+                (destination / "metadata.json").read_text(encoding="utf-8")
+            )
+            stable_fields = set(metadata) - {"compile_log_sha256"}
+            if any(existing.get(name) != metadata[name] for name in stable_fields):
+                raise CandidateStoreError(
+                    "immutable baseline input checkpoint belongs to different evidence"
+                )
+            # A real compiler may embed a private work directory or timestamp
+            # in a later resume log.  The original log remains immutable and
+            # hash-verified; idempotence is governed by the run, TeX, PDF,
+            # pass-count, and openability bindings rather than mutable log text.
+            return dict(existing)
+
+        temp = Path(tempfile.mkdtemp(prefix=".baseline-input-", dir=self.root))
+        try:
+            files = {
+                "baseline.tex": tex_bytes,
+                "baseline.pdf": pdf_bytes,
+                "compile.log": log_bytes,
+                "metadata.json": _json_bytes(metadata),
+            }
+            for name, payload in files.items():
+                (temp / name).write_bytes(payload)
+            sums = "".join(
+                f"{sha256_bytes(payload)}  {name}\n"
+                for name, payload in sorted(files.items())
+            ).encode("utf-8")
+            (temp / "SHA256SUMS").write_bytes(sums)
+            os.replace(temp, destination)
+        except BaseException:
+            if temp.exists():
+                shutil.rmtree(temp, ignore_errors=True)
+            raise
+        return dict(metadata)
+
+    def verify_baseline_input_checkpoint(self) -> bool:
+        """Recompute the complete checkpoint manifest and metadata hashes."""
+
+        directory = self.root / _BASELINE_INPUT_DIRECTORY
+        manifest = directory / "SHA256SUMS"
+        if not manifest.is_file():
+            return False
+        observed: dict[str, str] = {}
+        for line in manifest.read_text(encoding="utf-8").splitlines():
+            digest, separator, name = line.partition("  ")
+            if (
+                not separator
+                or name in observed
+                or name not in _BASELINE_INPUT_FILES
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            ):
+                return False
+            path = directory / name
+            if not path.is_file() or sha256_bytes(path.read_bytes()) != digest:
+                return False
+            observed[name] = digest
+        if set(observed) != _BASELINE_INPUT_FILES:
+            return False
+        try:
+            metadata = json.loads(
+                (directory / "metadata.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(metadata, dict) or set(metadata) != {
+            "artifact_type",
+            "run_id",
+            "baseline_tex_sha256",
+            "baseline_pdf_sha256",
+            "compile_log_sha256",
+            "compile_passes",
+            "pdf_openable",
+        }:
+            return False
+        return (
+            metadata["artifact_type"]
+            == "latexstruct-analysis-baseline-input-v1"
+            and isinstance(metadata["run_id"], str)
+            and bool(metadata["run_id"].strip())
+            and type(metadata["compile_passes"]) is int
+            and metadata["compile_passes"] >= 2
+            and metadata["pdf_openable"] is True
+            and metadata["baseline_tex_sha256"]
+            == sha256_bytes((directory / "baseline.tex").read_bytes())
+            and metadata["baseline_pdf_sha256"]
+            == sha256_bytes((directory / "baseline.pdf").read_bytes())
+            and metadata["compile_log_sha256"]
+            == sha256_bytes((directory / "compile.log").read_bytes())
+        )
 
     def persist(
         self,
@@ -689,9 +1052,16 @@ class CandidateRepository:
         reason: str,
     ) -> CandidateRecord:
         candidate_id = _portable_candidate_id(candidate_id)
+        if type(round_index) is not int or round_index < 0 or round_index > 9999:
+            raise CandidateStoreError("candidate round index is invalid")
+        if type(parent_candidate_id) is not str or type(reason) is not str:
+            raise CandidateStoreError("candidate text metadata is not typed")
+        if not isinstance(quality, QualityVector):
+            raise CandidateStoreError("candidate quality must be a QualityVector")
+        quality = _quality_vector_from_json(asdict(quality))
+        if not isinstance(disposition, CandidateDisposition):
+            raise CandidateStoreError("candidate disposition is invalid")
         destination = self.root / candidate_id
-        if destination.exists():
-            raise CandidateStoreError("immutable candidate already exists")
         tex_bytes = tex.encode("utf-8")
         pdf_bytes = bytes(pdf)
         tex_hash = sha256_bytes(tex_bytes)
@@ -711,7 +1081,6 @@ class CandidateRepository:
             # The repository root is host state, never candidate evidence.
             artifact_directory=candidate_id,
         )
-        temp = Path(tempfile.mkdtemp(prefix=f".{candidate_id}-", dir=self.root))
         try:
             files: dict[str, bytes] = {
                 "candidate.tex": tex_bytes,
@@ -723,20 +1092,62 @@ class CandidateRepository:
                 "review.json": _json_bytes(dict(review)),
                 "candidate.json": _json_bytes(record.to_dict()),
             }
-            if pdf_bytes:
-                files["candidate.pdf"] = pdf_bytes
-            for name, payload in files.items():
-                (temp / name).write_bytes(payload)
-            sums = "".join(
-                f"{sha256_bytes(payload)}  {name}\n"
-                for name, payload in sorted(files.items())
-            ).encode("utf-8")
-            (temp / "SHA256SUMS").write_bytes(sums)
-            os.replace(temp, destination)
-        except BaseException:
-            if temp.exists():
-                shutil.rmtree(temp, ignore_errors=True)
-            raise
+        except (AttributeError, TypeError, UnicodeError) as exc:
+            raise CandidateStoreError("candidate evidence inputs are not typed") from exc
+        if pdf_bytes:
+            files["candidate.pdf"] = pdf_bytes
+        sums = "".join(
+            f"{sha256_bytes(payload)}  {name}\n"
+            for name, payload in sorted(files.items())
+        ).encode("utf-8")
+        payloads = {**files, "SHA256SUMS": sums}
+
+        _assert_plain_candidate_path(self.root, label="candidate repository root")
+        if _storage_entry_exists(destination):
+            return self._reuse_exact_candidate(
+                destination=destination,
+                payloads=payloads,
+                record=record,
+            )
+
+        try:
+            temp = Path(tempfile.mkdtemp(prefix=f".{candidate_id}-", dir=self.root))
+        except OSError as exc:
+            raise CandidateStoreError("cannot create candidate staging directory") from exc
+        try:
+            _assert_plain_candidate_path(temp, label="candidate staging directory")
+            for name, payload in payloads.items():
+                _write_new_candidate_file(temp / name, payload)
+            _fsync_directory(temp)
+            _assert_plain_candidate_path(self.root, label="candidate repository root")
+            if _storage_entry_exists(destination):
+                return self._reuse_exact_candidate(
+                    destination=destination,
+                    payloads=payloads,
+                    record=record,
+                )
+            try:
+                # ``rename`` preserves the write-once contract on Windows and
+                # publishes the complete directory in one same-volume step.
+                os.rename(temp, destination)
+            except OSError:
+                # Another recovery worker may have published the same complete
+                # immutable candidate after our absence check.  Only exact
+                # byte-for-byte evidence is an admissible replay.
+                if _storage_entry_exists(destination):
+                    return self._reuse_exact_candidate(
+                        destination=destination,
+                        payloads=payloads,
+                        record=record,
+                    )
+                raise
+            _fsync_directory(self.root)
+            if not _directory_matches_payloads(destination, payloads):
+                raise CandidateStoreError(
+                    "candidate directory changed during immutable publication"
+                )
+        finally:
+            _remove_candidate_temp(temp)
         return record
 
     def load(self, candidate_id: str) -> CandidateRecord:
@@ -744,32 +1155,130 @@ class CandidateRepository:
         if not self.verify(candidate_id):
             raise CandidateStoreError("candidate hash manifest is missing or invalid")
         directory = self.root / candidate_id
-        raw = json.loads((directory / "candidate.json").read_text(encoding="utf-8"))
-        raw["quality"] = QualityVector(**raw["quality"])
-        raw["disposition"] = CandidateDisposition(raw["disposition"])
-        raw["artifact_directory"] = candidate_id
-        record = CandidateRecord(**raw)
+        try:
+            raw = parse_strict_json_bytes(
+                _read_candidate_file(directory / "candidate.json"),
+                label="candidate.json",
+            )
+            quality_payload = parse_strict_json_bytes(
+                _read_candidate_file(directory / "quality_vector.json"),
+                label="quality_vector.json",
+            )
+        except RecoveryValidationError as exc:
+            raise CandidateStoreError("candidate JSON evidence is invalid") from exc
+        if not isinstance(raw, dict) or set(raw) != _CANDIDATE_METADATA_FIELDS:
+            raise CandidateStoreError("candidate metadata schema is not exact")
+        if (
+            type(raw["candidate_id"]) is not str
+            or type(raw["parent_candidate_id"]) is not str
+            or type(raw["reason"]) is not str
+            or type(raw["artifact_directory"]) is not str
+        ):
+            raise CandidateStoreError("candidate metadata text fields are not typed")
+        if type(raw["round_index"]) is not int or not 0 <= raw["round_index"] <= 9999:
+            raise CandidateStoreError("candidate round index is invalid")
+        if not isinstance(raw["tex_sha256"], str) or not re.fullmatch(
+            r"[0-9a-f]{64}", raw["tex_sha256"]
+        ):
+            raise CandidateStoreError("candidate TeX hash is invalid")
+        pdf_sha256 = raw["pdf_sha256"]
+        if not isinstance(pdf_sha256, str) or (
+            pdf_sha256 and not re.fullmatch(r"[0-9a-f]{64}", pdf_sha256)
+        ):
+            raise CandidateStoreError("candidate PDF hash is invalid")
+        quality = _quality_vector_from_json(raw["quality"])
+        if asdict(quality) != quality_payload:
+            raise CandidateStoreError(
+                "candidate quality metadata differs from quality_vector.json"
+            )
+        try:
+            disposition = CandidateDisposition(raw["disposition"])
+        except (TypeError, ValueError) as exc:
+            raise CandidateStoreError("candidate disposition is invalid") from exc
+        record = CandidateRecord(
+            candidate_id=raw["candidate_id"],
+            parent_candidate_id=raw["parent_candidate_id"],
+            round_index=raw["round_index"],
+            tex_sha256=raw["tex_sha256"],
+            pdf_sha256=pdf_sha256,
+            quality=quality,
+            disposition=disposition,
+            reason=raw["reason"],
+            artifact_directory=candidate_id,
+        )
         if record.candidate_id != candidate_id:
             raise CandidateStoreError("candidate metadata identity mismatch")
-        if record.tex_sha256 != sha256_bytes((directory / "candidate.tex").read_bytes()):
+        if raw["artifact_directory"] != candidate_id:
+            raise CandidateStoreError("candidate artifact directory identity mismatch")
+        if candidate_id != make_candidate_id(record.round_index, record.tex_sha256):
+            raise CandidateStoreError("candidate id does not bind its round and TeX")
+        if record.tex_sha256 != sha256_bytes(
+            _read_candidate_file(directory / "candidate.tex")
+        ):
             raise CandidateStoreError("candidate TeX hash mismatch")
         pdf_path = directory / "candidate.pdf"
-        actual_pdf_hash = sha256_bytes(pdf_path.read_bytes()) if pdf_path.is_file() else ""
+        actual_pdf_hash = (
+            sha256_bytes(_read_candidate_file(pdf_path))
+            if _storage_entry_exists(pdf_path)
+            else ""
+        )
         if record.pdf_sha256 != actual_pdf_hash:
             raise CandidateStoreError("candidate PDF hash mismatch")
         return record
 
     def verify(self, candidate_id: str) -> bool:
-        directory = self.root / _portable_candidate_id(candidate_id)
-        manifest = directory / "SHA256SUMS"
-        if not manifest.is_file():
-            return False
-        for line in manifest.read_text(encoding="utf-8").splitlines():
-            digest, separator, name = line.partition("  ")
-            path = directory / name
-            if not separator or not path.is_file() or sha256_bytes(path.read_bytes()) != digest:
+        try:
+            directory = self.root / _portable_candidate_id(candidate_id)
+            _assert_plain_candidate_path(self.root, label="candidate repository root")
+            _assert_plain_candidate_path(directory, label="candidate directory")
+            if path_is_link_or_reparse(directory):
                 return False
-        return True
+            directory_stat = os.lstat(directory)
+            if not stat.S_ISDIR(directory_stat.st_mode):
+                return False
+            manifest_bytes = _read_candidate_file(directory / "SHA256SUMS")
+            manifest_text = manifest_bytes.decode("utf-8")
+            observed: set[str] = set()
+            allowed = set(_CANDIDATE_REQUIRED_FILES) | {"candidate.pdf"}
+            for line in manifest_text.splitlines():
+                digest, separator, name = line.partition("  ")
+                if (
+                    not separator
+                    or name in observed
+                    or name not in allowed
+                    or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                ):
+                    return False
+                payload = _read_candidate_file(directory / name)
+                if sha256_bytes(payload) != digest:
+                    return False
+                observed.add(name)
+            if not _CANDIDATE_REQUIRED_FILES.issubset(observed):
+                return False
+            entries = tuple(os.scandir(directory))
+            actual_files = {entry.name for entry in entries}
+            if actual_files != observed | {"SHA256SUMS"}:
+                return False
+            for entry in entries:
+                path = directory / entry.name
+                if path_is_link_or_reparse(path):
+                    return False
+                if not entry.is_file(follow_symlinks=False):
+                    return False
+            for name in _CANDIDATE_JSON_FILES:
+                parse_strict_json_bytes(
+                    _read_candidate_file(directory / name),
+                    label=name,
+                )
+            return True
+        except (
+            CandidateStoreError,
+            FileNotFoundError,
+            OSError,
+            RecoveryValidationError,
+            UnicodeError,
+        ):
+            return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -802,8 +1311,33 @@ class CandidateController:
         if self.best is not None:
             raise CandidateStoreError("baseline is already frozen")
         digest = sha256_text(tex)
+        candidate_id = make_candidate_id(0, digest)
+        destination = self.repository.root / candidate_id
+        if _storage_entry_exists(destination):
+            record = self.repository.load(candidate_id)
+            try:
+                stored_ledger = parse_strict_json_bytes(
+                    _read_candidate_file(destination / "issue_ledger.json"),
+                    label="issue_ledger.json",
+                )
+            except RecoveryValidationError as exc:
+                raise CandidateStoreError(
+                    "existing immutable baseline issue ledger is invalid"
+                ) from exc
+            if (
+                record.disposition != CandidateDisposition.BASELINE
+                or record.tex_sha256 != digest
+                or record.pdf_sha256 != (sha256_bytes(pdf) if pdf else "")
+                or record.quality != quality
+                or stored_ledger != dict(issue_ledger)
+            ):
+                raise CandidateStoreError(
+                    "existing immutable baseline differs from resumed evidence"
+                )
+            self.best = self.current = record
+            return record
         record = self.repository.persist(
-            candidate_id=make_candidate_id(0, digest),
+            candidate_id=candidate_id,
             parent_candidate_id="",
             round_index=0,
             tex=tex,
@@ -886,21 +1420,189 @@ class CandidateController:
         return record
 
 
-class LocalAnalysisCache:
-    """Content-addressed model-result cache with page/role-local invalidation."""
+def _fsync_directory(path: Path) -> None:
+    """Persist a directory entry after an atomic replace when supported."""
 
-    def __init__(self) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        if os.name == "nt":
+            return
+        raise
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        if os.name != "nt":
+            raise
+    finally:
+        os.close(descriptor)
+
+
+class LocalAnalysisCache:
+    """Content-addressed, optionally persistent, run-local response cache.
+
+    The caller supplies a directory that is already scoped by ``run_id``.
+    Every key still binds the immutable snapshot, response schema and tool
+    version, so copying a cache directory into another run cannot make stale
+    evidence admissible.  Writes are atomic and an existing digest is
+    immutable: two different responses for the same complete input identity
+    are treated as evidence corruption rather than last-writer-wins state.
+    """
+
+    def __init__(self, root: str | Path | None = None) -> None:
         self._values: dict[str, Any] = {}
         self._keys: dict[str, AnalysisCacheKey] = {}
+        self.root = (
+            Path(os.path.abspath(os.fspath(root))) if root is not None else None
+        )
+        if self.root is not None:
+            try:
+                assert_plain_storage_path(self.root)
+                self.root.mkdir(parents=True, exist_ok=True)
+                assert_plain_storage_path(self.root)
+            except (OSError, RecoveryValidationError) as exc:
+                raise AnalysisCacheIntegrityError(
+                    "analysis cache root is unsafe"
+                ) from exc
+
+    def _path(self, key: AnalysisCacheKey) -> Path | None:
+        if self.root is None:
+            return None
+        role = re.sub(r"[^A-Za-z0-9._-]+", "-", key.audit_role).strip("-._")
+        if not role:
+            raise ValueError("cache role cannot be mapped to a safe path")
+        return self.root / role / key.digest[:2] / f"{key.digest}.json"
+
+    @staticmethod
+    def _payload(key: AnalysisCacheKey, value: Any) -> dict[str, Any]:
+        frozen = json.loads(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            )
+        )
+        return {
+            "schema": "latexstruct-analysis-cache-entry-v2",
+            "cache_key": asdict(key),
+            "cache_key_sha256": key.digest,
+            "response": frozen,
+            "response_sha256": sha256_bytes(canonical_json_bytes(frozen)),
+        }
 
     def put(self, key: AnalysisCacheKey, value: Any) -> None:
         # JSON round-trip prevents callers from mutating cached evidence later.
-        frozen = json.loads(json.dumps(value, ensure_ascii=False, sort_keys=True))
+        payload = self._payload(key, value)
+        frozen = payload["response"]
+        path = self._path(key)
+        if path is not None:
+            try:
+                assert_plain_storage_path(path.parent)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                assert_plain_storage_path(path.parent)
+                if path_is_link_or_reparse(path):
+                    raise RecoveryValidationError(
+                        "analysis cache entry is a link or reparse point"
+                    )
+            except (OSError, RecoveryValidationError) as exc:
+                raise AnalysisCacheIntegrityError(
+                    "analysis cache entry path is unsafe"
+                ) from exc
+            encoded = (
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+            if path.exists():
+                if path_is_link_or_reparse(path):
+                    raise AnalysisCacheIntegrityError(
+                        "analysis cache entry is a link or reparse point"
+                    )
+                if (
+                    not path.is_file()
+                    or path.read_bytes() != encoded
+                ):
+                    raise ValueError("immutable analysis cache entry changed for one key")
+            else:
+                fd, temp_name = tempfile.mkstemp(
+                    prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+                )
+                try:
+                    with os.fdopen(fd, "wb") as handle:
+                        handle.write(encoded)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    assert_plain_storage_path(path.parent)
+                    if path_is_link_or_reparse(path):
+                        raise RecoveryValidationError(
+                            "analysis cache entry became a link or reparse point"
+                        )
+                    os.replace(temp_name, path)
+                    _fsync_directory(path.parent)
+                except RecoveryValidationError as exc:
+                    raise AnalysisCacheIntegrityError(
+                        "analysis cache entry path became unsafe"
+                    ) from exc
+                finally:
+                    if os.path.exists(temp_name):
+                        os.unlink(temp_name)
         self._keys[key.digest] = key
         self._values[key.digest] = frozen
 
     def get(self, key: AnalysisCacheKey) -> Any | None:
         value = self._values.get(key.digest)
+        if value is None:
+            path = self._path(key)
+            if path is None:
+                return None
+            try:
+                assert_plain_storage_path(path.parent)
+                if path_is_link_or_reparse(path):
+                    raise AnalysisCacheIntegrityError(
+                        "analysis cache entry is a link or reparse point"
+                    )
+            except RecoveryValidationError as exc:
+                raise AnalysisCacheIntegrityError(
+                    "analysis cache entry path is unsafe"
+                ) from exc
+            if not path.is_file():
+                return None
+            try:
+                payload = parse_strict_json_bytes(
+                    path.read_bytes(),
+                    label="analysis cache entry",
+                )
+            except (OSError, RecoveryValidationError):
+                return None
+            expected_key = asdict(key)
+            response = payload.get("response") if isinstance(payload, dict) else None
+            if (
+                set(payload) != {
+                    "schema",
+                    "cache_key",
+                    "cache_key_sha256",
+                    "response",
+                    "response_sha256",
+                }
+                or payload.get("schema") != "latexstruct-analysis-cache-entry-v2"
+                or payload.get("cache_key") != expected_key
+                or payload.get("cache_key_sha256") != key.digest
+                or payload.get("response_sha256")
+                != sha256_bytes(canonical_json_bytes(response))
+            ):
+                return None
+            value = response
+            self._keys[key.digest] = key
+            self._values[key.digest] = value
         return copy.deepcopy(value) if value is not None else None
 
     def invalidate_changed(self, current: AnalysisCacheKey) -> tuple[str, ...]:
@@ -914,7 +1616,44 @@ class LocalAnalysisCache:
                 removed.append(digest)
                 self._keys.pop(digest, None)
                 self._values.pop(digest, None)
+                path = self._path(key)
+                if path is not None:
+                    self._unlink_plain_entry(path)
         return tuple(sorted(removed))
+
+    def discard(self, key: AnalysisCacheKey) -> bool:
+        """Remove one exact cache key after response validation fails.
+
+        Cache entries are immutable only while they remain admissible evidence.
+        A strict parser may discover that an on-disk entry is syntactically valid
+        JSON but violates the role response contract; in that case the caller must
+        be able to evict only that key before obtaining fresh transport evidence.
+        """
+
+        existed = key.digest in self._keys or key.digest in self._values
+        self._keys.pop(key.digest, None)
+        self._values.pop(key.digest, None)
+        path = self._path(key)
+        if path is not None and self._unlink_plain_entry(path):
+            existed = True
+        return existed
+
+    @staticmethod
+    def _unlink_plain_entry(path: Path) -> bool:
+        try:
+            assert_plain_storage_path(path.parent)
+            if path_is_link_or_reparse(path):
+                raise AnalysisCacheIntegrityError(
+                    "analysis cache entry is a link or reparse point"
+                )
+        except RecoveryValidationError as exc:
+            raise AnalysisCacheIntegrityError(
+                "analysis cache entry path is unsafe"
+            ) from exc
+        if not path.is_file():
+            return False
+        path.unlink()
+        return True
 
     @property
     def size(self) -> int:
@@ -1076,6 +1815,7 @@ def decide_final_status(
 
 @dataclass(frozen=True, slots=True)
 class PerformanceMetrics:
+    available: bool
     total_pages: int
     elapsed_seconds: float
     pages_per_minute: float
@@ -1083,8 +1823,8 @@ class PerformanceMetrics:
     whole_book_scan_seconds: float
     role_call_counts: tuple[tuple[str, int], ...]
     model_elapsed_seconds: tuple[tuple[str, float], ...]
-    input_tokens: int
-    output_tokens: int
+    input_tokens: int | None
+    output_tokens: int | None
     cache_hits: int
     cache_misses: int
     checked_pages: int
@@ -1097,17 +1837,46 @@ class PerformanceMetrics:
     blocked_issues: int
     final_status: AnalysisFinalStatus
     target_seconds: float
-    target_met: bool
+    benchmark_page_count: int
+    benchmark_eligible: bool
+    target_status: PerformanceTargetStatus
+    target_evaluated: bool
+    target_met: bool | None
     estimated_remaining_seconds: float | None
+    cached_tokens: int | None = None
+    total_tokens: int | None = None
+    usage_complete: bool = False
+    observed_input_tokens: int = 0
+    observed_output_tokens: int = 0
+    observed_cached_tokens: int = 0
+    observed_total_tokens: int = 0
+    transport_call_count: int = 0
+    usage_observed_call_count: int = 0
+    usage_missing_call_count: int = 0
+    transport_attempt_count: int | None = None
+    observed_transport_attempt_count: int = 0
+    usage_observed_attempt_count: int = 0
+    usage_missing_attempt_count: int | None = None
+    attempt_evidence_complete: bool = False
+    cache_status: str = "DISABLED"
+    estimated_cost_cny: float | None = None
+    cost_status: str = "UNKNOWN"
+    pricing_sources: tuple[str, ...] = ()
+    billing_mode: str | None = None
+    orchestration_invocation_count: int = 0
+    cache_hit_evidence_count: int = 0
 
     @property
     def cache_hit_rate(self) -> float:
+        if self.cache_status != "ENABLED":
+            return 0.0
         total = self.cache_hits + self.cache_misses
         return self.cache_hits / total if total else 0.0
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["final_status"] = self.final_status.value
+        payload["target_status"] = self.target_status.value
         payload["cache_hit_rate"] = self.cache_hit_rate
         return payload
 
@@ -1115,11 +1884,28 @@ class PerformanceMetrics:
 class PerformanceTracker:
     """Compute honest throughput and ETA from the last ten completed units."""
 
-    def __init__(self, *, total_pages: int, target_seconds: float = 10800.0) -> None:
+    def __init__(
+        self,
+        *,
+        total_pages: int,
+        target_seconds: float = ANALYSIS_PERFORMANCE_BENCHMARK_SECONDS,
+        benchmark_eligible: bool | None = None,
+    ) -> None:
         if total_pages < 1 or target_seconds <= 0:
             raise ValueError("performance tracker requires positive totals")
+        if benchmark_eligible is True and total_pages != ANALYSIS_PERFORMANCE_BENCHMARK_PAGE_COUNT:
+            raise ValueError("performance benchmark eligibility requires exactly 600 pages")
         self.total_pages = total_pages
         self.target_seconds = target_seconds
+        page_count_eligible = total_pages == ANALYSIS_PERFORMANCE_BENCHMARK_PAGE_COUNT
+        requested_eligible = (
+            page_count_eligible if benchmark_eligible is None else benchmark_eligible
+        )
+        self.benchmark_eligible = bool(
+            requested_eligible
+            and page_count_eligible
+            and target_seconds == ANALYSIS_PERFORMANCE_BENCHMARK_SECONDS
+        )
         self._completions: dict[str, float] = {}
 
     def record_page_completion(self, source_page_id: str, elapsed_seconds: float) -> None:
@@ -1153,8 +1939,8 @@ class PerformanceTracker:
         whole_book_scan_seconds: float,
         role_call_counts: Mapping[str, int],
         model_elapsed_seconds: Mapping[str, float],
-        input_tokens: int,
-        output_tokens: int,
+        input_tokens: int | None,
+        output_tokens: int | None,
         cache_hits: int,
         cache_misses: int,
         high_risk_pages: int,
@@ -1165,18 +1951,62 @@ class PerformanceTracker:
         auto_closed_issues: int,
         blocked_issues: int,
         final_status: AnalysisFinalStatus,
+        usage_complete: bool | None = None,
+        cached_tokens: int | None = None,
+        total_tokens: int | None = None,
+        cache_status: str | None = None,
     ) -> PerformanceMetrics:
         checked_pages = len(self._completions)
         pages_per_minute = checked_pages * 60.0 / elapsed_seconds if elapsed_seconds > 0 else 0.0
-        target_met = (
-            checked_pages == self.total_pages
-            and elapsed_seconds <= self.target_seconds
-            and final_status in {
-                AnalysisFinalStatus.VERIFIED,
-                AnalysisFinalStatus.COMPLETED_WITH_ISSUES,
-            }
+        benchmark_complete = (
+            self.benchmark_eligible
+            and checked_pages == self.total_pages
+            and math.isfinite(elapsed_seconds)
+            and elapsed_seconds > 0
         )
+        if benchmark_complete:
+            target_met: bool | None = (
+                elapsed_seconds <= self.target_seconds
+                and final_status in {
+                    AnalysisFinalStatus.VERIFIED,
+                    AnalysisFinalStatus.COMPLETED_WITH_ISSUES,
+                }
+            )
+            target_status = (
+                PerformanceTargetStatus.PASSED
+                if target_met
+                else PerformanceTargetStatus.FAILED
+            )
+        else:
+            target_met = None
+            target_status = PerformanceTargetStatus.NOT_EVALUATED
+        input_count = None if input_tokens is None else int(input_tokens)
+        output_count = None if output_tokens is None else int(output_tokens)
+        complete_usage = bool(
+            input_count is not None and output_count is not None
+            if usage_complete is None
+            else usage_complete and input_count is not None and output_count is not None
+        )
+        cached_count = None if cached_tokens is None else int(cached_tokens)
+        total_count = None if total_tokens is None else int(total_tokens)
+        if complete_usage:
+            cached_count = 0 if cached_count is None else cached_count
+            total_count = (
+                input_count + output_count if total_count is None else total_count
+            )
+        else:
+            input_count = output_count = cached_count = total_count = None
+        normalized_cache_status = str(cache_status or "").strip().upper()
+        if not normalized_cache_status:
+            normalized_cache_status = (
+                "ENABLED" if int(cache_hits) + int(cache_misses) else "DISABLED"
+            )
+        if normalized_cache_status not in {"DISABLED", "ENABLED"}:
+            raise ValueError("cache_status must be DISABLED or ENABLED")
+        if normalized_cache_status == "DISABLED" and (cache_hits or cache_misses):
+            raise ValueError("disabled analysis cache cannot report hits or misses")
         return PerformanceMetrics(
+            available=True,
             total_pages=self.total_pages,
             elapsed_seconds=float(elapsed_seconds),
             pages_per_minute=pages_per_minute,
@@ -1186,8 +2016,8 @@ class PerformanceTracker:
             model_elapsed_seconds=tuple(sorted(
                 (str(k), float(v)) for k, v in model_elapsed_seconds.items()
             )),
-            input_tokens=int(input_tokens),
-            output_tokens=int(output_tokens),
+            input_tokens=input_count,
+            output_tokens=output_count,
             cache_hits=int(cache_hits),
             cache_misses=int(cache_misses),
             checked_pages=checked_pages,
@@ -1200,8 +2030,20 @@ class PerformanceTracker:
             blocked_issues=int(blocked_issues),
             final_status=final_status,
             target_seconds=self.target_seconds,
+            benchmark_page_count=ANALYSIS_PERFORMANCE_BENCHMARK_PAGE_COUNT,
+            benchmark_eligible=self.benchmark_eligible,
+            target_status=target_status,
+            target_evaluated=benchmark_complete,
             target_met=target_met,
             estimated_remaining_seconds=self.estimated_remaining_seconds(elapsed_seconds),
+            cached_tokens=cached_count,
+            total_tokens=total_count,
+            usage_complete=complete_usage,
+            observed_input_tokens=input_count or 0,
+            observed_output_tokens=output_count or 0,
+            observed_cached_tokens=cached_count or 0,
+            observed_total_tokens=total_count or 0,
+            cache_status=normalized_cache_status,
         )
 
 
@@ -1230,7 +2072,9 @@ class AnalysisQualityRuntime:
         self.progress = NoProgressController()
         self.candidates = CandidateController(CandidateRepository(candidate_root))
         self.performance = PerformanceTracker(
-            total_pages=len(units), target_seconds=snapshot.performance_target_seconds
+            total_pages=len(units),
+            target_seconds=snapshot.performance_target_seconds,
+            benchmark_eligible=snapshot.performance_benchmark_eligible,
         )
 
     def register_findings(
@@ -1252,6 +2096,7 @@ class AnalysisQualityRuntime:
 
 
 __all__ = [
+    "AnalysisCacheIntegrityError",
     "AnalysisQualityRuntime",
     "CandidateController",
     "CandidateRecord",

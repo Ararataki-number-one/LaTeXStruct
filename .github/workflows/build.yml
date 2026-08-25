@@ -10,6 +10,15 @@ on:
         description: "手动构建版本（留空则使用 latexstruct/_version.py）"
         required: false
         type: string
+      run_analysis_37:
+        description: "构建后调用同一提交的私有 37 页完整验收"
+        required: false
+        default: false
+        type: boolean
+      runner_label:
+        description: "本次 analysis-37 一次性 JIT runner 的随机唯一标签"
+        required: false
+        type: string
 
 jobs:
   test:
@@ -134,11 +143,35 @@ jobs:
           Get-Content benchmark/report.md
           if ($benchmarkExit -ne 0) { Write-Error "Benchmark（编译）未通过"; exit 1 }
 
-  build_candidate:
-    name: 构建待验收候选安装包（仅手动触发）
-    needs: test
+  validate_acceptance_request:
+    name: 校验可选 analysis-37 JIT runner 请求
     if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
+    steps:
+      - name: 拒绝缺失、非随机或无关的 runner 标签
+        shell: pwsh
+        env:
+          RUN_ANALYSIS_37: ${{ inputs.run_analysis_37 }}
+          REQUESTED_RUNNER_LABEL: ${{ inputs.runner_label }}
+        run: |
+          $enabled = ([string]$env:RUN_ANALYSIS_37).ToLowerInvariant() -eq 'true'
+          $label = ([string]$env:REQUESTED_RUNNER_LABEL).Trim()
+          if ($enabled -and $label -cnotmatch '^latexstruct-acceptance-[0-9a-f]{32}$') {
+            Write-Error '启用 analysis-37 时必须提供本次 JIT runner 的随机唯一标签'
+            exit 1
+          }
+          if (-not $enabled -and -not [string]::IsNullOrWhiteSpace($label)) {
+            Write-Error '未启用 analysis-37 时不得提供 runner_label'
+            exit 1
+          }
+
+  build_candidate:
+    name: 构建待验收候选安装包（仅手动触发）
+    needs: [test, validate_acceptance_request]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    outputs:
+      app_version: ${{ steps.candidate_version.outputs.app_version }}
     permissions:
       contents: read
     steps:
@@ -149,6 +182,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: 版本一致性校验（tag 与 __version__）
+        id: candidate_version
         shell: pwsh
         env:
           MANUAL_VERSION: ${{ inputs.version }}
@@ -164,6 +198,7 @@ jobs:
           if ($v -notmatch '^\d+\.\d+\.\d+$') { Write-Error "版本格式无效: $v"; exit 1 }
           python -c "import latexstruct; assert latexstruct.__version__=='$v', f'版本不匹配: {latexstruct.__version__} vs $v'"
           echo "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+          "app_version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: 安装依赖
         run: python -m pip install -r requirements.txt pyinstaller "Pillow>=10,<12"
       - name: 生成图标与版本资源
@@ -185,20 +220,6 @@ jobs:
           npm run build
       - name: PyInstaller 构建单文件 exe
         run: python -m PyInstaller packaging/LaTeXStruct.spec --noconfirm --distpath dist --workpath build
-      - name: 代码签名 exe（配置了证书 secrets 时）
-        env:
-          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
-          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
-        shell: pwsh
-        run: |
-          if ([string]::IsNullOrEmpty($env:WINDOWS_CERT_BASE64)) {
-            Write-Host "未配置签名证书，跳过签名"
-            exit 0
-          }
-          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
-          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1).FullName
-          & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dist/LaTeXStruct.exe
       - name: 安装 Inno Setup
         run: choco install innosetup -y --no-progress
       - name: 构建安装器
@@ -463,28 +484,12 @@ jobs:
                 '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
             }
           }
-      - name: 代码签名安装器（配置了证书 secrets 时）
-        env:
-          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
-          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
-        shell: pwsh
-        run: |
-          if ([string]::IsNullOrEmpty($env:WINDOWS_CERT_BASE64)) {
-            Write-Host "未配置签名证书，跳过签名"
-            exit 0
-          }
-          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
-          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1).FullName
-          Get-ChildItem dist/LaTeXStruct-setup-*.exe | ForEach-Object {
-            & $signtool sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
-          }
-      - name: 最终安装器字节绑定（签名后静默安装 → EXE SHA → 卸载）
+      - name: 最终安装器字节绑定（未签名候选静默安装 → EXE SHA → 卸载）
         shell: pwsh
         run: |
           $setups = @(Get-ChildItem dist/LaTeXStruct-setup-*.exe)
           if ($setups.Count -ne 1) {
-            Write-Error "签名后必须且只能有一个安装器，实际为 $($setups.Count) 个"
+            Write-Error "候选必须且只能有一个安装器，实际为 $($setups.Count) 个"
             exit 1
           }
           $setup = $setups[0]
@@ -553,6 +558,19 @@ jobs:
             dist/release-assets.json
             dist/SHA256SUMS.txt
 
+  trusted_analysis_37:
+    name: 调用同一 run 的私有 analysis-37 完整验收
+    needs: build_candidate
+    if: github.event_name == 'workflow_dispatch' && inputs.run_analysis_37
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/analysis-37-acceptance.yml
+    with:
+      candidate_run_id: ${{ github.run_id }}
+      version: ${{ needs.build_candidate.outputs.app_version }}
+      runner_label: ${{ inputs.runner_label }}
+
   release_attested_candidate:
     name: 发布严格 37 页完整验收过的原始候选字节（仅 tag）
     needs: test
@@ -588,27 +606,51 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             Write-Error '无法读取 origin/main，发布门保持关闭'; exit 1
           }
-          git merge-base --is-ancestor "$env:GITHUB_SHA" 'refs/remotes/origin/main'
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error 'tag 指向的提交不是 origin/main 的祖先，禁止发布'; exit 1
+          $mainSha = (git rev-parse 'refs/remotes/origin/main').Trim().ToLowerInvariant()
+          $tagSha = ([string]$env:GITHUB_SHA).Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0 -or $tagSha -ne $mainSha) {
+            Write-Error '稳定 tag 必须精确指向 origin/main 当前 HEAD，禁止在旧祖先提交发布'; exit 1
           }
           $manifest = "release/acceptance/v$env:APP_VERSION/release-attestation.json"
-          if (-not (Test-Path -LiteralPath $manifest)) {
-            Write-Error "缺少严格 analysis-37 真实验收的隐私安全哈希投影: $manifest"
+          $referenceManifest = "release/acceptance/v$env:APP_VERSION/github-acceptance-reference.json"
+          if (
+            -not (Test-Path -LiteralPath $manifest) -or
+            -not (Test-Path -LiteralPath $referenceManifest)
+          ) {
+            Write-Error '缺少严格 analysis-37 发布投影或 GitHub 受信 run 引用'
             exit 1
           }
           try {
             $attestation = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+            $reference = Get-Content -LiteralPath $referenceManifest -Raw | ConvertFrom-Json
             $attestedCommit = ([string]$attestation.commit).ToLowerInvariant()
             $candidateRunId = [string]$attestation.runtime_identity.build_id
+            $acceptanceRunId = [string]$reference.acceptance_run.run_id
+            $acceptanceWorkflowPath = [string]$reference.acceptance_run.workflow_path
+            $acceptanceRunnerLabel = [string]$reference.acceptance_run.runner_label
+            $payloadArtifactName = [string]$reference.artifacts.payload
+            $closureArtifactName = [string]$reference.artifacts.closure
           } catch {
-            Write-Error '真实验收声明不是有效 JSON'; exit 1
+            Write-Error '真实验收声明或 GitHub 受信引用不是有效 JSON'; exit 1
           }
           if ($attestedCommit -notmatch '^[0-9a-f]{40,64}$') {
             Write-Error '真实验收声明缺少有效 tested commit'; exit 1
           }
           if ($candidateRunId -notmatch '^[1-9][0-9]*$') {
             Write-Error '真实验收 build_id 不是数字 GitHub Actions run id'; exit 1
+          }
+          if ($acceptanceRunId -notmatch '^[1-9][0-9]*$') {
+            Write-Error 'GitHub acceptance run id 不是数字'; exit 1
+          }
+          if ($acceptanceRunnerLabel -cnotmatch '^latexstruct-acceptance-[0-9a-f]{32}$') {
+            Write-Error 'GitHub acceptance 未绑定一次性 JIT runner 标签'; exit 1
+          }
+          $sameRun = $candidateRunId -eq $acceptanceRunId
+          if (
+            ($sameRun -and $acceptanceWorkflowPath -ne '.github/workflows/build.yml') -or
+            (-not $sameRun -and $acceptanceWorkflowPath -ne '.github/workflows/analysis-37-acceptance.yml')
+          ) {
+            Write-Error 'GitHub acceptance workflow 模式与候选 run 身份不一致'; exit 1
           }
           git merge-base --is-ancestor $attestedCommit "$env:GITHUB_SHA"
           if ($LASTEXITCODE -ne 0) {
@@ -637,10 +679,11 @@ jobs:
             git ls-tree -r --name-only "$env:GITHUB_SHA" -- $evidencePrefix
           )
           if (
-            $evidenceFiles.Count -ne 1 -or
-            [string]$evidenceFiles[0] -ne $manifest
+            $evidenceFiles.Count -ne 2 -or
+            $evidenceFiles -notcontains $manifest -or
+            $evidenceFiles -notcontains $referenceManifest
           ) {
-            Write-Error '验收目录只能提交 release-attestation.json 哈希投影；禁止上传源 PDF、候选 PDF、逐页图或完整审计包'
+            Write-Error '验收目录只能提交 release-attestation.json 与 github-acceptance-reference.json；禁止上传源 PDF、候选 PDF、逐页图或完整审计包'
             exit 1
           }
           $forbiddenEvidence = @(
@@ -667,7 +710,8 @@ jobs:
             exit 1
           }
           python packaging/release_integrity.py verify-release-notes `
-            --changelog CHANGELOG.md --version $env:APP_VERSION
+            --changelog CHANGELOG.md --readme README.md `
+            --version $env:APP_VERSION
           if ($LASTEXITCODE -ne 0) {
             Write-Error 'CHANGELOG 含未来 CI 资产摘要或缺少当前版本说明'; exit 1
           }
@@ -695,10 +739,127 @@ jobs:
             Write-Error "候选 run 未完成、非手动构建、失败或 commit 不匹配: $candidateRunId"
             exit 1
           }
+          try {
+            $acceptanceRun = Invoke-RestMethod -Headers $headers `
+              "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/runs/$acceptanceRunId"
+            $acceptanceArtifacts = Invoke-RestMethod -Headers $headers `
+              "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/runs/$acceptanceRunId/artifacts?per_page=100"
+          } catch {
+            Write-Error "无法核验受信 analysis-37 GitHub run/artifacts $acceptanceRunId"; exit 1
+          }
+          if (
+            [string]$acceptanceRun.id -ne $acceptanceRunId -or
+            [string]$acceptanceRun.event -ne 'workflow_dispatch' -or
+            [string]$acceptanceRun.status -ne 'completed' -or
+            [string]$acceptanceRun.conclusion -ne 'success' -or
+            [string]$acceptanceRun.path -ne $acceptanceWorkflowPath -or
+            [int]$acceptanceRun.run_attempt -ne 1 -or
+            ([string]$acceptanceRun.head_sha).ToLowerInvariant() -ne $attestedCommit -or
+            [string]$acceptanceRun.repository.full_name -ne $env:GITHUB_REPOSITORY
+          ) {
+            Write-Error '受信 analysis-37 run 不是同仓库、同提交、首次成功的规定 workflow'
+            exit 1
+          }
+          $artifacts = @($acceptanceArtifacts.artifacts)
+          $payloadArtifacts = @($artifacts | Where-Object { $_.name -eq $payloadArtifactName })
+          $closureArtifacts = @($artifacts | Where-Object { $_.name -eq $closureArtifactName })
+          $candidateArtifactName = "LaTeXStruct-v$env:APP_VERSION"
+          $candidateArtifacts = @(
+            $artifacts | Where-Object { $_.name -eq $candidateArtifactName }
+          )
+          $expectedArtifactCount = if ($sameRun) { 3 } else { 2 }
+          if (
+            [int]$acceptanceArtifacts.total_count -ne $expectedArtifactCount -or
+            $artifacts.Count -ne $expectedArtifactCount -or
+            $payloadArtifacts.Count -ne 1 -or
+            $closureArtifacts.Count -ne 1 -or
+            ($sameRun -and $candidateArtifacts.Count -ne 1) -or
+            (-not $sameRun -and $candidateArtifacts.Count -ne 0)
+          ) {
+            Write-Error '受信 analysis-37 run artifact 清单与调用模式不一致'
+            exit 1
+          }
+          $payloadArtifact = $payloadArtifacts[0]
+          $closureArtifact = $closureArtifacts[0]
+          $trustedArtifacts = @($payloadArtifact, $closureArtifact)
+          if ($sameRun) { $trustedArtifacts += $candidateArtifacts[0] }
+          foreach ($artifact in $trustedArtifacts) {
+            if (
+              [string]$artifact.id -notmatch '^[1-9][0-9]*$' -or
+              [bool]$artifact.expired -or
+              [string]$artifact.digest -notmatch '^sha256:[0-9a-fA-F]{64}$' -or
+              [string]$artifact.workflow_run.id -ne $acceptanceRunId -or
+              ([string]$artifact.workflow_run.head_sha).ToLowerInvariant() -ne $attestedCommit
+            ) {
+              Write-Error '受信 artifact 已过期、无 digest 或未绑定 acceptance run'; exit 1
+            }
+          }
+          $trustDir = Join-Path $env:RUNNER_TEMP `
+            "latexstruct-tag-trust-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if (Test-Path -LiteralPath $trustDir) {
+            Write-Error 'tag trust 临时目录已存在，拒绝复用'; exit 1
+          }
+          New-Item -ItemType Directory -Path $trustDir | Out-Null
+          $utf8NoBom = [Text.UTF8Encoding]::new($false)
+          [IO.File]::WriteAllText(
+            (Join-Path $trustDir 'acceptance-run.json'),
+            ($acceptanceRun | ConvertTo-Json -Depth 100),
+            $utf8NoBom
+          )
+          [IO.File]::WriteAllText(
+            (Join-Path $trustDir 'acceptance-artifacts.json'),
+            ($acceptanceArtifacts | ConvertTo-Json -Depth 100),
+            $utf8NoBom
+          )
           "ATTESTED_COMMIT=$attestedCommit" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CANDIDATE_RUN_ID=$candidateRunId" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ACCEPTANCE_RUN_ID=$acceptanceRunId" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PAYLOAD_ARTIFACT_ID=$($payloadArtifact.id)" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CLOSURE_ARTIFACT_ID=$($closureArtifact.id)" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TRUST_METADATA_DIR=$trustDir" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: 下载并验证 GitHub 受信 acceptance artifact 闭包
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{
+            'User-Agent' = 'latexstruct-release-gate'
+            'Authorization' = "Bearer $env:GITHUB_TOKEN"
+            'Accept' = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $payloadZip = Join-Path $env:TRUST_METADATA_DIR 'payload.zip'
+          $closureZip = Join-Path $env:TRUST_METADATA_DIR 'closure.zip'
+          try {
+            Invoke-WebRequest -Headers $headers `
+              "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:PAYLOAD_ARTIFACT_ID/zip" `
+              -OutFile $payloadZip
+            Invoke-WebRequest -Headers $headers `
+              "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:CLOSURE_ARTIFACT_ID/zip" `
+              -OutFile $closureZip
+          } catch {
+            Write-Error '无法按 GitHub artifact ID 下载受信 payload/closure'; exit 1
+          }
+          $manifest = "release/acceptance/v$env:APP_VERSION/release-attestation.json"
+          $referenceManifest = "release/acceptance/v$env:APP_VERSION/github-acceptance-reference.json"
+          python packaging/release_integrity.py verify-github-acceptance `
+            --reference-manifest $referenceManifest `
+            --release-manifest $manifest `
+            --run-metadata (Join-Path $env:TRUST_METADATA_DIR 'acceptance-run.json') `
+            --artifacts-metadata (Join-Path $env:TRUST_METADATA_DIR 'acceptance-artifacts.json') `
+            --payload-archive $payloadZip --closure-archive $closureZip `
+            --repository $env:GITHUB_REPOSITORY `
+            --version $env:APP_VERSION --commit $env:ATTESTED_COMMIT
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error 'GitHub 受信 analysis-37 run/artifact/closure 未形成可重算闭包'
+            exit 1
+          }
       - name: 下载先前候选 run 的不可变发布资产
         uses: actions/download-artifact@v4
         with:
@@ -734,6 +895,33 @@ jobs:
           }
           $match.Groups['body'].Value.Trim() |
             Set-Content dist/RELEASE_NOTES.md -Encoding utf8NoBOM
+      - name: 发布瞬间再次校验 tag 与 origin/main 当前 HEAD
+        shell: pwsh
+        run: |
+          $mainGateRef = 'refs/release-gate/origin-main'
+          $tagGateRef = 'refs/release-gate/stable-tag'
+          $mainRefSpec = 'refs/heads/main:' + $mainGateRef
+          $tagRefSpec = 'refs/tags/' + $env:GITHUB_REF_NAME + ':' + $tagGateRef
+          git fetch --force --no-tags origin $mainRefSpec $tagRefSpec
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error '发布前无法重新读取 origin/main 与远端 tag，发布门保持关闭'
+            exit 1
+          }
+          $mainSha = (git rev-parse "$mainGateRef^{commit}").Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0) { Write-Error '无法解析最新 origin/main'; exit 1 }
+          $remoteTagSha = (git rev-parse "$tagGateRef^{commit}").Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0) { Write-Error '无法解析最新远端 tag'; exit 1 }
+          $checkoutSha = (git rev-parse 'HEAD^{commit}').Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0) { Write-Error '无法解析当前 checkout'; exit 1 }
+          $eventSha = ([string]$env:GITHUB_SHA).Trim().ToLowerInvariant()
+          if (
+            $mainSha -ne $remoteTagSha -or
+            $mainSha -ne $checkoutSha -or
+            $mainSha -ne $eventSha
+          ) {
+            Write-Error "发布瞬间身份漂移: main=$mainSha remoteTag=$remoteTagSha checkout=$checkoutSha event=$eventSha"
+            exit 1
+          }
       - name: 发布 GitHub Release（复用已验收候选原始字节）
         uses: softprops/action-gh-release@v2
         with:

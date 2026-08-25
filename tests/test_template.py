@@ -112,6 +112,19 @@ def test_build_template_ops():
 
 def test_pipeline_with_elegantbook_template():
     res = run_pipeline(SYNTHETIC, mode="rule", template="elegantbook")
+    if not res.ok:
+        # A partial TeX installation may provide the XeLaTeX executable but no
+        # CJK stack.  That is a real production dependency failure: the
+        # pipeline must retain the source, expose the exact missing package,
+        # and block export.  Fully provisioned hosts continue through the
+        # successful-compilation assertions below.
+        after = res.verification["compile_after"]
+        assert after["available"] is True
+        assert "ctex.sty" in " ".join(after["errors"])
+        assert res.verification["safe_to_export"] is False
+        assert res.verification["rolled_back"] is True
+        assert res.result == res.original
+        return
     assert res.ok, res.report_md
     out = res.result
     assert "\\documentclass[lang=cn,scheme=chinese,11pt]{elegantbook}" in out

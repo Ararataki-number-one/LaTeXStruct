@@ -116,10 +116,22 @@ _PROOF_RE = re.compile(
     re.IGNORECASE,
 )
 _PROOF_OF_TYPED_RE = re.compile(
-    r"^\s+of\s+(?:the\s+)?"
+    r"^\s+of\s+"
+    r"(?:(?:the\s+)?(?:upper|lower)\s+bound\s+(?:in|of|for)\s+)?"
+    r"(?:the\s+)?"
     r"(?:Theorem|Lemma|Proposition|Corollary|Conjecture|Claim|Fact|"
     r"Observation|Definition|Result|Question|Problem|Exercise)\b",
     re.IGNORECASE,
+)
+_INLINE_ONE_ARGUMENT_WRAPPER_RE = re.compile(
+    r"\\(?:textbf|textit|emph|textsc|textnormal|textrm|textsf|texttt|"
+    r"underline|mbox|makebox|fbox)\s*\{([^{}]*)\}"
+)
+_INLINE_TEXTCOLOR_RE = re.compile(
+    r"\\textcolor\s*\{[^{}]*\}\s*\{([^{}]*)\}"
+)
+_INLINE_HYPERREF_RE = re.compile(
+    r"\\hyperref\s*\[[^\]]*\]\s*\{([^{}]*)\}"
 )
 _CHINESE_PROOF_RE = re.compile(r"^(?:证明|证)(?P<tail>\s*(?:如下)?\s*[:：.]?.*)$")
 
@@ -385,22 +397,36 @@ def _visible_prefix(value: str) -> tuple[str, str]:
     return current, wrapper
 
 
+def _flatten_inline_presentation(value: str) -> str:
+    """Expose bounded visual/link wrappers for discovery only."""
+    current = str(value or "")
+    for _ in range(12):
+        updated = _INLINE_TEXTCOLOR_RE.sub(r"\1", current)
+        updated = _INLINE_HYPERREF_RE.sub(r"\1", updated)
+        updated = _INLINE_ONE_ARGUMENT_WRAPPER_RE.sub(r"\1", updated)
+        if updated == current:
+            break
+        current = updated
+    return current
+
+
 def _detect_heading(value: str) -> tuple[str, str, str, bool] | None:
     visible, wrapper = _visible_prefix(value)
-    proof = _PROOF_RE.match(visible)
+    classified_visible = _flatten_inline_presentation(visible)
+    proof = _PROOF_RE.match(classified_visible)
     if proof is not None:
         tail = proof.group("tail")
         if tail and not re.match(r"^\s*[.:：。]", tail) and not _PROOF_OF_TYPED_RE.match(tail):
             return None
         return "proof", proof.group("label"), "", True
-    chinese_proof = _CHINESE_PROOF_RE.match(visible)
+    chinese_proof = _CHINESE_PROOF_RE.match(classified_visible)
     if chinese_proof is not None:
         return "proof", visible[:2], "", True
 
-    match = _ENGLISH_HEADING_RE.match(visible)
+    match = _ENGLISH_HEADING_RE.match(classified_visible)
     mapping = _ENGLISH_ENV
     if match is None:
-        match = _CHINESE_HEADING_RE.match(visible)
+        match = _CHINESE_HEADING_RE.match(classified_visible)
         mapping = _CHINESE_ENV
     if match is None:
         return None

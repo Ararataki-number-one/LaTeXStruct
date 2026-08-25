@@ -350,6 +350,7 @@ def test_legacy_compile_result_remains_json_safe_and_omits_binary_pdf(monkeypatc
         "passes_requested",
         "passes_attempted",
         "passes_completed",
+        "compile_workdir",
         "input_manifest",
         "compile_input_sha256",
     }
@@ -364,6 +365,30 @@ def test_legacy_compile_result_remains_json_safe_and_omits_binary_pdf(monkeypatc
     assert result["passes_completed"] == 1
     assert "pdf_bytes" not in result
     json.dumps(result)
+
+
+def test_minimum_two_passes_share_one_private_workdir(monkeypatch):
+    workdirs = _fake_compile(
+        monkeypatch,
+        return_code=0,
+        pdf_pages=1,
+        log="Output written on main.pdf (1 page).\n",
+    )
+
+    result = compilecheck.compile_latex(
+        SIMPLE,
+        include_pdf=True,
+        minimum_passes=2,
+    )
+
+    assert result["passes_requested"] == 2
+    assert result["passes_attempted"] == 2
+    assert result["passes_completed"] == 2
+    assert len(workdirs) == 2
+    assert workdirs[0] == workdirs[1]
+    assert result["compile_workdir"].startswith(
+        compilecheck.COMPILE_WORKDIR_ID_PREFIX
+    )
 
 
 def test_compile_result_can_return_pdf_for_separate_persistence(monkeypatch):

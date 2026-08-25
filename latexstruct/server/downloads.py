@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 _INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
@@ -28,11 +28,11 @@ _DOWNLOADS_REGISTRY_VALUE = "{374DE290-123F-4565-9164-39C4925E467B}"
 
 def safe_download_filename(filename: str, default: str = "LaTeXStruct-result.tex") -> str:
     """生成单个、可移植且长度有界的文件名。"""
-    raw = Path(str(filename or "").replace("\\", "/")).name
+    raw = PurePosixPath(str(filename or "").replace("\\", "/")).name
     cleaned = _INVALID_FILENAME_RE.sub("_", raw).strip().rstrip(". ")
     if not cleaned:
         cleaned = default
-    path = Path(cleaned)
+    path = PurePosixPath(cleaned)
     suffix = path.suffix[:20]
     stem = path.stem.strip().rstrip(". ") or "LaTeXStruct-result"
     if stem.upper() in _WINDOWS_RESERVED_NAMES:
@@ -80,9 +80,19 @@ def save_unique_download(data: bytes, filename: str, *, root: Path | None = None
     """同目录完整落盘后再原子提交；同名时追加序号且永不覆盖。"""
     if not isinstance(data, bytes):
         raise TypeError("下载内容必须是 bytes")
-    target_root = _ensure_managed_root(Path(root) if root is not None else download_root())
+    # Preserve an already-resolved concrete Path.  Tests and Windows shims may
+    # temporarily patch ``os.name``; reconstructing a PosixPath through the
+    # platform Path factory at that point can incorrectly produce WindowsPath.
+    supplied_root = (
+        root
+        if isinstance(root, Path)
+        else Path(root)
+        if root is not None
+        else None
+    )
+    target_root = _ensure_managed_root(supplied_root or download_root())
     clean_name = safe_download_filename(filename)
-    clean_path = Path(clean_name)
+    clean_path = PurePosixPath(clean_name)
     stem, suffix = clean_path.stem, clean_path.suffix
 
     temporary = target_root / f".latexstruct-{uuid.uuid4().hex}.download"

@@ -25,7 +25,7 @@ from dataclasses import fields, is_dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Dict, Literal, Optional
+from typing import Callable, Dict, Literal, Mapping, Optional
 from weakref import WeakValueDictionary
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -36,9 +36,11 @@ from pydantic import BaseModel, Field, SecretStr
 from ..config import AppConfig, load_config, save_config
 from ..core.analysis_adapter import (
     AnalysisRunArtifacts,
+    ProductionAnalysisArchiveEvidence,
     freeze_pipeline_analysis_run,
+    verify_frozen_analysis_run,
 )
-from ..core.analysis_schema import AnalysisFinalStatus, ModelBinding
+from ..core.analysis_schema import AnalysisFinalStatus, AnalysisRunSnapshot, ModelBinding
 from ..core.audit_schema import (
     ArtifactRole,
     AuditDepth,
@@ -82,6 +84,9 @@ from ..core.ocr_runtime import (
     OcrStoreError,
     OcrValidationIssue,
     OCR_TRANSCRIPTION_SYSTEM_PROMPT,
+    frozen_ocr_model_binding,
+    inspect_latex_fragment,
+    make_ocr_model_binding,
     make_page_id,
     make_run_snapshot,
     normalize_quality_tier,
@@ -90,7 +95,6 @@ from ..core.ocr_runtime import (
     progress_metrics as ocr_progress_metrics,
     public_page_state,
     quality_tier_policy,
-    inspect_latex_fragment,
     thaw_json,
     validate_ocr_batch_response,
 )
@@ -172,6 +176,79 @@ def _bump_ocr_state(job: dict) -> None:
     """递增 OCR 公开快照版本，防止旧轮询响应覆盖新的控制状态。"""
     job["state_revision"] = int(job.get("state_revision") or 0) + 1
     job["updated"] = time.time()
+
+
+def _ocr_worker_pending(job: dict) -> bool:
+    """Return whether a managed OCR worker can still touch its job files."""
+    done = job.get("_worker_done")
+    if isinstance(done, threading.Event):
+        return not done.is_set()
+    worker = job.get("_worker_thread")
+    return isinstance(worker, threading.Thread) and worker.is_alive()
+
+
+def _wait_for_ocr_worker(
+    job: dict,
+    *,
+    timeout: float | None = None,
+) -> bool:
+    """Join one managed OCR worker; intended for deterministic shutdown/tests."""
+    with _ocr_jobs_lock:
+        worker = job.get("_worker_thread")
+        done = job.get("_worker_done")
+    if not isinstance(worker, threading.Thread):
+        return True
+    if worker is threading.current_thread():
+        return False
+    worker.join(timeout=timeout)
+    return bool(
+        not worker.is_alive()
+        and (not isinstance(done, threading.Event) or done.is_set())
+    )
+
+
+def _start_managed_ocr_worker(
+    job: dict,
+    target: Callable[[], None],
+    *,
+    name: str,
+) -> threading.Thread:
+    """Start and register an OCR worker before another request can discard it."""
+    worker_done = threading.Event()
+
+    def managed_target() -> None:
+        try:
+            target()
+        finally:
+            # This is the target's final access to mutable job state.  Once the
+            # event is visible, cleanup may remove the job and its workspace.
+            with _ocr_jobs_changed:
+                job["_worker_finished_at"] = time.time()
+                _bump_ocr_state(job)
+                worker_done.set()
+                _ocr_jobs_changed.notify_all()
+
+    worker = threading.Thread(target=managed_target, daemon=True, name=name)
+    with _ocr_jobs_lock:
+        if _ocr_worker_pending(job):
+            raise RuntimeError("OCR worker is already running")
+        job["_worker_done"] = worker_done
+        job["_worker_thread"] = worker
+        _bump_ocr_state(job)
+        # Starting while holding the registry lock closes the unstarted-thread
+        # window in which a concurrent DELETE could otherwise remove the job.
+        try:
+            worker.start()
+        except BaseException:
+            # A failed OS thread start must not leave an unset event that makes
+            # the job look permanently active.  The original failure remains
+            # visible to the caller.
+            worker_done.set()
+            job.pop("_worker_done", None)
+            job.pop("_worker_thread", None)
+            _bump_ocr_state(job)
+            raise
+    return worker
 
 
 def _ocr_error_is_retryable(message: str) -> bool:
@@ -498,6 +575,46 @@ def _build_ocr_client(
     )
 
 
+def _ocr_model_binding(client: object, model_id: str, backend: str) -> dict:
+    """Return the non-secret task binding frozen into the OCR snapshot."""
+
+    normalized_backend = str(backend or "").strip().lower()
+    selected_model = str(model_id or "").strip()
+    if not selected_model:
+        raise OcrStoreError("OCR 模型绑定缺少 model_id")
+    effort = ""
+    if normalized_backend == "codex_cli":
+        from ..core.codex_cli import validate_codex_effort
+
+        effort = validate_codex_effort(
+            str(getattr(client, "reasoning_effort", "") or "")
+        )
+    try:
+        return make_ocr_model_binding(
+            model_id=selected_model,
+            api_backend=normalized_backend,
+            reasoning_effort=effort,
+        )
+    except ValueError as exc:
+        raise OcrStoreError(str(exc)) from exc
+
+
+def _frozen_ocr_model_binding(snapshot: object) -> dict:
+    """Read and validate the exact OCR task binding from an immutable snapshot."""
+
+    try:
+        return frozen_ocr_model_binding(snapshot)
+    except ValueError as exc:
+        raise OcrStoreError(str(exc)) from exc
+
+
+def _codex_model_selector_from_snapshot(model_id: object) -> str:
+    """Restore an empty CLI selector without passing the display sentinel."""
+
+    value = str(model_id or "").strip()
+    return "" if value == "codex-cli-default" else value
+
+
 def _restore_ocr_recovery_telemetry(
     job: dict,
     store: OcrRunStore,
@@ -640,6 +757,7 @@ def _public_ocr_job(job: dict) -> dict:
             job.get("status") in OCR_ACTIVE_STATUSES
             or bool(job.get("importing"))
             or bool(job.get("saving"))
+            or _ocr_worker_pending(job)
         )
         retry_available = (
             not job_busy
@@ -4758,7 +4876,13 @@ def _analysis_v2_live_candidate_page_map(
 
 
 def _analysis_v2_client_bindings(cfg: AppConfig) -> tuple[dict, dict, dict[str, str]]:
-    """Bind each v2 role to the explicitly selected backend, with no fallback."""
+    """Bind each v2 task to its frozen backend lane, with no fallback.
+
+    The optional triage model is deliberately scoped to the initial
+    ``structure-findings`` operation (AI-1).  Every mathematical, visual,
+    repair, independent-review, and adjudication operation remains on the
+    primary binding.
+    """
     from ..core.ai import LLMClient
 
     backend = str(cfg.analysis_backend or "").strip().lower()
@@ -4767,19 +4891,32 @@ def _analysis_v2_client_bindings(cfg: AppConfig) -> tuple[dict, dict, dict[str, 
     if backend == "codex_cli":
         from ..core.codex_cli import CodexCLIClient
 
-        def codex_client():
+        def codex_client(model: str, reasoning_effort: str):
             return CodexCLIClient(
-                model=cfg.codex_model,
-                reasoning_effort=cfg.codex_reasoning_effort,
+                model=model,
+                reasoning_effort=reasoning_effort,
             )
 
-        decide_client = codex_client()
-        review_client = codex_client()
-        vision_client = codex_client()
-        model = str(decide_client.cfg.model or "configured-codex")
-        model_ids = {role: model for role in (
-            "AI-1", "AI-2", "AI-3", "AI-4", "AI-5", "AI-6"
-        )}
+        primary_model, primary_effort = cfg.codex_binding_for_operation(
+            "content-math-findings"
+        )
+        # AI-1 owns both discovery and the mandatory modified-page recheck.
+        # A single role client therefore cannot safely use the optional mini
+        # discovery selector in an authoritative run.
+        decide_client = codex_client(primary_model, primary_effort)
+        review_client = codex_client(primary_model, primary_effort)
+        vision_client = codex_client(primary_model, primary_effort)
+        triage_model_id = str(decide_client.cfg.model or "configured-codex")
+        primary_model_id = str(review_client.cfg.model or "configured-codex")
+        vision_model_id = str(vision_client.cfg.model or "configured-codex")
+        model_ids = {
+            "AI-1": triage_model_id,
+            "AI-2": primary_model_id,
+            "AI-3": vision_model_id,
+            "AI-4": primary_model_id,
+            "AI-5": vision_model_id,
+            "AI-6": primary_model_id,
+        }
     elif backend == "api":
         ai_cfg = cfg.to_ai_config()
         decide_client = LLMClient(ai_cfg.decide)
@@ -4808,14 +4945,20 @@ def _analysis_v2_client_bindings(cfg: AppConfig) -> tuple[dict, dict, dict[str, 
 
 
 def _analysis_v2_compiler():
-    """Return the real include-PDF compiler callback used twice by the bridge."""
-    def compiler(tex: str, *, extra_files: dict[str, bytes]):
+    """Return the compiler that performs both final passes in one workdir."""
+    def compiler(
+        tex: str,
+        *,
+        extra_files: dict[str, bytes],
+        minimum_passes: int = 2,
+    ):
         from ..core.compilecheck import compile_latex
 
         raw = dict(compile_latex(
             tex,
             extra_files=dict(extra_files),
             include_pdf=True,
+            minimum_passes=minimum_passes,
         ))
         pdf_bytes = raw.get("pdf_bytes")
         complete = bool(
@@ -4824,7 +4967,11 @@ def _analysis_v2_compiler():
             and raw.get("preview_status") == "COMPILED"
             and isinstance(pdf_bytes, (bytes, bytearray, memoryview))
             and bytes(pdf_bytes).startswith(b"%PDF-")
-            and int(raw.get("passes_completed") or 0) >= 1
+            and int(raw.get("passes_completed") or 0) >= minimum_passes
+            and isinstance(raw.get("compile_workdir"), str)
+            and str(raw.get("compile_workdir")).startswith(
+                "compile-workdir:sha256:"
+            )
         )
         if not complete:
             raw["ok"] = False
@@ -5050,6 +5197,764 @@ def _analysis_v2_fail(
     result.ok = False
 
 
+_ANALYSIS_V2_PAGE_MARKER_RE = re.compile(
+    r"(?m)^% Page (?P<page>[1-9][0-9]*)[ \t]*$"
+)
+
+
+def _analysis_v2_tex_page_regions(
+    tex: str,
+    page_numbers: tuple[int, ...],
+) -> dict[int, str]:
+    """Return the exact marker-bounded baseline region for every source page."""
+
+    markers = list(_ANALYSIS_V2_PAGE_MARKER_RE.finditer(tex))
+    by_number: dict[int, str] = {}
+    for index, match in enumerate(markers):
+        page = int(match.group("page"))
+        if page in by_number:
+            raise ValueError(f"基线 TEX 的源第 {page} 页标记重复")
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(tex)
+        by_number[page] = tex[match.start() : end]
+    missing = tuple(page for page in page_numbers if page not in by_number)
+    if missing:
+        raise ValueError(
+            "基线 TEX 缺少源页标记：" + ", ".join(str(page) for page in missing)
+        )
+    return {page: by_number[page] for page in page_numbers}
+
+
+def _analysis_v2_gray_page_metrics(page: object) -> dict[str, int]:
+    """Measure one real low-resolution render without retaining pixel bytes."""
+
+    import pymupdf
+
+    pixmap = page.get_pixmap(
+        matrix=pymupdf.Matrix(0.25, 0.25),
+        colorspace=pymupdf.csGRAY,
+        alpha=False,
+    )
+    width = int(pixmap.width)
+    height = int(pixmap.height)
+    channels = int(pixmap.n)
+    stride = int(pixmap.stride)
+    samples = bytes(pixmap.samples)
+    if width < 1 or height < 1 or channels != 1 or len(samples) < stride * height:
+        raise ValueError("v2 机器视觉预检没有得到有效灰度页")
+    pixels = width * height
+    ink = 0
+    dark = 0
+    for y in range(height):
+        row = y * stride
+        for x in range(width):
+            value = samples[row + x]
+            ink += int(value < 245)
+            dark += int(value < 32)
+    edge_indices = {
+        *(x for x in range(width)),
+        *(stride * (height - 1) + x for x in range(width)),
+        *(y * stride for y in range(1, max(1, height - 1))),
+        *(y * stride + width - 1 for y in range(1, max(1, height - 1))),
+    }
+    edge_ink = sum(samples[index] < 245 for index in edge_indices)
+    return {
+        "width": width,
+        "height": height,
+        "ink_ppm": ink * 1_000_000 // pixels,
+        "dark_ppm": dark * 1_000_000 // pixels,
+        "edge_ink_ppm": (
+            edge_ink * 1_000_000 // len(edge_indices) if edge_indices else 0
+        ),
+    }
+
+
+def _analysis_v2_page_preflight_facts(
+    *,
+    source_pdf_bytes: bytes,
+    baseline_pdf_bytes: bytes,
+    page_numbers: tuple[int, ...],
+    candidate_page_map: Mapping[int, tuple[int, ...]],
+    candidate_mapping_evidence: Mapping[str, object],
+) -> dict[int, dict[str, object]]:
+    """Run deterministic layout/map/visual checks before any analysis model call."""
+
+    from ..core.analysis_schema import canonical_json_bytes
+    from ..core.analysis_risk import PAGE_RISK_CLASSIFIER_POLICY
+
+    try:
+        import pymupdf
+
+        source_document = pymupdf.open(
+            stream=bytes(source_pdf_bytes), filetype="pdf"
+        )
+        baseline_document = pymupdf.open(
+            stream=bytes(baseline_pdf_bytes), filetype="pdf"
+        )
+    except Exception:
+        raise ValueError("v2 风险预检无法打开源 PDF 或基线 PDF") from None
+    try:
+        source_count = int(source_document.page_count)
+        candidate_count = int(baseline_document.page_count)
+        if (
+            source_count < 1
+            or candidate_count < 1
+            or page_numbers[-1] > source_count
+            or set(candidate_page_map) != set(page_numbers)
+        ):
+            raise ValueError("v2 风险预检的页范围或页映射不完整")
+        expected_map = {
+            str(page): list(candidate_page_map[page]) for page in page_numbers
+        }
+        if candidate_mapping_evidence.get("map") != expected_map:
+            raise ValueError("v2 风险预检页映射与冻结映射证据不一致")
+        mapping_sha256 = str(
+            candidate_mapping_evidence.get("mapping_sha256") or ""
+        )
+        if re.fullmatch(r"[0-9a-f]{64}", mapping_sha256) is None:
+            raise ValueError("v2 风险预检缺少冻结页映射摘要")
+
+        policy_versions = {
+            key: str(PAGE_RISK_CLASSIFIER_POLICY[key])
+            for key in (
+                "feature_extractor_version",
+                "visual_layout_algorithm_version",
+                "machine_visual_algorithm_version",
+                "compile_map_algorithm_version",
+            )
+        }
+        facts: dict[int, dict[str, object]] = {}
+        for source_page_number in page_numbers:
+            candidate_pages = tuple(candidate_page_map[source_page_number])
+            if (
+                not candidate_pages
+                or tuple(sorted(candidate_pages)) != candidate_pages
+                or len(candidate_pages) != len(set(candidate_pages))
+                or any(page < 1 or page > candidate_count for page in candidate_pages)
+            ):
+                raise ValueError(
+                    f"源第 {source_page_number} 页的候选页映射无效"
+                )
+            source_page = source_document.load_page(source_page_number - 1)
+            source_text = str(source_page.get_text("text") or "")
+            raw_blocks = source_page.get_text("blocks") or []
+            width = float(source_page.rect.width)
+            height = float(source_page.rect.height)
+            text_boxes: list[tuple[float, float, float, float]] = []
+            for raw in raw_blocks:
+                if not isinstance(raw, (list, tuple)) or len(raw) < 5:
+                    continue
+                if len(raw) > 6 and raw[6] != 0:
+                    continue
+                if not str(raw[4] or "").strip():
+                    continue
+                x0, y0, x1, y1 = (float(raw[index]) for index in range(4))
+                if x1 > x0 and y1 > y0:
+                    text_boxes.append((x0, y0, x1, y1))
+            left = [
+                box
+                for box in text_boxes
+                if box[2] <= width * 0.62 and (box[2] - box[0]) <= width * 0.60
+            ]
+            right = [
+                box
+                for box in text_boxes
+                if box[0] >= width * 0.38 and (box[2] - box[0]) <= width * 0.60
+            ]
+            vertical_overlap = 0.0
+            if left and right and height > 0:
+                left_span = (min(box[1] for box in left), max(box[3] for box in left))
+                right_span = (
+                    min(box[1] for box in right),
+                    max(box[3] for box in right),
+                )
+                vertical_overlap = max(
+                    0.0,
+                    min(left_span[1], right_span[1])
+                    - max(left_span[0], right_span[0]),
+                ) / height
+            double_column = (
+                len(left) >= 2 and len(right) >= 2 and vertical_overlap >= 0.15
+            )
+            try:
+                image_count = len(source_page.get_images(full=True))
+            except Exception:
+                image_count = 0
+            try:
+                drawing_count = len(source_page.get_drawings())
+            except Exception:
+                drawing_count = 0
+            complex_layout = bool(
+                double_column
+                or image_count > 0
+                or drawing_count >= 12
+                or len(text_boxes) >= 24
+            )
+            box_payload = [
+                [round(value, 3) for value in box] for box in sorted(text_boxes)
+            ]
+            layout_evidence = {
+                "schema": "latexstruct-source-layout-preflight-v1",
+                **policy_versions,
+                "page_width_milli_points": round(width * 1000),
+                "page_height_milli_points": round(height * 1000),
+                "text_block_count": len(text_boxes),
+                "text_boxes_sha256": hashlib.sha256(
+                    canonical_json_bytes(box_payload)
+                ).hexdigest(),
+                "left_column_block_count": len(left),
+                "right_column_block_count": len(right),
+                "column_vertical_overlap_ppm": round(vertical_overlap * 1_000_000),
+                "image_count": image_count,
+                "drawing_count": drawing_count,
+                "double_column": double_column,
+                "complex_layout": complex_layout,
+            }
+
+            source_metrics = _analysis_v2_gray_page_metrics(source_page)
+            candidate_metrics = [
+                _analysis_v2_gray_page_metrics(
+                    baseline_document.load_page(candidate_page - 1)
+                )
+                for candidate_page in candidate_pages
+            ]
+            anomalies: list[dict[str, object]] = []
+            maximum_candidate_ink = max(
+                item["ink_ppm"] for item in candidate_metrics
+            )
+            if source_metrics["ink_ppm"] >= 10_000 and maximum_candidate_ink < 1_000:
+                anomalies.append({
+                    "code": "CANDIDATE_RENDER_BLANK",
+                    "source_ink_ppm": source_metrics["ink_ppm"],
+                    "candidate_max_ink_ppm": maximum_candidate_ink,
+                })
+            if any(item["dark_ppm"] > 400_000 for item in candidate_metrics):
+                anomalies.append({
+                    "code": "CANDIDATE_RENDER_NEARLY_BLACK",
+                    "candidate_max_dark_ppm": max(
+                        item["dark_ppm"] for item in candidate_metrics
+                    ),
+                })
+            if any(item["edge_ink_ppm"] > 20_000 for item in candidate_metrics):
+                anomalies.append({
+                    "code": "CANDIDATE_CONTENT_TOUCHES_PAGE_EDGE",
+                    "candidate_max_edge_ink_ppm": max(
+                        item["edge_ink_ppm"] for item in candidate_metrics
+                    ),
+                })
+            if source_metrics["ink_ppm"] < 1_000 and maximum_candidate_ink > 30_000:
+                anomalies.append({
+                    "code": "SOURCE_BLANK_CANDIDATE_NONBLANK",
+                    "source_ink_ppm": source_metrics["ink_ppm"],
+                    "candidate_max_ink_ppm": maximum_candidate_ink,
+                })
+            anomalies.sort(key=lambda item: str(item["code"]))
+            compile_map_evidence = {
+                "schema": "latexstruct-compile-map-preflight-v1",
+                **policy_versions,
+                "mapping_sha256": mapping_sha256,
+                "source_page_number": source_page_number,
+                "candidate_page_numbers": list(candidate_pages),
+                "source_page_count": source_count,
+                "candidate_page_count": candidate_count,
+                "mapping_complete": True,
+                "mapping_in_range": True,
+                "mismatch": False,
+            }
+            facts[source_page_number] = {
+                "source_pdf_text": source_text,
+                "double_column": double_column,
+                "complex_layout": complex_layout,
+                "layout_evidence": layout_evidence,
+                "machine_visual_anomalies": tuple(anomalies),
+                "machine_visual_evidence": {
+                    "schema": "latexstruct-machine-visual-preflight-v1",
+                    **policy_versions,
+                    "render_scale_ppm": 250_000,
+                    "source": source_metrics,
+                    "candidate_pages": list(candidate_pages),
+                    "candidate": candidate_metrics,
+                    "anomaly_codes": [item["code"] for item in anomalies],
+                },
+                "compile_map_mismatch": False,
+                "compile_map_evidence": compile_map_evidence,
+            }
+        return facts
+    finally:
+        source_document.close()
+        baseline_document.close()
+
+
+def _analysis_v2_snapshot_evidence(
+    *,
+    project_dir: Path,
+    source_pdf_bytes: bytes,
+    raw_ocr_tex: str,
+    baseline_tex: str,
+    baseline_pdf_bytes: bytes,
+    compile_extra_files: dict[str, bytes] | None,
+    page_numbers: tuple[int, ...],
+    candidate_page_map: Mapping[int, tuple[int, ...]],
+    candidate_mapping_evidence: Mapping[str, object],
+    page_risk_admission_capture: dict[str, object] | None = None,
+) -> dict[str, str]:
+    """Recompute the native OCR and analysis-baseline hash closure.
+
+    The copied OCR package is treated as untrusted input: its canonical
+    manifest, exact file closure, source bytes, page range, compile inputs,
+    producer identity, and persisted project lineage are all checked here.
+    This function runs before production clients are invoked.
+    """
+
+    from ..core.analysis_risk import PageRiskPreflightInput, build_page_risk_admission
+    from ..core.analysis_schema import canonical_json_bytes
+    from ..core.analysis_adapter import stable_source_page_id
+    from ..core.analysis_recovery import (
+        RecoveryValidationError,
+        assert_plain_storage_path,
+        parse_strict_json_bytes,
+        path_is_link_or_reparse,
+    )
+    from ..core.compilecheck import build_compile_input_manifest
+    from ..core.ocr_page_evidence import FinalPageStatus, parse_page_records
+    from ..core.ocr_manifest import (
+        DEFAULT_MANIFEST_PATH,
+        ROLE_BASELINE_PDF,
+        ROLE_BASELINE_TEX,
+        ROLE_PAGE_MAP,
+        ROLE_PAGE_RECORDS,
+        ROLE_RAW_OCR_TEX,
+        ROLE_RUNTIME_PAGE_RECORDS,
+        verify_ocr_baseline_manifest,
+    )
+
+    def require_plain_path(path: Path, *, label: str) -> None:
+        if path_is_link_or_reparse(path):
+            raise ValueError(f"{label} is a link or reparse point")
+        assert_plain_storage_path(path)
+
+    # Keep the caller's lexical path chain intact.  ``resolve()`` would follow
+    # a Windows directory junction before the reparse-point check can see it.
+    project_root = Path(os.path.abspath(os.fspath(project_dir)))
+    package_root = project_root / "evidence" / "ocr-baseline"
+    try:
+        package_root.relative_to(project_root)
+    except ValueError as exc:
+        raise ValueError("OCR baseline evidence escaped the project root") from exc
+    require_plain_path(package_root, label="native OCR baseline evidence root")
+    if not package_root.is_dir():
+        raise ValueError("project has no plain native OCR baseline evidence package")
+    manifest_path = package_root.joinpath(*PurePosixPath(DEFAULT_MANIFEST_PATH).parts)
+    require_plain_path(manifest_path, label="native OCR baseline manifest")
+    if not manifest_path.is_file():
+        raise ValueError("native OCR baseline manifest is missing")
+    manifest_bytes = manifest_path.read_bytes()
+    try:
+        untrusted = parse_strict_json_bytes(
+            manifest_bytes,
+            label="native OCR baseline manifest",
+        )
+    except RecoveryValidationError as exc:
+        raise ValueError("native OCR baseline manifest is not valid JSON") from exc
+    descriptors = untrusted.get("artifacts") if isinstance(untrusted, dict) else None
+    if not isinstance(descriptors, list) or not descriptors:
+        raise ValueError("native OCR baseline manifest has no artifact closure")
+
+    artifacts: dict[str, bytes] = {}
+    expected_paths = {PurePosixPath(DEFAULT_MANIFEST_PATH).as_posix()}
+    roles: dict[str, dict] = {}
+    for descriptor in descriptors:
+        if not isinstance(descriptor, dict):
+            raise ValueError("native OCR artifact descriptor is invalid")
+        role = str(descriptor.get("role") or "")
+        logical_path = str(descriptor.get("path") or "")
+        relative = PurePosixPath(logical_path)
+        if (
+            not role
+            or role in roles
+            or not logical_path
+            or "\\" in logical_path
+            or relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            raise ValueError("native OCR artifact identity/path is unsafe or duplicate")
+        target = package_root.joinpath(*relative.parts)
+        try:
+            target.relative_to(package_root)
+        except ValueError as exc:
+            raise ValueError("native OCR artifact escaped its package root") from exc
+        require_plain_path(target, label=f"native OCR artifact {role}")
+        if not target.is_file():
+            raise ValueError(f"native OCR artifact is missing: {role}")
+        artifacts[relative.as_posix()] = target.read_bytes()
+        expected_paths.add(relative.as_posix())
+        roles[role] = descriptor
+
+    actual_paths: set[str] = set()
+    pending_directories = [package_root]
+    while pending_directories:
+        directory = pending_directories.pop()
+        require_plain_path(directory, label="native OCR evidence directory")
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as exc:
+            raise ValueError("native OCR evidence directory cannot be inspected") from exc
+        for entry in entries:
+            path = Path(entry.path)
+            require_plain_path(path, label="native OCR evidence package entry")
+            try:
+                if entry.is_file(follow_symlinks=False):
+                    actual_paths.add(path.relative_to(package_root).as_posix())
+                elif entry.is_dir(follow_symlinks=False):
+                    pending_directories.append(path)
+                else:
+                    raise ValueError(
+                        "native OCR evidence package contains a non-regular entry"
+                    )
+            except OSError as exc:
+                raise ValueError(
+                    "native OCR evidence package entry cannot be inspected"
+                ) from exc
+    if actual_paths != expected_paths:
+        raise ValueError("native OCR evidence file closure differs from its manifest")
+
+    source_hash = hashlib.sha256(bytes(source_pdf_bytes)).hexdigest()
+    verified = verify_ocr_baseline_manifest(
+        manifest_bytes,
+        artifacts,
+        expected_source_sha256=source_hash,
+    )
+    payload = verified.to_dict()
+    if payload.get("status") != {
+        "run_status": "SUCCESS",
+        "ocr_status": "COMPLETED",
+        "compile_status": "COMPILED",
+    }:
+        raise ValueError("native OCR baseline is not a successful compiled run")
+    source_facts = payload.get("source") or {}
+    if tuple(source_facts.get("selected_pages") or ()) != tuple(page_numbers):
+        raise ValueError("analysis page range differs from the native OCR snapshot")
+    bindings = payload.get("bindings") or {}
+
+    def role_hash(role: str) -> str:
+        descriptor = roles.get(role)
+        digest = str((descriptor or {}).get("sha256") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"native OCR baseline has no valid {role} digest")
+        return digest
+
+    if bindings.get("page_records") != ROLE_PAGE_RECORDS:
+        raise ValueError("native OCR page records binding is missing")
+    if bindings.get("runtime_page_records") != ROLE_RUNTIME_PAGE_RECORDS:
+        raise ValueError("native OCR runtime page records binding is missing")
+    page_records_descriptor = roles[ROLE_PAGE_RECORDS]
+    page_records_path = str(page_records_descriptor.get("path") or "")
+    page_records_bytes = artifacts.get(page_records_path)
+    if page_records_bytes is None:
+        raise ValueError("native OCR page records bytes are missing")
+    runtime_records_descriptor = roles[ROLE_RUNTIME_PAGE_RECORDS]
+    runtime_records_path = str(runtime_records_descriptor.get("path") or "")
+    runtime_records_bytes = artifacts.get(runtime_records_path)
+    if runtime_records_bytes is None:
+        raise ValueError("native OCR runtime page records bytes are missing")
+    raw_hash = role_hash(ROLE_RAW_OCR_TEX)
+    if raw_hash != hashlib.sha256(raw_ocr_tex.encode("utf-8")).hexdigest():
+        raise ValueError("project immutable raw OCR differs from the native package")
+    baseline_tex_hash = role_hash(ROLE_BASELINE_TEX)
+    baseline_pdf_hash = role_hash(ROLE_BASELINE_PDF)
+    # ``baseline_tex`` here is the current, genuinely compiled candidate handed
+    # to analysis v2.  It may already contain deterministic structure/layout
+    # edits, so it must not be conflated with the immutable native OCR baseline.
+    # The native role is bound to the persisted project source below; the
+    # current analysis baseline is independently bound by its compile-input
+    # closure at the end of this helper.
+    project_source_path = project_root / "source.tex"
+    require_plain_path(project_source_path, label="project source TEX")
+    if (
+        not project_source_path.is_file()
+        or hashlib.sha256(project_source_path.read_bytes()).hexdigest()
+        != baseline_tex_hash
+    ):
+        raise ValueError("project source TEX differs from the native OCR baseline")
+    compile_facts = payload.get("compile") or {}
+    compile_passes = compile_facts.get("passes") or []
+    if int(compile_facts.get("successful_passes") or 0) < 2 or len(compile_passes) < 2:
+        raise ValueError("native OCR baseline lacks two successful compile passes")
+    final_passes = compile_passes[-2:]
+    if any(
+        item.get("exit_code") != 0
+        or item.get("input_tex_sha256") != baseline_tex_hash
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", str(item.get("compile_input_sha256") or "")
+        )
+        for item in final_passes
+        if isinstance(item, dict)
+    ) or any(not isinstance(item, dict) for item in final_passes):
+        raise ValueError("native OCR compile-input evidence is incomplete or stale")
+    native_compile_inputs_hash = hashlib.sha256(canonical_json_bytes({
+        "schema": "latexstruct-native-ocr-compile-input-summary-v1",
+        "engine": str(compile_facts.get("engine") or ""),
+        "input_tex_sha256": str(compile_facts.get("input_tex_sha256") or ""),
+        "passes": [
+            {
+                "input_tex_sha256": item["input_tex_sha256"],
+                "compile_input_sha256": item["compile_input_sha256"],
+                "input_artifact_roles": list(item.get("input_artifact_roles") or []),
+            }
+            for item in final_passes
+        ],
+    })).hexdigest()
+    producer = payload.get("producer")
+    if not isinstance(producer, dict):
+        raise ValueError("native OCR producer/build identity is missing")
+    runtime_identity = _runtime_provenance_identity("analysis-prompts-v2")
+    if (
+        runtime_identity.get("app_version") == "unknown"
+        or runtime_identity.get("build_id") == "unknown"
+        or runtime_identity.get("commit") == "unknown"
+        or producer.get("app_version") != runtime_identity.get("app_version")
+        or producer.get("build_id") != runtime_identity.get("build_id")
+        or producer.get("git_commit") != runtime_identity.get("commit")
+    ):
+        raise ValueError(
+            "native OCR producer and current analysis executable are not the same exact build"
+        )
+    build_identity_hash = hashlib.sha256(canonical_json_bytes({
+        "schema": "latexstruct-analysis-build-identity-v1",
+        "ocr_producer": producer,
+        "analysis_runtime": runtime_identity,
+    })).hexdigest()
+
+    meta_path = project_root / "meta.json"
+    require_plain_path(meta_path, label="project metadata")
+    if not meta_path.is_file():
+        raise ValueError("project metadata is missing or corrupt")
+    try:
+        meta = parse_strict_json_bytes(
+            meta_path.read_bytes(),
+            label="project metadata",
+        )
+    except (OSError, RecoveryValidationError) as exc:
+        raise ValueError("project metadata is missing or corrupt") from exc
+    lineage = meta.get("ocr_baseline_lineage") if isinstance(meta, dict) else None
+    expected_lineage = {
+        "run_id": str(payload.get("run_id") or ""),
+        "verified": True,
+        "raw_ocr_sha256": raw_hash,
+        "baseline_tex_sha256": baseline_tex_hash,
+        "baseline_pdf_sha256": baseline_pdf_hash,
+        "baseline_manifest_sha256": verified.sha256,
+    }
+    if not isinstance(lineage, dict) or any(
+        lineage.get(key) != value for key, value in expected_lineage.items()
+    ):
+        raise ValueError("project OCR baseline lineage is missing or stale")
+
+    analysis_inputs = build_compile_input_manifest(
+        baseline_tex,
+        dict(compile_extra_files or {}),
+    )
+    main_input = next(
+        (item for item in analysis_inputs.get("files") or [] if item.get("path") == "main.tex"),
+        None,
+    )
+    if (
+        not isinstance(main_input, dict)
+        or main_input.get("sha256")
+        != hashlib.sha256(baseline_tex.encode("utf-8")).hexdigest()
+    ):
+        raise ValueError("analysis baseline compile closure does not bind its TEX bytes")
+
+    page_records_hash = role_hash(ROLE_PAGE_RECORDS)
+    if hashlib.sha256(page_records_bytes).hexdigest() != page_records_hash:
+        raise ValueError("native OCR page records bytes do not match their manifest digest")
+    records_run_id, records_source_hash, page_records = parse_page_records(
+        page_records_bytes
+    )
+    if records_run_id != str(payload.get("run_id") or ""):
+        raise ValueError("native OCR page records belong to a different run")
+    if records_source_hash != source_hash:
+        raise ValueError("native OCR page records belong to a different source PDF")
+    if tuple(record.source_page_number for record in page_records) != page_numbers:
+        raise ValueError("native OCR page records do not exactly cover the analysis page range")
+
+    runtime_records_hash = role_hash(ROLE_RUNTIME_PAGE_RECORDS)
+    if hashlib.sha256(runtime_records_bytes).hexdigest() != runtime_records_hash:
+        raise ValueError(
+            "native OCR runtime page records bytes do not match their manifest digest"
+        )
+    try:
+        runtime_wrapper = parse_strict_json_bytes(
+            runtime_records_bytes,
+            label="native OCR runtime page records",
+        )
+        raw_runtime_pages = runtime_wrapper.get("pages")
+        if (
+            not isinstance(raw_runtime_pages, list)
+            or runtime_wrapper.get("run_id") != str(payload.get("run_id") or "")
+        ):
+            raise ValueError
+        runtime_page_records = tuple(
+            OcrPageRecord.from_dict(item) for item in raw_runtime_pages
+        )
+    except (RecoveryValidationError, TypeError, ValueError):
+        raise ValueError("native OCR runtime page records are invalid") from None
+    if len(runtime_page_records) != len(page_records):
+        raise ValueError("native OCR coverage/runtime page record counts differ")
+
+    baseline_regions = _analysis_v2_tex_page_regions(baseline_tex, page_numbers)
+    preflight_facts = _analysis_v2_page_preflight_facts(
+        source_pdf_bytes=source_pdf_bytes,
+        baseline_pdf_bytes=baseline_pdf_bytes,
+        page_numbers=page_numbers,
+        candidate_page_map=candidate_page_map,
+        candidate_mapping_evidence=candidate_mapping_evidence,
+    )
+    preflight_inputs: list[PageRiskPreflightInput] = []
+    preflight_archive: list[dict[str, object]] = []
+    for selected_index, (record, runtime_record) in enumerate(
+        zip(page_records, runtime_page_records, strict=True),
+        1,
+    ):
+        if (
+            record.selected_index != selected_index
+            or record.page_id != f"ocr-page-{selected_index:06d}"
+            or record.source_sha256 != source_hash
+            or record.checks.all_pass is not True
+            or record.evidence_complete is not True
+            or record.completed is not True
+            or record.final_status is not FinalPageStatus.SUCCESS
+            or record.unresolved_region_hashes
+        ):
+            raise ValueError(
+                f"native OCR page {record.source_page_number} lacks complete SUCCESS evidence"
+            )
+        if (
+            runtime_record.task_index != selected_index
+            or runtime_record.page_id != record.page_id
+            or runtime_record.source_page != record.source_page_number
+            or runtime_record.status is not OcrPageStatus.SUCCESS
+        ):
+            raise ValueError(
+                f"native OCR runtime page {record.source_page_number} is stale"
+            )
+        page_number = record.source_page_number
+        page_id = stable_source_page_id(source_hash, page_number)
+        facts = preflight_facts[page_number]
+        candidate_ids = tuple(
+            f"candidate-page-{page:06d}" for page in candidate_page_map[page_number]
+        )
+        quality_issues = tuple(thaw_json(runtime_record.quality_issues))
+        host_quality_flags = tuple(thaw_json(runtime_record.host_quality_flags))
+        machine_visual_anomalies = tuple(facts["machine_visual_anomalies"])
+        risk_input = PageRiskPreflightInput(
+            source_page_id=page_id,
+            source_page_number=page_number,
+            source_page_object_hash=record.source_page_object_hash,
+            ocr_coverage_checks=record.checks.to_dict(),
+            unresolved_region_hashes=tuple(record.unresolved_region_hashes),
+            baseline_tex_region=baseline_regions[page_number],
+            candidate_pdf_page_ids=candidate_ids,
+            source_pdf_text=str(facts["source_pdf_text"]),
+            ocr_final_status=record.final_status.value,
+            ocr_retry_count=runtime_record.retry_count,
+            ocr_quality_issues=quality_issues,
+            host_quality_flags=host_quality_flags,
+            machine_visual_anomalies=machine_visual_anomalies,
+            double_column=bool(facts["double_column"]),
+            complex_layout=bool(facts["complex_layout"]),
+            compile_map_mismatch=bool(facts["compile_map_mismatch"]),
+            layout_evidence=facts["layout_evidence"],
+            compile_map_evidence=facts["compile_map_evidence"],
+        )
+        preflight_inputs.append(risk_input)
+        preflight_archive.append({
+            "source_page_id": page_id,
+            "source_page_number": page_number,
+            "source_page_object_hash": record.source_page_object_hash,
+            "ocr_page_id": record.page_id,
+            "ocr_coverage_checks": record.checks.to_dict(),
+            "unresolved_region_hashes": list(record.unresolved_region_hashes),
+            "ocr_final_status": record.final_status.value,
+            "ocr_retry_count": runtime_record.retry_count,
+            "ocr_quality_issues": list(quality_issues),
+            "host_quality_flags": list(host_quality_flags),
+            "candidate_pdf_page_ids": list(candidate_ids),
+            "source_pdf_text_sha256": hashlib.sha256(
+                str(facts["source_pdf_text"]).encode("utf-8")
+            ).hexdigest(),
+            "baseline_tex_region_sha256": hashlib.sha256(
+                baseline_regions[page_number].encode("utf-8")
+            ).hexdigest(),
+            "machine_visual_anomalies": list(machine_visual_anomalies),
+            "machine_visual_evidence": facts["machine_visual_evidence"],
+            "double_column": bool(facts["double_column"]),
+            "complex_layout": bool(facts["complex_layout"]),
+            "layout_evidence": facts["layout_evidence"],
+            "compile_map_mismatch": bool(facts["compile_map_mismatch"]),
+            "compile_map_evidence": facts["compile_map_evidence"],
+        })
+    risk_admission = build_page_risk_admission(
+        source_pdf_sha256=source_hash,
+        ocr_page_records_sha256=page_records_hash,
+        ocr_runtime_page_records_sha256=runtime_records_hash,
+        baseline_tex_sha256=hashlib.sha256(baseline_tex.encode("utf-8")).hexdigest(),
+        baseline_pdf_sha256=hashlib.sha256(baseline_pdf_bytes).hexdigest(),
+        page_inputs=tuple(preflight_inputs),
+    )
+    risk_admission_payload = risk_admission.to_dict()
+    risk_admission_sha256 = risk_admission.digest
+    if page_risk_admission_capture is not None:
+        page_risk_admission_capture.clear()
+        page_risk_admission_capture.update({
+            "payload": risk_admission_payload,
+            "sha256": risk_admission_sha256,
+            "strategy": risk_admission.strategy,
+            "page_count": len(risk_admission.pages),
+            "preflight_inputs": preflight_archive,
+            "typed_preflight_inputs": tuple(preflight_inputs),
+        })
+    return {
+        "ocr_baseline_manifest_hash": verified.sha256,
+        "ocr_page_records_hash": page_records_hash,
+        "ocr_runtime_page_records_hash": runtime_records_hash,
+        "ocr_page_map_hash": role_hash(ROLE_PAGE_MAP),
+        "ocr_baseline_compile_inputs_hash": native_compile_inputs_hash,
+        "baseline_compile_inputs_hash": str(analysis_inputs["manifest_sha256"]),
+        "build_identity_hash": build_identity_hash,
+        "page_risk_admission_hash": risk_admission_sha256,
+    }
+
+
+def _analysis_v2_budget_limits(project: dict) -> dict[str, int | float]:
+    """Return one exact, validated six-dimension production budget.
+
+    The project payload is an untrusted JSON boundary.  A configured budget
+    must therefore contain exactly the six snapshot fields: accepting partial
+    objects, booleans as integers, or unknown keys would make the frozen
+    budget hash describe limits other than the user supplied.
+    """
+    from ..core.analysis_budget import BudgetLimits
+
+    if "analysis_budget" not in project:
+        configured = {
+            "max_input_tokens": 0,
+            "max_output_tokens": 0,
+            "max_cost": 0.0,
+            "max_requests": 0,
+            "max_strong_model_calls": 0,
+            "max_wall_time_minutes": 120.0,
+        }
+    else:
+        configured = project["analysis_budget"]
+    if not isinstance(configured, dict):
+        raise ValueError("analysis_budget 必须是包含六项上限的 JSON 对象")
+    try:
+        limits = BudgetLimits.from_dict(configured)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"analysis_budget 无效：{exc}") from exc
+    return limits.to_dict()
+
+
 def _run_analysis_v2_production_stage(
     result,
     *,
@@ -5107,15 +6012,43 @@ def _run_analysis_v2_production_stage(
             or compile_after.get("available") is not True
             or compile_after.get("ok") is not True
             or compile_after.get("preview_status") != "COMPILED"
+            or compile_after.get("pdf_sha256") != legacy_pdf_hash
         ):
             raise ValueError("旧流水线当前候选没有通过真实 COMPILED 工件绑定")
         page_numbers = _analysis_v2_page_numbers(source_pdf_page_range)
+        from ..core.compilecheck import build_compile_input_manifest
+
+        baseline_inputs = build_compile_input_manifest(
+            legacy_tex,
+            dict(compile_extra_files or {}),
+        )
+        baseline_input_hash = str(baseline_inputs.get("manifest_sha256") or "")
+        if (
+            compile_after.get("compile_input_sha256") != baseline_input_hash
+            or preview.get("compile_input_sha256") != baseline_input_hash
+        ):
+            raise ValueError("旧流水线 COMPILED 候选的编译输入闭包缺失或已变化")
         candidate_page_map, mapping_evidence = _analysis_v2_candidate_page_map(
             legacy_verification,
             source_pdf_bytes=source_pdf_bytes,
             candidate_pdf_bytes=legacy_pdf,
             page_range=source_pdf_page_range,
         )
+        page_risk_admission: dict[str, object] = {}
+        snapshot_evidence = _analysis_v2_snapshot_evidence(
+            project_dir=project_dir,
+            source_pdf_bytes=source_pdf_bytes,
+            raw_ocr_tex=raw_ocr_tex,
+            baseline_tex=legacy_tex,
+            baseline_pdf_bytes=legacy_pdf,
+            compile_extra_files=dict(compile_extra_files or {}),
+            page_numbers=page_numbers,
+            candidate_page_map=candidate_page_map,
+            candidate_mapping_evidence=mapping_evidence,
+            page_risk_admission_capture=page_risk_admission,
+        )
+        if snapshot_evidence["baseline_compile_inputs_hash"] != baseline_input_hash:
+            raise ValueError("分析快照的基线编译输入摘要发生变化")
         text_clients, vision_clients, model_ids = _analysis_v2_client_bindings(cfg)
         compiler = _analysis_v2_compiler()
         source_alignment_count, source_alignment_texts = (
@@ -5180,6 +6113,9 @@ def _run_analysis_v2_production_stage(
             analysis_runner = run_production_analysis
         from .. import __version__
 
+        active_analysis_root = project_dir / "analysis-v2" / run_id
+        analysis_budget = _analysis_v2_budget_limits(project)
+        resume_requested = (active_analysis_root / "inputs").is_dir()
         production = analysis_runner(
             run_id=run_id,
             project_id=pid,
@@ -5194,15 +6130,146 @@ def _run_analysis_v2_production_stage(
             vision_clients=vision_clients,
             compiler=compiler,
             machine_verifier=machine_verifier,
-            candidate_root=project_dir / "analysis-v2" / run_id / "candidates",
+            candidate_root=active_analysis_root / "candidates",
             compile_extra_files=dict(compile_extra_files or {}),
+            snapshot_evidence=snapshot_evidence,
             raw_ocr_frozen=True,
+            page_risk_admission=page_risk_admission["payload"],
             application_version=__version__,
             model_ids=model_ids,
+            **analysis_budget,
+            resume=resume_requested,
         )
+        if type(production.resumed) is not bool:
+            raise ValueError("v2 恢复证据缺少严格布尔 resumed 字段")
+        if production.resumed is not resume_requested:
+            raise ValueError("v2 恢复结果与宿主请求的 resume 标志不一致")
+        budget_state = _analysis_v2_jsonable(production.budget_state)
+        raw_budget_usage = production.budget_usage
+        budget_usage_to_dict = getattr(raw_budget_usage, "to_dict", None)
+        if callable(budget_usage_to_dict):
+            raw_budget_usage = budget_usage_to_dict()
+        budget_usage = _analysis_v2_jsonable(raw_budget_usage)
+        if not isinstance(budget_state, dict) or not isinstance(budget_usage, dict):
+            raise ValueError("v2 预算状态或累计用量证据不是 JSON 对象")
+        if budget_state.get("limits") != analysis_budget:
+            raise ValueError("v2 预算状态未绑定宿主传入的六项预算")
+        if budget_state.get("usage") != budget_usage:
+            raise ValueError("v2 预算状态与归档累计用量不一致")
+        recovery_checkpoint_id = production.recovery_checkpoint_id
+        if recovery_checkpoint_id is not None and (
+            not isinstance(recovery_checkpoint_id, str)
+            or not recovery_checkpoint_id.strip()
+        ):
+            raise ValueError("v2 恢复 checkpoint 标识无效")
+        recovery_rejections = _analysis_v2_jsonable(
+            production.recovery_rejections
+        )
+        if not isinstance(recovery_rejections, list):
+            raise ValueError("v2 恢复拒绝证据必须是列表")
+        from ..core.analysis_schema import canonical_json_bytes
+
+        production_admission = production.page_risk_admission
+        admission_to_dict = getattr(production_admission, "to_dict", None)
+        if not callable(admission_to_dict):
+            raise ValueError("v2 生产结果缺少类型化页风险准入")
+        production_admission_payload = admission_to_dict()
+        if (
+            production_admission_payload != page_risk_admission["payload"]
+            or production_admission.digest != page_risk_admission["sha256"]
+            or production.snapshot.evidence_hashes is None
+            or production.snapshot.evidence_hashes.page_risk_admission_hash
+            != production_admission.digest
+        ):
+            raise ValueError("v2 生产页风险准入与宿主冻结输入不一致")
+        analysis_configuration = _analysis_v2_jsonable(
+            production.analysis_configuration
+        )
+        if not isinstance(analysis_configuration, dict):
+            raise ValueError("v2 生产分析配置不是 JSON 对象")
+        analysis_configuration_sha256 = hashlib.sha256(
+            canonical_json_bytes(analysis_configuration)
+        ).hexdigest()
+        if (
+            analysis_configuration_sha256
+            != production.analysis_configuration_sha256
+            or analysis_configuration_sha256 != production.snapshot.config_hash
+            or analysis_configuration_sha256
+            != production.snapshot.evidence_hashes.analysis_config_hash
+        ):
+            raise ValueError("v2 生产分析配置摘要未形成同一闭包")
         orchestration = production.orchestration
+        page_route_closure = orchestration.page_route_closure
+        route_to_dict = getattr(page_route_closure, "to_dict", None)
+        if not callable(route_to_dict):
+            raise ValueError("v2 生产结果缺少逐页风险路由闭包")
+        page_route_closure_payload = route_to_dict()
+        if page_route_closure.admission_sha256 != production_admission.digest:
+            raise ValueError("v2 逐页风险路由没有绑定风险准入")
+        production_page_inputs = tuple(production.page_inputs)
+        if (
+            len(production_page_inputs) != len(page_numbers)
+            or tuple(
+                item.page_unit.source_page_number for item in production_page_inputs
+            )
+            != page_numbers
+        ):
+            raise ValueError("v2 生产逐页输入没有完整覆盖冻结页范围")
+        page_inputs_payload = _analysis_v2_jsonable(production_page_inputs)
+        if not isinstance(page_inputs_payload, list):
+            raise ValueError("v2 生产逐页输入无法归档")
+        typed_risk_preflight = tuple(
+            page_risk_admission.get("typed_preflight_inputs") or ()
+        )
+        if (
+            len(typed_risk_preflight) != len(page_numbers)
+            or tuple(
+                item.source_page_number for item in typed_risk_preflight
+            )
+            != page_numbers
+        ):
+            raise ValueError("v2 类型化风险预检没有完整覆盖冻结页范围")
+        risk_preflight_payload = {
+            "schema": "latexstruct-analysis-risk-preflight-inputs-v2",
+            "source_pdf_sha256": hashlib.sha256(source_pdf_bytes).hexdigest(),
+            "baseline_tex_sha256": hashlib.sha256(
+                legacy_tex.encode("utf-8")
+            ).hexdigest(),
+            "baseline_pdf_sha256": hashlib.sha256(legacy_pdf).hexdigest(),
+            "ocr_page_records_sha256": snapshot_evidence[
+                "ocr_page_records_hash"
+            ],
+            "ocr_runtime_page_records_sha256": snapshot_evidence[
+                "ocr_runtime_page_records_hash"
+            ],
+            "inputs": list(page_risk_admission.get("preflight_inputs") or ()),
+        }
+        risk_preflight_payload["preflight_sha256"] = hashlib.sha256(
+            canonical_json_bytes(risk_preflight_payload)
+        ).hexdigest()
+        # Retain the exact in-memory production authority for the immutable
+        # archive.  The archive adapter must never reconstruct a lookalike
+        # snapshot from the later pipeline result.
+        result.analysis_v2_authoritative_snapshot = production.snapshot
+        result.analysis_v2_baseline_tex = legacy_tex
+        result.analysis_v2_baseline_pdf = legacy_pdf
+        result.analysis_v2_page_risk_admission = production_admission
+        result.analysis_v2_production_page_inputs = production_page_inputs
+        result.analysis_v2_page_route_closure = page_route_closure
+        result.analysis_v2_analysis_configuration = analysis_configuration
+        result.analysis_v2_analysis_configuration_sha256 = (
+            analysis_configuration_sha256
+        )
+        result.analysis_v2_risk_preflight = risk_preflight_payload
+        result.analysis_v2_typed_risk_preflight = typed_risk_preflight
         evidence = {
             "mapping": mapping_evidence,
+            "page_risk_admission": production_admission_payload,
+            "page_risk_preflight": risk_preflight_payload,
+            "page_inputs": page_inputs_payload,
+            "page_route_closure": page_route_closure_payload,
+            "analysis_configuration": analysis_configuration,
+            "analysis_configuration_sha256": analysis_configuration_sha256,
             "candidate_mappings": {
                 candidate_hash: {
                     **entry,
@@ -5213,7 +6280,7 @@ def _run_analysis_v2_production_stage(
                 }
                 for candidate_hash, entry in sorted(candidate_page_maps.items())
             },
-            "snapshot": _analysis_v2_jsonable(production.snapshot),
+            "snapshot": production.snapshot.to_dict(),
             "decision": _analysis_v2_jsonable(orchestration.decision),
             "verification_evidence": _analysis_v2_jsonable(orchestration.evidence),
             "best_candidate": _analysis_v2_jsonable(orchestration.best_candidate),
@@ -5225,9 +6292,21 @@ def _run_analysis_v2_production_stage(
             "transport_invocations": _analysis_v2_jsonable(
                 production.transport_invocations
             ),
+            "cache_hit_evidence": _analysis_v2_jsonable(
+                getattr(production, "cache_hit_evidence", ())
+            ),
+            "budget_state": budget_state,
+            "budget_usage": budget_usage,
+            "recovery": {
+                "resumed": production.resumed,
+                "checkpoint_id": recovery_checkpoint_id,
+                "rejections": recovery_rejections,
+            },
             "final_reviews": _analysis_v2_jsonable(orchestration.final_reviews),
             "performance": _analysis_v2_jsonable(orchestration.performance),
             "rollback_candidate_ids": list(orchestration.rollback_candidate_ids),
+            "stop_reasons": list(getattr(orchestration, "stop_reasons", ())),
+            "task_summary": dict(getattr(orchestration, "task_summary", ())),
             "machine_verification": _analysis_v2_jsonable(machine_capture),
         }
         if orchestration.decision.verified is not True:
@@ -5261,10 +6340,26 @@ def _run_analysis_v2_production_stage(
         compile_inputs = build_compile_input_manifest(
             final_tex, dict(compile_extra_files or {})
         )
-        engine = str(
-            production.compile_invocations[-1].engine
-            if production.compile_invocations else "xelatex"
+        final_compile_invocations = tuple(
+            item
+            for item in production.compile_invocations
+            if item.candidate_hash == final_tex_hash
         )
+        if not final_compile_invocations:
+            raise ValueError("v2 VERIFIED 结果缺少最终候选编译调用证据")
+        final_compile_invocation = final_compile_invocations[-1]
+        if (
+            final_compile_invocation.ok is not True
+            or final_compile_invocation.same_workdir_verified is not True
+            or final_compile_invocation.passes_requested < 2
+            or final_compile_invocation.passes_attempted < 2
+            or final_compile_invocation.passes_completed < 2
+            or final_compile_invocation.pdf_hash != final_pdf_hash
+            or final_compile_invocation.compile_input_sha256
+            != compile_inputs["manifest_sha256"]
+        ):
+            raise ValueError("v2 最终候选缺少同一 workdir 的真实连续双遍编译闭包")
+        engine = str(final_compile_invocation.engine)
         current_compile_log = str(
             getattr(production, "current_compile_log", "") or ""
         )
@@ -5287,9 +6382,11 @@ def _run_analysis_v2_production_stage(
             "return_code": 0,
             "exit_code": 0,
             "timed_out": False,
-            "passes_requested": 2,
-            "passes_attempted": 2,
-            "passes_completed": 2,
+            "passes_requested": final_compile_invocation.passes_requested,
+            "passes_attempted": final_compile_invocation.passes_attempted,
+            "passes_completed": final_compile_invocation.passes_completed,
+            "compile_workdir": final_compile_invocation.compile_workdir,
+            "same_workdir_verified": True,
             "input_manifest": compile_inputs,
             "compile_input_sha256": compile_inputs["manifest_sha256"],
         }
@@ -5485,6 +6582,7 @@ def _reserve_update_preparation():
                 if (
                     job.get("status") in OCR_ACTIVE_STATUSES
                     or job.get("importing") or job.get("saving")
+                    or _ocr_worker_pending(job)
                 ):
                     active_ocr += 1
                 elif job.get("raw_ready") or bool(job.get("usage")):
@@ -5912,6 +7010,7 @@ def _cleanup_ocr_jobs(now: float = None):
             if (
                 job.get("status") in OCR_ACTIVE_STATUSES
                 or job.get("importing") or job.get("saving")
+                or _ocr_worker_pending(job)
             ):
                 continue
             if now - job.get("created", now) < OCR_JOB_TTL_SECONDS:
@@ -6055,6 +7154,8 @@ class ConfigRequest(BaseModel):
     analysis_backend: Optional[str] = None
     codex_model: Optional[str] = None
     codex_reasoning_effort: Optional[str] = None
+    codex_triage_model: Optional[str] = None
+    codex_triage_reasoning_effort: Optional[str] = None
     decide_base_url: Optional[str] = None
     decide_model: Optional[str] = None
     decide_api_key: Optional[str] = None
@@ -8223,6 +9324,53 @@ def create_app(updated_from: str = "") -> FastAPI:
         if not isinstance(verification, dict):
             verification = {}
         pipeline_result = capture.get("pipeline_result")
+        authoritative_analysis_snapshot = getattr(
+            pipeline_result, "analysis_v2_authoritative_snapshot", None
+        )
+        if authoritative_analysis_snapshot is not None and not isinstance(
+            authoritative_analysis_snapshot, AnalysisRunSnapshot
+        ):
+            raise ValueError("production analysis snapshot authority has an invalid type")
+        production_archive_evidence = None
+        if authoritative_analysis_snapshot is not None:
+            production_archive_evidence = ProductionAnalysisArchiveEvidence(
+                snapshot=authoritative_analysis_snapshot,
+                page_risk_admission=getattr(
+                    pipeline_result, "analysis_v2_page_risk_admission", None
+                ),
+                page_inputs=tuple(
+                    getattr(
+                        pipeline_result,
+                        "analysis_v2_production_page_inputs",
+                        (),
+                    )
+                    or ()
+                ),
+                page_route_closure=getattr(
+                    pipeline_result, "analysis_v2_page_route_closure", None
+                ),
+                analysis_configuration=getattr(
+                    pipeline_result,
+                    "analysis_v2_analysis_configuration",
+                    None,
+                ),
+                analysis_configuration_sha256=str(
+                    getattr(
+                        pipeline_result,
+                        "analysis_v2_analysis_configuration_sha256",
+                        "",
+                    )
+                    or ""
+                ),
+                risk_preflight=tuple(
+                    getattr(
+                        pipeline_result,
+                        "analysis_v2_typed_risk_preflight",
+                        (),
+                    )
+                    or ()
+                ),
+            )
         is_ocr = str(snapshot.metadata.get("project_kind") or "") == "ocr"
 
         source_pdf_artifact = artifact_for(ArtifactRole.SOURCE_PDF)
@@ -8239,6 +9387,15 @@ def create_app(updated_from: str = "") -> FastAPI:
             getattr(pipeline_result, "raw_compiled_tex", "") or original_text
         )
         baseline_pdf = compiled_pdf_for(ArtifactRole.RAW_OCR_PREVIEW)
+        if authoritative_analysis_snapshot is not None:
+            baseline_tex = str(
+                getattr(pipeline_result, "analysis_v2_baseline_tex", "") or ""
+            )
+            baseline_pdf = bytes(
+                getattr(pipeline_result, "analysis_v2_baseline_pdf", b"") or b""
+            )
+            if not baseline_tex or not baseline_pdf.startswith(b"%PDF-"):
+                raise ValueError("production analysis baseline authority is incomplete")
         compile_before = verification.get("compile_before")
         compile_before = compile_before if isinstance(compile_before, dict) else {}
         compile_after = verification.get("compile_after")
@@ -8302,6 +9459,9 @@ def create_app(updated_from: str = "") -> FastAPI:
         else:
             page_count = 1
             page_range = (1,)
+        if authoritative_analysis_snapshot is not None:
+            page_count = authoritative_analysis_snapshot.page_count
+            page_range = authoritative_analysis_snapshot.page_range
 
         decision_items = [
             dict(item)
@@ -8354,6 +9514,8 @@ def create_app(updated_from: str = "") -> FastAPI:
                 str(snapshot.model or "unrecorded-model"),
                 ("artifact-freeze",),
             )]
+        if authoritative_analysis_snapshot is not None:
+            models = list(authoritative_analysis_snapshot.models)
 
         prompt_rows = provenance.get("prompts") or {}
         prompt_version = next(
@@ -8368,6 +9530,8 @@ def create_app(updated_from: str = "") -> FastAPI:
             ),
             "not-recorded",
         )
+        if authoritative_analysis_snapshot is not None:
+            prompt_version = authoritative_analysis_snapshot.prompt_version
         elapsed = max(
             0.0,
             float(capture.get("finished") or time.time())
@@ -8376,6 +9540,36 @@ def create_app(updated_from: str = "") -> FastAPI:
         v2_evidence = verification.get("v2_verification_evidence")
         if not isinstance(v2_evidence, dict):
             v2_evidence = None
+        analysis_v2_evidence = verification.get("analysis_v2")
+        recorded_performance = (
+            analysis_v2_evidence.get("performance")
+            if isinstance(analysis_v2_evidence, dict)
+            else None
+        )
+        if isinstance(recorded_performance, dict):
+            archive_performance = deepcopy(recorded_performance)
+            archive_performance["archive_source"] = (
+                "production transport and orchestration evidence"
+            )
+        else:
+            # Host timestamps alone say nothing about tokens or billing.  In
+            # particular, a failed transport may already have consumed usage,
+            # so the archive must preserve unknowns rather than write zeroes.
+            archive_performance = {
+                "available": True,
+                "elapsed_seconds": elapsed,
+                "source": "host pipeline timestamps",
+                "input_tokens": None,
+                "output_tokens": None,
+                "cached_tokens": None,
+                "total_tokens": None,
+                "usage_complete": False,
+                "cache_status": "DISABLED",
+                "cache_hits": 0,
+                "cache_misses": 0,
+                "estimated_cost_cny": None,
+                "cost_status": "UNKNOWN",
+            }
         rollback_history = []
         if verification.get("rolled_back") is True:
             rollback_history.append({
@@ -8417,11 +9611,9 @@ def create_app(updated_from: str = "") -> FastAPI:
                     (provenance.get("runtime") or {}).get("started_at")
                     or snapshot.captured_at
                 ),
-                performance_metrics={
-                    "available": True,
-                    "elapsed_seconds": elapsed,
-                    "source": "host pipeline timestamps",
-                },
+                performance_metrics=archive_performance,
+                authoritative_snapshot=authoritative_analysis_snapshot,
+                production_evidence=production_archive_evidence,
                 config={
                     "workflow": snapshot.workflow.value,
                     "terminal_status": terminal_status.value,
@@ -8430,6 +9622,21 @@ def create_app(updated_from: str = "") -> FastAPI:
                     "audit_snapshot_id": snapshot.snapshot_id,
                 },
             )
+            if not verify_frozen_analysis_run(archived.run_directory):
+                raise ValueError(
+                    "analysis archive failed immediate post-freeze hash verification"
+                )
+            if (
+                archived.verified
+                or archived.status == AnalysisFinalStatus.VERIFIED
+            ) and (
+                authoritative_analysis_snapshot is None
+                or terminal_status != TerminalStatus.SUCCESS
+            ):
+                raise ValueError(
+                    "analysis archive cannot report VERIFIED without terminal "
+                    "production snapshot authority"
+                )
             quality_path = archived.run_directory / "audit" / "quality_vector.json"
             quality = json.loads(quality_path.read_text(encoding="utf-8"))
             relative_path = PurePosixPath("analysis-runs", run_id).as_posix()
@@ -11421,7 +12628,13 @@ def create_app(updated_from: str = "") -> FastAPI:
         if resume_snapshot is not None:
             launch_cfg.analysis_backend = resume_snapshot.api_backend
             if resume_snapshot.api_backend == "codex_cli":
-                launch_cfg.codex_model = resume_snapshot.ocr_model
+                frozen_binding = _frozen_ocr_model_binding(resume_snapshot)
+                launch_cfg.codex_model = _codex_model_selector_from_snapshot(
+                    resume_snapshot.ocr_model
+                )
+                launch_cfg.codex_reasoning_effort = str(
+                    frozen_binding["reasoning_effort"]
+                )
         quality_tier = normalize_quality_tier(
             job.get("quality_tier") or quality_profile
         )
@@ -11431,7 +12644,8 @@ def create_app(updated_from: str = "") -> FastAPI:
         dpi = tier_policy.initial_dpi
         quality_profile = normalize_ocr_quality_profile(quality_profile)
         if (
-            quality_profile == OCR_QUALITY_PUBLICATION
+            resume_snapshot is None
+            and quality_profile == OCR_QUALITY_PUBLICATION
             and launch_cfg.analysis_backend == "codex_cli"
             and launch_cfg.codex_reasoning_effort == "low"
         ):
@@ -11740,7 +12954,7 @@ def create_app(updated_from: str = "") -> FastAPI:
             return message
 
         def _refresh_raw_preview(job, changed_page: int | None = None, *, force=False):
-            from ..ocr import merge_raw_ocr_book
+            from ..ocr import merge_raw_ocr_book, verified_equation_tag_evidence
 
             def page_chunk(page_no: int, page: dict) -> str:
                 page_id = str(page.get("page_id") or "")
@@ -11795,7 +13009,15 @@ def create_app(updated_from: str = "") -> FastAPI:
                     page_chunk(page_no, page)
                     for page_no, page in completed
                 ]
-                merged = merge_raw_ocr_book(chunks)
+                page_records = _ocr_manifest_page_records(job)
+                merged = merge_raw_ocr_book(
+                    chunks,
+                    outline=list(job.get("source_outline") or []),
+                    selected_pages=[page_no for page_no, _page in completed],
+                    equation_tag_evidence=verified_equation_tag_evidence(
+                        page_records
+                    ),
+                )
                 previous = str(job.get("raw_tex") or "")
                 job["raw_tex"] = merged
                 job["raw_ready"] = bool(chunks)
@@ -14387,7 +15609,7 @@ def create_app(updated_from: str = "") -> FastAPI:
 
         def _finalize_v2_ocr(store, snapshot):
             from ..core.ocr_baseline import compile_ocr_baseline
-            from ..ocr import merge_raw_ocr_book
+            from ..ocr import merge_raw_ocr_book, verified_equation_tag_evidence
 
             with _ocr_jobs_lock:
                 job["phase"] = "正在核验逐页八项覆盖并冻结 OCR 原稿"
@@ -14398,9 +15620,22 @@ def create_app(updated_from: str = "") -> FastAPI:
             figure_assets, figure_manifest = store.materialize_figure_assets(
                 snapshot.run_id
             )
+            page_records = _ocr_manifest_page_records(job)
+            frozen_outline = [dict(item) for item in thaw_json(snapshot.bookmarks)]
+            frozen_pages = tuple(snapshot.selected_pages)
+            equation_evidence = verified_equation_tag_evidence(page_records)
+
+            def build_raw_document(fragments):
+                return merge_raw_ocr_book(
+                    fragments,
+                    outline=frozen_outline,
+                    selected_pages=frozen_pages,
+                    equation_tag_evidence=equation_evidence,
+                )
+
             raw_manifest = store.freeze_raw_ocr(
                 snapshot.run_id,
-                document_builder=merge_raw_ocr_book,
+                document_builder=build_raw_document,
                 model_usage=job.get("usage") or {},
                 merge_version="2.0.0",
                 figure_manifest=figure_manifest,
@@ -14541,10 +15776,25 @@ def create_app(updated_from: str = "") -> FastAPI:
             if job.get("provider_blocked"):
                 retry_cfg = deepcopy(get_config())
                 retry_cfg.analysis_backend = snapshot.api_backend
+                frozen_binding = _frozen_ocr_model_binding(snapshot)
+                if snapshot.api_backend == "codex_cli":
+                    retry_cfg.codex_model = _codex_model_selector_from_snapshot(
+                        snapshot.ocr_model
+                    )
+                    retry_cfg.codex_reasoning_effort = str(
+                        frozen_binding["reasoning_effort"]
+                    )
                 refreshed, selected_model, selected_backend = _build_ocr_client(
                     retry_cfg, "", snapshot.ocr_model, ""
                 )
-                if selected_model != snapshot.ocr_model or selected_backend != snapshot.api_backend:
+                refreshed_binding = _ocr_model_binding(
+                    refreshed, selected_model, selected_backend
+                )
+                if (
+                    selected_model != snapshot.ocr_model
+                    or selected_backend != snapshot.api_backend
+                    or refreshed_binding != frozen_binding
+                ):
                     raise OcrStoreError("当前模型设置与不可变 OCR 任务不一致")
                 client = refreshed
                 with _ocr_jobs_lock:
@@ -14590,6 +15840,9 @@ def create_app(updated_from: str = "") -> FastAPI:
                 client, selected_model, backend = _build_ocr_client(
                     launch_cfg, base_url, model, api_key,
                 )
+                selected_model_binding = _ocr_model_binding(
+                    client, selected_model, backend
+                )
                 from .. import __version__
                 from ..core.ocr_pipeline import (
                     classify_source_pages,
@@ -14634,6 +15887,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                     "page_strategies": classification_pages,
                     "verification_model": selected_model,
                     "strong_model": selected_model,
+                    "model_bindings": [selected_model_binding],
                     "prompt_version": _ocr_prompt_version(),
                     "response_schema_version": "latexstruct-ocr-page-response-v2",
                     "git_commit": producer_commit,
@@ -14702,6 +15956,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 snapshot_path = store.run_dir(job["id"]) / "run-snapshot.json"
                 if snapshot_path.is_file():
                     snapshot = store.load_snapshot(job["id"])
+                    frozen_model_binding = _frozen_ocr_model_binding(snapshot)
                     stored_contract = thaw_json(snapshot.pipeline_contract)
                     stored_page_strategies = (
                         stored_contract.get("page_strategies")
@@ -14713,6 +15968,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                         or snapshot.selected_pages != tuple(page_nos)
                         or snapshot.ocr_model != selected_model
                         or snapshot.api_backend != backend
+                        or frozen_model_binding != selected_model_binding
                         or (
                             stored_page_strategies
                             and stored_page_strategies != classification_pages
@@ -14751,6 +16007,9 @@ def create_app(updated_from: str = "") -> FastAPI:
                             "retry_dpi": tier_policy.retry_dpi,
                             "verification_dpi": 160,
                             "verification_batch_size": 4,
+                            "reasoning_effort": str(
+                                selected_model_binding["reasoning_effort"]
+                            ),
                         },
                         pipeline_contract=pipeline_contract,
                         run_id=job["id"],
@@ -15098,9 +16357,11 @@ def create_app(updated_from: str = "") -> FastAPI:
                     job["error"] = message
                     _bump_ocr_state(job)
 
-        threading.Thread(
-            target=worker, daemon=True, name=f"latexstruct-ocr-{job['id'][:12]}",
-        ).start()
+        _start_managed_ocr_worker(
+            job,
+            worker,
+            name=f"latexstruct-ocr-{job['id'][:12]}",
+        )
 
     @app.post("/api/ocr/inspect")
     async def ocr_inspect(file: list[UploadFile] = File(...)):
@@ -15242,6 +16503,7 @@ def create_app(updated_from: str = "") -> FastAPI:
                 if (
                     job.get("status") in OCR_ACTIVE_STATUSES
                     or job.get("importing") or job.get("saving")
+                    or _ocr_worker_pending(job)
                 ):
                     raise HTTPException(409, "运行中的 OCR 任务不能删除")
                 _ocr_jobs.pop(jid, None)
@@ -15439,7 +16701,11 @@ def create_app(updated_from: str = "") -> FastAPI:
                     raise HTTPException(409, "OCR 结果正在导入项目，暂时不能重试页面")
                 if job.get("saving"):
                     raise HTTPException(409, "OCR 结果正在保存，完成后再重试页面")
-                if job.get("status") in OCR_ACTIVE_STATUSES or page.get("retrying"):
+                if (
+                    job.get("status") in OCR_ACTIVE_STATUSES
+                    or page.get("retrying")
+                    or _ocr_worker_pending(job)
+                ):
                     raise HTTPException(409, "该页正在处理，请勿重复点击重试")
                 # The immutable raw artifact is the terminal OCR authority.  A
                 # recovered job intentionally has no live provider client, but
@@ -15536,7 +16802,11 @@ def create_app(updated_from: str = "") -> FastAPI:
                     raise HTTPException(409, "OCR 结果正在导入项目，暂时不能批量重试")
                 if job.get("saving"):
                     raise HTTPException(409, "OCR 结果正在保存，完成后再批量重试")
-                if job.get("status") in OCR_ACTIVE_STATUSES or job.get("retrying_failed"):
+                if (
+                    job.get("status") in OCR_ACTIVE_STATUSES
+                    or job.get("retrying_failed")
+                    or _ocr_worker_pending(job)
+                ):
                     raise HTTPException(409, "OCR 任务正在处理，请勿重复启动批量重试")
                 if job.get("raw_frozen"):
                     raise HTTPException(
@@ -15642,11 +16912,11 @@ def create_app(updated_from: str = "") -> FastAPI:
                     _bump_ocr_state(job)
                 job["_merge_job"](job)
 
-        threading.Thread(
-            target=retry_failed_worker,
-            daemon=True,
+        _start_managed_ocr_worker(
+            job,
+            retry_failed_worker,
             name=f"latexstruct-ocr-retry-{jid[:12]}",
-        ).start()
+        )
         return _public_ocr_job(job)
 
     @app.get("/api/ocr/jobs/{jid}/result")

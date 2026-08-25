@@ -447,6 +447,74 @@ class OcrTextLayerStatus(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+_OCR_MODEL_BINDING_KEYS = frozenset({
+    "role",
+    "operations",
+    "model_id",
+    "reasoning_effort",
+    "backend",
+    "capabilities",
+})
+_OCR_MODEL_OPERATION = "math-ocr-transcription"
+_OCR_MODEL_CAPABILITIES = ("vision", "math-ocr", "structured-output")
+_CODEX_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
+
+
+def make_ocr_model_binding(
+    *, model_id: str, api_backend: str, reasoning_effort: str = ""
+) -> dict[str, object]:
+    """Create the public, non-secret binding for critical mathematical OCR."""
+
+    model = str(model_id or "").strip()
+    backend = str(api_backend or "").strip().lower()
+    effort = str(reasoning_effort or "").strip().lower()
+    if not model:
+        raise ValueError("OCR model binding requires model_id")
+    if backend == "codex_cli":
+        if effort not in _CODEX_REASONING_EFFORTS:
+            raise ValueError("Codex OCR model binding requires a valid reasoning effort")
+    elif effort:
+        raise ValueError("non-Codex OCR model binding cannot declare reasoning effort")
+    return {
+        "role": "OCR",
+        "operations": [_OCR_MODEL_OPERATION],
+        "model_id": model,
+        "reasoning_effort": effort,
+        "backend": backend,
+        "capabilities": list(_OCR_MODEL_CAPABILITIES),
+    }
+
+
+def _validated_ocr_model_binding(
+    *, pipeline_contract: object, model_id: object, api_backend: object
+) -> dict[str, object]:
+    contract = thaw_json(pipeline_contract or {})
+    rows = contract.get("model_bindings") if isinstance(contract, dict) else None
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise ValueError("OCR snapshot requires exactly one model binding")
+    binding = dict(rows[0])
+    if set(binding) != _OCR_MODEL_BINDING_KEYS:
+        raise ValueError("OCR snapshot model binding fields are incomplete")
+    expected = make_ocr_model_binding(
+        model_id=str(model_id or ""),
+        api_backend=str(api_backend or ""),
+        reasoning_effort=str(binding.get("reasoning_effort") or ""),
+    )
+    if binding != expected:
+        raise ValueError("OCR snapshot model binding differs from the run identity")
+    return expected
+
+
+def frozen_ocr_model_binding(snapshot: object) -> dict[str, object]:
+    """Validate and return the task binding carried by an OCR run snapshot."""
+
+    return _validated_ocr_model_binding(
+        pipeline_contract=getattr(snapshot, "pipeline_contract", {}),
+        model_id=getattr(snapshot, "ocr_model", ""),
+        api_backend=getattr(snapshot, "api_backend", ""),
+    )
+
+
 def make_page_id(task_index: int) -> str:
     if not isinstance(task_index, int) or isinstance(task_index, bool) or not 1 <= task_index <= 999999:
         raise ValueError("OCR task_index must be an integer in 1..999999")
@@ -604,6 +672,15 @@ class OcrRunSnapshot:
                 raise ValueError(
                     "pipeline_contract page_strategies are not in stable page_id order"
                 )
+        if pipeline_contract.get("model_bindings") is not None:
+            # New snapshots bind model and effort in the immutable contract.
+            # Absence remains readable for legacy snapshots, but production
+            # resume paths reject such ambiguous Codex evidence.
+            _validated_ocr_model_binding(
+                pipeline_contract=pipeline_contract,
+                model_id=self.ocr_model,
+                api_backend=self.api_backend,
+            )
         object.__setattr__(self, "pipeline_contract", _freeze(pipeline_contract))
         object.__setattr__(self, "schema_version", OCR_RUNTIME_SCHEMA)
 
@@ -730,6 +807,15 @@ def make_run_snapshot(
     verification_dpi = int(options.get("verification_dpi", 160))
     retry_dpi = int(options.get("retry_dpi", policy.retry_dpi))
     verification_batch_size = int(options.get("verification_batch_size", 4))
+    reasoning_effort = str(
+        options.get("reasoning_effort")
+        or ("medium" if str(api_backend or "").strip().lower() == "codex_cli" else "")
+    ).strip().lower()
+    model_binding = make_ocr_model_binding(
+        model_id=str(ocr_model or ""),
+        api_backend=str(api_backend or ""),
+        reasoning_effort=reasoning_effort,
+    )
     requested_contract = dict(pipeline_contract or {})
     contract = {
         "project_id": "",
@@ -737,6 +823,7 @@ def make_run_snapshot(
         "page_strategies": [],
         "verification_model": str(ocr_model or ""),
         "strong_model": "",
+        "model_bindings": [model_binding],
         "prompt_version": "unknown",
         "response_schema_version": "latexstruct-ocr-page-response-v2",
         "git_commit": "unknown",
@@ -768,9 +855,19 @@ def make_run_snapshot(
         ),
     }
     contract.update(requested_contract)
+    frozen_binding = _validated_ocr_model_binding(
+        pipeline_contract=contract,
+        model_id=ocr_model,
+        api_backend=api_backend,
+    )
+    if frozen_binding != model_binding:
+        raise ValueError(
+            "pipeline_contract model binding differs from runtime_options"
+        )
     frozen_config = {
         "api_backend": str(api_backend or ""),
         "ocr_model": str(ocr_model or ""),
+        "reasoning_effort": reasoning_effort,
         "quality_tier": tier.value,
         "initial_dpi": initial_dpi,
         "max_retries": max_retries,

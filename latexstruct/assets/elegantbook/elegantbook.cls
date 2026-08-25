@@ -172,21 +172,39 @@
   \RequirePackage[scaled=.90]{helvet}
 \else
   \RequirePackage[no-math]{fontspec}
-  \setmainfont{TeXGyreTermesX}[
-    UprightFont = *-Regular ,
-    BoldFont = *-Bold ,
-    ItalicFont = *-Italic ,
-    BoldItalicFont = *-BoldItalic ,
-    Extension = .otf ,
-    Scale = 1.0]
-    
-  \setsansfont{texgyreheros}[
-    UprightFont = *-regular ,
-    BoldFont = *-bold ,
-    ItalicFont = *-italic ,
-    BoldItalicFont = *-bolditalic ,
-    Extension = .otf ,
-    Scale = 0.9]
+  \IfFontExistsTF{TeXGyreTermesX-Regular.otf}{
+    \setmainfont{TeXGyreTermesX}[
+      UprightFont = *-Regular ,
+      BoldFont = *-Bold ,
+      ItalicFont = *-Italic ,
+      BoldItalicFont = *-BoldItalic ,
+      Extension = .otf ,
+      Scale = 1.0]
+  }{
+    \IfFontExistsTF{TeX Gyre Termes}{
+      \setmainfont{TeX Gyre Termes}[Scale = 1.0]
+    }{
+      \ClassWarning{elegantbook}{TeX Gyre Termes is unavailable; using Latin Modern Roman}
+      \setmainfont{Latin Modern Roman}[Scale = 1.0]
+    }
+  }
+
+  \IfFontExistsTF{texgyreheros-regular.otf}{
+    \setsansfont{texgyreheros}[
+      UprightFont = *-regular ,
+      BoldFont = *-bold ,
+      ItalicFont = *-italic ,
+      BoldItalicFont = *-bolditalic ,
+      Extension = .otf ,
+      Scale = 0.9]
+  }{
+    \IfFontExistsTF{TeX Gyre Heros}{
+      \setsansfont{TeX Gyre Heros}[Scale = 0.9]
+    }{
+      \ClassWarning{elegantbook}{TeX Gyre Heros is unavailable; using Latin Modern Sans}
+      \setsansfont{Latin Modern Sans}[Scale = 0.9]
+    }
+  }
 \fi
 
 \ifdefstring{\ELEGANT@lang}{cn}{
@@ -401,10 +419,14 @@
 \RequirePackage[title,titletoc,header]{appendix}
 
 
-\RequirePackage[
-  backend=\ELEGANT@bibend,
-  citestyle=\ELEGANT@citestyle,
-  bibstyle=\ELEGANT@bibstyle]{biblatex}
+\IfFileExists{biblatex.sty}{
+  \RequirePackage[
+    backend=\ELEGANT@bibend,
+    citestyle=\ELEGANT@citestyle,
+    bibstyle=\ELEGANT@bibstyle]{biblatex}
+}{
+  \ClassWarningNoLine{elegantbook}{biblatex.sty is unavailable; bibliography commands remain unavailable}
+}
 
 \ifdefstring{\ELEGANT@lang}{cn}{
   \renewcommand{\baselinestretch}{1.3}
@@ -889,7 +911,13 @@
 %%define the 
 %%definition theorem postulate axiom corollary lemma proposition 
 %%and proof environment
-\RequirePackage{pifont,manfnt,bbding}
+\RequirePackage{pifont,manfnt}
+\IfFileExists{bbding.sty}{
+  \RequirePackage{bbding}
+}{
+  \ClassWarningNoLine{elegantbook}{bbding.sty is unavailable; using a neutral list marker}
+  \providecommand{\SquareShadowBottomRight}{\ensuremath{\square}}
+}
 \RequirePackage[many]{tcolorbox}
 % \newlength{\normalparindent}
 % \setlength{\normalparindent}{\parindent}
@@ -1229,7 +1257,13 @@
     \end{multicols}
   \end{tcolorbox}}
 
-\RequirePackage{adforn}
+\IfFileExists{adforn.sty}{
+  \RequirePackage{adforn}
+}{
+  \ClassWarningNoLine{elegantbook}{adforn.sty is unavailable; using neutral problem-set ornaments}
+  \providecommand{\adftripleflourishleft}{\textasteriskcentered}
+  \providecommand{\adftripleflourishright}{\textasteriskcentered}
+}
 
 \newenvironment{problemset}[1][\xchaptertitle~\exercisename]{
   \vspace*{10pt}

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import re
 import socket
@@ -18,7 +19,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Collection, Dict, List, Optional, Tuple
+from typing import Any, Collection, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
 from ..providers import api_provider
@@ -47,6 +48,67 @@ MIN_AI_CONFIDENCE = AUTO_APPLY_CONFIDENCE
 
 class LLMError(Exception):
     pass
+
+
+def _usage_alias_value(
+    usage: Mapping[str, Any],
+    *names: str,
+) -> tuple[int | None, bool]:
+    """Return one strict non-negative integer shared by all present aliases."""
+
+    values = [usage[name] for name in names if name in usage]
+    if not values:
+        return None, True
+    if any(type(value) is not int or value < 0 for value in values):
+        return None, False
+    if len(set(values)) != 1:
+        return None, False
+    return int(values[0]), True
+
+
+def _transport_usage_complete(usage: Mapping[str, Any]) -> bool:
+    """Whether one actual transport attempt has a closed token account.
+
+    Cached-token counts are optional and mean zero when omitted. Input and
+    output counts are never inferred. A supplied total must equal their sum.
+    Production revalidates this flag instead of trusting client metadata.
+    """
+
+    input_tokens, input_valid = _usage_alias_value(
+        usage, "input_tokens", "prompt_tokens"
+    )
+    output_tokens, output_valid = _usage_alias_value(
+        usage, "output_tokens", "completion_tokens"
+    )
+    cached_tokens, cached_valid = _usage_alias_value(
+        usage, "cached_input_tokens", "cached_tokens"
+    )
+    details = usage.get("prompt_tokens_details")
+    if details is not None:
+        if not isinstance(details, Mapping):
+            cached_valid = False
+        elif "cached_tokens" in details:
+            nested, nested_valid = _usage_alias_value(details, "cached_tokens")
+            if not nested_valid:
+                cached_valid = False
+            elif cached_tokens is not None and cached_tokens != nested:
+                cached_valid = False
+            else:
+                cached_tokens = nested
+    total_tokens, total_valid = _usage_alias_value(usage, "total_tokens")
+    if (
+        input_tokens is None
+        or output_tokens is None
+        or not input_valid
+        or not output_valid
+        or not cached_valid
+        or not total_valid
+    ):
+        return False
+    cached_tokens = 0 if cached_tokens is None else cached_tokens
+    if cached_tokens > input_tokens:
+        return False
+    return total_tokens is None or total_tokens == input_tokens + output_tokens
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -105,6 +167,7 @@ class LLMClient:
     def __init__(self, cfg: RoleConfig):
         self.cfg = cfg
         self._usage_local = threading.local()
+        self._transport_attempts_local = threading.local()
         self.last_usage: Dict = {}
 
     @property
@@ -117,9 +180,40 @@ class LLMClient:
     def last_usage(self, value: Dict) -> None:
         self._usage_local.value = dict(value) if isinstance(value, dict) else {}
 
+    @property
+    def last_transport_attempts(self) -> Tuple[Dict[str, Any], ...]:
+        """Actual sends made by the current caller's latest logical call."""
+
+        return tuple(
+            copy.deepcopy(item)
+            for item in getattr(self._transport_attempts_local, "value", ())
+        )
+
+    def _reset_transport_attempts(self) -> None:
+        self._transport_attempts_local.value = []
+
+    def _record_transport_attempt(
+        self,
+        *,
+        succeeded: bool,
+        usage: Mapping[str, Any] | None,
+        failure_stage: str = "",
+    ) -> None:
+        records = list(getattr(self._transport_attempts_local, "value", ()))
+        raw_usage = dict(usage) if isinstance(usage, Mapping) else {}
+        records.append({
+            "attempt_number": len(records) + 1,
+            "succeeded": bool(succeeded),
+            "usage": copy.deepcopy(raw_usage),
+            "usage_complete": _transport_usage_complete(raw_usage),
+            "failure_stage": str(failure_stage or ""),
+        })
+        self._transport_attempts_local.value = records
+
     def chat_json(self, system: str, user: str) -> Tuple[dict, Dict]:
         """返回 (解析后的 JSON 对象, usage)。失败抛出 LLMError。"""
         self.last_usage = {}
+        self._reset_transport_attempts()
         payload = {
             "model": self.cfg.model,
             "messages": [
@@ -157,6 +251,7 @@ class LLMClient:
     def chat_vision(self, system: str, user_text: str, image_data_uri: str) -> str:
         """视觉模型调用（OCR 转写）：返回模型文本。"""
         self.last_usage = {}
+        self._reset_transport_attempts()
         payload = {
             "model": self.cfg.model,
             "messages": [
@@ -199,6 +294,7 @@ class LLMClient:
             + base64.b64encode(payload_bytes).decode("ascii")
         )
         self.last_usage = {}
+        self._reset_transport_attempts()
         payload = {
             "model": self.cfg.model,
             "messages": [
@@ -258,6 +354,7 @@ class LLMClient:
             })
         content.append({"type": "text", "text": user_text})
         self.last_usage = {}
+        self._reset_transport_attempts()
         payload = {
             "model": self.cfg.model,
             "messages": [
@@ -341,17 +438,52 @@ class LLMClient:
                     body = resp.read().decode("utf-8")
                 raw = json.loads(body)
                 if not isinstance(raw, dict):
+                    self._record_transport_attempt(
+                        succeeded=False,
+                        usage={},
+                        failure_stage="invalid_response_envelope",
+                    )
                     raise LLMError(f"{label}失败: 响应不是 JSON 对象")
-                self.last_usage = raw.get("usage", {}) or {}
+                response_usage = raw.get("usage", {}) or {}
+                self.last_usage = (
+                    response_usage if isinstance(response_usage, dict) else {}
+                )
+                self._record_transport_attempt(
+                    succeeded=True,
+                    usage=self.last_usage,
+                )
                 return raw
             except urllib.error.HTTPError as e:
-                detail = self._describe_http_error(e)
+                try:
+                    error_body = e.read().decode("utf-8", errors="replace")
+                except Exception:  # noqa: BLE001 - diagnostic boundary
+                    error_body = ""
+                error_usage: Mapping[str, Any] = {}
+                try:
+                    error_payload = json.loads(error_body)
+                    if isinstance(error_payload, dict) and isinstance(
+                        error_payload.get("usage"), dict
+                    ):
+                        error_usage = error_payload["usage"]
+                except (TypeError, ValueError):
+                    pass
+                self._record_transport_attempt(
+                    succeeded=False,
+                    usage=error_usage,
+                    failure_stage="http_error",
+                )
+                detail = self._describe_http_error(e, body=error_body)
                 if attempt < max_retries and e.code in {408, 409, 425, 429, 500, 502, 503, 504}:
                     if retry_delay:
                         time.sleep(retry_delay)
                     continue
                 raise LLMError(f"{label}失败: {detail}") from None
             except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+                self._record_transport_attempt(
+                    succeeded=False,
+                    usage={},
+                    failure_stage="network_error",
+                )
                 detail = self._redact(str(getattr(e, "reason", e)))
                 if attempt < max_retries:
                     if retry_delay:
@@ -359,14 +491,25 @@ class LLMClient:
                     continue
                 raise LLMError(f"{label}失败: 网络错误: {detail}") from None
             except json.JSONDecodeError:
+                self._record_transport_attempt(
+                    succeeded=False,
+                    usage={},
+                    failure_stage="invalid_json",
+                )
                 raise LLMError(f"{label}失败: 服务返回了非 JSON 响应") from None
         raise LLMError(f"{label}失败: 未知错误")
 
-    def _describe_http_error(self, error: urllib.error.HTTPError) -> str:
-        try:
-            body = error.read().decode("utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            body = ""
+    def _describe_http_error(
+        self,
+        error: urllib.error.HTTPError,
+        *,
+        body: str | None = None,
+    ) -> str:
+        if body is None:
+            try:
+                body = error.read().decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                body = ""
         detail = ""
         try:
             obj = json.loads(body)

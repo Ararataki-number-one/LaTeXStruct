@@ -43,6 +43,7 @@ from latexstruct.core.analysis_schema import (
     PageUnit,
     PatchOperationKind,
     PdfRegion,
+    PerformanceTargetStatus,
     QualityVector,
     ReviewResult,
     Severity,
@@ -524,13 +525,16 @@ def test_candidate_sha256s_are_recomputable_and_tampering_is_detected(tmp_path):
 
 def _cache_key(page: str, *, current="current", role="AI-1") -> AnalysisCacheKey:
     return AnalysisCacheKey(
+        snapshot_hash=_digest("analysis-snapshot"),
         source_page_id=page,
         source_page_hash=_digest(f"source-{page}"),
         baseline_tex_region_hash=_digest(f"baseline-{page}"),
         current_tex_region_hash=_digest(current),
         current_render_hash=_digest(f"render-{page}"),
         prompt_version="prompt-v2",
+        response_schema_version="analysis-response-v2",
         model_id="model-a",
+        tool_version="latexstruct-2.0.0",
         audit_role=role,
     )
 
@@ -540,6 +544,12 @@ def test_cache_change_invalidates_only_matching_page_and_role():
     p1 = _cache_key("p1")
     p2 = _cache_key("p2")
     p1_visual = _cache_key("p1", role="AI-3")
+    assert len({
+        p1.digest,
+        replace(p1, snapshot_hash=_digest("other-snapshot")).digest,
+        replace(p1, response_schema_version="analysis-response-v3").digest,
+        replace(p1, tool_version="latexstruct-2.0.1").digest,
+    }) == 4
     cache.put(p1, {"answer": [1]})
     cache.put(p2, {"answer": [2]})
     cache.put(p1_visual, {"answer": [3]})
@@ -651,7 +661,10 @@ def test_performance_metrics_use_real_coverage_and_recent_throughput():
     assert metrics.checked_pages == 10
     assert metrics.estimated_remaining_seconds == pytest.approx(10.0)
     assert metrics.cache_hit_rate == 0.5
-    assert metrics.target_met is False
+    assert metrics.benchmark_eligible is False
+    assert metrics.target_evaluated is False
+    assert metrics.target_status == PerformanceTargetStatus.NOT_EVALUATED
+    assert metrics.target_met is None
 
     for index in range(11, 21):
         tracker.record_page_completion(f"p{index}", float(index))
@@ -674,8 +687,12 @@ def test_performance_metrics_use_real_coverage_and_recent_throughput():
         blocked_issues=0,
         final_status=AnalysisFinalStatus.VERIFIED,
     )
-    assert complete.target_met is True
+    assert complete.checked_pages == 20
     assert complete.estimated_remaining_seconds == 0
+    assert complete.benchmark_eligible is False
+    assert complete.target_evaluated is False
+    assert complete.target_status == PerformanceTargetStatus.NOT_EVALUATED
+    assert complete.target_met is None
 
 
 def test_runtime_requires_exact_page_units_and_rejects_stale_best_evidence(tmp_path):

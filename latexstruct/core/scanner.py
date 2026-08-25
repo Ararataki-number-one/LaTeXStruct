@@ -55,6 +55,21 @@ SKIP_ENVS = (
        "algorithm", "algorithmic", "minipage"}
 )
 
+# A parser paragraph may start with the immutable page anchor inserted by the
+# OCR host and place the visible formal title on the following line.  That
+# layout needs a narrowly identified routing path: arbitrary ``hypertarget``
+# commands must never acquire the stronger deterministic boundary authority.
+OCR_PAGE_ANCHOR_BARE_TITLE_RULE = "ocr-page-anchor-bare-title"
+OCR_PAGE_ANCHOR_PROOF_START_RULE = "ocr-page-anchor-proof-start"
+OCR_PAGE_ANCHOR_RULE_IDS = frozenset({
+    OCR_PAGE_ANCHOR_BARE_TITLE_RULE,
+    OCR_PAGE_ANCHOR_PROOF_START_RULE,
+})
+OCR_PAGE_HYPERTARGET_RE = re.compile(
+    r"^\s*\\hypertarget\{(?P<page_id>ocr-page-\d{6})\}\{\}\s*"
+    r"(?:%[^\n]*)?$"
+)
+
 EN_MAP = {
     "Definition": "definition", "Theorem": "theorem", "Lemma": "lemma",
     "Proposition": "proposition", "Corollary": "corollary", "Remark": "remark",
@@ -277,6 +292,55 @@ class ScanResult:
     skipped: List[dict]
     stats: Dict[str, int]
     formal_inventory: Dict = field(default_factory=dict)
+
+
+def ocr_page_anchor_prefix(
+    doc: Document,
+    candidate=None,
+    *,
+    block_id: Optional[int] = None,
+    start_line: Optional[int] = None,
+) -> Optional[dict]:
+    """Return the exact host page-anchor prefix for *candidate*, if present.
+
+    The candidate must belong to one unique parser paragraph.  Before its
+    visible title, the paragraph may contain comments or blank lines, but its
+    only active source line must be the canonical six-digit OCR hypertarget.
+    This helper is intentionally reusable by the scanner, rule extender, and
+    independent legalizer so a cached ``rule_id`` is never trusted by itself.
+    """
+    if candidate is not None:
+        block_id = getattr(candidate, "block_id", None)
+        start_line = getattr(getattr(candidate, "span", None), "start_line", 0)
+    if block_id is None or not start_line:
+        return None
+    matches = [
+        block for block in doc.blocks
+        if block.id == block_id
+        and block.kind == "para"
+        and block.span.start_line < start_line <= block.span.end_line
+    ]
+    if len(matches) != 1:
+        return None
+    block = matches[0]
+    lines = doc.text.split("\n")
+    active = []
+    for line_no in range(block.span.start_line, start_line):
+        raw = lines[line_no - 1]
+        stripped = raw.strip()
+        if stripped and not stripped.startswith("%"):
+            active.append((line_no, raw))
+    if len(active) != 1:
+        return None
+    anchor_line, raw_anchor = active[0]
+    match = OCR_PAGE_HYPERTARGET_RE.fullmatch(raw_anchor)
+    if match is None:
+        return None
+    return {
+        "line": anchor_line,
+        "page_id": match.group("page_id"),
+        "block_id": block.id,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +695,11 @@ def scan(
                 and not envs & skip_envs
             )
             if patch_safe:
+                page_anchor = ocr_page_anchor_prefix(
+                    doc,
+                    block_id=block.id,
+                    start_line=anchor.start_line,
+                )
                 end_line = max(anchor.end_line, block.span.end_line)
                 next_anchor_start = next_anchor_start_by_id.get(anchor.id)
                 if next_anchor_start is not None:
@@ -659,7 +728,11 @@ def scan(
                         title_text, _multiline = _title_probe(fragment)
                         add(
                             kind="theorem-like",
-                            rule_id="formal-inventory-bare-title",
+                            rule_id=(
+                                OCR_PAGE_ANCHOR_BARE_TITLE_RULE
+                                if page_anchor is not None
+                                else "formal-inventory-bare-title"
+                            ),
                             block_id=block.id,
                             span=span,
                             title_text=title_text,
@@ -678,6 +751,13 @@ def scan(
                                 "formal_anchor_id": anchor.id,
                                 "formal_finding_id": finding.id,
                                 "source_sha256": anchor.source_sha256,
+                                **(
+                                    {
+                                        "ocr_page_anchor_line": page_anchor["line"],
+                                        "ocr_page_id": page_anchor["page_id"],
+                                    }
+                                    if page_anchor is not None else {}
+                                ),
                             },
                         )
                         made_patchable_candidate = True
@@ -689,7 +769,11 @@ def scan(
                         )
                         add(
                             kind="proof",
-                            rule_id="formal-inventory-proof-start",
+                            rule_id=(
+                                OCR_PAGE_ANCHOR_PROOF_START_RULE
+                                if page_anchor is not None
+                                else "formal-inventory-proof-start"
+                            ),
                             block_id=block.id,
                             span=span,
                             title_text=first,
@@ -707,6 +791,13 @@ def scan(
                                 "formal_anchor_id": anchor.id,
                                 "formal_finding_id": finding.id,
                                 "source_sha256": anchor.source_sha256,
+                                **(
+                                    {
+                                        "ocr_page_anchor_line": page_anchor["line"],
+                                        "ocr_page_id": page_anchor["page_id"],
+                                    }
+                                    if page_anchor is not None else {}
+                                ),
                             },
                         )
                         made_patchable_candidate = True

@@ -538,6 +538,8 @@ def compile_latex_artifact(
     text: str,
     timeout: int = 240,
     extra_files: dict = None,
+    *,
+    minimum_passes: int = 1,
 ) -> Dict:
     """Compile and return both machine state and the immutable PDF/log evidence.
 
@@ -546,6 +548,8 @@ def compile_latex_artifact(
     empty: callers may generate a line-numbered source rendering, but must not
     describe it as a LaTeX compilation.
     """
+    if type(minimum_passes) is not int or minimum_passes not in {1, 2}:
+        raise ValueError("minimum_passes must be 1 or 2")
     prepared_inputs = prepare_compile_inputs(text, extra_files)
     input_manifest = _manifest_from_prepared_inputs(prepared_inputs)
     exe = find_xelatex()
@@ -586,10 +590,13 @@ def compile_latex_artifact(
     engine_exe = exe
     fallback_notices: list[str] = []
     timed_out = False
-    passes_requested = 2 if any(
-        token in text
-        for token in ("\\tableofcontents", "\\ref{", "\\pageref{", "\\cite{")
-    ) else 1
+    passes_requested = max(
+        minimum_passes,
+        2 if any(
+            token in text
+            for token in ("\\tableofcontents", "\\ref{", "\\pageref{", "\\cite{")
+        ) else 1,
+    )
     passes_attempted = 0
     passes_completed = 0
     return_code: Optional[int] = None
@@ -783,6 +790,7 @@ def compile_latex(
     extra_files: dict = None,
     *,
     include_pdf: bool = False,
+    minimum_passes: int = 1,
 ) -> Dict:
     """Return compile evidence, optionally carrying the captured PDF bytes.
 
@@ -790,7 +798,12 @@ def compile_latex(
     long enough to persist the immutable preview separately; it removes the
     binary value before writing ``verification.json``.
     """
-    artifact = compile_latex_artifact(text, timeout=timeout, extra_files=extra_files)
+    artifact = compile_latex_artifact(
+        text,
+        timeout=timeout,
+        extra_files=extra_files,
+        minimum_passes=minimum_passes,
+    )
     result = {
         "engine": artifact["engine"],
         "available": artifact["available"],
@@ -816,6 +829,7 @@ def compile_latex(
         "passes_requested": artifact["passes_requested"],
         "passes_attempted": artifact["passes_attempted"],
         "passes_completed": artifact["passes_completed"],
+        "compile_workdir": artifact["compile_workdir"],
         "input_manifest": artifact["input_manifest"],
         "compile_input_sha256": artifact["compile_input_sha256"],
     }

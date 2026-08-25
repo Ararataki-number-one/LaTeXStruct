@@ -206,6 +206,7 @@ function AnalysisProgressDashboard({ dashboard, job, verification, onContinue })
         <span><small>当前最佳版本</small><b>{dashboard.bestVersion || "尚未形成"}</b></span>
         <span><small>已用时间</small><b>{formatProcessDuration(dashboard.elapsedSeconds)}</b></span>
         <span><small>预计剩余</small><b>{formatProcessDuration(dashboard.etaSeconds)}</b></span>
+        <span><small>600 页 / 120 分钟指标</small><b>{dashboard.performanceTargetLabel}</b></span>
       </div>
       <p className="analysis-stage-help">{dashboard.stageHelp}</p>
       {dashboard.rolledBack && (

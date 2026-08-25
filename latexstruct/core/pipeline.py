@@ -49,7 +49,13 @@ from .patch import (
 from .report import build_report
 from .review import run_review
 from .rules import RuleConfig, build_rule_decisions
-from .scanner import _declared_theorem_envs, scan
+from .scanner import (
+    OCR_PAGE_ANCHOR_BARE_TITLE_RULE,
+    OCR_PAGE_ANCHOR_PROOF_START_RULE,
+    OCR_PAGE_ANCHOR_RULE_IDS,
+    _declared_theorem_envs,
+    scan,
+)
 from .semantic_ir import build_ocr_semantic_ops
 from .verify import check_display_tag_safety, compare_braces, compare_env_balance, known_issues
 from .visual_quality import (
@@ -418,6 +424,81 @@ def _is_ocr_formal_inventory_candidate(candidate) -> bool:
     return bool(OCR_EXPLICIT_FORMAL_STYLE_RE.match(str(candidate.title_text or "")))
 
 
+def _ocr_page_inventory_binding(candidate, scan_res) -> Optional[dict]:
+    """Rebind a page-anchor candidate to one exact current formal inventory.
+
+    Scanner payloads and persisted source labels are not authority.  The
+    dedicated page-start route is eligible only when the current immutable
+    inventory contains one matching anchor and one matching missing finding,
+    with identical IDs, coordinates, block, kind, number, and source digest.
+    """
+    if getattr(candidate, "rule_id", "") not in OCR_PAGE_ANCHOR_RULE_IDS:
+        return None
+    inventory = getattr(scan_res, "formal_inventory", None)
+    if (
+        not isinstance(inventory, dict)
+        or inventory.get("schema") != "latexstruct-formal-inventory-v1"
+    ):
+        return None
+    payload = candidate.payload if isinstance(candidate.payload, dict) else {}
+    anchor_id = str(payload.get("formal_anchor_id") or "")
+    finding_id = str(payload.get("formal_finding_id") or "")
+    source_sha256 = str(payload.get("source_sha256") or "").lower()
+    if not anchor_id or not finding_id or not source_sha256:
+        return None
+    anchors = [
+        item for item in inventory.get("anchors", [])
+        if isinstance(item, dict) and item.get("id") == anchor_id
+    ]
+    findings = [
+        item for item in inventory.get("findings", [])
+        if isinstance(item, dict) and item.get("id") == finding_id
+    ]
+    if len(anchors) != 1 or len(findings) != 1:
+        return None
+    anchor, finding = anchors[0], findings[0]
+    expected_env = "proof" if candidate.kind == "proof" else candidate.env_hint
+    expected_number = (
+        "" if candidate.kind == "proof"
+        else str(payload.get("number") or "")
+    )
+    anchor_matches = (
+        anchor.get("start_line") == candidate.span.start_line
+        and anchor.get("end_line") == candidate.span.end_line
+        and anchor.get("block_id") == candidate.block_id
+        and str(anchor.get("suggested_env") or "") == expected_env
+        and str(anchor.get("original_env") or "") == ""
+        and str(anchor.get("number") or "") == expected_number
+        and str(anchor.get("source_sha256") or "").lower() == source_sha256
+        and tuple(anchor.get("in_env") or ()) == tuple(payload.get("in_env") or ())
+        and str(anchor.get("raw_text") or "") == str(payload.get("text") or "")
+    )
+    finding_matches = (
+        finding.get("kind") == "missing"
+        and finding.get("anchor_id") == anchor_id
+        and finding.get("start_line") == anchor.get("start_line")
+        and finding.get("end_line") == anchor.get("end_line")
+        and str(finding.get("original_env") or "") == ""
+        and str(finding.get("suggested_env") or "") == expected_env
+        and str(finding.get("environment_id") or "") == ""
+        and str(finding.get("source_sha256") or "").lower() == source_sha256
+    )
+    if not anchor_matches or not finding_matches:
+        return None
+    return {
+        "inventory_schema": str(inventory.get("schema") or ""),
+        "formal_anchor_id": anchor_id,
+        "formal_finding_id": finding_id,
+        "formal_source_sha256": source_sha256,
+        "formal_block_id": candidate.block_id,
+        "formal_start_line": candidate.span.start_line,
+        "formal_end_line": candidate.span.end_line,
+        "formal_env": expected_env,
+        "formal_number": expected_number,
+        "formal_rule_id": candidate.rule_id,
+    }
+
+
 def _build_ocr_semantic_anchors(
     doc,
     scan_res,
@@ -450,17 +531,28 @@ def _build_ocr_semantic_anchors(
         candidate = candidates_by_id.get(decision.candidate_id)
         if candidate is None or decision.action != "wrap" or not decision.body_span:
             continue
+        inventory_binding = None
         if candidate.kind == "theorem-like":
             if (
-                candidate.rule_id != "bare-title"
+                candidate.rule_id not in {
+                    "bare-title",
+                    OCR_PAGE_ANCHOR_BARE_TITLE_RULE,
+                }
                 or not str(candidate.payload.get("number", "") or "").strip()
             ):
                 continue
         elif candidate.kind == "proof":
-            if candidate.rule_id != "proof-start":
+            if candidate.rule_id not in {
+                "proof-start",
+                OCR_PAGE_ANCHOR_PROOF_START_RULE,
+            }:
                 continue
         else:
             continue
+        if candidate.rule_id in OCR_PAGE_ANCHOR_RULE_IDS:
+            inventory_binding = _ocr_page_inventory_binding(candidate, scan_res)
+            if inventory_binding is None:
+                continue
 
         legalize_deterministic_wrap(
             doc,
@@ -487,6 +579,10 @@ def _build_ocr_semantic_anchors(
             "env": candidate.env_hint if candidate.kind == "theorem-like" else "proof",
             "body_span": [start, end],
             "source_sha256": source_hash,
+            **(
+                {"formal_inventory_binding": inventory_binding}
+                if inventory_binding is not None else {}
+            ),
         }
         anchors.append(decision)
         locked_ids.add(candidate.id)
@@ -659,6 +755,28 @@ def _unsafe_candidate_env_reason(decision: Decision, candidate, doc=None) -> str
             return "确定性语义锚点的源范围被改写，已保守拒绝"
         if _semantic_span_hash(doc, decision.body_span) != anchor.get("source_sha256"):
             return "确定性语义锚点覆盖的源内容或数学文本已变化，已保守拒绝"
+        if candidate.rule_id in OCR_PAGE_ANCHOR_RULE_IDS:
+            binding = anchor.get("formal_inventory_binding")
+            candidate_payload = (
+                candidate.payload if isinstance(candidate.payload, dict) else {}
+            )
+            expected_number = (
+                "" if candidate.kind == "proof"
+                else str(candidate_payload.get("number") or "")
+            )
+            if not isinstance(binding, dict) or binding != {
+                "inventory_schema": "latexstruct-formal-inventory-v1",
+                "formal_anchor_id": str(candidate_payload.get("formal_anchor_id") or ""),
+                "formal_finding_id": str(candidate_payload.get("formal_finding_id") or ""),
+                "formal_source_sha256": str(candidate_payload.get("source_sha256") or "").lower(),
+                "formal_block_id": candidate.block_id,
+                "formal_start_line": candidate.span.start_line,
+                "formal_end_line": candidate.span.end_line,
+                "formal_env": "proof" if candidate.kind == "proof" else candidate.env_hint,
+                "formal_number": expected_number,
+                "formal_rule_id": candidate.rule_id,
+            }:
+                return "页首确定性语义锚点的 formal inventory 绑定已变化"
     return ""
 
 
@@ -2392,6 +2510,7 @@ def run_pipeline(
             transformed_source_text,
             result_text,
             check_body_text=ocr_semantic_lock_enabled,
+            check_heading_titles=ocr_semantic_lock_enabled,
             pack=pack,
         ),
         "known_issues": known_issues(result_text),

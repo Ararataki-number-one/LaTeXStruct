@@ -27,7 +27,7 @@ from .core.ocr_runtime import (
     first_forbidden_tex_control,
     make_page_id,
 )
-from .core.ocrstruct import encode_ocr_metadata, infer_document_kind
+from .core.ocrstruct import META_RE, encode_ocr_metadata, infer_document_kind
 from .core.parser import mask_comments, parse_latex
 
 OCR_SYSTEM_PROMPT = """你是「数学文档页面转写专家」。把给定书页图像**忠实**转写为 LaTeX 正文片段——
@@ -140,9 +140,11 @@ OCR_PREAMBLE = """\\documentclass[11pt]{__DOCUMENT_CLASS__}
 \\usepackage{amsmath}
 \\usepackage{amssymb}
 \\usepackage{amsfonts}
-\\usepackage{bbm}
+\\IfFileExists{bbm.sty}{\\usepackage{bbm}}{%
+  \\PackageWarning{latexstruct}{bbm.sty unavailable; \\string\\mathbbm remains unsupported}}
 \\usepackage{esint}
-\\usepackage{stmaryrd}
+\\IfFileExists{stmaryrd.sty}{\\usepackage{stmaryrd}}{%
+  \\PackageWarning{latexstruct}{stmaryrd.sty unavailable; stmaryrd symbols remain unsupported}}
 \\usepackage{tcolorbox}
 \\tcbuselibrary{breakable,skins}
 % Publisher-drawn text insets remain searchable text, never raster figures.
@@ -156,8 +158,10 @@ OCR_PREAMBLE = """\\documentclass[11pt]{__DOCUMENT_CLASS__}
 \\usepackage{caption}
 \\usepackage{tikz}
 \\usetikzlibrary{cd}
-\\usepackage{algorithm}
-\\usepackage{algpseudocode}
+\\IfFileExists{algorithm.sty}{\\usepackage{algorithm}}{%
+  \\PackageWarning{latexstruct}{algorithm.sty unavailable; algorithm floats remain unsupported}}
+\\IfFileExists{algpseudocode.sty}{\\usepackage{algpseudocode}}{%
+  \\PackageWarning{latexstruct}{algpseudocode.sty unavailable; pseudocode commands remain unsupported}}
 \\usepackage{hyperref}
 \\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=cyan}
 \\graphicspath{ {./images/} }
@@ -4774,7 +4778,7 @@ def verified_equation_tag_evidence(page_records: List[dict]) -> List[dict]:
         if not isinstance(record, dict):
             continue
         try:
-            page = int(record.get("page", 0))
+            page = int(record.get("page") or record.get("source_page") or 0)
         except (TypeError, ValueError):
             continue
         if page <= 0:
@@ -4835,19 +4839,55 @@ def merge_book(
     return "\n".join(parts)
 
 
-def merge_raw_ocr_book(chunks: List[str]) -> str:
+def merge_raw_ocr_book(
+    chunks: List[str],
+    *,
+    outline: List[dict] | None = None,
+    selected_pages: List[int] | tuple[int, ...] | None = None,
+    equation_tag_evidence: List[dict] | None = None,
+) -> str:
     """Wrap v2 page fragments without applying layout or structure heuristics.
 
     The immutable raw OCR may add only a compile preamble, stable host page
-    comments already present in ``chunks``, and the document terminator.  Page
-    breaks, ``\\noindent``, outline inference and TOC synthesis belong to later
-    derived candidates and must not alter raw transcription evidence.
+    comments already present in ``chunks``, one non-executable host metadata
+    comment, and the document terminator.  Page breaks, ``\\noindent`` and TOC
+    synthesis belong to later derived candidates and must not alter raw
+    transcription evidence.
+
+    The metadata is bound before the raw freeze and baseline compile.  It is
+    derived only from host-owned page identities, source outline and equation
+    evidence that has already passed the geometry/visual verifier.  Page
+    fragments remain byte-for-byte present in the wrapper.
     """
+    if any(META_RE.search(str(chunk)) for chunk in chunks):
+        raise ValueError("OCR page fragment contains a host metadata marker")
+    chunk_pages = _chunk_pages(chunks)
+    pages = list(selected_pages) if selected_pages is not None else chunk_pages
+    if selected_pages is not None and chunk_pages != pages:
+        raise ValueError("OCR raw wrapper page markers do not match selected pages")
+    selected_page_set = set(pages)
+    selected_outline = []
+    for item in list(outline or []):
+        try:
+            page = int(item.get("page", 0))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if page in selected_page_set:
+            selected_outline.append(item)
+    document_kind = infer_document_kind(selected_outline, chunks)
+    metadata = encode_ocr_metadata(
+        selected_outline,
+        document_kind,
+        pages,
+        _chunks_have_toc(chunks),
+        equation_tag_evidence=equation_tag_evidence,
+    )
     preamble = OCR_PREAMBLE.replace("__DOCUMENT_CLASS__", "article").rstrip()
     body = "\n\n".join(str(chunk).rstrip("\n") for chunk in chunks)
     return "\n".join([
         preamble,
         "% LaTeXStruct-Raw-OCR: 2.0.0 (host wrapper; page fragments unchanged)",
+        metadata,
         body,
         "\\end{document}",
         "",

@@ -21,6 +21,7 @@ from .parser import Document
 from .patch import Decision
 from .scanner import (
     BOX_ENVS,
+    OCR_PAGE_ANCHOR_RULE_IDS,
     PROOF_CONTINUE_RE,
     PROOF_END_MARKERS,
     PROOF_RE,
@@ -30,6 +31,34 @@ from .scanner import (
     _match_title,
     _semantic_view,
 )
+
+
+def _candidate_paragraph_index(doc: Document, candidate) -> int | None:
+    """Locate the candidate's paragraph without trusting a broad block match.
+
+    Normal scanner candidates retain the historical exact-start rule.  Only a
+    candidate carrying the dedicated OCR-page rule may bind by its unique
+    parser block ID, and the visible title line must still be contained in that
+    paragraph.  The independent legalizer later rechecks the source prefix.
+    """
+    if getattr(candidate, "rule_id", "") in OCR_PAGE_ANCHOR_RULE_IDS:
+        matches = [
+            index for index, block in enumerate(doc.blocks)
+            if block.id == getattr(candidate, "block_id", None)
+            and block.kind == "para"
+            and block.span.start_line
+            <= candidate.span.start_line
+            <= block.span.end_line
+        ]
+        return matches[0] if len(matches) == 1 else None
+    return next(
+        (
+            index for index, block in enumerate(doc.blocks)
+            if block.kind == "para"
+            and block.span.start_line == candidate.span.start_line
+        ),
+        None,
+    )
 
 
 def _gap_is_blank_or_ocr_comments(doc: Document, end_line: int, next_line: int) -> bool:
@@ -82,12 +111,17 @@ def _proof_terminal_end_before_structure(doc: Document, c, idx: int, proof_re) -
     from .legalize import has_proof_end_marker
 
     start = c.span.start_line
+    initial_block_id = doc.blocks[idx].id
     for block in doc.blocks[idx:]:
         if block.span.end_line < start:
             continue
         is_initial = (
             block.kind == "para"
-            and block.span.start_line == c.span.start_line
+            and (
+                block.id == initial_block_id
+                if c.rule_id in OCR_PAGE_ANCHOR_RULE_IDS
+                else block.span.start_line == c.span.start_line
+            )
         )
         if block.kind == "para" and not is_initial:
             first = _first_nonempty_line(block.text)
@@ -117,11 +151,7 @@ def _extend_proof_body(doc: Document, c, proof_re=None, continue_re=None) -> int
     continue_re = continue_re or PROOF_CONTINUE_RE
     end = c.span.end_line
     blocks = doc.blocks
-    idx = next(
-        (i for i, b in enumerate(blocks)
-         if b.kind == "para" and b.span.start_line == c.span.start_line),
-        None,
-    )
+    idx = _candidate_paragraph_index(doc, c)
     if idx is None:
         return end
     terminal_end = _proof_terminal_end_before_structure(doc, c, idx, proof_re)
@@ -187,13 +217,7 @@ def _extend_theorem_body(doc: Document, c, proof_re=None, continue_re=None) -> i
     continue_re = continue_re or PROOF_CONTINUE_RE
     end = c.span.end_line
     blocks = doc.blocks
-    idx = next(
-        (
-            i for i, block in enumerate(blocks)
-            if block.kind == "para" and block.span.start_line == c.span.start_line
-        ),
-        None,
-    )
+    idx = _candidate_paragraph_index(doc, c)
     if idx is None:
         return end
     has_body = bool(str(c.payload.get("title_remainder", "")).strip())
@@ -339,8 +363,7 @@ def build_rule_decisions(
             has_body = bool(remainder) or body_end > c.span.start_line
             can_rewrite = bool(title_line_old and title_line_new)
             keep = not ((prefix or can_rewrite) and has_body)
-            decisions.append(
-                Decision(
+            decision = Decision(
                     candidate_id=c.id,
                     action="wrap",
                     env=c.env_hint,
@@ -360,7 +383,19 @@ def build_rule_decisions(
                         "title_line_new": "" if keep else title_line_new,
                     },
                 )
-            )
+            if c.rule_id in OCR_PAGE_ANCHOR_RULE_IDS:
+                from .legalize import legalize_deterministic_wrap
+
+                legalize_deterministic_wrap(doc, decision, c)
+                error = str(getattr(decision, "_legalize_error", "") or "")
+                if error:
+                    ambiguous.append({
+                        "candidate_id": c.id,
+                        "line": c.span.start_line,
+                        "reason": error,
+                    })
+                    continue
+            decisions.append(decision)
         elif c.kind == "proof":
             strip = c.payload.get("strip_prefix", "")
             arg = c.payload.get("proof_arg", "")
@@ -371,8 +406,7 @@ def build_rule_decisions(
             has_body = bool(remainder) or body_end > c.span.start_line
             can_rewrite = bool(title_line_old and title_line_new)
             keep = not ((strip or can_rewrite) and has_body)
-            decisions.append(
-                Decision(
+            decision = Decision(
                     candidate_id=c.id,
                     action="wrap",
                     env="proof",
@@ -388,7 +422,19 @@ def build_rule_decisions(
                         "title_line_new": "" if keep else title_line_new,
                     },
                 )
-            )
+            if c.rule_id in OCR_PAGE_ANCHOR_RULE_IDS:
+                from .legalize import legalize_deterministic_wrap
+
+                legalize_deterministic_wrap(doc, decision, c)
+                error = str(getattr(decision, "_legalize_error", "") or "")
+                if error:
+                    ambiguous.append({
+                        "candidate_id": c.id,
+                        "line": c.span.start_line,
+                        "reason": error,
+                    })
+                    continue
+            decisions.append(decision)
         elif c.kind == "exercise-section":
             decisions.append(
                 Decision(

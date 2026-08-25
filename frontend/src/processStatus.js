@@ -388,7 +388,17 @@ export function formatProcessDuration(seconds) {
 }
 
 export function buildAnalysisDashboard(job = {}, verification = {}, decisions = [], info = {}) {
-  const metrics = job.performance_metrics || job.progress_metrics || job.metrics || {};
+  const analysisPerformance = verification?.analysis_v2?.performance
+    || job.result?.verification?.analysis_v2?.performance
+    || verification?.v2_verification_evidence?.performance;
+  const metrics = job.performance_metrics
+    || job.progress_metrics
+    || job.metrics
+    || analysisPerformance
+    || {};
+  const benchmarkMetrics = analysisPerformance
+    || job.performance_metrics
+    || metrics;
   const issueCounts = job.issue_counts || job.issue_summary || job.result?.issue_counts || {};
   const ledger = Array.isArray(job.issue_ledger)
     ? job.issue_ledger
@@ -429,7 +439,53 @@ export function buildAnalysisDashboard(job = {}, verification = {}, decisions = 
     (statusCounts.OPEN || 0) + (statusCounts.FIXING || 0)
       + (statusCounts.FIXED_PENDING_REVIEW || 0) + (statusCounts.REGRESSION || 0),
   ) ?? Math.max(0, found - fixed);
-  const totalPages = dashboardNumber(metrics.total_pages, job.page_count, job.total_pages, info.page_count);
+  const totalPages = dashboardNumber(
+    metrics.total_pages,
+    benchmarkMetrics.total_pages,
+    job.page_count,
+    job.total_pages,
+    info.page_count,
+  );
+  const benchmarkPageCount = 600;
+  const reportedBenchmarkPageCount = dashboardNumber(
+    benchmarkMetrics.benchmark_page_count,
+  ) ?? benchmarkPageCount;
+  const benchmarkElapsed = Number(benchmarkMetrics.elapsed_seconds);
+  const benchmarkCheckedPages = dashboardNumber(benchmarkMetrics.checked_pages);
+  const benchmarkFinalStatus = String(benchmarkMetrics.final_status || "").toUpperCase();
+  const benchmarkTotalPages = dashboardNumber(
+    benchmarkMetrics.total_pages,
+    job.page_count,
+    job.total_pages,
+    info.page_count,
+  );
+  const benchmarkScopeEligible = benchmarkTotalPages === benchmarkPageCount
+    && reportedBenchmarkPageCount === benchmarkPageCount
+    && benchmarkMetrics.benchmark_eligible === true
+    && Number(benchmarkMetrics.target_seconds) === 7200;
+  const completeBenchmarkEvidence = benchmarkScopeEligible
+    && benchmarkMetrics.available === true
+    && benchmarkCheckedPages === benchmarkPageCount
+    && Number.isFinite(benchmarkElapsed)
+    && benchmarkElapsed > 0;
+  const reportedTargetStatus = String(benchmarkMetrics.target_status || "").toUpperCase();
+  let performanceTargetStatus = "NOT_EVALUATED";
+  if (completeBenchmarkEvidence && benchmarkMetrics.target_evaluated === true) {
+    const recomputedTargetMet = benchmarkElapsed <= 7200
+      && ["VERIFIED", "COMPLETED_WITH_ISSUES"].includes(benchmarkFinalStatus);
+    const recomputedTargetStatus = recomputedTargetMet ? "PASSED" : "FAILED";
+    if (reportedTargetStatus === recomputedTargetStatus
+      && benchmarkMetrics.target_met === recomputedTargetMet) {
+      performanceTargetStatus = recomputedTargetStatus;
+    }
+  }
+  const performanceTargetLabel = performanceTargetStatus === "PASSED"
+    ? "已达到"
+    : performanceTargetStatus === "FAILED"
+      ? "未达到"
+      : benchmarkScopeEligible
+        ? "未评估（等待完整测量）"
+        : "未评估（仅完整 600 页可评）";
   const checkedPages = dashboardNumber(
     metrics.checked_pages,
     metrics.pages_checked,
@@ -481,6 +537,11 @@ export function buildAnalysisDashboard(job = {}, verification = {}, decisions = 
     stageHelp: currentPhase.help,
     round: dashboardNumber(metrics.current_round, job.current_round, job.round, job.macro_round),
     totalPages,
+    performanceTargetStatus,
+    performanceTargetMet: performanceTargetStatus === "NOT_EVALUATED"
+      ? null
+      : performanceTargetStatus === "PASSED",
+    performanceTargetLabel,
     checkedPages,
     currentPages,
     found,

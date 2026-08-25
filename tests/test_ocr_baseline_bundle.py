@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,7 +19,9 @@ from latexstruct.core.ocr_baseline import (
 )
 from latexstruct.core.ocr_artifacts import load_verified_ocr_baseline_bundle
 from latexstruct.core.ocr_manifest import (
+    ArtifactInput,
     DEFAULT_MANIFEST_PATH,
+    OcrBaselineManifestError,
     OcrBaselineManifestBundle,
     build_ocr_baseline_manifest,
 )
@@ -30,6 +34,7 @@ from latexstruct.core.ocr_runtime import (
     make_run_snapshot,
 )
 from latexstruct.server.app import (
+    _analysis_v2_snapshot_evidence,
     _persist_recomputable_ocr_baseline,
     _verified_v2_baseline_for_analysis,
 )
@@ -38,6 +43,7 @@ from tests.test_ocr_manifest import (
     RUN_ID,
     _compile_execution_metadata,
     _fixture,
+    _with_measured_compile_evidence,
 )
 
 
@@ -48,6 +54,115 @@ def _prepared_store(tmp_path: Path, *, compile_status: str = "COMPILED"):
     store = OcrRunStore(tmp_path / "runs")
     store.initialize(snapshot, inputs["source"].data)
     return store, snapshot, bundle
+
+
+def _symlink_or_skip(
+    link: Path,
+    target: Path,
+    *,
+    target_is_directory: bool,
+) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"filesystem symlink creation is unavailable: {exc}")
+
+
+def _junction_or_skip(link: Path, target: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows junction test")
+    completed = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", os.fspath(link), os.fspath(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0 or not link.exists():
+        pytest.skip("Windows junction creation is unavailable")
+
+
+def _prepared_analysis_evidence_project(tmp_path: Path, monkeypatch) -> SimpleNamespace:
+    inputs = _fixture()
+    marker_baseline = (
+        b"\\documentclass{article}\n"
+        b"\\begin{document}\n"
+        b"% Page 1\n"
+        b"Page 1 with $x_1$.\n\n"
+        b"% Page 2\n"
+        b"Page 2 with $x_2$.\n"
+        b"\\end{document}\n"
+    )
+    inputs["syntax_baseline"] = ArtifactInput(
+        "SYNTAX_BASELINE_TEX", "baseline/syntax_baseline.tex", marker_baseline
+    )
+    inputs["baseline_tex"] = ArtifactInput(
+        "BASELINE_TEX", "baseline/baseline.tex", marker_baseline
+    )
+    inputs = _with_measured_compile_evidence(inputs)
+    bundle = build_ocr_baseline_manifest(**inputs)
+    manifest = bundle.manifest.to_dict()
+    producer = manifest["producer"]
+    monkeypatch.setattr(
+        "latexstruct.server.app._runtime_provenance_identity",
+        lambda _prompt: {
+            "app_version": producer["app_version"],
+            "build_id": producer["build_id"],
+            "commit": producer["git_commit"],
+            "prompt_version": "analysis-prompts-v2",
+        },
+    )
+    project = tmp_path / "project"
+    package = project / "evidence" / "ocr-baseline"
+    for logical_path, data in bundle.files().items():
+        target = package / Path(logical_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    descriptors = {item["role"]: item for item in manifest["artifacts"]}
+
+    def artifact(role: str) -> bytes:
+        descriptor = descriptors[role]
+        return bundle.artifact_bytes()[descriptor["path"]]
+
+    raw_tex = artifact("RAW_OCR_TEX").decode("utf-8")
+    baseline_tex = artifact("BASELINE_TEX").decode("utf-8")
+    (project / "source.tex").write_bytes(artifact("BASELINE_TEX"))
+    (project / "meta.json").write_text(json.dumps({
+        "ocr_baseline_lineage": {
+            "run_id": manifest["run_id"],
+            "verified": True,
+            "raw_ocr_sha256": descriptors["RAW_OCR_TEX"]["sha256"],
+            "baseline_tex_sha256": descriptors["BASELINE_TEX"]["sha256"],
+            "baseline_pdf_sha256": descriptors["BASELINE_PDF"]["sha256"],
+            "baseline_manifest_sha256": bundle.manifest.sha256,
+        }
+    }), encoding="utf-8")
+    return SimpleNamespace(
+        artifact=artifact,
+        baseline_tex=baseline_tex,
+        bundle=bundle,
+        descriptors=descriptors,
+        manifest=manifest,
+        package=package,
+        project=project,
+        raw_tex=raw_tex,
+    )
+
+
+def _snapshot_prepared_evidence(prepared: SimpleNamespace) -> dict[str, str]:
+    return _analysis_v2_snapshot_evidence(
+        project_dir=prepared.project,
+        source_pdf_bytes=prepared.artifact("SOURCE"),
+        raw_ocr_tex=prepared.raw_tex,
+        baseline_tex=prepared.baseline_tex,
+        baseline_pdf_bytes=prepared.artifact("BASELINE_PDF"),
+        compile_extra_files={},
+        page_numbers=(1, 2),
+        candidate_page_map={1: (1,), 2: (2,)},
+        candidate_mapping_evidence={
+            "map": {"1": [1], "2": [2]},
+            "mapping_sha256": "9" * 64,
+        },
+    )
 
 
 def test_bundle_commit_is_manifest_last_and_byte_identical_reentry_is_noop(
@@ -87,6 +202,214 @@ def test_bundle_commit_is_manifest_last_and_byte_identical_reentry_is_noop(
     assert dict(loaded.artifact_bytes()) == dict(bundle.artifact_bytes())
     with pytest.raises(TypeError):
         loaded.artifacts_by_role["EXTRA"] = loaded.baseline_tex
+
+
+def test_analysis_snapshot_evidence_recomputes_package_and_rejects_tamper(
+    tmp_path, monkeypatch
+):
+    prepared = _prepared_analysis_evidence_project(tmp_path, monkeypatch)
+    artifact = prepared.artifact
+    baseline_tex = prepared.baseline_tex
+    bundle = prepared.bundle
+    descriptors = prepared.descriptors
+    package = prepared.package
+    project = prepared.project
+    raw_tex = prepared.raw_tex
+
+    risk_admission = {}
+    evidence = _analysis_v2_snapshot_evidence(
+        project_dir=project,
+        source_pdf_bytes=artifact("SOURCE"),
+        raw_ocr_tex=raw_tex,
+        baseline_tex=baseline_tex,
+        baseline_pdf_bytes=artifact("BASELINE_PDF"),
+        compile_extra_files={},
+        page_numbers=(1, 2),
+        candidate_page_map={1: (1,), 2: (2,)},
+        candidate_mapping_evidence={
+            "map": {"1": [1], "2": [2]},
+            "mapping_sha256": "9" * 64,
+        },
+        page_risk_admission_capture=risk_admission,
+    )
+    assert evidence["ocr_baseline_manifest_hash"] == bundle.manifest.sha256
+    assert evidence["ocr_page_records_hash"] == descriptors["PAGE_RECORDS"]["sha256"]
+    assert evidence["ocr_runtime_page_records_hash"] == (
+        descriptors["RUNTIME_PAGE_RECORDS"]["sha256"]
+    )
+    assert evidence["ocr_page_map_hash"] == descriptors["PAGE_MAP"]["sha256"]
+    assert evidence["page_risk_admission_hash"] == risk_admission["sha256"]
+    assert risk_admission["strategy"] == (
+        "deterministic-preflight-and-fixed-low-risk-sampling-v2"
+    )
+    assert risk_admission["page_count"] == 2
+    assert risk_admission["payload"]["schema_version"] == (
+        "latexstruct-analysis-page-risk-admission-v2"
+    )
+    assert risk_admission["payload"]["admission_sha256"] == risk_admission["sha256"]
+    assert all(
+        page["risk_level"] in {"R0", "R1", "R2", "R3"}
+        and page["risk_reasons"]
+        and page["summary"]["ocr_coverage_all_pass"] is True
+        and not page["summary"]["required_evidence_missing"]
+        and len(page["summary_sha256"]) == 64
+        for page in risk_admission["payload"]["pages"]
+    )
+
+    transformed_tex = baseline_tex + "% deterministic structure candidate\n"
+    transformed_evidence = _analysis_v2_snapshot_evidence(
+        project_dir=project,
+        source_pdf_bytes=artifact("SOURCE"),
+        raw_ocr_tex=raw_tex,
+        baseline_tex=transformed_tex,
+        baseline_pdf_bytes=artifact("BASELINE_PDF"),
+        compile_extra_files={},
+        page_numbers=(1, 2),
+        candidate_page_map={1: (1,), 2: (2,)},
+        candidate_mapping_evidence={
+            "map": {"1": [1], "2": [2]},
+            "mapping_sha256": "9" * 64,
+        },
+    )
+    assert (
+        transformed_evidence["baseline_compile_inputs_hash"]
+        != evidence["baseline_compile_inputs_hash"]
+    )
+
+    (project / "source.tex").write_bytes(artifact("BASELINE_TEX") + b"% tamper\n")
+    with pytest.raises(ValueError, match="project source TEX differs"):
+        _analysis_v2_snapshot_evidence(
+            project_dir=project,
+            source_pdf_bytes=artifact("SOURCE"),
+            raw_ocr_tex=raw_tex,
+            baseline_tex=transformed_tex,
+            baseline_pdf_bytes=artifact("BASELINE_PDF"),
+            compile_extra_files={},
+            page_numbers=(1, 2),
+            candidate_page_map={1: (1,), 2: (2,)},
+            candidate_mapping_evidence={
+                "map": {"1": [1], "2": [2]},
+                "mapping_sha256": "9" * 64,
+            },
+        )
+    (project / "source.tex").write_bytes(artifact("BASELINE_TEX"))
+
+    page_records = package / Path(descriptors["PAGE_RECORDS"]["path"])
+    page_records.write_bytes(page_records.read_bytes() + b"tamper")
+    with pytest.raises(OcrBaselineManifestError, match="mismatch"):
+        _analysis_v2_snapshot_evidence(
+            project_dir=project,
+            source_pdf_bytes=artifact("SOURCE"),
+            raw_ocr_tex=raw_tex,
+            baseline_tex=baseline_tex,
+            baseline_pdf_bytes=artifact("BASELINE_PDF"),
+            compile_extra_files={},
+            page_numbers=(1, 2),
+            candidate_page_map={1: (1,), 2: (2,)},
+            candidate_mapping_evidence={
+                "map": {"1": [1], "2": [2]},
+                "mapping_sha256": "9" * 64,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_manifest",
+    [
+        b'{"artifacts":[],"artifacts":[]}',
+        b'{"artifacts":NaN}',
+    ],
+)
+def test_analysis_snapshot_evidence_rejects_non_strict_manifest_json(
+    tmp_path: Path,
+    monkeypatch,
+    invalid_manifest: bytes,
+) -> None:
+    prepared = _prepared_analysis_evidence_project(tmp_path, monkeypatch)
+    (prepared.package / Path(DEFAULT_MANIFEST_PATH)).write_bytes(invalid_manifest)
+
+    with pytest.raises(ValueError, match="manifest is not valid JSON"):
+        _snapshot_prepared_evidence(prepared)
+
+
+@pytest.mark.parametrize(
+    "invalid_meta",
+    [
+        b'{"ocr_baseline_lineage":{},"ocr_baseline_lineage":{}}',
+        b'{"ocr_baseline_lineage":NaN}',
+    ],
+)
+def test_analysis_snapshot_evidence_rejects_non_strict_project_metadata_json(
+    tmp_path: Path,
+    monkeypatch,
+    invalid_meta: bytes,
+) -> None:
+    prepared = _prepared_analysis_evidence_project(tmp_path, monkeypatch)
+    (prepared.project / "meta.json").write_bytes(invalid_meta)
+
+    with pytest.raises(ValueError, match="project metadata is missing or corrupt"):
+        _snapshot_prepared_evidence(prepared)
+
+
+@pytest.mark.parametrize(
+    "location",
+    ["project-root", "evidence-parent", "evidence-root", "artifact"],
+)
+def test_analysis_snapshot_evidence_rejects_symlink_in_evidence_path_chain(
+    tmp_path: Path,
+    monkeypatch,
+    location: str,
+) -> None:
+    prepared = _prepared_analysis_evidence_project(tmp_path, monkeypatch)
+    if location == "project-root":
+        link = prepared.project
+    elif location == "evidence-parent":
+        link = prepared.project / "evidence"
+    elif location == "evidence-root":
+        link = prepared.package
+    else:
+        descriptor = prepared.descriptors["PAGE_RECORDS"]
+        link = prepared.package / Path(descriptor["path"])
+    external = tmp_path / f"external-{location}"
+    link.rename(external)
+    _symlink_or_skip(link, external, target_is_directory=external.is_dir())
+    try:
+        with pytest.raises(ValueError, match="link or reparse point"):
+            _snapshot_prepared_evidence(prepared)
+    finally:
+        if link.is_symlink():
+            link.unlink()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reparse-point regression")
+@pytest.mark.parametrize(
+    "location",
+    ["evidence-parent", "evidence-root", "artifact-parent"],
+)
+def test_analysis_snapshot_evidence_rejects_windows_junction_in_path_chain(
+    tmp_path: Path,
+    monkeypatch,
+    location: str,
+) -> None:
+    prepared = _prepared_analysis_evidence_project(tmp_path, monkeypatch)
+    if location == "evidence-parent":
+        junction = prepared.project / "evidence"
+    elif location == "evidence-root":
+        junction = prepared.package
+    else:
+        descriptor = prepared.descriptors["PAGE_RECORDS"]
+        junction = (prepared.package / Path(descriptor["path"])).parent
+        if junction == prepared.package:
+            pytest.skip("fixture has no nested artifact directory")
+    external = tmp_path / f"external-{location}"
+    junction.rename(external)
+    _junction_or_skip(junction, external)
+    try:
+        with pytest.raises(ValueError, match="link or reparse point"):
+            _snapshot_prepared_evidence(prepared)
+    finally:
+        if junction.exists():
+            junction.rmdir()
 
 
 @pytest.mark.parametrize(

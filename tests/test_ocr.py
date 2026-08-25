@@ -1700,17 +1700,52 @@ def test_merge_book():
 
 
 def test_merge_raw_ocr_book_keeps_page_fragments_unmodified():
+    from latexstruct.core.ocrstruct import parse_ocr_metadata
+
     first = "% Page 1\nFirst sentence ends here and"
     second = "% Page 2\ncontinuation starts in lower case."
 
-    tex = merge_raw_ocr_book([first, second])
+    evidence = {
+        "type": "equation_tag_integrity_evidence",
+        "status": "source_geometry_and_active_match",
+        "verifier": "pdf_geometry_plus_full_page_visual_and_active_latex",
+        "evidence_id": "p2-equation-tag-1",
+        "label": "1",
+        "bbox_normalized": [0.05, 0.4, 0.08, 0.43],
+        "source": "pdf_text_geometry",
+    }
+    tex = merge_raw_ocr_book(
+        [first, second],
+        outline=[{"level": 0, "title": "Introduction", "page": 1}],
+        selected_pages=(1, 2),
+        equation_tag_evidence=verified_equation_tag_evidence([
+            {"page": 2, "quality_flags": [evidence]},
+        ]),
+    )
 
     assert first in tex and second in tex
+    assert tex.count("% LaTeXStruct-OCR-Metadata:") == 1
+    metadata = parse_ocr_metadata(tex)
+    assert metadata["pages"] == [1, 2]
+    assert metadata["kind"] == "article"
+    assert metadata["outline"] == [
+        {"level": 0, "title": "Introduction", "page": 1},
+    ]
+    assert metadata["equation_tags"][0]["evidence_id"] == "p2-equation-tag-1"
     assert "\\clearpage" not in tex
     assert "\\noindent" not in tex
     assert "%=== PAGE BREAK ===" not in tex
     assert "\\tableofcontents" not in tex
     assert tex.rstrip().endswith("\\end{document}")
+
+
+def test_merge_raw_ocr_book_rejects_page_or_metadata_identity_mismatch():
+    with pytest.raises(ValueError, match="page markers"):
+        merge_raw_ocr_book(["% Page 2\nBody."], selected_pages=(1,))
+    with pytest.raises(ValueError, match="host metadata marker"):
+        merge_raw_ocr_book([
+            "% Page 1\n% LaTeXStruct-OCR-Metadata: injected\nBody.",
+        ])
 
 
 def test_merge_book_embeds_only_fully_verified_equation_evidence():
@@ -1727,7 +1762,7 @@ def test_merge_book_embeds_only_fully_verified_equation_evidence():
     }
     rejected = {**valid, "evidence_id": "unverified", "verifier": "model_guess"}
     evidence = verified_equation_tag_evidence([
-        {"page": 2, "quality_flags": [valid, rejected]},
+        {"source_page": 2, "quality_flags": [valid, rejected]},
     ])
     tex = merge_book(
         ["% Page 2\n\\begin{equation}\nx=y\\tag{1}\n\\end{equation}"],

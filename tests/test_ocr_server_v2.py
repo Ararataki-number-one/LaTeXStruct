@@ -655,6 +655,11 @@ def test_visual_fast_path_cleans_boundary_folio_before_freeze(tmp_path: Path):
             store.run_dir(snapshot.run_id) / "artifacts" / "raw-ocr.tex"
         ).read_text(encoding="utf-8")
         assert "\n37\n" not in frozen_tex
+        from latexstruct.core.ocrstruct import parse_ocr_metadata
+
+        assert frozen_tex.count("% LaTeXStruct-OCR-Metadata:") == 1
+        assert parse_ocr_metadata(frozen_tex)["pages"] == [37]
+        assert body in frozen_tex
 
         with srv._ocr_jobs_lock:
             srv._ocr_jobs.pop(jid, None)

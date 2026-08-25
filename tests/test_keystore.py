@@ -18,6 +18,10 @@ _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 _orig_path = config.CONFIG_PATH
 _CONFIG_ENV_NAMES = (
     "LATEXSTRUCT_OCR_PROVIDER", "DASHSCOPE_API_KEY",
+    "LATEXSTRUCT_ANALYSIS_BACKEND", "LATEXSTRUCT_CODEX_MODEL",
+    "LATEXSTRUCT_CODEX_REASONING_EFFORT",
+    "LATEXSTRUCT_CODEX_TRIAGE_MODEL",
+    "LATEXSTRUCT_CODEX_TRIAGE_REASONING_EFFORT",
     "LATEXSTRUCT_DECIDE_BASE_URL", "LATEXSTRUCT_REVIEW_BASE_URL",
     "LATEXSTRUCT_OCR_BASE_URL", "LATEXSTRUCT_DECIDE_MODEL",
     "LATEXSTRUCT_REVIEW_MODEL", "LATEXSTRUCT_OCR_MODEL",
@@ -506,6 +510,8 @@ def test_codex_analysis_settings_roundtrip_into_ai_config():
                 analysis_backend="codex_cli",
                 codex_model="openai/gpt-5.4",
                 codex_reasoning_effort="xhigh",
+                codex_triage_model="gpt-5.4-mini",
+                codex_triage_reasoning_effort="high",
                 keyring=False,
             )
             config.save_config(cfg, backend=FakeBackend())
@@ -513,6 +519,8 @@ def test_codex_analysis_settings_roundtrip_into_ai_config():
             assert on_disk["analysis_backend"] == "codex_cli"
             assert on_disk["codex_model"] == "openai/gpt-5.4"
             assert on_disk["codex_reasoning_effort"] == "xhigh"
+            assert on_disk["codex_triage_model"] == "gpt-5.4-mini"
+            assert on_disk["codex_triage_reasoning_effort"] == "high"
 
             loaded = config.load_config(backend=FakeBackend())
             ai_cfg = loaded.to_ai_config()
@@ -520,6 +528,94 @@ def test_codex_analysis_settings_roundtrip_into_ai_config():
             assert ai_cfg.analysis_backend == "codex_cli"
             assert ai_cfg.codex_model == "openai/gpt-5.4"
             assert ai_cfg.codex_reasoning_effort == "xhigh"
+            assert loaded.codex_binding_for_operation("structure-findings") == (
+                "gpt-5.4-mini",
+                "high",
+            )
+    finally:
+        _restore(tmp)
+
+
+def test_codex_environment_overrides_are_runtime_only():
+    tmp = _tmp()
+    try:
+        stored = {
+            "analysis_backend": "api",
+            "codex_model": "",
+            "codex_reasoning_effort": "medium",
+            "codex_triage_model": "",
+            "codex_triage_reasoning_effort": "",
+            "keyring": False,
+        }
+        with open(config.CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(stored, f)
+        with _isolated_env(
+            LATEXSTRUCT_ANALYSIS_BACKEND="codex_cli",
+            LATEXSTRUCT_CODEX_MODEL="gpt-5.4",
+            LATEXSTRUCT_CODEX_REASONING_EFFORT="high",
+            LATEXSTRUCT_CODEX_TRIAGE_MODEL="gpt-5.4-mini",
+            LATEXSTRUCT_CODEX_TRIAGE_REASONING_EFFORT="high",
+        ):
+            loaded = config.load_config(backend=FakeBackend())
+            assert loaded.analysis_backend == "codex_cli"
+            assert loaded.codex_model == "gpt-5.4"
+            assert loaded.codex_reasoning_effort == "high"
+            assert loaded.codex_triage_model == "gpt-5.4-mini"
+            assert loaded.codex_triage_reasoning_effort == "high"
+            assert all(loaded._env_resolved.get(field) for field in (
+                "analysis_backend",
+                "codex_model",
+                "codex_reasoning_effort",
+                "codex_triage_model",
+                "codex_triage_reasoning_effort",
+            ))
+            assert loaded.to_ocr_config().backend == "codex_cli"
+            assert loaded.to_ai_config().analysis_backend == "codex_cli"
+            config.save_config(loaded, backend=FakeBackend(), secret_updates={})
+
+        on_disk = json.loads(open(config.CONFIG_PATH, encoding="utf-8").read())
+        assert on_disk["analysis_backend"] == "api"
+        assert on_disk["codex_model"] == ""
+        assert on_disk["codex_reasoning_effort"] == "medium"
+        assert on_disk["codex_triage_model"] == ""
+        assert on_disk["codex_triage_reasoning_effort"] == ""
+    finally:
+        _restore(tmp)
+
+
+def test_invalid_codex_environment_overrides_are_rejected():
+    tmp = _tmp()
+    try:
+        cases = (
+            (
+                {"LATEXSTRUCT_ANALYSIS_BACKEND": "automatic-fallback"},
+                "ANALYSIS_BACKEND",
+            ),
+            (
+                {"LATEXSTRUCT_CODEX_MODEL": 'gpt-5.4\" --yolo'},
+                "模型 ID",
+            ),
+            (
+                {"LATEXSTRUCT_CODEX_REASONING_EFFORT": "maximum"},
+                "推理强度",
+            ),
+            (
+                {"LATEXSTRUCT_CODEX_TRIAGE_MODEL": "mini model id"},
+                "模型 ID",
+            ),
+            (
+                {"LATEXSTRUCT_CODEX_TRIAGE_REASONING_EFFORT": "maximum"},
+                "推理强度",
+            ),
+        )
+        for environment, expected in cases:
+            with _isolated_env(**environment):
+                try:
+                    config.load_config(backend=FakeBackend())
+                except ValueError as exc:
+                    assert expected in str(exc)
+                else:
+                    raise AssertionError("非法 Codex 环境覆盖必须被拒绝")
     finally:
         _restore(tmp)
 
@@ -532,12 +628,16 @@ def test_invalid_persisted_codex_settings_fall_back_safely():
                 "analysis_backend": "automatic-api-fallback",
                 "codex_model": 'gpt-5\" --yolo',
                 "codex_reasoning_effort": "maximum",
+                "codex_triage_model": "bad model id",
+                "codex_triage_reasoning_effort": "maximum",
             }, f)
         with _isolated_env():
             loaded = config.load_config(backend=FakeBackend())
         assert loaded.analysis_backend == "api"
         assert loaded.codex_model == ""
         assert loaded.codex_reasoning_effort == "medium"
+        assert loaded.codex_triage_model == ""
+        assert loaded.codex_triage_reasoning_effort == ""
     finally:
         _restore(tmp)
 

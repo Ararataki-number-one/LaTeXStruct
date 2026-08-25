@@ -14,6 +14,7 @@ extraction, and machine verification.
 
 from __future__ import annotations
 
+from collections import Counter
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 import re
 import threading
@@ -25,13 +26,20 @@ from typing import Callable, Mapping, Sequence, TypeVar
 from .analysis_runtime import (
     AnalysisQualityRuntime,
     CandidateRecord,
+    IssueLedger,
     PatchPlan,
     PatchRejected,
     PatchScope,
     PerformanceMetrics,
     apply_patch_plan,
 )
+from .analysis_tasks import (
+    AnalysisTaskStore,
+    TaskLedgerPersistenceError,
+    make_task_identity,
+)
 from .analysis_schema import (
+    ANALYSIS_RESPONSE_SCHEMA_VERSIONS,
     AnalysisFinalStatus,
     AnalysisRunSnapshot,
     CompileState,
@@ -40,6 +48,11 @@ from .analysis_schema import (
     IssueRecord,
     IssueStatus,
     PageRisk,
+    PageRiskAdmission,
+    PageRiskRouteClosure,
+    PageRouteCallKey,
+    PageRouteRecord,
+    PageTriageOutcome,
     PageUnit,
     QualityVector,
     ReviewResult,
@@ -47,6 +60,7 @@ from .analysis_schema import (
     Severity,
     VerificationDecision,
     VerificationEvidence,
+    canonical_json_bytes,
     sha256_bytes,
     sha256_text,
 )
@@ -143,6 +157,9 @@ class CallBinding:
     source_page_id: str
     issue_id: str
     material_hashes: FourMaterialHashes
+    snapshot_hash: str
+    prompt_version: str
+    response_schema_version: str
 
     def __post_init__(self) -> None:
         if not self.run_id.strip() or not self.role.strip():
@@ -152,6 +169,11 @@ class CallBinding:
         object.__setattr__(self, "candidate_hash", _require_digest(
             self.candidate_hash, "candidate_hash"
         ))
+        object.__setattr__(self, "snapshot_hash", _require_digest(
+            self.snapshot_hash, "snapshot_hash"
+        ))
+        if not self.prompt_version.strip() or not self.response_schema_version.strip():
+            raise ValueError("prompt and response schema versions are required")
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,6 +434,10 @@ class AnalysisCallbacks:
     tex_region: Callable[[PageUnit, str], str]
     patch_scope: Callable[[IssueRecord, str], PatchScope]
     ai6_adjudicate: Callable[[AdjudicationRequest], AdjudicationResult] | None = None
+    ai3_triage: Callable[[FindingRequest], Sequence[IssueProposal]] | None = None
+    ai1_recheck: Callable[[FindingRequest], Sequence[IssueProposal]] | None = None
+    ai2_recheck: Callable[[FindingRequest], Sequence[IssueProposal]] | None = None
+    ai3_recheck: Callable[[FindingRequest], Sequence[IssueProposal]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,6 +452,61 @@ class AnalysisOrchestrationResult:
     invocations: tuple[InvocationRecord, ...]
     performance: PerformanceMetrics
     rollback_candidate_ids: tuple[str, ...]
+    stop_reasons: tuple[str, ...] = ()
+    task_summary: tuple[tuple[str, int], ...] = ()
+    page_route_closure: PageRiskRouteClosure | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisResumeState:
+    snapshot_hash: str
+    round_index: int
+    current_tex: str
+    current_candidate_id: str
+    current_candidate_hash: str
+    best_candidate_id: str
+    best_candidate_hash: str
+    issue_ledger: Mapping[str, object]
+    prior_invocations: tuple[InvocationRecord, ...] = ()
+    prior_full_compile_count: int = 0
+    prior_incremental_check_count: int = 0
+    prior_rollback_candidate_ids: tuple[str, ...] = ()
+    prior_modified_page_ids: tuple[str, ...] = ()
+    prior_stop_reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "snapshot_hash", _require_digest(self.snapshot_hash, "snapshot_hash")
+        )
+        for name in ("current_candidate_hash", "best_candidate_hash"):
+            object.__setattr__(self, name, _require_digest(getattr(self, name), name))
+        if self.round_index < 0 or not self.current_tex:
+            raise ValueError("resume state round and TeX are invalid")
+        if sha256_text(self.current_tex) != self.current_candidate_hash:
+            raise ValueError("resume TeX differs from the current candidate hash")
+        if self.current_candidate_id != self.best_candidate_id or (
+            self.current_candidate_hash != self.best_candidate_hash
+        ):
+            raise ValueError("resume currently supports only the committed history best")
+        if self.prior_full_compile_count < 0 or self.prior_incremental_check_count < 0:
+            raise ValueError("resume counters cannot be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisCheckpointState:
+    round_index: int
+    current_tex: str
+    current_compile: CompileResult
+    current_candidate: CandidateRecord
+    best_candidate: CandidateRecord
+    issue_ledger: Mapping[str, object]
+    task_ledger: Mapping[str, object]
+    invocations: tuple[InvocationRecord, ...]
+    full_compile_count: int
+    incremental_check_count: int
+    rollback_candidate_ids: tuple[str, ...]
+    modified_page_ids: tuple[str, ...]
+    stop_reasons: tuple[str, ...]
 
 
 _T = TypeVar("_T")
@@ -454,6 +535,14 @@ class AnalysisOrchestrator:
         raw_ocr_frozen: bool,
         final_review_context_ids: tuple[str, str],
         clock: Callable[[], float] = time.monotonic,
+        risk_routing_enabled: bool = False,
+        resilient_execution: bool | None = None,
+        discovery_max_attempts: int = 2,
+        macro_batching_enabled: bool | None = None,
+        baseline_frozen_callback: Callable[[CompileResult], None] | None = None,
+        checkpoint_callback: Callable[[AnalysisCheckpointState], None] | None = None,
+        resume_state: AnalysisResumeState | None = None,
+        page_risk_admission: PageRiskAdmission | None = None,
     ) -> None:
         inputs = tuple(page_inputs)
         ids = [item.page_unit.source_page_id for item in inputs]
@@ -474,6 +563,73 @@ class AnalysisOrchestrator:
         self.raw_ocr_frozen = bool(raw_ocr_frozen)
         self.final_review_context_ids = contexts
         self.clock = clock
+        self.risk_routing_enabled = bool(risk_routing_enabled)
+        self.resilient_execution = (
+            self.risk_routing_enabled
+            if resilient_execution is None
+            else bool(resilient_execution)
+        )
+        if type(discovery_max_attempts) is not int or discovery_max_attempts < 1:
+            raise ValueError("discovery_max_attempts must be positive")
+        self.discovery_max_attempts = discovery_max_attempts
+        self.macro_batching_enabled = (
+            self.risk_routing_enabled
+            if macro_batching_enabled is None
+            else bool(macro_batching_enabled)
+        )
+        if resume_state is not None and resume_state.snapshot_hash != snapshot.snapshot_hash:
+            raise ValueError("resume state belongs to a different immutable snapshot")
+        self.baseline_frozen_callback = baseline_frozen_callback
+        self.checkpoint_callback = checkpoint_callback
+        self.resume_state = resume_state
+        if page_risk_admission is not None and not isinstance(
+            page_risk_admission, PageRiskAdmission
+        ):
+            raise ValueError("page_risk_admission has an invalid type")
+        self.page_risk_admission = page_risk_admission
+        self._sampled_low_risk_page_ids = (
+            frozenset(page_risk_admission.low_risk_sampling.selected_page_ids)
+            if page_risk_admission is not None
+            else frozenset()
+        )
+        if page_risk_admission is not None:
+            if (
+                page_risk_admission.source_pdf_sha256 != snapshot.source_pdf_hash
+                or page_risk_admission.baseline_tex_sha256
+                != snapshot.baseline_tex_hash
+                or page_risk_admission.baseline_pdf_sha256
+                != snapshot.baseline_pdf_hash
+                or (
+                    snapshot.evidence_hashes is not None
+                    and (
+                        page_risk_admission.ocr_page_records_sha256
+                        != snapshot.evidence_hashes.ocr_page_records_hash
+                        or page_risk_admission.digest
+                        != snapshot.evidence_hashes.page_risk_admission_hash
+                    )
+                )
+            ):
+                raise ValueError("page-risk admission differs from the snapshot")
+            admitted_by_id = {
+                item.summary.source_page_id: item for item in page_risk_admission.pages
+            }
+            if set(admitted_by_id) != set(ids):
+                raise ValueError("page-risk admission does not cover the page inputs")
+            for item in inputs:
+                admitted = admitted_by_id[item.page_unit.source_page_id]
+                if (
+                    admitted.summary.source_page_number
+                    != item.page_unit.source_page_number
+                    or admitted.summary.baseline_tex_region_hash
+                    != sha256_text(item.baseline_tex_region)
+                    or admitted.summary.candidate_page_ids_hash
+                    != sha256_bytes(canonical_json_bytes(
+                        list(item.page_unit.candidate_pdf_page_ids)
+                    ))
+                    or admitted.risk_level != item.page_unit.risk_level
+                    or admitted.risk_reasons != item.page_unit.risk_reasons
+                ):
+                    raise ValueError("page input risk differs from the immutable admission")
         self.concurrency_limit = int(snapshot.concurrency_limit)
         if not 1 <= self.concurrency_limit <= _MAX_PARALLEL_MODEL_CALLS:
             raise ValueError(
@@ -485,23 +641,75 @@ class AnalysisOrchestrator:
             page_units=[item.page_unit for item in inputs],
             candidate_root=candidate_root,
         )
-        self._invocations: list[InvocationRecord] = []
+        self._task_store = (
+            AnalysisTaskStore(
+                Path(candidate_root)
+                / "_run"
+                / snapshot.snapshot_hash[:16]
+                / "tasks"
+            )
+            if self.resilient_execution
+            else None
+        )
+        self._invocations: list[InvocationRecord] = list(
+            resume_state.prior_invocations if resume_state is not None else ()
+        )
         self._role_counts: dict[str, int] = {}
         self._role_elapsed: dict[str, float] = {}
+        for invocation in self._invocations:
+            self._role_counts[invocation.binding.role] = (
+                self._role_counts.get(invocation.binding.role, 0) + 1
+            )
+            self._role_elapsed[invocation.binding.role] = (
+                self._role_elapsed.get(invocation.binding.role, 0.0)
+                + invocation.elapsed_seconds
+            )
         self._invocation_lock = threading.Lock()
-        self._next_invocation_ordinal = 1
+        self._next_invocation_ordinal = 1 + max(
+            (item.ordinal for item in self._invocations), default=0
+        )
         self._compile_history: list[CompileResult] = []
         self._attempted_candidate_hashes: set[str] = set()
-        self._modified_pages: set[str] = set()
+        self._modified_pages: set[str] = set(
+            resume_state.prior_modified_page_ids if resume_state is not None else ()
+        )
+        self._incremental_check_count = (
+            resume_state.prior_incremental_check_count
+            if resume_state is not None
+            else 0
+        )
+        self._prior_full_compile_count = (
+            resume_state.prior_full_compile_count if resume_state is not None else 0
+        )
+        self._prior_rollback_candidate_ids = (
+            resume_state.prior_rollback_candidate_ids if resume_state is not None else ()
+        )
+        self._stop_reasons: list[str] = list(
+            resume_state.prior_stop_reasons if resume_state is not None else ()
+        )
+        self._triage_outcomes: dict[str, PageTriageOutcome] = {}
+        self._triage_response_hashes: dict[str, str] = {}
+        self._triage_anomaly_reasons: dict[str, tuple[str, ...]] = {}
+        if self.risk_routing_enabled:
+            self._stop_reasons.extend(
+                f"risk_r3_requires_adjudication:{item.page_unit.source_page_id}"
+                for item in self.page_inputs
+                if item.page_unit.risk_level == PageRisk.R3
+            )
         self._run_started = 0.0
 
     def _binding(
         self,
         *,
         role: str,
+        operation: str,
         issue_id: str,
         materials: PageMaterials,
     ) -> CallBinding:
+        try:
+            response_schema_version = ANALYSIS_RESPONSE_SCHEMA_VERSIONS[operation]
+        except KeyError as exc:
+            raise ValueError(f"unknown analysis response schema for {operation}") from exc
         return CallBinding(
             run_id=self.snapshot.run_id,
             role=role,
@@ -509,6 +717,9 @@ class AnalysisOrchestrator:
             source_page_id=materials.source_page_id,
             issue_id=issue_id,
             material_hashes=materials.hashes,
+            snapshot_hash=self.snapshot.snapshot_hash,
+            prompt_version=self.snapshot.prompt_version,
+            response_schema_version=response_schema_version,
         )
 
     def _invoke(
@@ -676,21 +887,706 @@ class AnalysisOrchestrator:
         if not set(proposal.source_page_ids).issubset(self._by_page):
             raise CallbackContractError(f"{role} finding references an unknown source page")
 
-    def _discover(self, tex: str, compiled: CompileResult) -> None:
-        roles = (
+    @staticmethod
+    def _finding_to_dict(proposal: IssueProposal) -> dict[str, object]:
+        return {
+            "issue_type": proposal.issue_type,
+            "severity": proposal.severity.value,
+            "source_page_ids": list(proposal.source_page_ids),
+            "tex_anchors": [asdict(item) for item in proposal.tex_anchors],
+            "source_pdf_regions": [
+                asdict(item) for item in proposal.source_pdf_regions
+            ],
+            "detector_role": proposal.detector_role,
+            "evidence_hashes": list(proposal.evidence_hashes),
+            "baseline_hash": proposal.baseline_hash,
+            "candidate_hash": proposal.candidate_hash,
+            "description": proposal.description,
+            "blocker_reason": proposal.blocker_reason,
+        }
+
+    @staticmethod
+    def _finding_from_dict(value: object) -> IssueProposal:
+        from .analysis_schema import PdfRegion, TexAnchor
+
+        if not isinstance(value, Mapping):
+            raise CallbackContractError("persisted finding must be an object")
+        expected = {
+            "issue_type",
+            "severity",
+            "source_page_ids",
+            "tex_anchors",
+            "source_pdf_regions",
+            "detector_role",
+            "evidence_hashes",
+            "baseline_hash",
+            "candidate_hash",
+            "description",
+            "blocker_reason",
+        }
+        if set(value) != expected:
+            raise CallbackContractError("persisted finding fields are not exact")
+        try:
+            anchors = tuple(TexAnchor(**item) for item in value["tex_anchors"])
+            regions = tuple(PdfRegion(**item) for item in value["source_pdf_regions"])
+            return IssueProposal(
+                issue_type=str(value["issue_type"]),
+                severity=Severity(str(value["severity"])),
+                source_page_ids=tuple(str(item) for item in value["source_page_ids"]),
+                tex_anchors=anchors,
+                source_pdf_regions=regions,
+                detector_role=str(value["detector_role"]),
+                evidence_hashes=tuple(
+                    str(item) for item in value["evidence_hashes"]
+                ),
+                baseline_hash=str(value["baseline_hash"]),
+                candidate_hash=str(value["candidate_hash"]),
+                description=str(value["description"]),
+                blocker_reason=str(value["blocker_reason"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CallbackContractError("persisted finding is invalid") from exc
+
+    def _roles_for_page(
+        self,
+        page: PageAnalysisInput,
+    ) -> tuple[tuple[str, str, Callable[[FindingRequest], Sequence[IssueProposal]]], ...]:
+        deep_roles = (
             ("AI-1", "structure-findings", self.callbacks.ai1_structure),
             ("AI-2", "content-math-findings", self.callbacks.ai2_content_math),
             ("AI-3", "visual-findings", self.callbacks.ai3_visual),
         )
+        if not self.risk_routing_enabled:
+            return deep_roles
+        triage = (
+            (
+                "AI-3",
+                "visual-triage",
+                self.callbacks.ai3_triage or self.callbacks.ai3_visual,
+            ),
+        )
+        risk = page.page_unit.risk_level
+        if page.page_unit.source_page_id in self._sampled_low_risk_page_ids and risk in {
+            PageRisk.R0,
+            PageRisk.R1,
+        }:
+            risk = PageRisk.R2
+        if risk == PageRisk.R0:
+            return triage
+        if risk == PageRisk.R1:
+            return triage + deep_roles[:1]
+        if risk == PageRisk.R2:
+            return triage + deep_roles
+        if risk == PageRisk.R3:
+            # R3 means the host evidence is conflicting or the input closure
+            # is unsafe.  Ordinary auditors cannot downgrade that condition;
+            # a later host-created conflict may be sent to AI-6, otherwise the
+            # page remains explicitly blocked by the stop reason installed in
+            # __init__.
+            return triage
+        raise AnalysisOrchestrationError(f"unsupported page risk: {risk}")
+
+    def _record_triage(
+        self,
+        *,
+        source_page_id: str,
+        proposals: Sequence[IssueProposal],
+    ) -> None:
+        payload = [self._finding_to_dict(item) for item in proposals]
+        self._triage_response_hashes[source_page_id] = sha256_bytes(
+            canonical_json_bytes(payload)
+        )
+        if any(item.severity == Severity.CRITICAL for item in proposals):
+            outcome = PageTriageOutcome.BLOCKED
+        elif proposals:
+            outcome = PageTriageOutcome.ANOMALY
+        else:
+            outcome = PageTriageOutcome.CLEAR
+        reasons = tuple(sorted({
+            f"visual_triage:{item.issue_type}" for item in proposals
+        }))
+        self._triage_outcomes[source_page_id] = outcome
+        self._triage_anomaly_reasons[source_page_id] = reasons
+        if outcome == PageTriageOutcome.BLOCKED:
+            self._stop_reasons.append(
+                f"visual_triage_blocked:{source_page_id}"
+            )
+
+    def _discover_resilient(
+        self,
+        tex: str,
+        compiled: CompileResult,
+    ) -> None:
+        if self._task_store is None:
+            raise AnalysisOrchestrationError("resilient discovery has no task store")
+        plans: list[
+            tuple[
+                str,
+                CallBinding,
+                Callable[[object], object],
+                FindingRequest,
+                str,
+            ]
+        ] = []
+        page_task_ids: dict[str, list[str]] = {
+            item.page_unit.source_page_id: [] for item in self.page_inputs
+        }
+        for page in self.page_inputs:
+            page_id = page.page_unit.source_page_id
+            materials = self._materials(page_id, tex, compiled)
+            for role, operation, callback in self._roles_for_page(page):
+                discovery_id = (
+                    f"DISCOVERY-{role}-"
+                    f"{sha256_text(self.snapshot.run_id + page_id)[:12]}"
+                )
+                binding = self._binding(
+                    role=role,
+                    operation=operation,
+                    issue_id=discovery_id,
+                    materials=materials,
+                )
+                request = FindingRequest(binding, materials)
+                identity = make_task_identity(
+                    snapshot_hash=self.snapshot.snapshot_hash,
+                    candidate_hash=binding.candidate_hash,
+                    operation=operation,
+                    role=role,
+                    source_page_id=page_id,
+                    scope_id=discovery_id,
+                    binding_payload=asdict(binding),
+                )
+                record = self._task_store.register(identity)
+                page_task_ids[page_id].append(record.identity.task_id)
+                plans.append((operation, binding, callback, request, identity.task_id))
+
+        by_task: dict[str, tuple[IssueProposal, ...]] = {}
+        plan_by_task = {plan[4]: plan for plan in plans}
+        fatal_stop = threading.Event()
+        for plan in plans:
+            operation, binding, _callback, _request, task_id = plan
+            record = self._task_store.get(task_id)
+            if record.state == "COMPLETED":
+                raw = self._task_store.response(task_id)
+                if not isinstance(raw, list):
+                    raise CallbackContractError(
+                        f"persisted {operation} response must be a list"
+                    )
+                proposals = tuple(self._finding_from_dict(item) for item in raw)
+                for proposal in proposals:
+                    self._validate_finding(
+                        proposal, role=binding.role, binding=binding
+                    )
+                by_task[task_id] = proposals
+
+        unrecoverable_tasks: set[str] = set()
+        while True:
+            pending = [
+                task_id
+                for task_id in plan_by_task
+                if self._task_store.get(task_id).state == "PENDING"
+                and task_id not in unrecoverable_tasks
+            ]
+            if not pending:
+                break
+            # The first wave is concurrent.  Failed work is retried as single
+            # atomic tasks, so one bad sibling can neither cancel nor replay a
+            # successfully committed response.
+            retry_wave = any(
+                self._task_store.get(task_id).attempts > 0 for task_id in pending
+            )
+            workers = 1 if retry_wave else min(self.concurrency_limit, len(pending))
+            ordinals = self._reserve_invocation_ordinals(len(pending))
+            attempts_before = {
+                task_id: self._task_store.get(task_id).attempts for task_id in pending
+            }
+
+            def run_one(task_id: str, ordinal: int) -> tuple[IssueProposal, ...]:
+                operation, binding, callback, request, _task_id = plan_by_task[task_id]
+                if fatal_stop.is_set():
+                    raise AnalysisOrchestrationError(
+                        "discovery cancelled after a fatal analysis fault"
+                    )
+                try:
+                    self._task_store.start(
+                        task_id,
+                        max_attempts=self.discovery_max_attempts,
+                    )
+                    raw = self._invoke(
+                        operation,
+                        binding,
+                        callback,
+                        request,
+                        invocation_ordinal=ordinal,
+                    )
+                    if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+                        raise CallbackContractError(
+                            f"{binding.role} must return a sequence of findings"
+                        )
+                    proposals = tuple(raw)
+                    for proposal in proposals:
+                        self._validate_finding(
+                            proposal, role=binding.role, binding=binding
+                        )
+                    self._task_store.commit_success(
+                        task_id,
+                        [self._finding_to_dict(item) for item in proposals],
+                    )
+                    return proposals
+                except TaskLedgerPersistenceError:
+                    fatal_stop.set()
+                    raise
+                except Exception as exc:
+                    if bool(getattr(exc, "fatal_analysis", False)):
+                        # Budget/persistence authority is no longer trustworthy.
+                        # It is unsafe to mutate the task ledger or issue another
+                        # paid call in this analysis run.
+                        fatal_stop.set()
+                        raise
+                    retryable = not isinstance(
+                        exc, (CallbackContractError, StaleEvidenceError)
+                    ) and bool(getattr(exc, "retryable", True))
+                    if self._task_store.get(task_id).state == "RUNNING":
+                        self._task_store.fail(
+                            task_id,
+                            f"{type(exc).__name__}: {exc}",
+                            retryable=retryable,
+                            max_attempts=self.discovery_max_attempts,
+                        )
+                    raise
+
+            with ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="latexstruct-analysis-task",
+            ) as pool:
+                futures = {
+                    task_id: pool.submit(run_one, task_id, ordinal)
+                    for task_id, ordinal in zip(pending, ordinals, strict=True)
+                }
+                for task_id in pending:
+                    try:
+                        by_task[task_id] = futures[task_id].result()
+                    except TaskLedgerPersistenceError:
+                        # Durable task authority is uncertain.  Continuing in
+                        # this process could repeat a paid call or omit work.
+                        for future in futures.values():
+                            future.cancel()
+                        raise
+                    except Exception as exc:
+                        if bool(getattr(exc, "fatal_analysis", False)):
+                            for future in futures.values():
+                                future.cancel()
+                            raise
+                        # The task ledger contains the exact failure and decides
+                        # whether the next loop retries or permanently blocks it.
+                        record = self._task_store.get(task_id)
+                        if record.state == "RUNNING" or (
+                            record.state == "PENDING"
+                            and record.attempts == attempts_before[task_id]
+                        ):
+                            # A task-state persistence failure cannot be retried
+                            # safely in this process: doing so can spin forever
+                            # or silently omit a planned task from final gates.
+                            unrecoverable_tasks.add(task_id)
+
+        for operation, binding, _callback, _request, task_id in plans:
+            record = self._task_store.get(task_id)
+            if record.state == "COMPLETED":
+                proposals = by_task[task_id]
+                if operation == "visual-triage":
+                    self._record_triage(
+                        source_page_id=binding.source_page_id,
+                        proposals=proposals,
+                    )
+                else:
+                    for proposal in proposals:
+                        self.runtime.ledger.upsert(proposal, round_index=0)
+            elif record.state == "BLOCKED":
+                self._stop_reasons.append(
+                    f"analysis_task_blocked:{binding.source_page_id}:"
+                    f"{binding.role}:{task_id}"
+                )
+            else:
+                self._stop_reasons.append(
+                    f"analysis_task_incomplete:{binding.source_page_id}:"
+                    f"{binding.role}:{task_id}:{record.state.lower()}"
+                )
+
+        elapsed = max(0.0, self.clock() - self._run_started)
+        for page in self.page_inputs:
+            page_id = page.page_unit.source_page_id
+            task_ids = page_task_ids[page_id]
+            if all(
+                self._task_store.get(task_id).state == "COMPLETED"
+                for task_id in task_ids
+            ):
+                self.runtime.performance.record_page_completion(page_id, elapsed)
+        self._run_triage_escalations(tex, compiled)
+
+    def _run_bound_finding_task(
+        self,
+        *,
+        page: PageAnalysisInput,
+        tex: str,
+        compiled: CompileResult,
+        role: str,
+        operation: str,
+        callback: Callable[[FindingRequest], Sequence[IssueProposal]],
+        scope_prefix: str,
+        round_index: int,
+    ) -> tuple[IssueProposal, ...]:
+        """Execute one deterministic follow-up task with atomic reuse."""
+
+        page_id = page.page_unit.source_page_id
+        materials = self._materials(page_id, tex, compiled)
+        scope_id = (
+            f"{scope_prefix}-{role}-"
+            f"{sha256_text(self.snapshot.run_id + page_id + operation + sha256_text(tex))[:12]}"
+        )
+        binding = self._binding(
+            role=role,
+            operation=operation,
+            issue_id=scope_id,
+            materials=materials,
+        )
+        request = FindingRequest(binding, materials)
+        if not self.resilient_execution:
+            raw = self._invoke(operation, binding, callback, request)
+            if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+                raise CallbackContractError(f"{role} must return a sequence of findings")
+            proposals = tuple(raw)
+            for proposal in proposals:
+                self._validate_finding(proposal, role=role, binding=binding)
+                self.runtime.ledger.upsert(proposal, round_index=round_index)
+            return proposals
+        if self._task_store is None:  # pragma: no cover - constructor invariant
+            raise AnalysisOrchestrationError("follow-up task has no durable store")
+        identity = make_task_identity(
+            snapshot_hash=self.snapshot.snapshot_hash,
+            candidate_hash=binding.candidate_hash,
+            operation=operation,
+            role=role,
+            source_page_id=page_id,
+            scope_id=scope_id,
+            binding_payload=asdict(binding),
+        )
+        record = self._task_store.register(identity)
+        proposals: tuple[IssueProposal, ...]
+        if record.state == "COMPLETED":
+            raw_saved = self._task_store.response(identity.task_id)
+            if not isinstance(raw_saved, list):
+                raise CallbackContractError("persisted follow-up response must be a list")
+            proposals = tuple(self._finding_from_dict(item) for item in raw_saved)
+        else:
+            proposals = ()
+            while self._task_store.get(identity.task_id).state == "PENDING":
+                try:
+                    self._task_store.start(
+                        identity.task_id,
+                        max_attempts=self.discovery_max_attempts,
+                    )
+                    raw = self._invoke(operation, binding, callback, request)
+                    if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+                        raise CallbackContractError(
+                            f"{role} must return a sequence of findings"
+                        )
+                    proposals = tuple(raw)
+                    for proposal in proposals:
+                        self._validate_finding(proposal, role=role, binding=binding)
+                    self._task_store.commit_success(
+                        identity.task_id,
+                        [self._finding_to_dict(item) for item in proposals],
+                    )
+                except TaskLedgerPersistenceError:
+                    raise
+                except Exception as exc:
+                    if bool(getattr(exc, "fatal_analysis", False)):
+                        raise
+                    retryable = not isinstance(
+                        exc, (CallbackContractError, StaleEvidenceError)
+                    ) and bool(getattr(exc, "retryable", True))
+                    if self._task_store.get(identity.task_id).state == "RUNNING":
+                        self._task_store.fail(
+                            identity.task_id,
+                            f"{type(exc).__name__}: {exc}",
+                            retryable=retryable,
+                            max_attempts=self.discovery_max_attempts,
+                        )
+                    if self._task_store.get(identity.task_id).state == "BLOCKED":
+                        self._stop_reasons.append(
+                            f"analysis_task_blocked:{page_id}:{role}:{identity.task_id}"
+                        )
+                        return ()
+        for proposal in proposals:
+            self._validate_finding(proposal, role=role, binding=binding)
+            self.runtime.ledger.upsert(proposal, round_index=round_index)
+        return proposals
+
+    def _run_triage_escalations(self, tex: str, compiled: CompileResult) -> None:
+        if not self.risk_routing_enabled:
+            return
+        deep_roles = (
+            ("AI-1", "structure-findings", self.callbacks.ai1_structure),
+            ("AI-2", "content-math-findings", self.callbacks.ai2_content_math),
+            ("AI-3", "visual-findings", self.callbacks.ai3_visual),
+        )
+        for page in self.page_inputs:
+            page_id = page.page_unit.source_page_id
+            if self._triage_outcomes.get(page_id) != PageTriageOutcome.ANOMALY:
+                continue
+            admitted = page.page_unit.risk_level
+            if admitted == PageRisk.R3:
+                # R3 is an input-authority conflict.  It is blocked (or may
+                # be handled by a separately evidenced AI-6 adjudication),
+                # never silently converted into ordinary deep review.
+                continue
+            already_full = admitted == PageRisk.R2 or (
+                page_id in self._sampled_low_risk_page_ids
+                and admitted in {PageRisk.R0, PageRisk.R1}
+            )
+            if already_full:
+                continue
+            roles = deep_roles[1:] if admitted == PageRisk.R1 else deep_roles
+            for role, operation, callback in roles:
+                self._run_bound_finding_task(
+                    page=page,
+                    tex=tex,
+                    compiled=compiled,
+                    role=role,
+                    operation=operation,
+                    callback=callback,
+                    scope_prefix="TRIAGE-ESCALATION",
+                    round_index=0,
+                )
+
+    def _recheck_modified_pages(
+        self,
+        tex: str,
+        compiled: CompileResult,
+        *,
+        round_index: int,
+    ) -> None:
+        if not self.risk_routing_enabled or not self._modified_pages:
+            return
+        rechecks = (
+            (
+                "AI-1",
+                "structure-recheck",
+                self.callbacks.ai1_recheck or self.callbacks.ai1_structure,
+            ),
+            (
+                "AI-2",
+                "content-math-recheck",
+                self.callbacks.ai2_recheck or self.callbacks.ai2_content_math,
+            ),
+            (
+                "AI-3",
+                "visual-recheck",
+                self.callbacks.ai3_recheck or self.callbacks.ai3_visual,
+            ),
+        )
+        for page_id in sorted(
+            self._modified_pages,
+            key=lambda value: self._by_page[value].page_unit.source_page_number,
+        ):
+            page = self._by_page[page_id]
+            for role, operation, callback in rechecks:
+                self._run_bound_finding_task(
+                    page=page,
+                    tex=tex,
+                    compiled=compiled,
+                    role=role,
+                    operation=operation,
+                    callback=callback,
+                    scope_prefix="MODIFIED-RECHECK",
+                    round_index=round_index,
+                )
+
+    def _build_page_route_closure(
+        self,
+        *,
+        final_candidate_hash: str,
+    ) -> PageRiskRouteClosure | None:
+        admission = self.page_risk_admission
+        if admission is None:
+            return None
+        admitted_by_id = {
+            item.summary.source_page_id: item for item in admission.pages
+        }
+        page_records: list[PageRouteRecord] = []
+        for page in self.page_inputs:
+            page_id = page.page_unit.source_page_id
+            admitted = admitted_by_id[page_id].risk_level
+            triage = self._triage_outcomes.get(page_id)
+            reasons = self._triage_anomaly_reasons.get(page_id, ())
+            triage_hash = self._triage_response_hashes.get(page_id)
+            if triage is None or triage_hash is None:
+                triage = PageTriageOutcome.BLOCKED
+                reasons = tuple(sorted({*reasons, "visual_triage:missing"}))
+                triage_hash = sha256_bytes(canonical_json_bytes([]))
+                self._stop_reasons.append(f"visual_triage_missing:{page_id}")
+            if triage == PageTriageOutcome.BLOCKED:
+                effective = PageRisk.R3
+            elif triage == PageTriageOutcome.ANOMALY and admitted in {
+                PageRisk.R0,
+                PageRisk.R1,
+            }:
+                effective = PageRisk.R2
+            else:
+                effective = admitted
+            modified = page_id in self._modified_pages
+            sampled = page_id in self._sampled_low_risk_page_ids
+            page_records.append(PageRouteRecord(
+                source_page_id=page_id,
+                source_page_number=page.page_unit.source_page_number,
+                admitted_risk=admitted,
+                triage_outcome=triage,
+                triage_response_sha256=triage_hash,
+                effective_risk=effective,
+                modified=modified,
+                anomaly_reasons=reasons,
+                sampled_low_risk=sampled,
+                deep_review_required=(
+                    effective in {PageRisk.R2, PageRisk.R3}
+                    or modified
+                    or sampled
+                    or bool(reasons)
+                ),
+                final_candidate_hash=final_candidate_hash,
+            ))
+
+        route_operations = {
+            "visual-triage",
+            "structure-findings",
+            "content-math-findings",
+            "visual-findings",
+            "structure-recheck",
+            "content-math-recheck",
+            "visual-recheck",
+            "local-patch",
+            "issue-review",
+            "final-review-1",
+            "final-review-2",
+            "adjudication",
+        }
+        call_keys = tuple(sorted(
+            (
+                PageRouteCallKey(
+                    role=item.binding.role,
+                    operation=item.operation,
+                    source_page_id=item.binding.source_page_id,
+                    candidate_hash=item.binding.candidate_hash,
+                    issue_id=item.binding.issue_id,
+                    snapshot_hash=item.binding.snapshot_hash,
+                    response_schema_version=item.binding.response_schema_version,
+                    succeeded=item.succeeded,
+                )
+                for item in self._invocations
+                if item.operation in route_operations
+            ),
+            key=lambda item: (
+                item.role,
+                item.operation,
+                item.source_page_id,
+                item.candidate_hash,
+                item.issue_id,
+            ),
+        ))
+
+        expected_all = Counter(
+            item.page_unit.source_page_id for item in self.page_inputs
+        )
+
+        def successful_pages(role: str, operation: str) -> Counter[str]:
+            return Counter(
+                item.source_page_id
+                for item in call_keys
+                if item.role == role
+                and item.operation == operation
+                and item.succeeded
+            )
+
+        def require_pages(
+            role: str,
+            operation: str,
+            expected: Counter[str],
+        ) -> None:
+            if successful_pages(role, operation) != expected:
+                self._stop_reasons.append(
+                    f"route_coverage_incomplete:{role}:{operation}"
+                )
+
+        require_pages("AI-3", "visual-triage", expected_all)
+        for operation in ("final-review-1", "final-review-2"):
+            require_pages("AI-5", operation, expected_all)
+            if any(
+                item.role == "AI-5"
+                and item.operation == operation
+                and item.succeeded
+                and item.candidate_hash != final_candidate_hash
+                for item in call_keys
+            ):
+                self._stop_reasons.append(
+                    f"route_candidate_stale:AI-5:{operation}"
+                )
+
+        effective_by_id = {item.source_page_id: item for item in page_records}
+        ai1_expected: Counter[str] = Counter()
+        deep_expected: Counter[str] = Counter()
+        recheck_expected: Counter[str] = Counter()
+        for page_id, record in effective_by_id.items():
+            if record.effective_risk == PageRisk.R1:
+                ai1_expected[page_id] = 1
+            if record.effective_risk == PageRisk.R2 or record.sampled_low_risk:
+                ai1_expected[page_id] = 1
+                deep_expected[page_id] = 1
+            if record.modified:
+                recheck_expected[page_id] = 1
+            if record.effective_risk == PageRisk.R3:
+                self._stop_reasons.append(
+                    f"risk_r3_requires_adjudication:{page_id}"
+                )
+        require_pages("AI-1", "structure-findings", ai1_expected)
+        require_pages("AI-2", "content-math-findings", deep_expected)
+        require_pages("AI-3", "visual-findings", deep_expected)
+        for role, operation in (
+            ("AI-1", "structure-recheck"),
+            ("AI-2", "content-math-recheck"),
+            ("AI-3", "visual-recheck"),
+        ):
+            require_pages(role, operation, recheck_expected)
+            if any(
+                item.role == role
+                and item.operation == operation
+                and item.succeeded
+                and item.candidate_hash != final_candidate_hash
+                for item in call_keys
+            ):
+                self._stop_reasons.append(
+                    f"route_candidate_stale:{role}:{operation}"
+                )
+        return PageRiskRouteClosure(
+            admission_sha256=admission.digest,
+            final_candidate_hash=final_candidate_hash,
+            pages=tuple(page_records),
+            route_call_keys=call_keys,
+        )
+
+    def _discover(self, tex: str, compiled: CompileResult) -> None:
+        if self.resilient_execution:
+            self._discover_resilient(tex, compiled)
+            return
         plans: list[tuple[str, CallBinding, Callable[[object], object], FindingRequest]] = []
         for page in self.page_inputs:
             materials = self._materials(page.page_unit.source_page_id, tex, compiled)
-            for role, operation, callback in roles:
+            for role, operation, callback in self._roles_for_page(page):
                 discovery_id = (
                     f"DISCOVERY-{role}-{sha256_text(self.snapshot.run_id + materials.source_page_id)[:12]}"
                 )
                 binding = self._binding(
-                    role=role, issue_id=discovery_id, materials=materials
+                    role=role,
+                    operation=operation,
+                    issue_id=discovery_id,
+                    materials=materials,
                 )
                 plans.append(
                     (operation, binding, callback, FindingRequest(binding, materials))
@@ -709,15 +1605,22 @@ class AnalysisOrchestrator:
         )
         raw_results = self._parallel_invocations(calls)
         validated: list[IssueProposal] = []
-        for (_operation, binding, _callback, _request), raw in zip(
+        for (operation, binding, _callback, _request), raw in zip(
             plans, raw_results, strict=True
         ):
             role = binding.role
             if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
                 raise CallbackContractError(f"{role} must return a sequence of findings")
-            for proposal in raw:
+            proposals = tuple(raw)
+            for proposal in proposals:
                 self._validate_finding(proposal, role=role, binding=binding)
-                validated.append(proposal)
+            if operation == "visual-triage":
+                self._record_triage(
+                    source_page_id=binding.source_page_id,
+                    proposals=proposals,
+                )
+            else:
+                validated.extend(proposals)
         # The only ledger mutation happens here, in immutable page/role order.
         for proposal in validated:
             self.runtime.ledger.upsert(proposal, round_index=0)
@@ -726,6 +1629,7 @@ class AnalysisOrchestrator:
                 page.page_unit.source_page_id,
                 max(0.0, self.clock() - self._run_started),
             )
+        self._run_triage_escalations(tex, compiled)
 
     def _conflict_groups(self) -> tuple[tuple[IssueRecord, ...], ...]:
         records = [
@@ -771,7 +1675,12 @@ class AnalysisOrchestrator:
         primary = live[0]
         page_id = primary.source_page_ids[0]
         materials = self._materials(page_id, tex, compiled)
-        binding = self._binding(role="AI-6", issue_id=primary.issue_id, materials=materials)
+        binding = self._binding(
+            role="AI-6",
+            operation="adjudication",
+            issue_id=primary.issue_id,
+            materials=materials,
+        )
         result = self._invoke(
             "adjudication",
             binding,
@@ -809,7 +1718,12 @@ class AnalysisOrchestrator:
         responses: list[IssuePageReviewResult] = []
         for page_id in issue.source_page_ids:
             materials = self._materials(page_id, candidate_tex, compiled)
-            binding = self._binding(role="AI-5", issue_id=issue.issue_id, materials=materials)
+            binding = self._binding(
+                role="AI-5",
+                operation="issue-review",
+                issue_id=issue.issue_id,
+                materials=materials,
+            )
             response = self._invoke(
                 "issue-review",
                 binding,
@@ -898,7 +1812,12 @@ class AnalysisOrchestrator:
             or not set(issue.source_page_ids).issubset(scope.source_page_ids)
         ):
             raise CallbackContractError("host patch scope is stale or belongs to another issue")
-        binding = self._binding(role="AI-4", issue_id=issue.issue_id, materials=materials)
+        binding = self._binding(
+            role="AI-4",
+            operation="local-patch",
+            issue_id=issue.issue_id,
+            materials=materials,
+        )
         plan = self._invoke(
             "local-patch",
             binding,
@@ -986,13 +1905,36 @@ class AnalysisOrchestrator:
             candidate_compile.quality,
             provisionally_closed_issue_ids=(issue.issue_id,) if review_would_close else (),
         )
+        # Persist the ledger state that belongs to the candidate, not the
+        # pre-review in-memory state.  The repository is immutable, so writing
+        # FIXING here would make an accepted recovery checkpoint permanently
+        # contradict the host ledger after this method closes the issue.
+        candidate_ledger = IssueLedger(self.runtime.ledger.records)
+        candidate_ledger.transition(
+            issue_id,
+            IssueStatus.FIXED_PENDING_REVIEW,
+            round_index=round_index,
+            candidate_hash=application.candidate_hash,
+            patch_id=application.patch_id,
+        )
+        candidate_ledger.close_after_review(
+            issue_id,
+            round_index=round_index,
+            candidate_hash=application.candidate_hash,
+            review_result=review[0],
+            compile_ok=candidate_compile.compiled_ok,
+            content_conservation_ok=review[1],
+            math_conservation_ok=review[2],
+            visual_review_ok=review[3],
+            new_high_priority_issues=review[4],
+        )
         record = self.runtime.candidates.evaluate(
             application=application,
             round_index=round_index,
             pdf=candidate_compile.pdf,
             compile_log=candidate_compile.compile_log,
             quality=selection_quality,
-            issue_ledger=self.runtime.ledger.to_dict(),
+            issue_ledger=candidate_ledger.to_dict(),
             review={
                 "result": review[0].value,
                 "content_conservation_ok": review[1],
@@ -1052,6 +1994,319 @@ class AnalysisOrchestrator:
             )
         return tex, compiled, False
 
+    def _attempt_issue_batch(
+        self,
+        *,
+        issue_ids: Sequence[str],
+        round_index: int,
+        tex: str,
+        compiled: CompileResult,
+    ) -> tuple[str, CompileResult, bool]:
+        """Micro-check local plans, then compile one non-overlapping macro batch."""
+
+        plans: list[PatchPlan] = []
+        scopes: dict[str, PatchScope] = {}
+        issues: dict[str, IssueRecord] = {}
+        fingerprints: dict[str, str] = {}
+        base_hash = sha256_text(tex)
+
+        for issue_id in issue_ids:
+            issue = self.runtime.ledger.transition(
+                issue_id,
+                IssueStatus.FIXING,
+                round_index=round_index,
+                candidate_hash=base_hash,
+            )
+            issues[issue_id] = issue
+            page_id = issue.source_page_ids[0]
+            materials = self._materials(page_id, tex, compiled)
+            scope = self.callbacks.patch_scope(issue, tex)
+            if (
+                scope.issue_id != issue.issue_id
+                or scope.candidate_hash != base_hash
+                or not set(issue.source_page_ids).issubset(scope.source_page_ids)
+            ):
+                self.runtime.ledger.transition(
+                    issue_id,
+                    IssueStatus.BLOCKED,
+                    round_index=round_index,
+                    candidate_hash=base_hash,
+                    blocker_reason="host patch scope is stale or incomplete",
+                )
+                self._stop_reasons.append(f"patch_scope_blocked:{issue_id}")
+                continue
+            binding = self._binding(
+                role="AI-4",
+                operation="local-patch",
+                issue_id=issue.issue_id,
+                materials=materials,
+            )
+            fingerprint = sha256_text(
+                binding.candidate_hash
+                + binding.issue_id
+                + "".join(asdict(binding.material_hashes).values())
+            )
+            fingerprints[issue_id] = fingerprint
+            try:
+                plan = self._invoke(
+                    "local-patch",
+                    binding,
+                    self.callbacks.ai4_patch,
+                    PatchRequest(binding, materials, issue, scope),
+                )
+            except BaseException as exc:
+                if bool(getattr(exc, "fatal_analysis", False)):
+                    raise
+                self.runtime.ledger.transition(
+                    issue_id,
+                    IssueStatus.BLOCKED,
+                    round_index=round_index,
+                    candidate_hash=base_hash,
+                    blocker_reason=f"{type(exc).__name__}: {exc}"[:1000],
+                )
+                self._stop_reasons.append(f"patch_task_blocked:{issue_id}")
+                continue
+            if plan is None:
+                self.runtime.ledger.transition(
+                    issue_id,
+                    IssueStatus.OPEN,
+                    round_index=round_index,
+                    candidate_hash=base_hash,
+                )
+                self.runtime.progress.record_issue_attempt(
+                    issue_id,
+                    prompt_and_evidence_fingerprint=fingerprint,
+                    resolved=False,
+                )
+                continue
+            if (
+                not isinstance(plan, PatchPlan)
+                or plan.candidate_hash != base_hash
+                or plan.issue_ids != (issue_id,)
+            ):
+                self.runtime.ledger.transition(
+                    issue_id,
+                    IssueStatus.BLOCKED,
+                    round_index=round_index,
+                    candidate_hash=base_hash,
+                    blocker_reason="AI-4 returned an invalid or stale patch contract",
+                )
+                self._stop_reasons.append(f"patch_contract_blocked:{issue_id}")
+                continue
+            plans.append(plan)
+            scopes[issue_id] = scope
+
+        if not plans:
+            return tex, compiled, False
+
+        batch = PatchPlan(
+            candidate_hash=base_hash,
+            issue_ids=tuple(plan.issue_ids[0] for plan in plans),
+            operations=tuple(
+                operation for plan in plans for operation in plan.operations
+            ),
+        )
+        try:
+            application = apply_patch_plan(tex, batch, scopes=scopes)
+        except PatchRejected as exc:
+            for plan in plans:
+                issue_id = plan.issue_ids[0]
+                self.runtime.ledger.transition(
+                    issue_id,
+                    IssueStatus.BLOCKED,
+                    round_index=round_index,
+                    candidate_hash=base_hash,
+                    blocker_reason=f"macro batch micro-check rejected: {exc}"[:1000],
+                )
+                self._stop_reasons.append(f"micro_patch_rejected:{issue_id}")
+            return tex, compiled, False
+
+        self._incremental_check_count += len(plans)
+        if application.candidate_hash in self._attempted_candidate_hashes:
+            for plan in plans:
+                issue_id = plan.issue_ids[0]
+                self.runtime.ledger.transition(
+                    issue_id,
+                    IssueStatus.OPEN,
+                    round_index=round_index,
+                    candidate_hash=base_hash,
+                )
+                self.runtime.progress.record_issue_attempt(
+                    issue_id,
+                    prompt_and_evidence_fingerprint=fingerprints[issue_id],
+                    resolved=False,
+                )
+            return tex, compiled, False
+        self._attempted_candidate_hashes.add(application.candidate_hash)
+
+        try:
+            candidate_compile = self._compile(
+                application.candidate_tex,
+                round_index=round_index,
+                reason=f"macro patch batch {application.patch_id}",
+            )
+        except BaseException as exc:
+            for plan in plans:
+                issue_id = plan.issue_ids[0]
+                self.runtime.ledger.transition(
+                    issue_id,
+                    IssueStatus.BLOCKED,
+                    round_index=round_index,
+                    candidate_hash=base_hash,
+                    blocker_reason=f"macro compile failed: {exc}"[:1000],
+                )
+            self._stop_reasons.append(f"macro_compile_failed:round-{round_index}")
+            return tex, compiled, False
+
+        reviews: dict[
+            str,
+            tuple[ReviewResult, bool, bool, bool, int, list[dict[str, object]]],
+        ] = {}
+        review_errors: dict[str, str] = {}
+        for plan in plans:
+            issue_id = plan.issue_ids[0]
+            try:
+                reviews[issue_id] = self._review_issue(
+                    issue=issues[issue_id],
+                    application_patch_id=application.patch_id,
+                    candidate_tex=application.candidate_tex,
+                    compiled=candidate_compile,
+                )
+            except BaseException as exc:
+                if bool(getattr(exc, "fatal_analysis", False)):
+                    raise
+                review_errors[issue_id] = f"{type(exc).__name__}: {exc}"[:1000]
+                self._stop_reasons.append(f"issue_review_blocked:{issue_id}")
+
+        provisionally_closed = tuple(
+            issue_id
+            for issue_id, review in reviews.items()
+            if (
+                review[0] == ReviewResult.PASS
+                and candidate_compile.compiled_ok
+                and review[1]
+                and review[2]
+                and review[3]
+                and review[4] == 0
+            )
+        )
+        selection_quality = self._selection_quality(
+            candidate_compile.quality,
+            provisionally_closed_issue_ids=provisionally_closed,
+        )
+
+        candidate_ledger = IssueLedger(self.runtime.ledger.records)
+        for plan in plans:
+            issue_id = plan.issue_ids[0]
+            review = reviews.get(issue_id)
+            if review is None:
+                candidate_ledger.transition(
+                    issue_id,
+                    IssueStatus.BLOCKED,
+                    round_index=round_index,
+                    candidate_hash=application.candidate_hash,
+                    blocker_reason=review_errors[issue_id],
+                )
+                continue
+            candidate_ledger.transition(
+                issue_id,
+                IssueStatus.FIXED_PENDING_REVIEW,
+                round_index=round_index,
+                candidate_hash=application.candidate_hash,
+                patch_id=application.patch_id,
+            )
+            candidate_ledger.close_after_review(
+                issue_id,
+                round_index=round_index,
+                candidate_hash=application.candidate_hash,
+                review_result=review[0],
+                compile_ok=candidate_compile.compiled_ok,
+                content_conservation_ok=review[1],
+                math_conservation_ok=review[2],
+                visual_review_ok=review[3],
+                new_high_priority_issues=review[4],
+            )
+
+        record = self.runtime.candidates.evaluate(
+            application=application,
+            round_index=round_index,
+            pdf=candidate_compile.pdf,
+            compile_log=candidate_compile.compile_log,
+            quality=selection_quality,
+            issue_ledger=candidate_ledger.to_dict(),
+            review={
+                "batch_patch_id": application.patch_id,
+                "issue_reviews": {
+                    issue_id: {
+                        "result": review[0].value,
+                        "content_conservation_ok": review[1],
+                        "math_conservation_ok": review[2],
+                        "visual_review_ok": review[3],
+                        "new_high_priority_issues": review[4],
+                        "page_reviews": review[5],
+                    }
+                    for issue_id, review in sorted(reviews.items())
+                },
+                "review_errors": dict(sorted(review_errors.items())),
+                "machine_compile_ok": candidate_compile.compiled_ok,
+                "machine_quality": asdict(candidate_compile.quality),
+                "host_selection_quality": asdict(selection_quality),
+            },
+        )
+        if record.disposition.value == "ACCEPTED":
+            self._modified_pages.update(application.affected_page_ids)
+            for plan in plans:
+                issue_id = plan.issue_ids[0]
+                review = reviews.get(issue_id)
+                if review is None:
+                    self.runtime.ledger.transition(
+                        issue_id,
+                        IssueStatus.BLOCKED,
+                        round_index=round_index,
+                        candidate_hash=application.candidate_hash,
+                        blocker_reason=review_errors[issue_id],
+                    )
+                    continue
+                self.runtime.ledger.transition(
+                    issue_id,
+                    IssueStatus.FIXED_PENDING_REVIEW,
+                    round_index=round_index,
+                    candidate_hash=application.candidate_hash,
+                    patch_id=application.patch_id,
+                )
+                closed = self.runtime.ledger.close_after_review(
+                    issue_id,
+                    round_index=round_index,
+                    candidate_hash=application.candidate_hash,
+                    review_result=review[0],
+                    compile_ok=candidate_compile.compiled_ok,
+                    content_conservation_ok=review[1],
+                    math_conservation_ok=review[2],
+                    visual_review_ok=review[3],
+                    new_high_priority_issues=review[4],
+                )
+                self.runtime.progress.record_issue_attempt(
+                    issue_id,
+                    prompt_and_evidence_fingerprint=fingerprints[issue_id],
+                    resolved=closed.current_status == IssueStatus.VERIFIED_CLOSED,
+                )
+            return application.candidate_tex, candidate_compile, True
+
+        for plan in plans:
+            issue_id = plan.issue_ids[0]
+            self.runtime.ledger.transition(
+                issue_id,
+                IssueStatus.OPEN,
+                round_index=round_index,
+                candidate_hash=base_hash,
+            )
+            self.runtime.progress.record_issue_attempt(
+                issue_id,
+                prompt_and_evidence_fingerprint=fingerprints[issue_id],
+                resolved=False,
+            )
+        return tex, compiled, False
+
     def _final_reviews(
         self,
         tex: str,
@@ -1070,7 +2325,10 @@ class AnalysisOrchestrator:
                     f"{sha256_text(self.snapshot.run_id + page_id + context_id)[:12]}"
                 )
                 binding = self._binding(
-                    role="AI-5", issue_id=review_scope_id, materials=materials
+                    role="AI-5",
+                    operation=f"final-review-{pass_number}",
+                    issue_id=review_scope_id,
+                    materials=materials,
                 )
                 plans.append((
                     page_id,
@@ -1087,38 +2345,94 @@ class AnalysisOrchestrator:
                 )
                 for _page_id, binding, request in plans
             )
-            raw_results = self._parallel_invocations(calls)
             page_results: list[FinalPageReviewResult] = []
-            for (page_id, binding, _request), result in zip(
-                plans, raw_results, strict=True
-            ):
-                if not isinstance(result, FinalPageReviewResult):
-                    raise CallbackContractError("AI-5 must return FinalPageReviewResult")
-                if result.candidate_hash != binding.candidate_hash:
-                    raise StaleEvidenceError("AI-5 final review belongs to a stale candidate")
-                if (
-                    result.source_page_id != page_id
-                    or result.pass_number != pass_number
-                    or result.context_id != context_id
+            if self.resilient_execution:
+                ordinals = self._reserve_invocation_ordinals(len(calls))
+                with ThreadPoolExecutor(
+                    max_workers=min(self.concurrency_limit, len(calls)),
+                    thread_name_prefix="latexstruct-final-review",
+                ) as pool:
+                    futures = [
+                        pool.submit(call, ordinal)
+                        for call, ordinal in zip(calls, ordinals, strict=True)
+                    ]
+                    for (page_id, binding, _request), future in zip(
+                        plans, futures, strict=True
+                    ):
+                        try:
+                            result = future.result()
+                            if not isinstance(result, FinalPageReviewResult):
+                                raise CallbackContractError(
+                                    "AI-5 must return FinalPageReviewResult"
+                                )
+                            if result.candidate_hash != binding.candidate_hash:
+                                raise StaleEvidenceError(
+                                    "AI-5 final review belongs to a stale candidate"
+                                )
+                            if (
+                                result.source_page_id != page_id
+                                or result.pass_number != pass_number
+                                or result.context_id != context_id
+                            ):
+                                raise CallbackContractError(
+                                    "AI-5 final review changed its host binding"
+                                )
+                        except BaseException as exc:
+                            if bool(getattr(exc, "fatal_analysis", False)):
+                                for pending_future in futures:
+                                    pending_future.cancel()
+                                raise
+                            self._stop_reasons.append(
+                                f"final_review_blocked:{pass_number}:{page_id}"
+                            )
+                            continue
+                        page_results.append(result)
+            else:
+                raw_results = self._parallel_invocations(calls)
+                for (page_id, binding, _request), result in zip(
+                    plans, raw_results, strict=True
                 ):
-                    raise CallbackContractError("AI-5 final review changed its host binding")
-                page_results.append(result)
+                    if not isinstance(result, FinalPageReviewResult):
+                        raise CallbackContractError(
+                            "AI-5 must return FinalPageReviewResult"
+                        )
+                    if result.candidate_hash != binding.candidate_hash:
+                        raise StaleEvidenceError(
+                            "AI-5 final review belongs to a stale candidate"
+                        )
+                    if (
+                        result.source_page_id != page_id
+                        or result.pass_number != pass_number
+                        or result.context_id != context_id
+                    ):
+                        raise CallbackContractError(
+                            "AI-5 final review changed its host binding"
+                        )
+                    page_results.append(result)
+            if not page_results:
+                # The schema deliberately forbids an empty review pass.  Its
+                # absence is machine-detectable and cannot masquerade as an
+                # all(empty) success; a later independent context still runs.
+                continue
+            complete = len(page_results) == len(plans)
             output.append(IndependentReviewPass(
                 pass_number=pass_number,
                 context_id=context_id,
                 candidate_hash=sha256_text(tex),
                 checked_page_ids=tuple(item.source_page_id for item in page_results),
                 compile_passes=compiled.compile_passes,
-                content_conservation_ok=all(
+                content_conservation_ok=complete and all(
                     item.content_conservation_ok for item in page_results
                 ),
-                math_conservation_ok=all(
+                math_conservation_ok=complete and all(
                     item.math_conservation_ok for item in page_results
                 ),
-                formal_inventory_ok=all(
+                formal_inventory_ok=complete and all(
                     item.formal_inventory_ok for item in page_results
                 ),
-                visual_review_ok=all(item.visual_review_ok for item in page_results),
+                visual_review_ok=complete and all(
+                    item.visual_review_ok for item in page_results
+                ),
                 new_high_risk_issues=sum(
                     item.new_high_risk_issues for item in page_results
                 ),
@@ -1211,7 +2525,67 @@ class AnalysisOrchestrator:
                     *status_failures,
                 ))),
             )
+        if self._stop_reasons:
+            decision = VerificationDecision(
+                status=(
+                    AnalysisFinalStatus.COMPLETED_WITH_ISSUES
+                    if decision.status == AnalysisFinalStatus.VERIFIED
+                    else decision.status
+                ),
+                verified=False,
+                failures=tuple(dict.fromkeys((
+                    *decision.failures,
+                    "analysis_work_incomplete",
+                    *self._stop_reasons,
+                ))),
+            )
         return evidence, decision
+
+    def _commit_checkpoint(
+        self,
+        *,
+        round_index: int,
+        current_tex: str,
+        current_compile: CompileResult,
+    ) -> None:
+        callback = self.checkpoint_callback
+        if callback is None:
+            return
+        current = self.runtime.candidates.current
+        best = self.runtime.candidates.best
+        if current is None or best is None:
+            raise AnalysisOrchestrationError(
+                "cannot checkpoint before candidate authority is initialized"
+            )
+        rollback_ids = tuple(dict.fromkeys((
+            *self._prior_rollback_candidate_ids,
+            *(
+                item.rejected_candidate_id
+                for item in self.runtime.candidates.rollback_history
+            ),
+        )))
+        callback(AnalysisCheckpointState(
+            round_index=round_index,
+            current_tex=current_tex,
+            current_compile=current_compile,
+            current_candidate=current,
+            best_candidate=best,
+            issue_ledger=self.runtime.ledger.to_dict(),
+            task_ledger=(
+                self._task_store.to_dict()
+                if self._task_store is not None
+                else {
+                    "schema": "latexstruct-analysis-task-ledger-v2",
+                    "records": {},
+                }
+            ),
+            invocations=tuple(sorted(self._invocations, key=lambda item: item.ordinal)),
+            full_compile_count=self._prior_full_compile_count + len(self._compile_history),
+            incremental_check_count=self._incremental_check_count,
+            rollback_candidate_ids=rollback_ids,
+            modified_page_ids=tuple(sorted(self._modified_pages)),
+            stop_reasons=tuple(dict.fromkeys(self._stop_reasons)),
+        ))
 
     def run(
         self,
@@ -1237,27 +2611,79 @@ class AnalysisOrchestrator:
         baseline_compile = self._compile(
             baseline_tex, round_index=0, reason="frozen OCR baseline"
         )
+        if not baseline_compile.compiled_ok:
+            raise AnalysisOrchestrationError(
+                "baseline compilation did not produce an openable two-pass PDF"
+            )
         if baseline_compile.pdf_hash != self.snapshot.baseline_pdf_hash:
             raise StaleEvidenceError("baseline PDF does not match the immutable snapshot")
         current_tex = baseline_tex
         current_compile = baseline_compile
-        self._discover(current_tex, current_compile)
-        for group in self._conflict_groups():
-            self._adjudicate(
-                issues=group,
-                reason="CONFLICT",
-                tex=current_tex,
-                compiled=current_compile,
-            )
-        self.runtime.candidates.save_baseline(
+        # Preserve the verified input before any fallible discovery call, but
+        # keep it separate from CandidateController: the real selection
+        # baseline must be initialized only after discovery has populated the
+        # host ledger and its quality counts are known.
+        self.runtime.candidates.repository.save_baseline_input_checkpoint(
+            run_id=self.snapshot.run_id,
             tex=baseline_tex,
             pdf=baseline_compile.pdf,
             compile_log=baseline_compile.compile_log,
-            quality=self._selection_quality(baseline_compile.quality),
-            issue_ledger=self.runtime.ledger.to_dict(),
+            compile_passes=baseline_compile.compile_passes,
+            pdf_openable=baseline_compile.pdf_openable,
         )
+        if self.baseline_frozen_callback is not None:
+            self.baseline_frozen_callback(baseline_compile)
 
-        for round_index in range(1, max_macro_rounds + 1):
+        if self.resume_state is not None:
+            state = self.resume_state
+            self.runtime.ledger = IssueLedger.from_dict(state.issue_ledger)
+            record = self.runtime.candidates.resume_from_committed_best(
+                state.best_candidate_id
+            )
+            if (
+                record.candidate_id != state.current_candidate_id
+                or record.tex_sha256 != state.current_candidate_hash
+            ):
+                raise StaleEvidenceError(
+                    "resume candidate differs from the committed checkpoint"
+                )
+            current_tex = state.current_tex
+            current_compile = (
+                baseline_compile
+                if state.current_candidate_hash == self.snapshot.baseline_tex_hash
+                else self._compile(
+                    current_tex,
+                    round_index=state.round_index,
+                    reason="resume committed history best",
+                )
+            )
+            self._attempted_candidate_hashes.add(state.current_candidate_hash)
+            first_round = state.round_index + 1
+        else:
+            self._discover(current_tex, current_compile)
+            for group in self._conflict_groups():
+                self._adjudicate(
+                    issues=group,
+                    reason="CONFLICT",
+                    tex=current_tex,
+                    compiled=current_compile,
+                )
+            self.runtime.candidates.save_baseline(
+                tex=baseline_tex,
+                pdf=baseline_compile.pdf,
+                compile_log=baseline_compile.compile_log,
+                quality=self._selection_quality(baseline_compile.quality),
+                issue_ledger=self.runtime.ledger.to_dict(),
+            )
+            self._commit_checkpoint(
+                round_index=0,
+                current_tex=current_tex,
+                current_compile=current_compile,
+            )
+            first_round = 1
+
+        last_committed_round = first_round - 1
+        for round_index in range(first_round, max_macro_rounds + 1):
             eligible = [
                 item for item in self.runtime.ledger.unresolved()
                 if item.current_status in {
@@ -1269,31 +2695,66 @@ class AnalysisOrchestrator:
             if not eligible:
                 break
             eligible.sort(key=lambda item: (SEVERITY_ORDER[item.severity], item.issue_id))
-            for issue in eligible:
-                # AI-6 may have rejected another item while this round was running.
-                live = self.runtime.ledger.get(issue.issue_id)
-                if live.current_status not in {
-                    IssueStatus.OPEN,
-                    IssueStatus.BLOCKED,
-                    IssueStatus.REGRESSION,
-                }:
-                    continue
-                current_tex, current_compile, _accepted = self._attempt_issue(
-                    issue_id=issue.issue_id,
+            if self.macro_batching_enabled:
+                current_tex, current_compile, _accepted = self._attempt_issue_batch(
+                    issue_ids=tuple(item.issue_id for item in eligible),
                     round_index=round_index,
                     tex=current_tex,
                     compiled=current_compile,
                 )
+            else:
+                for issue in eligible:
+                    # AI-6 may have rejected another item while this round was running.
+                    live = self.runtime.ledger.get(issue.issue_id)
+                    if live.current_status not in {
+                        IssueStatus.OPEN,
+                        IssueStatus.BLOCKED,
+                        IssueStatus.REGRESSION,
+                    }:
+                        continue
+                    current_tex, current_compile, _accepted = self._attempt_issue(
+                        issue_id=issue.issue_id,
+                        round_index=round_index,
+                        tex=current_tex,
+                        compiled=current_compile,
+                    )
+            self._commit_checkpoint(
+                round_index=round_index,
+                current_tex=current_tex,
+                current_compile=current_compile,
+            )
+            last_committed_round = round_index
 
+        self._recheck_modified_pages(
+            current_tex,
+            current_compile,
+            round_index=last_committed_round + 1,
+        )
+        if self._modified_pages:
+            self._commit_checkpoint(
+                round_index=last_committed_round,
+                current_tex=current_tex,
+                current_compile=current_compile,
+            )
         best = self.runtime.candidates.best
         if best is None or best.tex_sha256 != sha256_text(current_tex):
             raise AnalysisOrchestrationError("candidate controller lost the history best")
         final_reviews = self._final_reviews(current_tex, current_compile)
+        page_route_closure = self._build_page_route_closure(
+            final_candidate_hash=sha256_text(current_tex),
+        )
         evidence, decision = self._verification(
             tex=current_tex,
             compiled=current_compile,
             baseline_compile=baseline_compile,
             final_reviews=final_reviews,
+        )
+        # Capture final-review and machine-verification invocations as a later
+        # immutable sequence even when they do not advance the macro round.
+        self._commit_checkpoint(
+            round_index=last_committed_round,
+            current_tex=current_tex,
+            current_compile=current_compile,
         )
         elapsed = max(0.0, self.clock() - started)
         closed = sum(
@@ -1310,18 +2771,26 @@ class AnalysisOrchestrator:
             whole_book_scan_seconds=elapsed,
             role_call_counts=self._role_counts,
             model_elapsed_seconds=self._role_elapsed,
-            input_tokens=0,
-            output_tokens=0,
+            # Transport usage is owned by the production bridge.  A bare
+            # orchestrator cannot know whether a completed or failed request
+            # consumed billable tokens, so it must not manufacture zeroes.
+            input_tokens=None,
+            output_tokens=None,
+            usage_complete=False,
             cache_hits=0,
-            cache_misses=sum(self._role_counts.values()),
+            cache_misses=0,
+            cache_status="DISABLED",
             high_risk_pages=sum(
                 item.page_unit.risk_level in {PageRisk.R2, PageRisk.R3}
                 for item in self.page_inputs
             ),
             modified_pages=len(self._modified_pages),
-            full_compile_count=len(self._compile_history),
-            incremental_check_count=0,
-            rollback_count=len(self.runtime.candidates.rollback_history),
+            full_compile_count=self._prior_full_compile_count + len(self._compile_history),
+            incremental_check_count=self._incremental_check_count,
+            rollback_count=(
+                len(self._prior_rollback_candidate_ids)
+                + len(self.runtime.candidates.rollback_history)
+            ),
             auto_closed_issues=closed,
             blocked_issues=blocked,
             final_status=decision.status,
@@ -1336,10 +2805,20 @@ class AnalysisOrchestrator:
             ledger=self.runtime.ledger.records,
             invocations=tuple(sorted(self._invocations, key=lambda item: item.ordinal)),
             performance=performance,
-            rollback_candidate_ids=tuple(
-                item.rejected_candidate_id
-                for item in self.runtime.candidates.rollback_history
+            rollback_candidate_ids=tuple(dict.fromkeys((
+                *self._prior_rollback_candidate_ids,
+                *(
+                    item.rejected_candidate_id
+                    for item in self.runtime.candidates.rollback_history
+                ),
+            ))),
+            stop_reasons=tuple(dict.fromkeys(self._stop_reasons)),
+            task_summary=(
+                tuple(sorted(self._task_store.summary().items()))
+                if self._task_store is not None
+                else ()
             ),
+            page_route_closure=page_route_closure,
         )
 
 
@@ -1347,9 +2826,11 @@ __all__ = [
     "AdjudicationRequest",
     "AdjudicationResult",
     "AnalysisCallbacks",
+    "AnalysisCheckpointState",
     "AnalysisOrchestrationError",
     "AnalysisOrchestrationResult",
     "AnalysisOrchestrator",
+    "AnalysisResumeState",
     "CallbackContractError",
     "CallBinding",
     "CompileRequest",

@@ -16,6 +16,7 @@ from latexstruct.core.invariants import (  # noqa: E402
     cites,
     image_paths,
     labels,
+    heading_title_tokens,
     math_tokens,
     refs,
 )
@@ -161,6 +162,58 @@ Apply the widget rule. \hfill $\square$
     assert check_invariants(
         before, deleted, check_body_text=True,
     )["body_text"]["equal"] is False
+
+
+def test_centered_heading_to_semantic_heading_preserves_visible_title_only():
+    before = "\n".join([
+        r"\begin{document}",
+        r"\begin{center}",
+        r"\textbf{3.1. Triangles}",
+        r"\end{center}",
+        "Body text.",
+        r"\end{document}",
+    ])
+    after = "\n".join([
+        r"\begin{document}",
+        r"\subsection*{3.1. Triangles}",
+        "Body text.",
+        r"\end{document}",
+    ])
+    changed = after.replace("Triangles", "Cycles")
+
+    preserved = check_invariants(
+        before,
+        after,
+        check_body_text=True,
+        check_heading_titles=True,
+    )
+    tampered = check_invariants(
+        before,
+        changed,
+        check_body_text=True,
+        check_heading_titles=True,
+    )
+
+    assert heading_title_tokens(before) == heading_title_tokens(after) == [
+        "3.1. Triangles"
+    ]
+    assert preserved["body_text"]["equal"] is True
+    assert preserved["heading_titles"]["equal"] is True
+    assert preserved["ok"] is True
+    assert tampered["heading_titles"]["equal"] is False
+    assert tampered["ok"] is False
+
+
+def test_heading_fingerprint_does_not_promote_ordinary_centered_prose():
+    text = "\n".join([
+        r"\begin{document}",
+        r"\begin{center}",
+        "This sentence is centered for presentation only.",
+        r"\end{center}",
+        r"\end{document}",
+    ])
+
+    assert heading_title_tokens(text) == []
 
 
 def test_body_gate_preserves_statement_inside_formal_heading_group():

@@ -1,0 +1,382 @@
+name: analysis-37 trusted acceptance
+
+on:
+  workflow_call:
+    inputs:
+      candidate_run_id:
+        description: "同一提交上已成功产出候选资产的 build.yml run 数字 ID"
+        required: true
+        type: string
+      version:
+        description: "严格语义版本（必须与候选程序一致）"
+        required: true
+        type: string
+      runner_label:
+        description: "只分配给本次 JIT runner 的随机唯一标签"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: "同一提交上已成功完成的 build.yml 手动候选 run 数字 ID"
+        required: true
+        type: string
+      version:
+        description: "严格语义版本（必须与候选程序一致）"
+        required: true
+        type: string
+      runner_label:
+        description: "只分配给本次 JIT runner 的随机唯一标签"
+        required: true
+        type: string
+
+concurrency:
+  group: latexstruct-analysis-37-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  trusted_analysis_37:
+    name: 精确候选的私有 analysis-37 完整验收
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - latexstruct-acceptance-private
+      - ${{ inputs.runner_label }}
+    environment: v2-stable-acceptance
+    timeout-minutes: 360
+    env:
+      RAMSEY_37_SOURCE_PATH: ${{ vars.RAMSEY_37_SOURCE_PATH }}
+      RELEASE_ANALYSIS_MODEL_ID: gpt-5.4-mini
+      RELEASE_ANALYSIS_REASONING_EFFORT: high
+      LATEXSTRUCT_ANALYSIS_BACKEND: codex_cli
+      LATEXSTRUCT_CODEX_MODEL: gpt-5.4-mini
+      LATEXSTRUCT_CODEX_REASONING_EFFORT: high
+      LATEXSTRUCT_CODEX_TRIAGE_MODEL: gpt-5.4-mini
+      LATEXSTRUCT_CODEX_TRIAGE_REASONING_EFFORT: high
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+      - name: 验证受信 run 与候选构建身份
+        id: identity
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          CANDIDATE_RUN_ID_INPUT: ${{ inputs.candidate_run_id }}
+          REQUIRED_RUNNER_LABEL: ${{ inputs.runner_label }}
+        run: |
+          if ([int]$env:GITHUB_RUN_ATTEMPT -ne 1) {
+            Write-Error '受信 analysis-37 只接受首次 run attempt；禁止 rerun 继承旧工件'
+            exit 1
+          }
+          $version = ([string]$env:REQUESTED_VERSION).TrimStart('v').Trim()
+          $candidateRunId = ([string]$env:CANDIDATE_RUN_ID_INPUT).Trim()
+          $runnerLabel = ([string]$env:REQUIRED_RUNNER_LABEL).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Error "版本格式无效: $version"; exit 1
+          }
+          if ($candidateRunId -notmatch '^[1-9][0-9]*$') {
+            Write-Error 'candidate_run_id 必须是数字 GitHub Actions run id'; exit 1
+          }
+          if ($runnerLabel -cnotmatch '^latexstruct-acceptance-[0-9a-f]{32}$') {
+            Write-Error 'runner_label 必须是本次 JIT runner 的 32 位小写十六进制随机标签'
+            exit 1
+          }
+          python -c "import latexstruct; assert latexstruct.__version__=='$version'"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error '验收版本与被测提交中的应用版本不一致'; exit 1
+          }
+          $headers = @{
+            'User-Agent' = 'latexstruct-analysis-37-acceptance'
+            'Authorization' = "Bearer $env:GITHUB_TOKEN"
+            'Accept' = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          try {
+            $candidate = Invoke-RestMethod -Headers $headers `
+              "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/runs/$candidateRunId"
+          } catch {
+            Write-Error "无法读取候选构建 run $candidateRunId"; exit 1
+          }
+          $sameRun = $candidateRunId -eq [string]$env:GITHUB_RUN_ID
+          $candidateStateValid = if ($sameRun) {
+            [string]$candidate.status -eq 'in_progress' -and
+              [string]::IsNullOrEmpty([string]$candidate.conclusion)
+          } else {
+            [string]$candidate.status -eq 'completed' -and
+              [string]$candidate.conclusion -eq 'success'
+          }
+          if (
+            [string]$candidate.id -ne $candidateRunId -or
+            [string]$candidate.event -ne 'workflow_dispatch' -or
+            -not $candidateStateValid -or
+            [string]$candidate.path -ne '.github/workflows/build.yml' -or
+            [int]$candidate.run_attempt -ne 1 -or
+            ([string]$candidate.head_sha).ToLowerInvariant() -ne `
+              ([string]$env:GITHUB_SHA).ToLowerInvariant() -or
+            [string]$candidate.repository.full_name -ne $env:GITHUB_REPOSITORY
+          ) {
+            Write-Error '候选构建不是同仓库、同提交、首次有效的 build.yml 手动 run'
+            exit 1
+          }
+          $acceptanceWorkflowPath = if ($sameRun) {
+            '.github/workflows/build.yml'
+          } else {
+            '.github/workflows/analysis-37-acceptance.yml'
+          }
+          $privateRoot = Join-Path $env:RUNNER_TEMP `
+            "latexstruct-private-analysis-37-$env:GITHUB_RUN_ID"
+          $payloadRoot = Join-Path $env:RUNNER_TEMP `
+            "latexstruct-public-analysis-37-$env:GITHUB_RUN_ID"
+          $closureRoot = Join-Path $env:RUNNER_TEMP `
+            "latexstruct-public-closure-$env:GITHUB_RUN_ID"
+          foreach ($path in @($privateRoot, $payloadRoot, $closureRoot)) {
+            if (Test-Path -LiteralPath $path) {
+              Write-Error "受信 run 的隔离目录已存在，拒绝复用: $path"; exit 1
+            }
+            New-Item -ItemType Directory -Path $path | Out-Null
+          }
+          $privateAppData = Join-Path $privateRoot 'profile\AppData\Roaming'
+          $privateLocalAppData = Join-Path $privateRoot 'profile\AppData\Local'
+          $privateTemp = Join-Path $privateRoot 'temp'
+          foreach ($path in @($privateAppData, $privateLocalAppData, $privateTemp)) {
+            New-Item -ItemType Directory -Path $path -Force | Out-Null
+          }
+          $profileHome = ([string]$env:USERPROFILE).Trim()
+          if (-not $profileHome -or -not (Test-Path -LiteralPath $profileHome -PathType Container)) {
+            Write-Error '一次性验收 runner 没有可用的 Windows 用户目录'; exit 1
+          }
+          $codexHome = Join-Path $profileHome '.codex'
+          "APP_VERSION=$version" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_RUN_ID=$candidateRunId" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ACCEPTANCE_WORKFLOW_PATH=$acceptanceWorkflowPath" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ACCEPTANCE_RUNNER_LABEL=$runnerLabel" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "PRIVATE_ACCEPTANCE_ROOT=$privateRoot" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "PUBLIC_PAYLOAD_ROOT=$payloadRoot" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "PUBLIC_CLOSURE_ROOT=$closureRoot" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "PRIVATE_APPDATA_ROOT=$privateAppData" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "PRIVATE_LOCALAPPDATA_ROOT=$privateLocalAppData" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "PRIVATE_TEMP_ROOT=$privateTemp" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "HOME=$profileHome" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CODEX_HOME=$codexHome" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "APPDATA=$privateAppData" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "LOCALAPPDATA=$privateLocalAppData" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "TEMP=$privateTemp" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$privateTemp" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: 安装真实验收驱动
+        shell: pwsh
+        run: |
+          python -m pip install -e ".[server,acceptance]"
+          if ($LASTEXITCODE -ne 0) { Write-Error '验收依赖安装失败'; exit 1 }
+          python -m playwright install chromium
+          if ($LASTEXITCODE -ne 0) { Write-Error 'Chromium 安装失败'; exit 1 }
+      - name: 下载同一提交的不可变候选资产
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: LaTeXStruct-v${{ env.APP_VERSION }}
+          path: candidate-assets
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.CANDIDATE_RUN_ID }}
+      - name: 校验私有源文件与候选资产并启动精确 EXE
+        shell: pwsh
+        run: |
+          $source = ([string]$env:RAMSEY_37_SOURCE_PATH).Trim()
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            Write-Error '受保护环境变量 RAMSEY_37_SOURCE_PATH 未指向本机 37 页源 PDF'
+            exit 1
+          }
+          $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash.ToLowerInvariant()
+          if ($sourceHash -ne '29074289719d99d7fc89f528cc0b140c27be679ea5d2477fe517eff741e7757c') {
+            Write-Error "37 页源 PDF SHA-256 不匹配: $sourceHash"; exit 1
+          }
+          $releaseManifest = Join-Path $env:PRIVATE_ACCEPTANCE_ROOT 'release-attestation.json'
+          $portable = Join-Path 'candidate-assets' "LaTeXStruct-portable-$env:APP_VERSION.zip"
+          $runtime = Join-Path $env:PRIVATE_ACCEPTANCE_ROOT 'candidate-runtime'
+          Expand-Archive -LiteralPath $portable -DestinationPath $runtime
+          $exe = Join-Path $runtime 'LaTeXStruct.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            Write-Error '候选便携包缺少 LaTeXStruct.exe'; exit 1
+          }
+          $exeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
+          $listener = [System.Net.Sockets.TcpListener]::new(
+            [System.Net.IPAddress]::Loopback, 0
+          )
+          $listener.Start()
+          $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+          $listener.Stop()
+          $process = Start-Process -FilePath $exe -ArgumentList `
+            '--server','--port',"$port" -WindowStyle Hidden -PassThru
+          "SOURCE_PDF=$source" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_EXE=$exe" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_EXE_SHA256=$exeHash" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_SERVICE_PID=$($process.Id)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_BASE_URL=http://127.0.0.1:$port" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          $healthy = $false
+          foreach ($attempt in 1..90) {
+            if ($process.HasExited) { break }
+            try {
+              $health = Invoke-RestMethod "http://127.0.0.1:$port/api/health"
+              if ($health.ok -eq $true) { $healthy = $true; break }
+            } catch { Start-Sleep -Seconds 1 }
+          }
+          if (-not $healthy) {
+            Write-Error '精确候选服务未在 90 秒内进入健康状态'; exit 1
+          }
+          try {
+            $codexStatus = Invoke-RestMethod `
+              "http://127.0.0.1:$port/api/codex/status" -TimeoutSec 30
+            $runtimeConfig = Invoke-RestMethod `
+              "http://127.0.0.1:$port/api/config" -TimeoutSec 30
+          } catch {
+            Write-Error '无法完成候选内置 Codex runtime 与非秘密配置预检'; exit 1
+          }
+          if (
+            $codexStatus.available -ne $true -or
+            $codexStatus.authenticated -ne $true -or
+            $codexStatus.ready -ne $true
+          ) {
+            Write-Error '候选内置 Codex CLI 未通过 ChatGPT 登录就绪预检'; exit 1
+          }
+          if (
+            [string]$runtimeConfig.analysis_backend -ne 'codex_cli' -or
+            [string]$runtimeConfig.codex_model -ne $env:RELEASE_ANALYSIS_MODEL_ID -or
+            [string]$runtimeConfig.codex_reasoning_effort -ne `
+              $env:RELEASE_ANALYSIS_REASONING_EFFORT -or
+            [string]$runtimeConfig.codex_triage_model -ne `
+              $env:RELEASE_ANALYSIS_MODEL_ID -or
+            [string]$runtimeConfig.codex_triage_reasoning_effort -ne `
+              $env:RELEASE_ANALYSIS_REASONING_EFFORT
+          ) {
+            Write-Error '候选未采用冻结的主分析与 structure triage 分角色配置'; exit 1
+          }
+      - name: 执行 37 页 OCR、分析审阅、编译与逐页视觉闭环
+        shell: pwsh
+        run: |
+          $analysisRun = Join-Path $env:PRIVATE_ACCEPTANCE_ROOT 'analysis-run-37'
+          python tools/v2_analysis_acceptance.py "$env:SOURCE_PDF" `
+            --profile analysis-37 --base-url $env:CANDIDATE_BASE_URL `
+            --output $analysisRun --expected-version $env:APP_VERSION `
+            --expected-commit $env:GITHUB_SHA `
+            --expected-build-id $env:CANDIDATE_RUN_ID `
+            --executable $env:CANDIDATE_EXE `
+            --exe-sha256 $env:CANDIDATE_EXE_SHA256 `
+            --service-pid $env:CANDIDATE_SERVICE_PID `
+            --expected-model-id $env:RELEASE_ANALYSIS_MODEL_ID `
+            --expected-reasoning-effort $env:RELEASE_ANALYSIS_REASONING_EFFORT `
+            --quality-tier high --template faithfulbook `
+            --timeout-seconds 14400
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error 'analysis-37 真实完整验收未通过'; exit 1
+          }
+          python packaging/release_integrity.py assemble-attestations `
+            --version $env:APP_VERSION --commit $env:GITHUB_SHA `
+            --analysis-run-37 $analysisRun `
+            --output (Join-Path $env:PRIVATE_ACCEPTANCE_ROOT 'release-attestation.json')
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error '无法从真实私有工件组装发布投影'; exit 1
+          }
+          python packaging/release_integrity.py assemble-github-acceptance `
+            --version $env:APP_VERSION --commit $env:GITHUB_SHA `
+            --repository $env:GITHUB_REPOSITORY `
+            --acceptance-run-id $env:GITHUB_RUN_ID `
+            --acceptance-run-attempt ([int]$env:GITHUB_RUN_ATTEMPT) `
+            --acceptance-workflow-path $env:ACCEPTANCE_WORKFLOW_PATH `
+            --runner-label $env:ACCEPTANCE_RUNNER_LABEL `
+            --candidate-run-id $env:CANDIDATE_RUN_ID `
+            --analysis-run-37 $analysisRun `
+            --release-manifest (Join-Path $env:PRIVATE_ACCEPTANCE_ROOT 'release-attestation.json') `
+            --assets-manifest candidate-assets/release-assets.json `
+            --checksums candidate-assets/SHA256SUMS.txt `
+            --assets-dir candidate-assets --output-dir $env:PUBLIC_PAYLOAD_ROOT
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error '受信 GitHub payload 无法闭合真实工件与候选资产'; exit 1
+          }
+      - name: 上传只含哈希投影的受信 payload
+        id: payload_upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: LaTeXStruct-analysis-37-evidence-v${{ env.APP_VERSION }}
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          path: |
+            ${{ env.PUBLIC_PAYLOAD_ROOT }}/github-acceptance-reference.json
+            ${{ env.PUBLIC_PAYLOAD_ROOT }}/github-acceptance-root.json
+            ${{ env.PUBLIC_PAYLOAD_ROOT }}/release-attestation.json
+      - name: 生成 payload artifact ID 与 digest 闭包
+        shell: pwsh
+        env:
+          PAYLOAD_ARTIFACT_ID: ${{ steps.payload_upload.outputs.artifact-id }}
+          PAYLOAD_ARTIFACT_DIGEST: ${{ steps.payload_upload.outputs.artifact-digest }}
+        run: |
+          python packaging/release_integrity.py write-github-acceptance-closure `
+            --payload-dir $env:PUBLIC_PAYLOAD_ROOT `
+            --repository $env:GITHUB_REPOSITORY `
+            --version $env:APP_VERSION --commit $env:GITHUB_SHA `
+            --acceptance-run-id $env:GITHUB_RUN_ID `
+            --acceptance-run-attempt ([int]$env:GITHUB_RUN_ATTEMPT) `
+            --acceptance-workflow-path $env:ACCEPTANCE_WORKFLOW_PATH `
+            --runner-label $env:ACCEPTANCE_RUNNER_LABEL `
+            --candidate-run-id $env:CANDIDATE_RUN_ID `
+            --payload-artifact-id $env:PAYLOAD_ARTIFACT_ID `
+            --payload-artifact-digest $env:PAYLOAD_ARTIFACT_DIGEST `
+            --output (Join-Path $env:PUBLIC_CLOSURE_ROOT 'github-acceptance-closure.json')
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error '无法生成 GitHub payload artifact 闭包'; exit 1
+          }
+      - name: 上传受信 closure
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: LaTeXStruct-analysis-37-closure-v${{ env.APP_VERSION }}
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          path: ${{ env.PUBLIC_CLOSURE_ROOT }}/github-acceptance-closure.json
+      - name: 清理自托管验收机上的本次私有运行目录
+        if: always()
+        shell: pwsh
+        run: |
+          if ([string]$env:CANDIDATE_SERVICE_PID -match '^[1-9][0-9]*$') {
+            Stop-Process -Id ([int]$env:CANDIDATE_SERVICE_PID) -Force `
+              -ErrorAction SilentlyContinue
+          }
+          $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
+          foreach ($raw in @(
+            $env:PRIVATE_ACCEPTANCE_ROOT,
+            $env:PUBLIC_PAYLOAD_ROOT,
+            $env:PUBLIC_CLOSURE_ROOT
+          )) {
+            if ([string]::IsNullOrWhiteSpace($raw)) { continue }
+            $target = [IO.Path]::GetFullPath($raw)
+            if ((Split-Path -Parent $target).TrimEnd('\') -ne $runnerTemp) {
+              Write-Error "拒绝清理 RUNNER_TEMP 之外的路径: $target"; exit 1
+            }
+            if (Test-Path -LiteralPath $target) {
+              Remove-Item -LiteralPath $target -Recurse -Force
+            }
+          }
+          foreach ($privatePath in @(
+            $env:PRIVATE_ACCEPTANCE_ROOT,
+            $env:PUBLIC_PAYLOAD_ROOT,
+            $env:PUBLIC_CLOSURE_ROOT,
+            $env:PRIVATE_APPDATA_ROOT,
+            $env:PRIVATE_LOCALAPPDATA_ROOT,
+            $env:PRIVATE_TEMP_ROOT
+          )) {
+            if (
+              -not [string]::IsNullOrWhiteSpace($privatePath) -and
+              (Test-Path -LiteralPath $privatePath)
+            ) {
+              Write-Error "本次验收私有目录清理后仍存在: $privatePath"; exit 1
+            }
+          }

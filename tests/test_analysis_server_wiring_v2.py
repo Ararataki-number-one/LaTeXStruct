@@ -14,7 +14,22 @@ import pytest
 
 from latexstruct.config import AppConfig
 from latexstruct.core.analysis_adapter import stable_source_page_id
-from latexstruct.core.analysis_schema import AnalysisFinalStatus
+from latexstruct.core.analysis_orchestrator import PageAnalysisInput
+from latexstruct.core.analysis_risk import (
+    PageRiskPreflightInput,
+    build_page_risk_admission,
+    coerce_page_risk_admission,
+)
+from latexstruct.core.analysis_schema import (
+    AnalysisFinalStatus,
+    PageRisk,
+    PageRiskRouteClosure,
+    PageRouteRecord,
+    PageTriageOutcome,
+    PageUnit,
+    canonical_json_bytes,
+)
+from latexstruct.core.compilecheck import build_compile_input_manifest
 from latexstruct.core.ocr_recovery import (
     OcrRecoveryEvidenceStore,
     RecoveryImageInput,
@@ -99,6 +114,7 @@ def _pipeline_result(candidate: bytes, deterministic: dict):
     tex = _tex()
     pdf_hash = hashlib.sha256(candidate).hexdigest()
     tex_hash = hashlib.sha256(tex.encode("utf-8")).hexdigest()
+    compile_input_hash = build_compile_input_manifest(tex, {})["manifest_sha256"]
     return SimpleNamespace(
         ok=False,
         result="legacy-result",
@@ -131,11 +147,14 @@ def _pipeline_result(candidate: bytes, deterministic: dict):
                 "sha256": pdf_hash,
                 "pdf_sha256": pdf_hash,
                 "tex_sha256": tex_hash,
+                "compile_input_sha256": compile_input_hash,
             },
             "compile_after": {
                 "available": True,
                 "ok": True,
                 "preview_status": "COMPILED",
+                "pdf_sha256": pdf_hash,
+                "compile_input_sha256": compile_input_hash,
             },
             "visual_quality_loop": {
                 "rounds": [{
@@ -148,6 +167,44 @@ def _pipeline_result(candidate: bytes, deterministic: dict):
             },
         },
     )
+
+
+def _server_analysis_budget(**overrides):
+    limits = {
+        "max_input_tokens": 0,
+        "max_output_tokens": 0,
+        "max_cost": 0.0,
+        "max_requests": 0,
+        "max_strong_model_calls": 0,
+        "max_wall_time_minutes": 120.0,
+    }
+    limits.update(overrides)
+    return limits
+
+
+def test_server_analysis_budget_defaults_are_explicit_and_complete():
+    assert server._analysis_v2_budget_limits({}) == _server_analysis_budget()
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        None,
+        [],
+        {"max_requests": 10},
+        _server_analysis_budget(unrecognized_limit=1),
+        _server_analysis_budget(max_requests=True),
+        _server_analysis_budget(max_requests=1.5),
+        _server_analysis_budget(max_input_tokens=-1),
+        _server_analysis_budget(max_cost=float("nan")),
+        _server_analysis_budget(max_wall_time_minutes=0),
+    ],
+)
+def test_server_analysis_budget_rejects_invalid_shapes_types_and_values(
+    configured,
+):
+    with pytest.raises(ValueError, match="analysis_budget"):
+        server._analysis_v2_budget_limits({"analysis_budget": configured})
 
 
 def test_host_frozen_reflow_map_excludes_toc_and_preserves_split_page():
@@ -241,9 +298,38 @@ def test_server_stage_calls_production_runner_and_atomically_publishes_verified_
     source, candidate, deterministic = _frozen_inputs()
     result = _pipeline_result(candidate, deterministic)
     calls = {"runner": 0, "compiler": []}
+    budget_limits = {
+        "max_input_tokens": 120_000,
+        "max_output_tokens": 24_000,
+        "max_cost": 12.5,
+        "max_requests": 80,
+        "max_strong_model_calls": 6,
+        "max_wall_time_minutes": 45.0,
+    }
+    budget_usage = {
+        "observed_input_tokens": 100,
+        "observed_output_tokens": 20,
+        "observed_cost": 0.1,
+        "accounted_input_tokens": 100,
+        "accounted_output_tokens": 20,
+        "accounted_cost": 0.1,
+        "requests": 1,
+        "strong_model_calls": 0,
+        "unknown_input_token_requests": 0,
+        "unknown_output_token_requests": 0,
+        "unknown_cost_requests": 0,
+        "committed_reservations": 1,
+        "cancelled_reservations": 0,
+        "wall_time_minutes": 0.25,
+    }
+    active_root = tmp_path / "analysis-v2" / "server-production-run"
+    (active_root / "inputs").mkdir(parents=True)
 
-    def fake_compile(tex, *, extra_files, include_pdf):
-        calls["compiler"].append((tex, dict(extra_files), include_pdf))
+    def fake_compile(tex, *, extra_files, include_pdf, minimum_passes):
+        calls["compiler"].append(
+            (tex, dict(extra_files), include_pdf, minimum_passes)
+        )
+        compile_inputs = build_compile_input_manifest(tex, extra_files)
         return {
             "available": True,
             "ok": True,
@@ -253,21 +339,130 @@ def test_server_stage_calls_production_runner_and_atomically_publishes_verified_
             "pages": 4,
             "engine": "fake-xelatex",
             "errors": [],
-            "passes_completed": 1,
+            "passes_requested": 2,
+            "passes_attempted": 2,
+            "passes_completed": 2,
+            "compile_workdir": "compile-workdir:sha256:" + "a" * 64,
+            "compile_input_sha256": compile_inputs["manifest_sha256"],
         }
 
     monkeypatch.setattr("latexstruct.core.compilecheck.compile_latex", fake_compile)
+    admitted = {
+        "ocr_baseline_manifest_hash": "1" * 64,
+        "ocr_page_records_hash": "2" * 64,
+        "ocr_runtime_page_records_hash": "6" * 64,
+        "ocr_page_map_hash": "5" * 64,
+        "ocr_baseline_compile_inputs_hash": "3" * 64,
+        "baseline_compile_inputs_hash": build_compile_input_manifest(_tex(), {})[
+            "manifest_sha256"
+        ],
+        "build_identity_hash": "4" * 64,
+    }
+
+    def fake_snapshot_evidence(**kwargs):
+        source_hash = hashlib.sha256(source).hexdigest()
+        coverage_checks = {
+            name: "PASS"
+            for name in (
+                "source_hash_bound",
+                "candidate_created",
+                "visual_authority_checked",
+                "reading_order_checked",
+                "text_coverage_checked",
+                "math_region_coverage_checked",
+                "syntax_checked",
+                "persisted",
+            )
+        }
+        regions = {
+            1: "% Page 1\nalpha theorem unique complete\n",
+            2: "% Page 2\nbeta proof unique first second complete\n",
+        }
+        typed_preflight = tuple(
+            PageRiskPreflightInput(
+                source_page_id=stable_source_page_id(source_hash, page),
+                source_page_number=page,
+                source_page_object_hash=f"{index + 5:x}" * 64,
+                ocr_coverage_checks=dict(coverage_checks),
+                unresolved_region_hashes=(),
+                baseline_tex_region=regions[page],
+                candidate_pdf_page_ids=tuple(
+                    f"candidate-page-{candidate_page:06d}"
+                    for candidate_page in kwargs["candidate_page_map"][page]
+                ),
+                source_pdf_text=(
+                    "alpha theorem unique complete"
+                    if page == 1
+                    else "beta proof unique first second complete"
+                ),
+                ocr_final_status="SUCCESS",
+                ocr_retry_count=0,
+                ocr_quality_issues=(),
+                host_quality_flags=(),
+                machine_visual_anomalies=(),
+                double_column=False,
+                complex_layout=False,
+                compile_map_mismatch=False,
+                layout_evidence={"schema": "test-layout-v1", "page": page},
+                compile_map_evidence={"schema": "test-map-v1", "page": page},
+            )
+            for index, page in enumerate((1, 2), 1)
+        )
+        admission = build_page_risk_admission(
+            source_pdf_sha256=source_hash,
+            ocr_page_records_sha256=admitted["ocr_page_records_hash"],
+            ocr_runtime_page_records_sha256=admitted[
+                "ocr_runtime_page_records_hash"
+            ],
+            baseline_tex_sha256=hashlib.sha256(_tex().encode("utf-8")).hexdigest(),
+            baseline_pdf_sha256=hashlib.sha256(candidate).hexdigest(),
+            page_inputs=typed_preflight,
+        )
+        payload = admission.to_dict()
+        digest = admission.digest
+        admitted["page_risk_admission_hash"] = digest
+        kwargs["page_risk_admission_capture"].update({
+            "payload": payload,
+            "sha256": digest,
+            "strategy": admission.strategy,
+            "page_count": 2,
+            "preflight_inputs": [
+                {
+                    "source_page_id": item.summary.source_page_id,
+                    "source_page_number": item.summary.source_page_number,
+                    "source_page_object_hash": item.summary.source_page_object_hash,
+                }
+                for item in admission.pages
+            ],
+            "typed_preflight_inputs": typed_preflight,
+        })
+        return dict(admitted)
+
+    monkeypatch.setattr(
+        server,
+        "_analysis_v2_snapshot_evidence",
+        fake_snapshot_evidence,
+    )
 
     def fake_runner(**kwargs):
         calls["runner"] += 1
         assert kwargs["candidate_page_map"] == {1: (2,), 2: (3, 4)}
+        assert kwargs["snapshot_evidence"] == admitted
+        admission = coerce_page_risk_admission(kwargs["page_risk_admission"])
+        assert admission.digest == admitted["page_risk_admission_hash"]
+        assert not any(
+            item.summary.required_evidence_missing for item in admission.pages
+        )
         assert set(kwargs["text_clients"]) == {"AI-1", "AI-2", "AI-4", "AI-6"}
         assert set(kwargs["vision_clients"]) == {"AI-3", "AI-5"}
-        # The production callback is the real include-PDF compiler and each
-        # candidate is required to invoke it twice.
-        first = kwargs["compiler"](kwargs["baseline_tex"], extra_files={})
-        second = kwargs["compiler"](kwargs["baseline_tex"], extra_files={})
-        assert first["ok"] is True and second["ok"] is True
+        assert {
+            key: kwargs[key] for key in budget_limits
+        } == budget_limits
+        assert kwargs["resume"] is True
+        assert kwargs["candidate_root"] == active_root / "candidates"
+        # One callback invocation owns both passes in the same private workdir.
+        compiled = kwargs["compiler"](kwargs["baseline_tex"], extra_files={})
+        assert compiled["ok"] is True
         source_hash = hashlib.sha256(source).hexdigest()
         page_ids = tuple(
             stable_source_page_id(source_hash, page) for page in (1, 2)
@@ -302,18 +497,143 @@ def test_server_stage_calls_production_runner_and_atomically_publishes_verified_
             performance={"final_status": "VERIFIED"},
             rollback_candidate_ids=(),
         )
+        tex_hash = hashlib.sha256(_tex().encode("utf-8")).hexdigest()
+        pdf_hash = hashlib.sha256(candidate).hexdigest()
+        compile_input_hash = build_compile_input_manifest(_tex(), {})[
+            "manifest_sha256"
+        ]
+        analysis_configuration = {
+            "schema": "latexstruct-test-analysis-configuration-v2",
+            "model": "gpt-5.4",
+            "reasoning_effort": "high",
+        }
+        analysis_configuration_sha256 = hashlib.sha256(
+            canonical_json_bytes(analysis_configuration)
+        ).hexdigest()
+        regions = {
+            1: "% Page 1\nalpha theorem unique complete\n",
+            2: "% Page 2\nbeta proof unique first second complete\n",
+        }
+        page_inputs = []
+        for admitted_page in admission.pages:
+            page_number = admitted_page.summary.source_page_number
+            page_bytes = f"source-page-{page_number}".encode("utf-8")
+            marker = f"% Page {page_number}"
+            end_anchor = "% Page 2" if page_number == 1 else "\\end{document}"
+            page_inputs.append(PageAnalysisInput(
+                PageUnit(
+                    source_page_id=admitted_page.summary.source_page_id,
+                    source_page_number=page_number,
+                    source_page_hash=hashlib.sha256(page_bytes).hexdigest(),
+                    baseline_tex_start_anchor=marker,
+                    baseline_tex_end_anchor=end_anchor,
+                    current_tex_start_anchor=marker,
+                    current_tex_end_anchor=end_anchor,
+                    candidate_pdf_page_ids=tuple(
+                        f"candidate-page-{page:06d}"
+                        for page in kwargs["candidate_page_map"][page_number]
+                    ),
+                    source_text_layer=(
+                        "alpha theorem unique complete"
+                        if page_number == 1
+                        else "beta proof unique first second complete"
+                    ),
+                    risk_level=admitted_page.risk_level,
+                    risk_reasons=admitted_page.risk_reasons,
+                ),
+                page_bytes,
+                regions[page_number],
+            ))
+        sampled_ids = set(admission.low_risk_sampling.selected_page_ids)
+        route_closure = PageRiskRouteClosure(
+            admission_sha256=admission.digest,
+            final_candidate_hash=tex_hash,
+            pages=tuple(
+                PageRouteRecord(
+                    source_page_id=item.summary.source_page_id,
+                    source_page_number=item.summary.source_page_number,
+                    admitted_risk=item.risk_level,
+                    triage_outcome=PageTriageOutcome.CLEAR,
+                    triage_response_sha256=hashlib.sha256(b"[]").hexdigest(),
+                    effective_risk=item.risk_level,
+                    modified=False,
+                    anomaly_reasons=(),
+                    sampled_low_risk=(
+                        item.summary.source_page_id in sampled_ids
+                    ),
+                    deep_review_required=(
+                        item.risk_level in {PageRisk.R2, PageRisk.R3}
+                        or item.summary.source_page_id in sampled_ids
+                    ),
+                    final_candidate_hash=tex_hash,
+                )
+                for item in admission.pages
+            ),
+            route_call_keys=(),
+        )
+        orchestration.page_route_closure = route_closure
+        snapshot_evidence_hashes = SimpleNamespace(
+            page_risk_admission_hash=admission.digest,
+            analysis_config_hash=analysis_configuration_sha256,
+        )
         return SimpleNamespace(
-            snapshot={"run_id": kwargs["run_id"]},
+            snapshot=SimpleNamespace(
+                config_hash=analysis_configuration_sha256,
+                evidence_hashes=snapshot_evidence_hashes,
+                to_dict=lambda: {
+                    "run_id": kwargs["run_id"],
+                    "config_hash": analysis_configuration_sha256,
+                },
+            ),
+            page_risk_admission=admission,
+            analysis_configuration=analysis_configuration,
+            analysis_configuration_sha256=analysis_configuration_sha256,
+            page_inputs=tuple(page_inputs),
             orchestration=orchestration,
-            compile_invocations=(SimpleNamespace(engine="fake-xelatex"),),
+            compile_invocations=(SimpleNamespace(
+                candidate_hash=tex_hash,
+                reason="final atomic compile",
+                run_number=1,
+                ok=True,
+                pdf_hash=pdf_hash,
+                page_count=4,
+                engine="fake-xelatex",
+                passes_requested=2,
+                passes_attempted=2,
+                passes_completed=2,
+                compile_workdir="compile-workdir:sha256:" + "a" * 64,
+                compile_input_sha256=compile_input_hash,
+                same_workdir_verified=True,
+            ),),
             transport_invocations=({"role": "AI-1"},),
+            cache_hit_evidence=(),
+            budget_state={
+                "schema_version": "analysis-budget-v1",
+                "limits": dict(budget_limits),
+                "usage": dict(budget_usage),
+                "low_priority_threshold": 0.9,
+                "stop_reason": None,
+                "stop_details": [],
+                "unbounded_unknown_dimensions": [],
+                "reservations": [],
+            },
+            budget_usage=dict(budget_usage),
             current_compile_log="v2 compile pass 1\nv2 compile pass 2",
+            resumed=True,
+            recovery_checkpoint_id="checkpoint-000004-deadbeefcafe",
+            recovery_rejections=(
+                {"path": "checkpoints/checkpoint-000005", "reason": "tampered"},
+            ),
         )
 
     server._run_analysis_v2_production_stage(
         result,
         pid="project-ocr",
-        project={"kind": "ocr", "mode": "ai"},
+        project={
+            "kind": "ocr",
+            "mode": "ai",
+            "analysis_budget": budget_limits,
+        },
         project_dir=tmp_path,
         cfg=AppConfig(
             analysis_backend="api",
@@ -335,7 +655,8 @@ def test_server_stage_calls_production_runner_and_atomically_publishes_verified_
     )
 
     assert calls["runner"] == 1
-    assert [item[2] for item in calls["compiler"]] == [True, True]
+    assert [item[2] for item in calls["compiler"]] == [True]
+    assert [item[3] for item in calls["compiler"]] == [2]
     assert result.ok is True
     assert result.result == _tex()
     assert result.compiled_pdf == candidate
@@ -348,6 +669,28 @@ def test_server_stage_calls_production_runner_and_atomically_publishes_verified_
     )
     assert result.verification["analysis_v2"]["compile_invocations"]
     assert result.verification["analysis_v2"]["transport_invocations"]
+    archived_risk = result.verification["analysis_v2"]["page_risk_admission"]
+    assert archived_risk["admission_sha256"] == admitted[
+        "page_risk_admission_hash"
+    ]
+    assert len(archived_risk["pages"]) == 2
+    assert result.verification["analysis_v2"]["page_route_closure"][
+        "admission_sha256"
+    ] == archived_risk["admission_sha256"]
+    assert result.verification["analysis_v2"]["analysis_configuration"][
+        "model"
+    ] == "gpt-5.4"
+    assert result.verification["analysis_v2"]["budget_state"]["limits"] == (
+        budget_limits
+    )
+    assert result.verification["analysis_v2"]["budget_usage"] == budget_usage
+    assert result.verification["analysis_v2"]["recovery"] == {
+        "resumed": True,
+        "checkpoint_id": "checkpoint-000004-deadbeefcafe",
+        "rejections": [
+            {"path": "checkpoints/checkpoint-000005", "reason": "tampered"}
+        ],
+    }
     assert all(
         check["ok"] is True
         for check in result.verification["checks"]
@@ -360,7 +703,9 @@ def test_server_stage_calls_production_runner_and_atomically_publishes_verified_
     )
 
 
-def test_runner_failure_keeps_legacy_candidate_and_marks_v2_unverified(tmp_path):
+def test_runner_failure_keeps_legacy_candidate_and_marks_v2_unverified(
+    tmp_path, monkeypatch
+):
     source, candidate, deterministic = _frozen_inputs()
     result = _pipeline_result(candidate, deterministic)
     original = (
@@ -372,6 +717,21 @@ def test_runner_failure_keeps_legacy_candidate_and_marks_v2_unverified(tmp_path)
 
     def fail_runner(**_kwargs):
         raise RuntimeError(r"failed at C:\Users\Private\candidate.tex")
+
+    monkeypatch.setattr(
+        server,
+        "_analysis_v2_snapshot_evidence",
+        lambda **_kwargs: {
+            "ocr_baseline_manifest_hash": "1" * 64,
+            "ocr_page_records_hash": "2" * 64,
+            "ocr_page_map_hash": "5" * 64,
+            "ocr_baseline_compile_inputs_hash": "3" * 64,
+            "baseline_compile_inputs_hash": build_compile_input_manifest(_tex(), {})[
+                "manifest_sha256"
+            ],
+            "build_identity_hash": "4" * 64,
+        },
+    )
 
     server._run_analysis_v2_production_stage(
         result,

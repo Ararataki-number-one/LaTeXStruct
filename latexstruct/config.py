@@ -22,6 +22,7 @@ from .providers import get_provider_preset, is_qwen_config
 from .store import default_data_dir
 
 CONFIG_PATH = os.path.join(default_data_dir(), "config.json")
+CODEX_TRIAGE_OPERATION = "structure-findings"
 
 
 @dataclass
@@ -31,6 +32,10 @@ class AppConfig:
     analysis_backend: str = "api"
     codex_model: str = ""
     codex_reasoning_effort: str = "medium"
+    # Optional narrow override for the initial structure-findings pass only.
+    # Empty values inherit the primary Codex binding, preserving old configs.
+    codex_triage_model: str = ""
+    codex_triage_reasoning_effort: str = ""
     decide_base_url: str = "https://api.deepseek.com"
     decide_model: str = "deepseek-v4-flash"
     decide_api_key: str = field(default="", repr=False)
@@ -80,6 +85,24 @@ class AppConfig:
             codex_model=self.codex_model,
             codex_reasoning_effort=self.codex_reasoning_effort,
         )
+
+    def codex_binding_for_operation(self, operation: str) -> tuple[str, str]:
+        """Resolve one analysis operation without widening the mini-model lane.
+
+        Only the initial ``structure-findings`` task may use the optional
+        triage binding.  Mathematical analysis, visual review, repair,
+        independent review, adjudication, and OCR always retain the primary
+        Codex model and effort.
+        """
+
+        operation_name = str(operation or "").strip()
+        if operation_name == CODEX_TRIAGE_OPERATION:
+            return (
+                self.codex_triage_model or self.codex_model,
+                self.codex_triage_reasoning_effort
+                or self.codex_reasoning_effort,
+            )
+        return self.codex_model, self.codex_reasoning_effort
 
     def masked(self) -> Dict:
         d = asdict(self)
@@ -204,6 +227,24 @@ def _validate_codex_settings(cfg: AppConfig, *, tolerate_invalid: bool = False) 
         if not tolerate_invalid:
             raise
         cfg.codex_reasoning_effort = "medium"
+    try:
+        cfg.codex_triage_model = validate_codex_model(cfg.codex_triage_model)
+    except ValueError:
+        if not tolerate_invalid:
+            raise
+        cfg.codex_triage_model = ""
+    triage_effort = str(cfg.codex_triage_reasoning_effort or "").strip()
+    if triage_effort:
+        try:
+            cfg.codex_triage_reasoning_effort = validate_codex_effort(
+                triage_effort
+            )
+        except ValueError:
+            if not tolerate_invalid:
+                raise
+            cfg.codex_triage_reasoning_effort = ""
+    else:
+        cfg.codex_triage_reasoning_effort = ""
 
 
 def load_config(backend: KeystoreBackend | None = None) -> AppConfig:
@@ -258,6 +299,46 @@ def load_config(backend: KeystoreBackend | None = None) -> AppConfig:
             setattr(cfg, k, os.environ[envk])
             cfg._keyring_resolved[k] = False
             cfg._env_resolved[k] = True
+
+    backend_override = os.environ.get("LATEXSTRUCT_ANALYSIS_BACKEND")
+    if backend_override:
+        backend = backend_override.strip().lower()
+        if backend not in {"api", "codex_cli"}:
+            raise ValueError(
+                "LATEXSTRUCT_ANALYSIS_BACKEND 必须是 api 或 codex_cli"
+            )
+        cfg.analysis_backend = backend
+        cfg._env_resolved["analysis_backend"] = True
+
+    model_override = os.environ.get("LATEXSTRUCT_CODEX_MODEL")
+    effort_override = os.environ.get("LATEXSTRUCT_CODEX_REASONING_EFFORT")
+    if model_override or effort_override:
+        from .core.codex_cli import validate_codex_effort, validate_codex_model
+
+        if model_override:
+            cfg.codex_model = validate_codex_model(model_override)
+            cfg._env_resolved["codex_model"] = True
+        if effort_override:
+            cfg.codex_reasoning_effort = validate_codex_effort(effort_override)
+            cfg._env_resolved["codex_reasoning_effort"] = True
+
+    triage_model_override = os.environ.get("LATEXSTRUCT_CODEX_TRIAGE_MODEL")
+    triage_effort_override = os.environ.get(
+        "LATEXSTRUCT_CODEX_TRIAGE_REASONING_EFFORT"
+    )
+    if triage_model_override:
+        from .core.codex_cli import validate_codex_model
+
+        cfg.codex_triage_model = validate_codex_model(triage_model_override)
+        cfg._env_resolved["codex_triage_model"] = True
+    if triage_effort_override:
+        from .core.codex_cli import validate_codex_effort
+
+        cfg.codex_triage_reasoning_effort = validate_codex_effort(
+            triage_effort_override
+        )
+        cfg._env_resolved["codex_triage_reasoning_effort"] = True
+
     dashscope_key = os.environ.get("DASHSCOPE_API_KEY")
     if dashscope_key:
         for role in ("decide", "review", "ocr"):
@@ -337,6 +418,8 @@ def save_config(
             raise ValueError(f"更换 {role} API Host 时必须在同一请求中提交对应的新 API Key")
 
     for field_name in (
+        "analysis_backend", "codex_model", "codex_reasoning_effort",
+        "codex_triage_model", "codex_triage_reasoning_effort",
         "decide_base_url", "review_base_url", "ocr_base_url",
         "decide_model", "review_model", "ocr_model",
     ):

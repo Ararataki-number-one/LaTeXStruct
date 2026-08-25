@@ -32,8 +32,10 @@
 \makeatother
 \IfFileExists{microtype.sty}{%
   \usepackage{microtype}
-  % XeTeX supports protrusion/tracking, but not font expansion.
-  \microtypesetup{protrusion=true,expansion=false,tracking=true}%
+  % XeTeX supports protrusion, but microtype's tracking implementation is
+  % pdfTeX/LuaTeX-only and raises a package error under XeLaTeX.  Keep the
+  % engine-neutral feature enabled and explicitly disable unsupported ones.
+  \microtypesetup{protrusion=true,expansion=false,tracking=false}%
 }{}
 
 % The class option establishes the nominal size; this fixes the requested

@@ -279,6 +279,88 @@ test("analysis dashboard exposes rounds, pages, issue ledger, rollback and best 
   assert.equal(dashboard.rolledBack, true);
   assert.equal(dashboard.bestVersion, "round-1");
   assert.equal(dashboard.etaSeconds, 180);
+  assert.equal(dashboard.performanceTargetStatus, "NOT_EVALUATED");
+  assert.equal(dashboard.performanceTargetMet, null);
+  assert.match(dashboard.performanceTargetLabel, /仅完整 600 页可评/);
+});
+
+
+test("analysis dashboard keeps the 600-page target tri-state and rejects short-run promotion", () => {
+  const short = buildAnalysisDashboard({
+    page_count: 37,
+    performance_metrics: {
+      total_pages: 37,
+      target_seconds: 7200,
+      target_status: "PASSED",
+      target_met: true,
+    },
+  }, {}, [], {});
+  assert.equal(short.performanceTargetStatus, "NOT_EVALUATED");
+  assert.equal(short.performanceTargetMet, null);
+
+  const complete = buildAnalysisDashboard({ page_count: 600 }, {
+    analysis_v2: {
+      performance: {
+        available: true,
+        total_pages: 600,
+        checked_pages: 600,
+        elapsed_seconds: 7000,
+        final_status: "VERIFIED",
+        benchmark_page_count: 600,
+        benchmark_eligible: true,
+        target_seconds: 7200,
+        target_status: "PASSED",
+        target_evaluated: true,
+        target_met: true,
+      },
+    },
+  }, [], {});
+  assert.equal(complete.performanceTargetStatus, "PASSED");
+  assert.equal(complete.performanceTargetMet, true);
+  assert.equal(complete.performanceTargetLabel, "已达到");
+
+  const legacy = buildAnalysisDashboard({
+    page_count: 600,
+    performance_metrics: { total_pages: 600, target_met: true },
+  }, {}, [], {});
+  assert.equal(legacy.performanceTargetStatus, "NOT_EVALUATED");
+  assert.equal(legacy.performanceTargetMet, null);
+});
+
+
+test("analysis benchmark evidence is not shadowed by coexisting OCR performance metrics", () => {
+  const dashboard = buildAnalysisDashboard({
+    page_count: 600,
+    performance_metrics: {
+      schema_version: "latexstruct-ocr-performance-metrics-v2",
+      pages: {
+        selected: 600,
+        coverage_completed: 600,
+        remaining: 0,
+      },
+      throughput: { average_pages_per_minute: 25 },
+    },
+  }, {
+    analysis_v2: {
+      performance: {
+        available: true,
+        total_pages: 600,
+        checked_pages: 600,
+        elapsed_seconds: 7000,
+        final_status: "VERIFIED",
+        benchmark_page_count: 600,
+        benchmark_eligible: true,
+        target_seconds: 7200,
+        target_status: "PASSED",
+        target_evaluated: true,
+        target_met: true,
+      },
+    },
+  }, [], {});
+
+  assert.equal(dashboard.performanceTargetStatus, "PASSED");
+  assert.equal(dashboard.performanceTargetMet, true);
+  assert.equal(dashboard.performanceTargetLabel, "已达到");
 });
 
 

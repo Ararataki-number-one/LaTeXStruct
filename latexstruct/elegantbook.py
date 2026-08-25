@@ -18,7 +18,7 @@ README_FILENAME = "ELEGANTBOOK-BUNDLE-README.md"
 
 _ASSET_DIR = Path(__file__).with_name("assets") / "elegantbook"
 _EXPECTED_SHA256 = {
-    CLASS_FILENAME: "6e68bf8097b8141fe6a5ab6819a6bab7a9c56158aa9a92ebc44856cabc6330d3",
+    CLASS_FILENAME: "92ad40c7a63deabdc5a6e678fef4bf9ce340d7d4aff9b527d69c5d8ed07058c5",
     LICENSE_FILENAME: "44f4da558127692b203619708bff5e37fb8b04241fc8d053d15cd277393f3ebb",
 }
 
@@ -56,6 +56,10 @@ def bundle_readme_bytes() -> bytes:
 1. 保留 `elegantbook.cls` 与主 TEX 文件在工程包内。
 2. 在解压后的工程根目录运行 `xelatex`；含目录、引用或文献时至少运行两遍。
 3. 图片、BibTeX、子 TEX 与其他资源均保留原相对路径，请勿只移动主文件。
+
+英文书稿缺少 TeX Gyre Termes/Heros 时会明确警告并使用 Latin Modern；中文书稿仍
+必须安装 ctex/CJK 字体栈。只有实际使用参考文献或装饰环境时才需要 biblatex、bbding、
+adforn；缺失功能不会由空实现伪造，相关命令仍会使编译失败并阻止验证。
 
 `ELEGANTBOOK-LICENSE.txt` 是 ElegantBook 的 LPPL 许可证。`LATEXSTRUCT-REPORT.md`
 记录本次结构化和安全检查。若只导出单个 TEX，编译环境需已安装 ElegantBook，
