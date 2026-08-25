@@ -1,3 +1,4 @@
 latexstruct/assets/elegantbook/elegantbook.cls -text whitespace=-trailing-space,-blank-at-eof
 latexstruct/assets/elegantbook/ELEGANTBOOK-LICENSE.txt -text whitespace=-trailing-space,-blank-at-eof
 latexstruct/assets/faithfulbook/faithfulbook-preamble.tex -text whitespace=-trailing-space,-blank-at-eof
+release/acceptance/**/*.json text eol=lf

@@ -65,6 +65,14 @@ def test_bundled_elegantbook_snapshot_is_present_and_hash_verified():
         assert " -text " in f" {rule} ", "Windows checkout must preserve reviewed bytes"
 
 
+def test_release_acceptance_json_checkout_preserves_trusted_lf_bytes():
+    """Keep committed trust projections byte-identical to their GitHub artifacts."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, ".gitattributes"), encoding="utf-8") as f:
+        rules = {line.strip() for line in f if line.strip()}
+    assert "release/acceptance/**/*.json text eol=lf" in rules
+
+
 def test_workspace_reuses_monaco_models_until_editor_widget_is_disposed():
     """Guard the @monaco-editor/react DiffEditor unmount-order workaround."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
