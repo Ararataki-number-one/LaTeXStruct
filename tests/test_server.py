@@ -2175,7 +2175,10 @@ def test_pdf_render_failure_does_not_block_later_pages_and_retry_rerenders_missi
                 ).status_code == 200
                 for _ in range(150):
                     partial = c.get(f"/api/ocr/jobs/{jid}").json()
-                    if partial["status"] == "partial":
+                    if (
+                        partial["status"] == "partial"
+                        and partial["pages"]["2"]["can_retry"] is True
+                    ):
                         break
                     time.sleep(0.02)
 
@@ -2197,12 +2200,17 @@ def test_pdf_render_failure_does_not_block_later_pages_and_retry_rerenders_missi
                 assert body["status"] == "partial"
                 assert body["compile_status"] == "SOURCE_PREVIEW"
                 assert body["progress"] < 1.0
+                assert body["pages"]["2"]["status"] == "done"
                 assert body["pages"]["2"]["preview_ready"] is True
+                assert body["pages"]["2"]["can_retry"] is False
                 assert sorted(render_calls[:3]) == [(1, 200), (2, 200), (3, 200)]
                 assert render_calls[3:] == [(2, 300)]
                 assert vision_calls == [1, 3, 2]
                 assert c.get(f"/api/ocr/jobs/{jid}/pages/2").status_code == 200
         finally:
+            job = srv._ocr_jobs.get(jid, {}) if jid else {}
+            if job:
+                srv._wait_for_ocr_worker(job, timeout=10)
             job = srv._ocr_jobs.pop(jid, {}) if jid else {}
             shutil.rmtree(job.get("dir", ""), ignore_errors=True)
 
