@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import zipfile
@@ -15,6 +16,12 @@ from latexstruct.core.compilecheck import (
     COMPILE_WORKDIR_ID_PREFIX,
     build_compile_input_manifest,
 )
+from latexstruct.core.analysis_input import load_ocr_analysis_input_package
+from latexstruct.core.analysis_inventory import (
+    build_analysis_inventory_bundle,
+    build_host_inventory_authorizations,
+    evaluate_analysis_inventory_gate,
+)
 from latexstruct.core.ocr_manifest import (
     OCR_PRODUCER_SCHEMA,
     OCR_RUNTIME_PAGE_RECORDS_SCHEMA,
@@ -22,6 +29,26 @@ from latexstruct.core.ocr_manifest import (
     CompilePassInput,
     build_ocr_baseline_manifest,
     canonical_json_bytes,
+)
+from latexstruct.core.ocr_block_inventory import (
+    OcrBlockInventory,
+    OcrBlockInventoryBlock,
+    OcrBlockInventoryPage,
+)
+from latexstruct.core.ocr_evidence_correction import (
+    produce_evidence_corrected_baseline,
+)
+from latexstruct.core.ocr_lane_routes import (
+    OcrLaneOwner,
+    OcrLaneRoute,
+    build_lane_routes_artifact,
+    parse_lane_routes_artifact,
+)
+from latexstruct.core.ocr_page_evidence_bindings import (
+    OcrPageEvidenceBinding,
+    OcrPageTerminalMode,
+    build_ocr_page_evidence_bindings,
+    parse_ocr_page_evidence_bindings,
 )
 from latexstruct.core.ocr_metrics import (
     OcrMetricsCollector,
@@ -44,6 +71,7 @@ from latexstruct.core.ocr_runtime import (
     make_page_id,
     make_run_snapshot,
 )
+from latexstruct.core.ocr_schema import PageBlockType
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "packaging" / "release_integrity.py"
@@ -56,6 +84,10 @@ SPEC.loader.exec_module(MODULE)
 VERSION = "2.0.0"
 COMMIT = "d" * 40
 RUNNER_LABEL = "latexstruct-acceptance-" + "a" * 32
+PRIVATE_SOURCE_FILENAME_SENTINEL = "PRIVATE-SOURCE-NAME-DO-NOT-PUBLISH.pdf"
+PRIVATE_PAGE_RISK_SENTINEL = (
+    r"C:\Users\private-user\secret-page-risk-evidence.json"
+)
 
 
 def test_release_integrity_direct_script_entrypoint_loads_project_package():
@@ -112,6 +144,34 @@ TEST_SOURCE_SHA256 = _sha(TEST_SOURCE_PDF_BYTES)
 TEST_RUN_ID = "a" * 32
 
 
+def _fixture_page_tex(index: int) -> str:
+    source_text = f"release fixture source page {index}"
+    if index <= 16:
+        return source_text
+    if index <= 31:
+        return f"{source_text} \\(x\\)"
+    return source_text + " " + " ".join("\\(x\\)" for _ in range(8))
+
+
+def _fixture_syntax_tex_bytes(pages: int) -> bytes:
+    body_rows: list[str] = []
+    for index in range(1, pages + 1):
+        body_rows.extend((
+            f"% Page {index}",
+            (
+                "% LaTeXStruct-Page: "
+                f"page_id={make_page_id(index)} source_page={index}"
+            ),
+            _fixture_page_tex(index),
+            "",
+        ))
+    return (
+        b"\\documentclass{article}\n\\begin{document}\n"
+        + ("\n".join(body_rows).rstrip() + "\n").encode("utf-8")
+        + b"\\end{document}\n"
+    )
+
+
 @pytest.fixture(autouse=True)
 def _use_recomputable_test_source_anchor(monkeypatch: pytest.MonkeyPatch):
     """Use a constructible PDF digest while retaining the production constant."""
@@ -148,6 +208,16 @@ def _valid_ocr_baseline_package(
                     "page_id": make_page_id(index),
                     "source_page": index,
                     "strategy": "OBJECT_LAYER_VERIFIED",
+                    "source_page_object_hash": _sha(
+                        f"source object {index}".encode()
+                    ),
+                    "source_text_layer_sha256": _sha(
+                        _fixture_page_tex(index).encode("utf-8")
+                    ),
+                    "candidate_tex_sha256": _sha(
+                        _fixture_page_tex(index).encode("utf-8")
+                    ),
+                    "block_count": 1,
                 }
                 for index in range(1, pages + 1)
             ],
@@ -164,19 +234,16 @@ def _valid_ocr_baseline_package(
     raw_parts: list[str] = []
     for index in range(1, pages + 1):
         page_id = make_page_id(index)
-        source_text = f"release fixture source page {index}"
-        if index <= 16:
-            page_tex = source_text
-        elif index <= 31:
-            page_tex = f"{source_text} \\(x\\)"
-        else:
-            page_tex = source_text + " " + " ".join("\\(x\\)" for _ in range(8))
+        page_tex = _fixture_page_tex(index)
         record = OcrPageRecord(
             page_id=page_id,
             source_page=index,
             task_index=index,
             status=OcrPageStatus.SUCCESS,
             raw_response_sha256=_sha(f"response {index}".encode()),
+            source_evidence_sha256=_sha(
+                f"source evidence {index}".encode()
+            ),
             raw_tex=page_tex,
             cleaned_tex=page_tex,
             quality_issues=(
@@ -308,6 +375,7 @@ def _valid_ocr_baseline_package(
         + raw_bytes
         + b"\\end{document}\n"
     )
+    assert syntax_bytes == _fixture_syntax_tex_bytes(pages)
     baseline_pdf_bytes = _compiled_pdf_bytes(pages)
     page_map_bytes = build_pdf_page_map(
         baseline_pdf_bytes,
@@ -341,6 +409,109 @@ def _valid_ocr_baseline_package(
         )
         for index in (1, 2)
     )
+    correction_report_bytes = produce_evidence_corrected_baseline(
+        raw_ocr_tex=raw_bytes.decode("utf-8"),
+        syntax_baseline_tex=syntax_bytes.decode("utf-8"),
+    ).report.canonical_json_bytes()
+    lane_routes_bytes = build_lane_routes_artifact(
+        run_id=TEST_RUN_ID,
+        selected_pages=tuple(range(1, pages + 1)),
+        routes=tuple(
+            OcrLaneRoute(
+                run_id=TEST_RUN_ID,
+                page_id=record.page_id,
+                source_page=record.source_page,
+                selected_index=record.task_index,
+                candidate_sha256=record.tex_sha256,
+                owner=OcrLaneOwner.TERMINAL_VISUAL,
+                verifier_response_sha256=record.raw_response_sha256,
+                reason="fixture verifier PASS",
+            )
+            for record in records
+        ),
+    )
+    page_evidence_bindings_bytes = build_ocr_page_evidence_bindings(
+        run_id=TEST_RUN_ID,
+        source_sha256=snapshot.source_sha256,
+        selected_pages=tuple(range(1, pages + 1)),
+        pages=tuple(
+            OcrPageEvidenceBinding(
+                page_id=record.page_id,
+                source_page=record.source_page,
+                selected_index=record.task_index,
+                terminal_mode=OcrPageTerminalMode.VISUAL,
+                terminal_status=record.status.value,
+                initial_candidate_tex_sha256=record.tex_sha256,
+                visual_verification_response_sha256=(
+                    record.raw_response_sha256
+                ),
+                terminal_cleaned_tex_sha256=record.tex_sha256,
+                runtime_record_sha256=_sha(json.dumps(
+                    record.to_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")),
+                runtime_source_evidence_sha256=(
+                    record.source_evidence_sha256
+                ),
+                runtime_raw_response_sha256=record.raw_response_sha256,
+                page_evidence_source_sha256=(
+                    coverage_records[index - 1].artifact_hashes["source.json"]
+                ),
+                page_evidence_candidate_sha256=(
+                    coverage_records[index - 1].artifact_hashes["candidate.json"]
+                ),
+                page_evidence_verification_sha256=(
+                    coverage_records[index - 1].artifact_hashes[
+                        "verification.json"
+                    ]
+                ),
+                page_evidence_raw_response_sha256=(
+                    coverage_records[index - 1].artifact_hashes[
+                        "raw-response.json"
+                    ]
+                ),
+                page_evidence_tex_sha256=(
+                    coverage_records[index - 1].artifact_hashes["page.tex"]
+                ),
+            )
+            for index, record in enumerate(records, 1)
+        ),
+    )
+    block_inventory_bytes = OcrBlockInventory(
+        run_id=TEST_RUN_ID,
+        source_sha256=snapshot.source_sha256,
+        selected_pages=tuple(range(1, pages + 1)),
+        pages=tuple(
+            OcrBlockInventoryPage(
+                page_id=record.page_id,
+                source_page=record.source_page,
+                selected_index=record.task_index,
+                source_page_object_hash=_sha(
+                    f"source object {record.source_page}".encode()
+                ),
+                source_text_layer_sha256=_sha(
+                    record.cleaned_tex.encode("utf-8")
+                ),
+                blocks=(OcrBlockInventoryBlock(
+                    block_id=(
+                        f"{record.page_id}-block-0001-"
+                        f"{record.source_page:012x}"
+                    ),
+                    block_type=PageBlockType.TEXT,
+                    reading_order=1,
+                    plain_text=record.cleaned_tex,
+                    style_features={},
+                    bbox=(72.0, 72.0, 500.0, 90.0),
+                    source_object_hash=_sha(
+                        f"source object {record.source_page}".encode()
+                    ),
+                ),),
+            )
+            for record in records
+        ),
+    ).to_json_bytes()
     bundle = build_ocr_baseline_manifest(
         snapshot=ArtifactInput(
             "RUN_SNAPSHOT",
@@ -361,6 +532,26 @@ def _valid_ocr_baseline_package(
         ),
         baseline_tex=ArtifactInput(
             "BASELINE_TEX", "baseline/baseline.tex", syntax_bytes
+        ),
+        evidence_correction_report=ArtifactInput(
+            "EVIDENCE_CORRECTION_REPORT",
+            "evidence/evidence-correction-report.json",
+            correction_report_bytes,
+        ),
+        lane_routes=ArtifactInput(
+            "LANE_ROUTES",
+            "evidence/lane-routes.json",
+            lane_routes_bytes,
+        ),
+        page_evidence_bindings=ArtifactInput(
+            "OCR_PAGE_EVIDENCE_BINDINGS",
+            "evidence/ocr-page-evidence-bindings.json",
+            page_evidence_bindings_bytes,
+        ),
+        block_inventory=ArtifactInput(
+            "OCR_BLOCK_INVENTORY",
+            "evidence/ocr-block-inventory.json",
+            block_inventory_bytes,
         ),
         baseline_pdf=ArtifactInput(
             "BASELINE_PDF", "baseline/baseline.pdf", baseline_pdf_bytes
@@ -426,6 +617,76 @@ def _write_json(path: Path, payload: dict) -> None:
     )
 
 
+def _inject_private_publication_sentinels(run_dir: Path) -> None:
+    """Place valid private-only values where a public projection must not copy."""
+
+    for name in (
+        "analysis-attestation.json",
+        "analysis-performance.json",
+        "analysis-validation-report.json",
+    ):
+        path = run_dir / name
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if name == "analysis-attestation.json":
+            risk = payload["page_risk_admission"]
+            preflight = risk["preflight"]
+            preflight["inputs"][0]["machine_visual_evidence"][
+                "private_diagnostic_path"
+            ] = PRIVATE_PAGE_RISK_SENTINEL
+            preflight_body = {
+                key: value
+                for key, value in preflight.items()
+                if key != "preflight_sha256"
+            }
+            digest = MODULE._canonical_json_sha256(preflight_body)
+            preflight["preflight_sha256"] = digest
+            risk["preflight_sha256"] = digest
+        _write_json(path, payload)
+
+
+def _rewrite_private_analysis_audit(
+    run_dir: Path,
+    mutator,
+    *,
+    rebind_internal_hashes: bool,
+) -> None:
+    """Rewrite the private audit fixture and always rebind its outer record."""
+
+    audit_path = run_dir / "analysis-audit-submission.zip"
+    with zipfile.ZipFile(audit_path, "r") as archive:
+        members = {
+            info.filename: archive.read(info)
+            for info in archive.infolist()
+            if not info.is_dir()
+        }
+    manifest = json.loads(members["submission_manifest.json"])
+    mutator(members, manifest)
+    if rebind_internal_hashes:
+        for record in manifest["artifacts"]:
+            member = record["path"]
+            if member in members:
+                record["byte_count"] = len(members[member])
+                record["bytes_sha256"] = _sha(members[member])
+        members["submission_manifest.json"] = canonical_json_bytes(manifest)
+        members.pop("audit/SHA256SUMS", None)
+        members["audit/SHA256SUMS"] = "".join(
+            f"{_sha(payload)}  {member}\n"
+            for member, payload in sorted(members.items())
+        ).encode("utf-8")
+    buffer_path = audit_path.with_suffix(".replacement.zip")
+    with zipfile.ZipFile(
+        buffer_path, "w", compression=zipfile.ZIP_DEFLATED
+    ) as archive:
+        for member, payload in sorted(members.items()):
+            archive.writestr(member, payload)
+    buffer_path.replace(audit_path)
+    attestation_path = run_dir / "analysis-attestation.json"
+    attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+    attestation["audit_submission"]["bytes"] = audit_path.stat().st_size
+    attestation["audit_submission"]["sha256"] = _sha(audit_path.read_bytes())
+    _write_json(attestation_path, attestation)
+
+
 def _rewrite_ocr_manifest(run_dir: Path, mutator) -> None:
     manifest_path = (
         run_dir
@@ -463,7 +724,7 @@ def _valid_run(
     }
     model = {"id": "qwen-vl-real", "backend": "dashscope", "calls": pages}
     source = {
-        "filename": "release-source.pdf",
+        "filename": PRIVATE_SOURCE_FILENAME_SENTINEL,
         "sha256": source_sha256,
         "total_pages": pages,
     }
@@ -600,7 +861,7 @@ def _valid_analysis_run(
         "executable_sha256": executable_sha256,
     }
     source = {
-        "filename": "release-source.pdf",
+        "filename": PRIVATE_SOURCE_FILENAME_SENTINEL,
         "sha256": source_sha256,
         "total_pages": pages,
     }
@@ -643,10 +904,7 @@ def _valid_analysis_run(
     candidate_pdf_bytes = candidate_document.tobytes()
     candidate_document.close()
     artifact_bytes = {
-        "candidate_tex": (
-            b"\\documentclass{article}\n"
-            b"\\begin{document}\nVerified candidate\n\\end{document}\n"
-        ),
+        "candidate_tex": _fixture_syntax_tex_bytes(pages),
         "candidate_pdf": candidate_pdf_bytes,
         "compile_log": b"XeLaTeX pass 1: exit 0\nXeLaTeX pass 2: exit 0\n",
     }
@@ -1206,6 +1464,97 @@ def _valid_analysis_run(
         }
         for model in model_bindings
     ]
+    native_input = load_ocr_analysis_input_package(
+        nested_package,
+        expected_source_sha256=source_sha256,
+        expected_manifest_sha256=str(
+            verified_nested_baseline["manifest_sha256"]
+        ),
+        expected_run_id=str(verified_nested_baseline["run_id"]),
+        expected_selected_pages=tuple(range(1, pages + 1)),
+    )
+    fixture_routes = parse_lane_routes_artifact(
+        native_input.artifacts_by_role["LANE_ROUTES"].data,
+        expected_run_id=native_input.run_id,
+        expected_selected_pages=native_input.snapshot.selected_pages,
+    )
+    fixture_page_bindings = parse_ocr_page_evidence_bindings(
+        native_input.artifacts_by_role["OCR_PAGE_EVIDENCE_BINDINGS"].data,
+        expected_run_id=native_input.run_id,
+        expected_source_sha256=native_input.source_sha256,
+        expected_selected_pages=native_input.snapshot.selected_pages,
+    )
+    fixture_snapshot_pages = {
+        row["page_id"]: row
+        for row in native_input.snapshot.pipeline_contract["page_strategies"]
+    }
+    fixture_cross_rows = []
+    fixture_event_rows = []
+    for route, binding in zip(
+        fixture_routes, fixture_page_bindings, strict=True
+    ):
+        snapshot_page = fixture_snapshot_pages[route.page_id]
+        block_page = native_input.block_inventory.pages_by_id[route.page_id]
+        fixture_cross_rows.append({
+            "page_id": route.page_id,
+            "source_page": route.source_page,
+            "initial_candidate_tex_sha256": snapshot_page[
+                "candidate_tex_sha256"
+            ],
+            "visual_verification_response_sha256": (
+                binding.visual_verification_response_sha256
+            ),
+            "terminal_cleaned_tex_sha256": (
+                binding.terminal_cleaned_tex_sha256
+            ),
+            "route_sha256": route.route_sha256,
+            "source_page_object_hash": block_page.source_page_object_hash,
+            "source_text_layer_sha256": block_page.source_text_layer_sha256,
+        })
+        fixture_event_rows.append({
+            "page_id": route.page_id,
+            "event_sha256s": [event.event_sha256 for event in route.history],
+        })
+    fixture_route_page_bindings_sha256 = _sha(
+        canonical_json_bytes(fixture_cross_rows)
+    )
+    fixture_route_event_chain_sha256 = _sha(
+        canonical_json_bytes(fixture_event_rows)
+    )
+    native_source_blocks = [dict(item) for item in native_input.native_source_blocks]
+    inventory_authorizations = build_host_inventory_authorizations(
+        native_source_blocks,
+        ocr_manifest_sha256=native_input.manifest_sha256,
+        generated_toc_required=True,
+    )
+    inventory_authorization_payload = [
+        item.as_dict() for item in inventory_authorizations
+    ]
+    inventory_source_page_map = {
+        int(page): tuple(pdf_pages)
+        for page, pdf_pages in native_input.source_page_map.items()
+    }
+    baseline_inventory = build_analysis_inventory_bundle(
+        baseline_tex_bytes.decode("utf-8"),
+        baseline_tex_bytes.decode("utf-8"),
+        inventory_source_page_map,
+        native_source_blocks=native_source_blocks,
+        authorizations=inventory_authorizations,
+        require_native_heading_inventory=True,
+    )
+    final_inventory = build_analysis_inventory_bundle(
+        baseline_tex_bytes.decode("utf-8"),
+        artifact_bytes["candidate_tex"].decode("utf-8"),
+        inventory_source_page_map,
+        native_source_blocks=native_source_blocks,
+        authorizations=inventory_authorizations,
+        require_native_heading_inventory=True,
+    )
+    inventory_gate = evaluate_analysis_inventory_gate(final_inventory)
+    assert inventory_gate.passed is True
+    baseline_inventory_bytes = canonical_json_bytes(baseline_inventory.as_dict())
+    final_inventory_bytes = canonical_json_bytes(final_inventory.as_dict())
+    inventory_gate_bytes = canonical_json_bytes(inventory_gate.as_dict())
     analysis_configuration = {
         "workflow_version": "analysis-loop-v2",
         "prompt_version": "analysis-prompts-v2",
@@ -1216,7 +1565,8 @@ def _valid_analysis_run(
         "transport_contracts": transport_contracts,
         "page_range": list(range(1, pages + 1)),
         "candidate_page_map": [
-            [page, [page]] for page in range(1, pages + 1)
+            [page, list(pdf_pages)]
+            for page, pdf_pages in inventory_source_page_map.items()
         ],
         "candidate_storage_name": "candidate.tex",
         "raw_ocr_frozen": True,
@@ -1231,6 +1581,15 @@ def _valid_analysis_run(
         "page_risk_admission": admission.canonical_payload(),
         "page_risk_admission_hash": admission.digest,
         "page_risk_source_admission_hash": admission.digest,
+        "baseline_inventory_digest": baseline_inventory.digest,
+        "baseline_inventory_json_sha256": _sha(baseline_inventory_bytes),
+        "native_source_blocks": native_source_blocks,
+        "native_source_blocks_supplied": True,
+        "inventory_authorizations": inventory_authorization_payload,
+        "inventory_authorization_source": "HOST_REQUIRED_POLICY",
+        "inventory_policy_schema": "latexstruct-host-inventory-policy-v1",
+        "inventory_policy_ocr_manifest_sha256": native_input.manifest_sha256,
+        "native_heading_inventory_required": True,
         "compile_extra_files": [],
         "max_macro_rounds": 3,
         **budget_limits,
@@ -1435,8 +1794,79 @@ def _valid_analysis_run(
         "active_tableofcontents_count": 1,
         "template": "faithfulbook",
     }
+    final_decision = {
+        "status": "VERIFIED",
+        "verified": True,
+        "failures": [],
+        "best_candidate_id": "candidate-final-fixture",
+        "baseline_inventory_digest": baseline_inventory.digest,
+        "baseline_inventory_json_sha256": _sha(baseline_inventory_bytes),
+        "final_inventory_digest": final_inventory.digest,
+        "final_inventory_json_sha256": _sha(final_inventory_bytes),
+        "inventory_gate_digest": inventory_gate.digest,
+        "inventory_gate_json_sha256": _sha(inventory_gate_bytes),
+        "inventory_gate_status": inventory_gate.status.value,
+    }
+    audit_role_members = {
+        "BASELINE_TEX": ("audit/baseline.tex", baseline_tex_bytes),
+        "CURRENT_TEX": (
+            "audit/current.tex",
+            artifact_bytes["candidate_tex"],
+        ),
+        "ANALYSIS_CONFIGURATION": (
+            "audit/analysis_configuration.json",
+            canonical_json_bytes(analysis_configuration),
+        ),
+        "ANALYSIS_INVENTORY_BASELINE": (
+            "audit/analysis_inventory_baseline.json",
+            baseline_inventory_bytes,
+        ),
+        "ANALYSIS_INVENTORY_FINAL": (
+            "audit/analysis_inventory_final.json",
+            final_inventory_bytes,
+        ),
+        "ANALYSIS_INVENTORY_GATE": (
+            "audit/analysis_inventory_gate.json",
+            inventory_gate_bytes,
+        ),
+        "FINAL_DECISION": (
+            "audit/final_decision.json",
+            canonical_json_bytes(final_decision),
+        ),
+    }
+    audit_members = {
+        member: payload for member, payload in audit_role_members.values()
+    }
+    submission_manifest = {
+        "schema_version": "latexstruct-ai-audit-submission-fixture-v1",
+        "artifacts": [
+            {
+                "artifact_role": role,
+                "path": member,
+                "byte_count": len(payload),
+                "bytes_sha256": _sha(payload),
+                "aliases": [],
+            }
+            for role, (member, payload) in audit_role_members.items()
+        ],
+    }
+    audit_members["submission_manifest.json"] = canonical_json_bytes(
+        submission_manifest
+    )
+    audit_members["audit/packaging-integrity.json"] = canonical_json_bytes({
+        "valid": True,
+        "packaging_status": "SUCCESS",
+        "audit_package_status": "VALID",
+    })
+    audit_members["audit/SHA256SUMS"] = "".join(
+        f"{_sha(payload)}  {member}\n"
+        for member, payload in sorted(audit_members.items())
+    ).encode("utf-8")
     audit_path = run_dir / "analysis-audit-submission.zip"
-    audit_path.write_bytes(b"PK\x03\x04verified-private-audit-fixture")
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(audit_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for member, payload in sorted(audit_members.items()):
+            archive.writestr(member, payload)
     audit_submission = {
         "filename": audit_path.name,
         "bytes": audit_path.stat().st_size,
@@ -1445,6 +1875,69 @@ def _valid_analysis_run(
         "audit_package_status": "VALID",
         "verification_status": "VERIFIED",
         "published_to_github": False,
+    }
+    analysis_inventory = {
+        "schema_version": MODULE.ANALYSIS_INVENTORY_RELEASE_CLOSURE_SCHEMA,
+        "result": "PASS",
+        "analysis_configuration_sha256": analysis_configuration_sha256,
+        "ocr_baseline_manifest_sha256": native_input.manifest_sha256,
+        "baseline_tex_sha256": _sha(baseline_tex_bytes),
+        "final_candidate_tex_sha256": _sha(artifact_bytes["candidate_tex"]),
+        "page_map_digest": baseline_inventory.page_map_digest,
+        "native_source_blocks_digest": baseline_inventory.as_dict()[
+            "native_source_blocks_digest"
+        ],
+        "inventory_authorizations_sha256": _sha(
+            canonical_json_bytes(inventory_authorization_payload)
+        ),
+        "baseline_inventory_digest": baseline_inventory.digest,
+        "baseline_inventory_json_sha256": _sha(baseline_inventory_bytes),
+        "final_inventory_digest": final_inventory.digest,
+        "final_inventory_json_sha256": _sha(final_inventory_bytes),
+        "inventory_gate_digest": inventory_gate.digest,
+        "inventory_gate_json_sha256": _sha(inventory_gate_bytes),
+        "inventory_gate_status": "PASS",
+        "scanner_executed": True,
+        "residual_total": 0,
+        "blocked_categories": [],
+        "ocr_manifest_roles": {
+            "lane_routes": {
+                "role": "LANE_ROUTES",
+                "sha256": native_input.lane_routes_sha256,
+                "status": "PASS",
+                "page_count": len(fixture_routes),
+                "event_count": sum(
+                    len(route.history) for route in fixture_routes
+                ),
+                "page_bindings_sha256": (
+                    fixture_route_page_bindings_sha256
+                ),
+                "event_chain_sha256": fixture_route_event_chain_sha256,
+            },
+            "page_evidence_bindings": {
+                "role": "OCR_PAGE_EVIDENCE_BINDINGS",
+                "sha256": native_input.artifact_sha256s[
+                    "OCR_PAGE_EVIDENCE_BINDINGS"
+                ],
+                "status": "PASS",
+                "page_count": len(fixture_page_bindings),
+                "cross_binding_sha256": (
+                    fixture_route_page_bindings_sha256
+                ),
+            },
+            "evidence_correction_report": {
+                "role": "EVIDENCE_CORRECTION_REPORT",
+                "sha256": native_input.evidence_correction_report_sha256,
+                "status": native_input.evidence_correction_status,
+            },
+            "block_inventory": {
+                "role": "OCR_BLOCK_INVENTORY",
+                "sha256": native_input.block_inventory_sha256,
+                "status": "PASS",
+                "page_count": len(native_input.block_inventory.pages),
+                "block_count": len(native_input.native_source_blocks),
+            },
+        },
     }
     attestation = {
         "schema_version": MODULE.ANALYSIS_ATTESTATION_SCHEMA,
@@ -1481,6 +1974,7 @@ def _valid_analysis_run(
         "independent_final_reviews": reviews,
         "visual_verification": visual_verification,
         "page_layout": page_layout,
+        "analysis_inventory": analysis_inventory,
         "machine_verification": machine,
         "audit_submission": audit_submission,
         "reports": {
@@ -1502,7 +1996,11 @@ def _valid_analysis_run(
     return run_dir
 
 
-def _candidate_release_fixture(tmp_path: Path) -> dict[str, Path]:
+def _candidate_release_fixture(
+    tmp_path: Path,
+    *,
+    private_publication_sentinels: bool = False,
+) -> dict[str, Path]:
     executable = tmp_path / "candidate-inputs" / "LaTeXStruct.exe"
     license_file = tmp_path / "candidate-inputs" / "LICENSE"
     notices_file = tmp_path / "candidate-inputs" / "THIRD_PARTY_NOTICES.txt"
@@ -1535,14 +2033,15 @@ def _candidate_release_fixture(tmp_path: Path) -> dict[str, Path]:
     )
 
     attestation = tmp_path / "release" / "release-attestation.json"
+    analysis_run = _valid_analysis_run(
+        tmp_path / "analysis37", 37, executable_sha256=executable_sha
+    )
+    if private_publication_sentinels:
+        _inject_private_publication_sentinels(analysis_run)
     MODULE.assemble_release_attestation(
         version=VERSION,
         commit=COMMIT,
-        run_dirs={
-            "analysis-37": _valid_analysis_run(
-                tmp_path / "analysis37", 37, executable_sha256=executable_sha
-            )
-        },
+        run_dirs={"analysis-37": analysis_run},
         output=attestation,
     )
     return {
@@ -1999,6 +2498,7 @@ def test_release_notes_reject_hard_coded_current_ci_asset_digest(tmp_path: Path)
         encoding="utf-8",
     )
 
+
     with pytest.raises(MODULE.ReleaseIntegrityError, match="hard-codes"):
         MODULE.verify_release_notes(changelog, VERSION)
 
@@ -2056,9 +2556,15 @@ def _write_artifact_zip(output: Path, files: dict[str, Path]) -> None:
 
 
 def _trusted_acceptance_fixture(
-    tmp_path: Path, *, same_run: bool = False
+    tmp_path: Path,
+    *,
+    same_run: bool = False,
+    private_publication_sentinels: bool = False,
 ) -> dict[str, Path]:
-    fixture = _candidate_release_fixture(tmp_path)
+    fixture = _candidate_release_fixture(
+        tmp_path,
+        private_publication_sentinels=private_publication_sentinels,
+    )
     analysis_run = tmp_path / "analysis37" / "analysis-run-37"
     payload_dir = tmp_path / "trusted-payload"
     acceptance_run_id = "200" if same_run else "300"
@@ -2237,6 +2743,32 @@ def test_github_acceptance_artifact_closure_is_a_recomputable_trust_root(
     )
 
 
+def test_all_three_public_github_json_files_exclude_private_sentinels(
+    tmp_path: Path,
+) -> None:
+    fixture = _trusted_acceptance_fixture(
+        tmp_path,
+        private_publication_sentinels=True,
+    )
+    private_text = (
+        fixture["analysis_run"] / "analysis-attestation.json"
+    ).read_text(encoding="utf-8")
+    assert PRIVATE_SOURCE_FILENAME_SENTINEL in private_text
+    assert PRIVATE_PAGE_RISK_SENTINEL.replace("\\", "\\\\") in private_text
+
+    for filename in (
+        "github-acceptance-reference.json",
+        "github-acceptance-root.json",
+        "release-attestation.json",
+    ):
+        public_text = (fixture["payload_dir"] / filename).read_text(
+            encoding="utf-8"
+        )
+        assert PRIVATE_SOURCE_FILENAME_SENTINEL not in public_text
+        assert "private_diagnostic_path" not in public_text
+        assert PRIVATE_PAGE_RISK_SENTINEL.replace("\\", "\\\\") not in public_text
+
+
 def test_github_acceptance_trust_supports_same_run_reusable_acceptance(
     tmp_path: Path,
 ):
@@ -2407,6 +2939,134 @@ def test_release_attestation_requires_strict_analysis_37_and_detects_tampering(
         MODULE.verify_release_attestation(manifest, version=VERSION, commit=COMMIT)
 
 
+def test_analysis_inventory_rejects_missing_private_role(tmp_path: Path) -> None:
+    run_dir = _valid_analysis_run(tmp_path, 37)
+
+    def remove_gate(members: dict[str, bytes], manifest: dict) -> None:
+        members.pop("audit/analysis_inventory_gate.json")
+        manifest["artifacts"] = [
+            record
+            for record in manifest["artifacts"]
+            if record["artifact_role"] != "ANALYSIS_INVENTORY_GATE"
+        ]
+
+    _rewrite_private_analysis_audit(
+        run_dir, remove_gate, rebind_internal_hashes=True
+    )
+    with pytest.raises(
+        MODULE.ReleaseIntegrityError,
+        match="exactly one ANALYSIS_INVENTORY_GATE",
+    ):
+        MODULE.verify_analysis_attestation(
+            run_dir, expected_pages=37, version=VERSION, commit=COMMIT
+        )
+
+
+def test_analysis_inventory_rejects_unrebound_content_tampering(
+    tmp_path: Path,
+) -> None:
+    run_dir = _valid_analysis_run(tmp_path, 37)
+
+    def tamper(members: dict[str, bytes], _manifest: dict) -> None:
+        payload = json.loads(members["audit/analysis_inventory_final.json"])
+        payload["current_tex_sha256"] = "f" * 64
+        members["audit/analysis_inventory_final.json"] = canonical_json_bytes(
+            payload
+        )
+
+    _rewrite_private_analysis_audit(
+        run_dir, tamper, rebind_internal_hashes=False
+    )
+    with pytest.raises(MODULE.ReleaseIntegrityError, match="member digest mismatch"):
+        MODULE.verify_analysis_attestation(
+            run_dir, expected_pages=37, version=VERSION, commit=COMMIT
+        )
+
+
+def test_analysis_inventory_rejects_hash_recomputed_content_tampering(
+    tmp_path: Path,
+) -> None:
+    run_dir = _valid_analysis_run(tmp_path, 37)
+
+    def tamper_and_rebind(members: dict[str, bytes], _manifest: dict) -> None:
+        payload = json.loads(members["audit/analysis_inventory_final.json"])
+        payload["current_tex_sha256"] = "f" * 64
+        members["audit/analysis_inventory_final.json"] = canonical_json_bytes(
+            payload
+        )
+
+    _rewrite_private_analysis_audit(
+        run_dir, tamper_and_rebind, rebind_internal_hashes=True
+    )
+    with pytest.raises(
+        MODULE.ReleaseIntegrityError,
+        match="differs from independent recomputation",
+    ):
+        MODULE.verify_analysis_attestation(
+            run_dir, expected_pages=37, version=VERSION, commit=COMMIT
+        )
+
+
+def test_analysis_inventory_rejects_rebound_final_status_forgery(
+    tmp_path: Path,
+) -> None:
+    run_dir = _valid_analysis_run(tmp_path, 37)
+
+    def forge_status(members: dict[str, bytes], _manifest: dict) -> None:
+        payload = json.loads(members["audit/final_decision.json"])
+        payload["inventory_gate_status"] = "FAILED"
+        members["audit/final_decision.json"] = canonical_json_bytes(payload)
+
+    _rewrite_private_analysis_audit(
+        run_dir, forge_status, rebind_internal_hashes=True
+    )
+    with pytest.raises(
+        MODULE.ReleaseIntegrityError,
+        match="final decision is not inventory/hash bound",
+    ):
+        MODULE.verify_analysis_attestation(
+            run_dir, expected_pages=37, version=VERSION, commit=COMMIT
+        )
+
+
+def test_analysis_inventory_rejects_forged_public_pass_status(
+    tmp_path: Path,
+) -> None:
+    run_dir = _valid_analysis_run(tmp_path, 37)
+    path = run_dir / "analysis-attestation.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["analysis_inventory"]["inventory_gate_status"] = "FAILED"
+    _write_json(path, payload)
+    with pytest.raises(MODULE.ReleaseIntegrityError, match="strict PASS"):
+        MODULE.verify_analysis_attestation(
+            run_dir, expected_pages=37, version=VERSION, commit=COMMIT
+        )
+
+
+def test_analysis_inventory_rejects_rebound_configuration_tampering(
+    tmp_path: Path,
+) -> None:
+    run_dir = _valid_analysis_run(tmp_path, 37)
+
+    def forge_configuration(members: dict[str, bytes], _manifest: dict) -> None:
+        payload = json.loads(members["audit/analysis_configuration.json"])
+        payload["inventory_authorizations"] = []
+        members["audit/analysis_configuration.json"] = canonical_json_bytes(
+            payload
+        )
+
+    _rewrite_private_analysis_audit(
+        run_dir, forge_configuration, rebind_internal_hashes=True
+    )
+    with pytest.raises(
+        MODULE.ReleaseIntegrityError,
+        match="configuration differs from snapshot authority",
+    ):
+        MODULE.verify_analysis_attestation(
+            run_dir, expected_pages=37, version=VERSION, commit=COMMIT
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -2486,11 +3146,129 @@ def test_release_projection_keeps_private_evidence_out_of_public_tree(tmp_path: 
     verified = MODULE.verify_release_attestation(
         manifest, version=VERSION, commit=COMMIT
     )
-    assert verified["source"]["sha256"] == MODULE.RAMSEY_37_SOURCE_SHA256
+    assert verified["source"] == {
+        "sha256": MODULE.RAMSEY_37_SOURCE_SHA256,
+        "total_pages": 37,
+    }
+    assert verified["acceptance"]["source"] == verified["source"]
     assert verified["evidence_publication"]["projection_only"] is True
+    public_snapshot = verified["acceptance"]["snapshot_binding"]
+    assert "analysis_configuration" not in public_snapshot
+    assert public_snapshot["analysis_configuration_private"] is True
+    assert public_snapshot["native_source_blocks_published"] is False
+    private = json.loads(
+        (analysis37 / "analysis-attestation.json").read_text(encoding="utf-8")
+    )
+    public_risk = verified["acceptance"]["page_risk_admission"]
+    assert set(public_risk) == {
+        "schema_version",
+        "private_closure_sha256",
+        "source_pdf_sha256",
+        "baseline_tex_sha256",
+        "baseline_pdf_sha256",
+        "ocr_page_records_sha256",
+        "ocr_runtime_page_records_sha256",
+        "admission_sha256",
+        "preflight_sha256",
+        "route_closure_sha256",
+        "final_candidate_tex_sha256",
+        "page_count",
+        "page_ids_sha256",
+        "risk_counts",
+        "low_risk_sampling_sha256",
+        "low_risk_sample_count",
+        "all_preflight_bindings_verified",
+        "all_route_bindings_verified",
+    }
+    assert public_risk["schema_version"] == (
+        MODULE.ANALYSIS_PAGE_RISK_PUBLIC_PROJECTION_SCHEMA
+    )
+    assert public_risk["private_closure_sha256"] == (
+        MODULE._canonical_json_sha256(private["page_risk_admission"])
+    )
+    assert public_risk["admission_sha256"] == (
+        public_snapshot["evidence_hashes"]["page_risk_admission_hash"]
+    )
+    assert not {"admission", "preflight", "route_closure", "low_risk_sampling"} & set(
+        public_risk
+    )
+    public_text = manifest.read_text(encoding="utf-8")
+    assert PRIVATE_SOURCE_FILENAME_SENTINEL not in public_text
+    assert '"preflight": {' not in public_text
+    assert '"native_source_blocks": [' not in public_text
+    assert "release fixture source page 1" not in public_text
     assert {path.name for path in manifest.parent.iterdir()} == {
         "release-attestation.json"
     }
+
+
+def test_public_page_risk_projection_is_exact_hash_only_and_content_free() -> None:
+    source_sha = MODULE.RAMSEY_37_SOURCE_SHA256
+    page_records_sha = "1" * 64
+    runtime_records_sha = "2" * 64
+    admission_sha = "3" * 64
+    final_candidate_sha = "4" * 64
+    private = {
+        "admission": {
+            "source_pdf_sha256": source_sha,
+            "baseline_tex_sha256": "5" * 64,
+            "baseline_pdf_sha256": "6" * 64,
+            "ocr_page_records_sha256": page_records_sha,
+            "ocr_runtime_page_records_sha256": runtime_records_sha,
+        },
+        "route_closure": {
+            "final_candidate_hash": final_candidate_sha,
+            "private_reason": PRIVATE_PAGE_RISK_SENTINEL,
+        },
+        "low_risk_sampling": {
+            "target_count": 1,
+            "private_filename": PRIVATE_SOURCE_FILENAME_SENTINEL,
+        },
+        "admission_sha256": admission_sha,
+        "preflight_sha256": "7" * 64,
+        "route_closure_sha256": "8" * 64,
+        "page_count": 37,
+        "page_ids_sha256": "9" * 64,
+        "risk_counts": {
+            "admitted": {"R0": 37, "R1": 0, "R2": 0, "R3": 0},
+            "effective": {"R0": 37, "R1": 0, "R2": 0, "R3": 0},
+        },
+        "all_preflight_bindings_verified": True,
+        "all_route_bindings_verified": True,
+    }
+    public = MODULE._public_analysis_page_risk_projection(private)
+    verified = MODULE._verify_public_analysis_page_risk_projection(
+        public,
+        expected_pages=37,
+        source_sha256=source_sha,
+        evidence_hashes={
+            "ocr_page_records_hash": page_records_sha,
+            "ocr_runtime_page_records_hash": runtime_records_sha,
+            "page_risk_admission_hash": admission_sha,
+        },
+        final_candidate_sha256=final_candidate_sha,
+    )
+    public_text = json.dumps(verified, ensure_ascii=False)
+    assert PRIVATE_PAGE_RISK_SENTINEL not in public_text
+    assert PRIVATE_SOURCE_FILENAME_SENTINEL not in public_text
+    assert verified["private_closure_sha256"] == (
+        MODULE._canonical_json_sha256(private)
+    )
+
+    forged = dict(public)
+    forged["preflight"] = {"private_reason": PRIVATE_PAGE_RISK_SENTINEL}
+    with pytest.raises(MODULE.ReleaseIntegrityError, match="unsupported fields"):
+        MODULE._verify_public_analysis_page_risk_projection(
+            forged,
+            expected_pages=37,
+            source_sha256=source_sha,
+            evidence_hashes={
+                "ocr_page_records_hash": page_records_sha,
+                "ocr_runtime_page_records_hash": runtime_records_sha,
+                "page_risk_admission_hash": admission_sha,
+            },
+            final_candidate_sha256=final_candidate_sha,
+        )
 
 
 def test_analysis_37_rejects_recommended_tier_and_49_page_inflation(tmp_path: Path):
@@ -3114,7 +3892,9 @@ def test_build_workflow_guards_tag_release_and_publishes_dynamic_hashes():
     workflow = (
         Path(__file__).resolve().parents[1] / ".github" / "workflows" / "build.yml"
     ).read_text(encoding="utf-8")
-    release_action = workflow.index("softprops/action-gh-release@v2")
+    release_action = workflow.index(
+        "softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65"
+    )
     tag_job = workflow.index("release_attested_candidate:")
     candidate_job = workflow.index("build_candidate:")
     acceptance_job = workflow.index("trusted_analysis_37:")
@@ -3133,9 +3913,9 @@ def test_build_workflow_guards_tag_release_and_publishes_dynamic_hashes():
     assert workflow.index("record-assets") < workflow.index(
         "actions/upload-artifact@v4"
     ) < tag_job
-    assert tag_job < workflow.index("actions/download-artifact@v4") < workflow.index(
-        "verify-candidate-assets"
-    ) < release_action
+    assert tag_job < workflow.index(
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
+    ) < workflow.index("verify-candidate-assets") < release_action
     assert "if: github.event_name == 'workflow_dispatch'" in workflow[
         candidate_job:tag_job
     ]
@@ -3198,6 +3978,45 @@ def test_build_workflow_guards_tag_release_and_publishes_dynamic_hashes():
     assert "LaTeXStruct-setup-${{ env.APP_VERSION }}.exe" in workflow[tag_job:]
 
 
+def test_contents_write_jobs_pin_all_remote_actions_to_reviewed_commits():
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "build.yml"
+    ).read_text(encoding="utf-8")
+    expected_release_actions = {
+        "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+        "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65",
+    }
+
+    job_starts = list(re.finditer(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", workflow))
+    contents_write_jobs: dict[str, set[str]] = {}
+    for index, match in enumerate(job_starts):
+        end = (
+            job_starts[index + 1].start()
+            if index + 1 < len(job_starts)
+            else len(workflow)
+        )
+        job_block = workflow[match.start() : end]
+        if not re.search(r"(?m)^      contents:\s*write\s*$", job_block):
+            continue
+        action_refs = set(
+            re.findall(r"(?m)^\s*(?:-\s*)?uses:\s*([^\s#]+)", job_block)
+        )
+        assert action_refs, f"contents: write job {match.group(1)} has no action refs"
+        assert all(
+            action.startswith("./")
+            or re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action)
+            for action in action_refs
+        ), f"contents: write job {match.group(1)} contains a mutable action ref"
+        contents_write_jobs[match.group(1)] = action_refs
+
+    release_actions = contents_write_jobs["release_attested_candidate"]
+    assert {action for action in release_actions if not action.startswith("./")} == (
+        expected_release_actions
+    )
+
+
 def test_trusted_analysis_37_workflow_keeps_private_bytes_local_and_closes_artifacts():
     workflow = (
         Path(__file__).resolve().parents[1]
@@ -3255,10 +4074,15 @@ def test_trusted_analysis_37_workflow_keeps_private_bytes_local_and_closes_artif
     assert "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" in workflow
     assert "actions/setup-python@" not in workflow
     assert "RUNNER_TOOL_CACHE" in workflow
+    assert 'Write-Output "::add-mask::$sensitiveRoot"' in workflow
+    assert 'Write-Output "::add-mask::$profileHome"' in workflow
+    assert 'Write-Output "::add-mask::$source"' in workflow
     assert "$python = $pythonCandidates[0]" in workflow
     assert "sys.version_info[:2] == (3, 13)" in workflow
     assert "platform.machine() == 'AMD64'" in workflow
     assert "验收 Python SHA-256" in workflow
+    assert 'Write-Host "验收 Python: $pythonPath"' not in workflow
+    assert '工具缓存中: $pythonPath' not in workflow
     assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in workflow
     upload_section = workflow[workflow.index("上传只含哈希投影的受信 payload") :]
     assert "analysis-audit-submission.zip" not in upload_section
@@ -3266,6 +4090,7 @@ def test_trusted_analysis_37_workflow_keeps_private_bytes_local_and_closes_artif
     assert "RAMSEY_37_SOURCE_PATH }}" not in upload_section
     assert "Remove-Item -LiteralPath $target -Recurse -Force" in workflow
     assert "RUNNER_TEMP 之外" in workflow
+    assert 'RUNNER_TEMP 之外的路径: $target' not in workflow
     assert "$privateAppData = Join-Path $privateRoot" in workflow
     assert "$privateLocalAppData = Join-Path $privateRoot" in workflow
     assert "$privateTemp = Join-Path $privateRoot" in workflow
@@ -3277,6 +4102,7 @@ def test_trusted_analysis_37_workflow_keeps_private_bytes_local_and_closes_artif
     assert "$env:PRIVATE_LOCALAPPDATA_ROOT" in workflow
     assert "$env:PRIVATE_TEMP_ROOT" in workflow
     assert "本次验收私有目录清理后仍存在" in workflow
+    assert '私有目录清理后仍存在: $privatePath' not in workflow
     assert "LATEXSTRUCT_OCR_KEY" not in workflow
     assert "LATEXSTRUCT_DECIDE_KEY" not in workflow
     assert "LATEXSTRUCT_REVIEW_KEY" not in workflow

@@ -18,6 +18,7 @@ import pytest
 
 from latexstruct.core import analysis_production
 from latexstruct.core.analysis_budget import ActualUsage, AnalysisBudget, BudgetClaim
+from latexstruct.core.analysis_inventory import AnalysisNativeSourceBlock
 from latexstruct.core.analysis_production import (
     ProductionAnalysisError,
     run_production_analysis,
@@ -34,13 +35,23 @@ from latexstruct.core.analysis_schema import (
 from latexstruct.core.compilecheck import build_compile_input_manifest
 
 
-TARGET = "Every graph has a vertex."
+TARGET = "Theorem 1. Every graph has a vertex."
 BASELINE_TEX = (
     "\\documentclass{article}\n"
     "\\begin{document}\n"
     "% Page 1\n"
     f"{TARGET}\n"
     "\\end{document}\n"
+)
+NATIVE_FORMAL_BLOCKS = (
+    AnalysisNativeSourceBlock(
+        page_id="ocr-page-000001",
+        source_page=1,
+        block_id="formal-source-0001",
+        block_type="HEADING_TEXT",
+        plain_text=TARGET,
+        source_sha256=sha256_text(TARGET),
+    ),
 )
 
 
@@ -342,6 +353,7 @@ def _run(
         concurrency_limit=1,
         page_risks=page_risks,
         page_risk_admission=admission if page_risks is None else None,
+        native_source_blocks=NATIVE_FORMAL_BLOCKS,
         max_macro_rounds=max_macro_rounds,
         max_requests=max_requests,
         max_output_tokens=max_output_tokens,

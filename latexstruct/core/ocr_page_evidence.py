@@ -27,7 +27,12 @@ from .ocr_visual import PageVisualVerification, VisualVerdict
 PAGE_SOURCE_SCHEMA_VERSION = "latexstruct-ocr-page-source-v1"
 PAGE_CANDIDATE_SCHEMA_VERSION = "latexstruct-ocr-page-candidate-v1"
 PAGE_VERIFICATION_SCHEMA_VERSION = "latexstruct-ocr-page-verification-v1"
-PAGE_RETRY_RECORD_SCHEMA_VERSION = "latexstruct-ocr-page-retry-record-v1"
+PAGE_RETRY_INTENT_SCHEMA_VERSION = "latexstruct-ocr-page-retry-intent-v1"
+LEGACY_PAGE_RETRY_RECORD_SCHEMA_VERSION = "latexstruct-ocr-page-retry-record-v1"
+PAGE_RETRY_RECORD_SCHEMA_VERSION = "latexstruct-ocr-page-retry-record-v2"
+VISUAL_CALL_INTENT_SCHEMA_VERSION = "latexstruct-ocr-visual-call-intent-v1"
+VISUAL_CALL_RESULT_SCHEMA_VERSION = "latexstruct-ocr-visual-call-result-v1"
+VISUAL_CALL_CONSUMED_SCHEMA_VERSION = "latexstruct-ocr-visual-call-consumed-v1"
 PAGE_COVERAGE_SCHEMA_VERSION = "latexstruct-ocr-page-coverage-v1"
 PAGE_RECORDS_SCHEMA_VERSION = "latexstruct-ocr-page-records-coverage-v1"
 COVERAGE_SUMMARY_SCHEMA_VERSION = "latexstruct-ocr-coverage-summary-v1"
@@ -47,12 +52,15 @@ _PAGE_ID_RE = re.compile(r"^ocr-page-([0-9]{6})$")
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RETRY_ID_RE = re.compile(r"^retry-[0-9]{4,8}(?:-[A-Za-z0-9_-]{1,40})?$")
+_VISUAL_CALL_ID_RE = re.compile(r"^visual-[0-9]{4,8}-[0-9a-f]{32}$")
 _FIXED_PAGE_ARTIFACTS = frozenset(
     {"source.json", "candidate.json", "verification.json", "raw-response.json", "page.tex"}
 )
 _RETRY_FILENAMES = frozenset(
     {"request.json", "verification.json", "raw-response.json", "record.json", "page.tex"}
 )
+_VISUAL_CALL_FILENAMES = frozenset({"intent.json", "result.json", "consumed.json"})
+_VISUAL_CALL_KINDS = frozenset({"INITIAL", "LOCAL_PATCH"})
 
 
 class PageEvidenceError(RuntimeError):
@@ -94,6 +102,17 @@ def _canonical_json_bytes(value: object) -> bytes:
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(bytes(data)).hexdigest()
+
+
+def _canonical_json_value_sha256(value: object) -> str:
+    """Hash canonical JSON content without the artifact's trailing newline."""
+
+    return _sha256(json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8"))
 
 
 def _digest(value: str, label: str) -> str:
@@ -636,6 +655,15 @@ class PageEvidenceStore:
             self.page_dir(page_id) / "retries" / str(retry_id) / str(filename)
         )
 
+    def _visual_call_path(self, page_id: str, call_id: str, filename: str) -> Path:
+        if _VISUAL_CALL_ID_RE.fullmatch(str(call_id or "")) is None:
+            raise PageEvidenceError("invalid visual call evidence id")
+        if str(filename or "") not in _VISUAL_CALL_FILENAMES:
+            raise PageEvidenceError("unsupported or unsafe visual call artifact path")
+        return self._ensure_safe(
+            self.page_dir(page_id) / "visual-calls" / str(call_id) / str(filename)
+        )
+
     @staticmethod
     def _artifact(path: Path, relative_path: str, data: bytes) -> StoredPageArtifact:
         return StoredPageArtifact(
@@ -704,6 +732,688 @@ class PageEvidenceStore:
         relative = f"retries/{retry_id}/{filename}"
         return self._atomic_write_once(path, payload, relative)
 
+    def next_visual_call_sequence(self, page_id: str) -> int:
+        """Return the next page-local visual provider-call sequence."""
+
+        root = self._ensure_safe(self.page_dir(page_id) / "visual-calls")
+        if not root.exists():
+            return 1
+        if root.is_symlink() or not root.is_dir():
+            raise PageEvidenceIntegrityError("visual call evidence root is not a directory")
+        maximum = 0
+        for path in root.iterdir():
+            if path.is_symlink() or not path.is_dir():
+                raise PageEvidenceIntegrityError("visual call evidence contains an unsafe entry")
+            if _VISUAL_CALL_ID_RE.fullmatch(path.name) is None:
+                raise PageEvidenceIntegrityError("visual call evidence contains an invalid id")
+            maximum = max(maximum, int(path.name.split("-", 2)[1]))
+        return maximum + 1
+
+    def persist_visual_call_intent(
+        self,
+        page_id: str,
+        call_id: str,
+        *,
+        source_page: int,
+        task_index: int,
+        call_kind: str,
+        runtime_call_index: int,
+        visual_call_sequence: int,
+        provider_batch_id: str,
+        image_sha256: str,
+        candidate_tex_sha256: str,
+        parent_result_sha256: str = "",
+        required_block_ids: Sequence[str] = (),
+    ) -> Mapping[str, object]:
+        """Commit one exact verifier intent before invoking the provider."""
+
+        kind = str(call_kind or "")
+        block_ids = tuple(str(item) for item in required_block_ids)
+        if (
+            any(not item for item in block_ids)
+            or len(set(block_ids)) != len(block_ids)
+            or tuple(sorted(block_ids)) != block_ids
+        ):
+            raise PageEvidenceError("visual call required block ids must be unique and sorted")
+        if kind not in _VISUAL_CALL_KINDS:
+            raise PageEvidenceError("unsupported visual call kind")
+        for value, label in (
+            (source_page, "source_page"),
+            (task_index, "task_index"),
+            (runtime_call_index, "runtime_call_index"),
+            (visual_call_sequence, "visual_call_sequence"),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise PageEvidenceError(f"visual call {label} must be positive")
+        try:
+            encoded_sequence = int(str(call_id).split("-", 2)[1])
+        except (IndexError, ValueError) as exc:
+            raise PageEvidenceError("invalid visual call evidence id") from exc
+        if (
+            _VISUAL_CALL_ID_RE.fullmatch(str(call_id or "")) is None
+            or encoded_sequence != visual_call_sequence
+        ):
+            raise PageEvidenceError("visual call id/sequence mismatch")
+        if re.fullmatch(r"ocr-verify-batch-[0-9a-f]{24}", str(provider_batch_id or "")) is None:
+            raise PageEvidenceError("invalid visual provider batch id")
+        image_digest = _digest(image_sha256, "visual image_sha256")
+        candidate_digest = _digest(candidate_tex_sha256, "visual candidate_tex_sha256")
+        parent_digest = str(parent_result_sha256 or "").lower()
+        if kind == "INITIAL":
+            if parent_digest or block_ids:
+                raise PageEvidenceError("initial visual call cannot name patch parent evidence")
+        elif not block_ids or _SHA256_RE.fullmatch(parent_digest) is None:
+            raise PageEvidenceError("local patch visual call lacks exact parent/coverage evidence")
+        block_ids_sha256 = _sha256(_canonical_json_bytes(list(block_ids)))
+        value = {
+            "schema_version": VISUAL_CALL_INTENT_SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "source_sha256": self.source_sha256,
+            "page_id": page_id,
+            "source_page": source_page,
+            "task_index": task_index,
+            "call_id": str(call_id),
+            "call_kind": kind,
+            "runtime_call_index": runtime_call_index,
+            "visual_call_sequence": visual_call_sequence,
+            "provider_batch_id": str(provider_batch_id),
+            "image_sha256": image_digest,
+            "candidate_tex_sha256": candidate_digest,
+            "parent_result_sha256": parent_digest,
+            "required_block_ids": list(block_ids),
+            "required_block_ids_sha256": block_ids_sha256,
+        }
+        path = self._visual_call_path(page_id, call_id, "intent.json")
+        artifact = self._atomic_write_once(
+            path,
+            _canonical_json_bytes(value),
+            f"visual-calls/{call_id}/intent.json",
+        )
+        loaded = dict(self.load_visual_call_intent(
+            page_id, call_id, expected_sha256=artifact.sha256
+        ))
+        if loaded != value:
+            raise PageEvidenceIntegrityError("persisted visual call intent changed")
+        return MappingProxyType({
+            "intent": MappingProxyType(loaded),
+            "intent_sha256": artifact.sha256,
+        })
+
+    def load_visual_call_intent(
+        self,
+        page_id: str,
+        call_id: str,
+        *,
+        expected_sha256: str = "",
+    ) -> Mapping[str, object]:
+        path = self._visual_call_path(page_id, call_id, "intent.json")
+        if not path.is_file() or path.is_symlink():
+            raise PageEvidenceIntegrityError("visual call intent is missing")
+        try:
+            data = path.read_bytes()
+            value = _json_object(data, "visual call intent")
+            _strict_keys(value, {
+                "schema_version", "run_id", "source_sha256", "page_id",
+                "source_page", "task_index", "call_id", "call_kind",
+                "runtime_call_index", "visual_call_sequence", "provider_batch_id",
+                "image_sha256", "candidate_tex_sha256", "parent_result_sha256",
+                "required_block_ids", "required_block_ids_sha256",
+            }, "visual call intent")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise PageEvidenceIntegrityError("visual call intent is corrupt") from exc
+        expected_digest = str(expected_sha256 or "").lower()
+        if expected_digest and (
+            _SHA256_RE.fullmatch(expected_digest) is None
+            or _sha256(data) != expected_digest
+        ):
+            raise PageEvidenceIntegrityError("visual call intent SHA-256 mismatch")
+        source_page = value.get("source_page")
+        task_index = value.get("task_index")
+        runtime_call_index = value.get("runtime_call_index")
+        sequence = value.get("visual_call_sequence")
+        kind = value.get("call_kind")
+        blocks = value.get("required_block_ids")
+        parent = str(value.get("parent_result_sha256") or "").lower()
+        if (
+            value.get("schema_version") != VISUAL_CALL_INTENT_SCHEMA_VERSION
+            or value.get("run_id") != self.run_id
+            or value.get("source_sha256") != self.source_sha256
+            or value.get("page_id") != page_id
+            or value.get("call_id") != call_id
+            or kind not in _VISUAL_CALL_KINDS
+            or not all(
+                isinstance(item, int) and not isinstance(item, bool) and item >= 1
+                for item in (source_page, task_index, runtime_call_index, sequence)
+            )
+            or int(str(call_id).split("-", 2)[1]) != sequence
+            or re.fullmatch(
+                r"ocr-verify-batch-[0-9a-f]{24}",
+                str(value.get("provider_batch_id") or ""),
+            ) is None
+            or _SHA256_RE.fullmatch(str(value.get("image_sha256") or "")) is None
+            or _SHA256_RE.fullmatch(str(value.get("candidate_tex_sha256") or "")) is None
+            or not isinstance(blocks, list)
+            or any(not isinstance(item, str) or not item for item in blocks)
+            or len(set(blocks)) != len(blocks)
+            or sorted(blocks) != blocks
+            or value.get("required_block_ids_sha256")
+            != _sha256(_canonical_json_bytes(blocks))
+            or (kind == "INITIAL" and (parent or blocks))
+            or (
+                kind == "LOCAL_PATCH"
+                and (not blocks or _SHA256_RE.fullmatch(parent) is None)
+            )
+        ):
+            raise PageEvidenceIntegrityError("visual call intent identity/binding mismatch")
+        return MappingProxyType(dict(value))
+
+    def persist_visual_call_result(
+        self,
+        page_id: str,
+        call_id: str,
+        *,
+        expected_intent_sha256: str,
+        response_sha256: str,
+        raw_response: Mapping[str, object],
+        verification: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        """Persist the validated provider result before any page/lane commit."""
+
+        intent_path = self._visual_call_path(page_id, call_id, "intent.json")
+        intent_data = intent_path.read_bytes()
+        intent = dict(self.load_visual_call_intent(
+            page_id, call_id, expected_sha256=expected_intent_sha256
+        ))
+        raw_value = dict(raw_response)
+        verification_value = dict(verification)
+        if verification_value.get("page_id") != page_id:
+            raise PageEvidenceError("visual call result is bound to another page")
+        response_digest = _digest(response_sha256, "visual response_sha256")
+        raw_digest = _canonical_json_value_sha256(raw_value)
+        if response_digest != raw_digest:
+            raise PageEvidenceError("visual response digest differs from raw response")
+        value = {
+            "schema_version": VISUAL_CALL_RESULT_SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "source_sha256": self.source_sha256,
+            "page_id": page_id,
+            "call_id": call_id,
+            "call_kind": intent["call_kind"],
+            "intent_sha256": _sha256(intent_data),
+            "provider_batch_id": intent["provider_batch_id"],
+            "response_sha256": response_digest,
+            "raw_response_sha256": raw_digest,
+            "verification_sha256": _canonical_json_value_sha256(
+                verification_value
+            ),
+            "raw_response": raw_value,
+            "verification": verification_value,
+        }
+        path = self._visual_call_path(page_id, call_id, "result.json")
+        artifact = self._atomic_write_once(
+            path,
+            _canonical_json_bytes(value),
+            f"visual-calls/{call_id}/result.json",
+        )
+        loaded = dict(self.load_visual_call_result(
+            page_id, call_id, expected_sha256=artifact.sha256
+        ))
+        if loaded != value:
+            raise PageEvidenceIntegrityError("persisted visual call result changed")
+        return MappingProxyType({
+            "result": MappingProxyType(loaded),
+            "result_sha256": artifact.sha256,
+        })
+
+    def load_visual_call_result(
+        self,
+        page_id: str,
+        call_id: str,
+        *,
+        expected_sha256: str = "",
+    ) -> Mapping[str, object]:
+        path = self._visual_call_path(page_id, call_id, "result.json")
+        if not path.is_file() or path.is_symlink():
+            raise PageEvidenceIntegrityError("visual call result is missing")
+        try:
+            data = path.read_bytes()
+            value = _json_object(data, "visual call result")
+            _strict_keys(value, {
+                "schema_version", "run_id", "source_sha256", "page_id", "call_id",
+                "call_kind", "intent_sha256", "provider_batch_id", "response_sha256",
+                "raw_response_sha256", "verification_sha256", "raw_response",
+                "verification",
+            }, "visual call result")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise PageEvidenceIntegrityError("visual call result is corrupt") from exc
+        expected_digest = str(expected_sha256 or "").lower()
+        if expected_digest and (
+            _SHA256_RE.fullmatch(expected_digest) is None
+            or _sha256(data) != expected_digest
+        ):
+            raise PageEvidenceIntegrityError("visual call result SHA-256 mismatch")
+        intent_path = self._visual_call_path(page_id, call_id, "intent.json")
+        intent_data = intent_path.read_bytes()
+        intent = self.load_visual_call_intent(page_id, call_id)
+        raw = value.get("raw_response")
+        verification = value.get("verification")
+        if not isinstance(raw, Mapping) or not isinstance(verification, Mapping):
+            raise PageEvidenceIntegrityError("visual call result payload is malformed")
+        raw_digest = _canonical_json_value_sha256(raw)
+        verification_digest = _canonical_json_value_sha256(verification)
+        if (
+            value.get("schema_version") != VISUAL_CALL_RESULT_SCHEMA_VERSION
+            or value.get("run_id") != self.run_id
+            or value.get("source_sha256") != self.source_sha256
+            or value.get("page_id") != page_id
+            or value.get("call_id") != call_id
+            or value.get("call_kind") != intent["call_kind"]
+            or value.get("intent_sha256") != _sha256(intent_data)
+            or value.get("provider_batch_id") != intent["provider_batch_id"]
+            or value.get("response_sha256") != raw_digest
+            or value.get("raw_response_sha256") != raw_digest
+            or value.get("verification_sha256") != verification_digest
+            or verification.get("page_id") != page_id
+        ):
+            raise PageEvidenceIntegrityError("visual call result identity/binding mismatch")
+        return MappingProxyType(dict(value))
+
+    def persist_visual_call_consumed(
+        self,
+        page_id: str,
+        call_id: str,
+        *,
+        disposition: str,
+        runtime_record_sha256: str,
+        record_status: str,
+        lane_owner: str,
+        lane_route_sha256: str,
+    ) -> Mapping[str, object]:
+        """Close an intent after commit or an explicit fail-closed decision."""
+
+        intent_path = self._visual_call_path(page_id, call_id, "intent.json")
+        intent = self.load_visual_call_intent(page_id, call_id)
+        intent_sha = _sha256(intent_path.read_bytes())
+        result_path = self._visual_call_path(page_id, call_id, "result.json")
+        result_sha = ""
+        if result_path.exists():
+            self.load_visual_call_result(page_id, call_id)
+            result_sha = _sha256(result_path.read_bytes())
+        selected_disposition = str(disposition or "")
+        if selected_disposition not in {"COMMITTED", "FAIL_CLOSED"}:
+            raise PageEvidenceError("invalid visual call consumed disposition")
+        if selected_disposition == "COMMITTED" and not result_sha:
+            raise PageEvidenceError("committed visual call has no durable result")
+        value = {
+            "schema_version": VISUAL_CALL_CONSUMED_SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "source_sha256": self.source_sha256,
+            "page_id": page_id,
+            "call_id": call_id,
+            "call_kind": intent["call_kind"],
+            "intent_sha256": intent_sha,
+            "result_sha256": result_sha,
+            "disposition": selected_disposition,
+            "runtime_record_sha256": _digest(
+                runtime_record_sha256, "visual runtime_record_sha256"
+            ),
+            "record_status": str(record_status or ""),
+            "lane_owner": str(lane_owner or ""),
+            "lane_route_sha256": _digest(
+                lane_route_sha256, "visual lane_route_sha256"
+            ),
+        }
+        if not value["record_status"] or not value["lane_owner"]:
+            raise PageEvidenceError("visual call consumed terminal identity is incomplete")
+        path = self._visual_call_path(page_id, call_id, "consumed.json")
+        artifact = self._atomic_write_once(
+            path,
+            _canonical_json_bytes(value),
+            f"visual-calls/{call_id}/consumed.json",
+        )
+        loaded = dict(self.load_visual_call_consumed(
+            page_id, call_id, expected_sha256=artifact.sha256
+        ))
+        if loaded != value:
+            raise PageEvidenceIntegrityError("persisted visual call consumed marker changed")
+        return MappingProxyType(loaded)
+
+    def load_visual_call_consumed(
+        self,
+        page_id: str,
+        call_id: str,
+        *,
+        expected_sha256: str = "",
+    ) -> Mapping[str, object]:
+        path = self._visual_call_path(page_id, call_id, "consumed.json")
+        if not path.is_file() or path.is_symlink():
+            raise PageEvidenceIntegrityError("visual call consumed marker is missing")
+        try:
+            data = path.read_bytes()
+            value = _json_object(data, "visual call consumed marker")
+            _strict_keys(value, {
+                "schema_version", "run_id", "source_sha256", "page_id", "call_id",
+                "call_kind", "intent_sha256", "result_sha256", "disposition",
+                "runtime_record_sha256", "record_status", "lane_owner",
+                "lane_route_sha256",
+            }, "visual call consumed marker")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise PageEvidenceIntegrityError("visual call consumed marker is corrupt") from exc
+        expected_digest = str(expected_sha256 or "").lower()
+        if expected_digest and (
+            _SHA256_RE.fullmatch(expected_digest) is None
+            or _sha256(data) != expected_digest
+        ):
+            raise PageEvidenceIntegrityError("visual call consumed SHA-256 mismatch")
+        intent_path = self._visual_call_path(page_id, call_id, "intent.json")
+        intent = self.load_visual_call_intent(page_id, call_id)
+        result_path = self._visual_call_path(page_id, call_id, "result.json")
+        actual_result_sha = ""
+        if result_path.exists():
+            self.load_visual_call_result(page_id, call_id)
+            actual_result_sha = _sha256(result_path.read_bytes())
+        if (
+            value.get("schema_version") != VISUAL_CALL_CONSUMED_SCHEMA_VERSION
+            or value.get("run_id") != self.run_id
+            or value.get("source_sha256") != self.source_sha256
+            or value.get("page_id") != page_id
+            or value.get("call_id") != call_id
+            or value.get("call_kind") != intent["call_kind"]
+            or value.get("intent_sha256") != _sha256(intent_path.read_bytes())
+            or value.get("result_sha256") != actual_result_sha
+            or value.get("disposition") not in {"COMMITTED", "FAIL_CLOSED"}
+            or (
+                value.get("disposition") == "COMMITTED"
+                and not actual_result_sha
+            )
+            or _SHA256_RE.fullmatch(
+                str(value.get("runtime_record_sha256") or "")
+            ) is None
+            or _SHA256_RE.fullmatch(
+                str(value.get("lane_route_sha256") or "")
+            ) is None
+            or not str(value.get("record_status") or "")
+            or not str(value.get("lane_owner") or "")
+        ):
+            raise PageEvidenceIntegrityError("visual call consumed binding mismatch")
+        return MappingProxyType(dict(value))
+
+    def pending_visual_calls(
+        self,
+        page_id: str,
+    ) -> tuple[Mapping[str, object], ...]:
+        """Return strict visual intents that have no consumed marker."""
+
+        root = self._ensure_safe(self.page_dir(page_id) / "visual-calls")
+        if not root.exists():
+            return ()
+        if root.is_symlink() or not root.is_dir():
+            raise PageEvidenceIntegrityError("visual call evidence root is not a directory")
+        pending: list[Mapping[str, object]] = []
+        seen_sequences: set[int] = set()
+        for path in sorted(root.iterdir(), key=lambda item: item.name):
+            if path.is_symlink() or not path.is_dir():
+                raise PageEvidenceIntegrityError("visual call evidence contains an unsafe entry")
+            call_id = path.name
+            if _VISUAL_CALL_ID_RE.fullmatch(call_id) is None:
+                raise PageEvidenceIntegrityError("visual call evidence contains an invalid id")
+            intent_path = self._visual_call_path(page_id, call_id, "intent.json")
+            if not intent_path.exists():
+                raise PageEvidenceIntegrityError("visual call directory has no intent")
+            intent = dict(self.load_visual_call_intent(page_id, call_id))
+            sequence = int(intent["visual_call_sequence"])
+            if sequence in seen_sequences:
+                raise PageEvidenceIntegrityError("visual call sequence is duplicated")
+            seen_sequences.add(sequence)
+            result_path = self._visual_call_path(page_id, call_id, "result.json")
+            result = None
+            result_sha = ""
+            if result_path.exists():
+                result = dict(self.load_visual_call_result(page_id, call_id))
+                result_sha = _sha256(result_path.read_bytes())
+            consumed_path = self._visual_call_path(page_id, call_id, "consumed.json")
+            if consumed_path.exists():
+                self.load_visual_call_consumed(page_id, call_id)
+                continue
+            pending.append(MappingProxyType({
+                "call_id": call_id,
+                "intent": MappingProxyType(intent),
+                "intent_sha256": _sha256(intent_path.read_bytes()),
+                "result": None if result is None else MappingProxyType(result),
+                "result_sha256": result_sha,
+            }))
+        return tuple(sorted(
+            pending,
+            key=lambda item: int(item["intent"]["visual_call_sequence"]),
+        ))
+
+    def base_commit_marker_exists(self, page_id: str) -> bool:
+        """Return whether the immutable base verification marker exists.
+
+        A link, directory, or unreadable marker is corruption, not absence.  A
+        caller may repair only the genuinely absent case; append-only writes
+        then check every pre-marker fragment byte-for-byte.
+        """
+
+        path = self._artifact_path(page_id, "verification.json")
+        if not path.exists():
+            return False
+        if path.is_symlink() or not path.is_file():
+            raise PageEvidenceIntegrityError(
+                "base page evidence commit marker is not a plain file"
+            )
+        try:
+            path.read_bytes()
+        except OSError as exc:
+            raise PageEvidenceIntegrityError(
+                "base page evidence commit marker is unreadable"
+            ) from exc
+        return True
+
+    def retry_commit_marker_exists(self, page_id: str, retry_id: str) -> bool:
+        """Return whether one retry has its immutable record.json marker."""
+
+        path = self._retry_path(page_id, retry_id, "record.json")
+        if not path.exists():
+            return False
+        if path.is_symlink() or not path.is_file():
+            raise PageEvidenceIntegrityError(
+                "retry evidence commit marker is not a plain file"
+            )
+        try:
+            path.read_bytes()
+        except OSError as exc:
+            raise PageEvidenceIntegrityError(
+                "retry evidence commit marker is unreadable"
+            ) from exc
+        return True
+
+    def persist_retry_intent(
+        self,
+        page_id: str,
+        retry_id: str,
+        *,
+        intended_call_index: int,
+        request: Mapping[str, object],
+        parent_artifact_hashes: Mapping[str, str],
+    ) -> Mapping[str, object]:
+        """Commit a hash-bound retry intent before any provider invocation."""
+
+        if (
+            not isinstance(intended_call_index, int)
+            or isinstance(intended_call_index, bool)
+            or intended_call_index < 1
+        ):
+            raise PageEvidenceError("retry intended_call_index must be positive")
+        request_value = dict(request)
+        if request_value.get("page_id") != page_id:
+            raise PageEvidenceError("retry intent request is bound to another page")
+        if request_value.get("retry_id") != retry_id:
+            raise PageEvidenceError("retry intent request id mismatch")
+        if request_value.get("intended_call_index") != intended_call_index:
+            raise PageEvidenceError("retry intent request call index mismatch")
+        parent = dict(
+            self.verify_coverage_artifact_hashes(
+                page_id, parent_artifact_hashes
+            )
+        )
+        value = {
+            "schema_version": PAGE_RETRY_INTENT_SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "page_id": page_id,
+            "retry_id": retry_id,
+            "intended_call_index": intended_call_index,
+            "request": request_value,
+            "parent_artifact_hashes": parent,
+        }
+        artifact = self.write_retry_artifact(
+            page_id,
+            retry_id,
+            "request.json",
+            value,
+        )
+        loaded = dict(self.load_retry_intent(page_id, retry_id))
+        if loaded != value:
+            raise PageEvidenceIntegrityError(
+                "persisted retry intent differs from the requested intent"
+            )
+        return MappingProxyType({
+            "intent": MappingProxyType(loaded),
+            "intent_sha256": artifact.sha256,
+            "parent_artifact_hashes": MappingProxyType(parent),
+        })
+
+    def load_retry_intent(
+        self,
+        page_id: str,
+        retry_id: str,
+        *,
+        expected_sha256: str = "",
+    ) -> Mapping[str, object]:
+        """Load one exact, append-only retry intent after identity checks."""
+
+        path = self._retry_path(page_id, retry_id, "request.json")
+        if not path.is_file() or path.is_symlink():
+            raise PageEvidenceIntegrityError("retry intent request.json is missing")
+        try:
+            data = path.read_bytes()
+            value = _json_object(data, "retry intent request.json")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PageEvidenceIntegrityError("retry intent request.json is corrupt") from exc
+        expected_digest = str(expected_sha256 or "").lower()
+        if expected_digest and (
+            _SHA256_RE.fullmatch(expected_digest) is None
+            or _sha256(data) != expected_digest
+        ):
+            raise PageEvidenceIntegrityError("retry intent SHA-256 binding mismatch")
+        expected_fields = {
+            "schema_version",
+            "run_id",
+            "page_id",
+            "retry_id",
+            "intended_call_index",
+            "request",
+            "parent_artifact_hashes",
+        }
+        try:
+            _strict_keys(value, expected_fields, "retry intent")
+        except ValueError as exc:
+            raise PageEvidenceIntegrityError("retry intent fields are not exact") from exc
+        call_index = value.get("intended_call_index")
+        request = value.get("request")
+        parent = value.get("parent_artifact_hashes")
+        if (
+            value.get("schema_version") != PAGE_RETRY_INTENT_SCHEMA_VERSION
+            or value.get("run_id") != self.run_id
+            or value.get("page_id") != page_id
+            or value.get("retry_id") != retry_id
+            or not isinstance(call_index, int)
+            or isinstance(call_index, bool)
+            or call_index < 1
+            or not isinstance(request, Mapping)
+            or request.get("page_id") != page_id
+            or request.get("retry_id") != retry_id
+            or request.get("intended_call_index") != call_index
+            or not isinstance(parent, Mapping)
+        ):
+            raise PageEvidenceIntegrityError("retry intent identity is invalid")
+        try:
+            normalized_parent = dict(_normalized_artifact_hashes({
+                str(key): str(item) for key, item in parent.items()
+            }))
+            verified_parent = dict(
+                self.verify_coverage_artifact_hashes(page_id, normalized_parent)
+            )
+        except (PageEvidenceError, ValueError) as exc:
+            raise PageEvidenceIntegrityError(
+                "retry intent parent evidence is invalid"
+            ) from exc
+        if verified_parent != normalized_parent:
+            raise PageEvidenceIntegrityError(
+                "retry intent parent evidence differs after verification"
+            )
+        return MappingProxyType({
+            **value,
+            "request": dict(request),
+            "parent_artifact_hashes": normalized_parent,
+        })
+
+    def latest_committed_coverage_head(
+        self,
+        page_id: str,
+    ) -> Mapping[str, object]:
+        """Return the newest fully committed, hash-valid evidence head."""
+
+        heads = self._verified_coverage_heads(page_id)
+        hashes, retry_id = heads[-1]
+        return MappingProxyType({
+            "artifact_hashes": MappingProxyType(dict(hashes)),
+            "retry_id": retry_id,
+        })
+
+    def pending_retry_intents(
+        self,
+        page_id: str,
+    ) -> tuple[Mapping[str, object], ...]:
+        """Return verified durable intents that have no retry commit marker."""
+
+        retry_root = self._ensure_safe(self.page_dir(page_id) / "retries")
+        if not retry_root.exists():
+            return ()
+        if retry_root.is_symlink() or not retry_root.is_dir():
+            raise PageEvidenceIntegrityError("retry evidence root is not a directory")
+        pending: list[Mapping[str, object]] = []
+        for path in sorted(retry_root.iterdir(), key=lambda item: item.name):
+            if path.is_symlink() or not path.is_dir():
+                raise PageEvidenceIntegrityError(
+                    "retry evidence contains an unsafe entry"
+                )
+            retry_id = path.name
+            if self.retry_commit_marker_exists(page_id, retry_id):
+                self.verify_retry_artifacts(page_id, retry_id)
+                continue
+            request_path = self._retry_path(page_id, retry_id, "request.json")
+            if not request_path.exists():
+                continue
+            if request_path.is_symlink() or not request_path.is_file():
+                raise PageEvidenceIntegrityError(
+                    "pending retry request is not a plain file"
+                )
+            request = _json_object(
+                request_path.read_bytes(), "pending retry request.json"
+            )
+            if request.get("schema_version") != PAGE_RETRY_INTENT_SCHEMA_VERSION:
+                # Legacy pre-intent fragments are not durable provider intents.
+                continue
+            pending.append(self.load_retry_intent(page_id, retry_id))
+        return tuple(sorted(
+            pending,
+            key=lambda item: (
+                int(item["intended_call_index"]),
+                str(item["retry_id"]),
+            ),
+        ))
+
     def persist_retry_bundle(
         self,
         page_id: str,
@@ -714,24 +1424,89 @@ class PageEvidenceStore:
         raw_response: bytes | bytearray | memoryview | Mapping[str, object],
         page_tex: str,
         parent_artifact_hashes: Mapping[str, str] | None = None,
+        expected_retry_intent_sha256: str = "",
     ) -> Mapping[str, str]:
         """Persist one immutable retry and finish with a hash-bound record.json."""
         if request.get("page_id") not in {None, page_id}:
             raise PageEvidenceError("retry request is bound to another page_id")
         if verification.get("page_id") not in {None, page_id}:
             raise PageEvidenceError("retry verification is bound to another page_id")
-        request_artifact = self.write_retry_artifact(
-            page_id, retry_id, "request.json", request
+        normalized_parent = dict(
+            _normalized_artifact_hashes(parent_artifact_hashes or {})
         )
+        durable_intent = (
+            request.get("schema_version") == PAGE_RETRY_INTENT_SCHEMA_VERSION
+        )
+        if durable_intent:
+            # A production retry commits this exact wrapper before invoking the
+            # provider.  The terminal bundle must reuse that append-only
+            # artifact, never replace it with the nested provider request.
+            loaded_intent = dict(self.load_retry_intent(
+                page_id,
+                retry_id,
+                expected_sha256=expected_retry_intent_sha256,
+            ))
+            if loaded_intent != dict(request):
+                raise PageEvidenceIntegrityError(
+                    "terminal retry request differs from durable retry intent"
+                )
+            if dict(loaded_intent["parent_artifact_hashes"]) != normalized_parent:
+                raise PageEvidenceIntegrityError(
+                    "terminal retry parent differs from durable retry intent"
+                )
+            request_path = self._retry_path(page_id, retry_id, "request.json")
+            request_data = request_path.read_bytes()
+            request_artifact = self._artifact(
+                request_path,
+                f"retries/{retry_id}/request.json",
+                request_data,
+            )
+        else:
+            # Compatibility path for already-supported legacy callers whose
+            # retry request itself is the append-only request.json artifact.
+            if expected_retry_intent_sha256:
+                raise PageEvidenceIntegrityError(
+                    "durable retry intent digest supplied for a legacy request"
+                )
+            request_artifact = self.write_retry_artifact(
+                page_id, retry_id, "request.json", request
+            )
         raw_artifact = self.write_retry_artifact(
             page_id, retry_id, "raw-response.json", raw_response
         )
         _json_object(raw_artifact.path.read_bytes(), "retry raw-response.json")
-        verification_artifact = self.write_retry_artifact(
-            page_id, retry_id, "verification.json", verification
-        )
         tex_artifact = self.write_retry_artifact(
             page_id, retry_id, "page.tex", str(page_tex).encode("utf-8")
+        )
+        if durable_intent:
+            candidate_artifact_sha256 = normalized_parent.get("candidate.json")
+            if candidate_artifact_sha256 is None:
+                raise PageEvidenceIntegrityError(
+                    "durable retry parent has no candidate.json binding"
+                )
+            verification_value = dict(verification)
+            embedded_page_id = verification_value.get("page_id")
+            if embedded_page_id is not None and str(embedded_page_id) != page_id:
+                raise PageEvidenceError(
+                    "retry verification is bound to another page_id"
+                )
+            verification_payload = {
+                "schema_version": PAGE_VERIFICATION_SCHEMA_VERSION,
+                "run_id": self.run_id,
+                "page_id": page_id,
+                "source_sha256": self.source_sha256,
+                "candidate_artifact_sha256": candidate_artifact_sha256,
+                "raw_response_sha256": raw_artifact.sha256,
+                "final_page_tex_sha256": tex_artifact.sha256,
+                "verification": verification_value,
+            }
+            retry_record_schema = PAGE_RETRY_RECORD_SCHEMA_VERSION
+        else:
+            # Explicit compatibility format for pre-intent retry callers.
+            verification_payload = dict(verification)
+            retry_record_schema = LEGACY_PAGE_RETRY_RECORD_SCHEMA_VERSION
+        verification_artifact = self.write_retry_artifact(
+            page_id, retry_id, "verification.json", verification_payload
         )
         artifact_hashes = {
             "request.json": request_artifact.sha256,
@@ -740,15 +1515,13 @@ class PageEvidenceStore:
             "page.tex": tex_artifact.sha256,
         }
         record = {
-            "schema_version": PAGE_RETRY_RECORD_SCHEMA_VERSION,
+            "schema_version": retry_record_schema,
             "run_id": self.run_id,
             "page_id": page_id,
             "retry_id": retry_id,
             "source_sha256": self.source_sha256,
             "artifact_hashes": artifact_hashes,
-            "parent_artifact_hashes": dict(
-                _normalized_artifact_hashes(parent_artifact_hashes or {})
-            ),
+            "parent_artifact_hashes": normalized_parent,
         }
         self.write_retry_artifact(page_id, retry_id, "record.json", record)
         return self.verify_retry_artifacts(page_id, retry_id)
@@ -768,8 +1541,12 @@ class PageEvidenceStore:
             },
             "retry record",
         )
+        retry_record_schema = record["schema_version"]
         if (
-            record["schema_version"] != PAGE_RETRY_RECORD_SCHEMA_VERSION
+            retry_record_schema not in {
+                LEGACY_PAGE_RETRY_RECORD_SCHEMA_VERSION,
+                PAGE_RETRY_RECORD_SCHEMA_VERSION,
+            }
             or record["run_id"] != self.run_id
             or record["page_id"] != page_id
             or record["retry_id"] != retry_id
@@ -799,8 +1576,232 @@ class PageEvidenceStore:
             actual[name] = _sha256(path.read_bytes())
         if dict(normalized_recorded) != dict(sorted(actual.items())):
             raise PageEvidenceIntegrityError("retry evidence artifact hash binding mismatch")
+        verification_value = _json_object(
+            self._retry_path(page_id, retry_id, "verification.json").read_bytes(),
+            "retry verification.json",
+        )
+        if retry_record_schema == PAGE_RETRY_RECORD_SCHEMA_VERSION:
+            _strict_keys(
+                verification_value,
+                {
+                    "schema_version",
+                    "run_id",
+                    "page_id",
+                    "source_sha256",
+                    "candidate_artifact_sha256",
+                    "raw_response_sha256",
+                    "final_page_tex_sha256",
+                    "verification",
+                },
+                "retry verification",
+            )
+            candidate_sha256 = dict(parent_hashes).get("candidate.json")
+            if (
+                verification_value["schema_version"]
+                != PAGE_VERIFICATION_SCHEMA_VERSION
+                or verification_value["run_id"] != self.run_id
+                or verification_value["page_id"] != page_id
+                or verification_value["source_sha256"] != self.source_sha256
+                or verification_value["candidate_artifact_sha256"]
+                != candidate_sha256
+                or verification_value["raw_response_sha256"]
+                != actual["raw-response.json"]
+                or verification_value["final_page_tex_sha256"]
+                != actual["page.tex"]
+            ):
+                raise PageEvidenceIntegrityError(
+                    "retry verification dependency binding mismatch"
+                )
+            embedded = verification_value["verification"]
+            if not isinstance(embedded, Mapping):
+                raise PageEvidenceIntegrityError(
+                    "retry verification payload must be an object"
+                )
+            if embedded.get("page_id") not in {None, page_id}:
+                raise PageEvidenceIntegrityError(
+                    "retry verification payload page_id mismatch"
+                )
         actual["record.json"] = _sha256(record_data)
         return MappingProxyType(dict(sorted(actual.items())))
+
+    def _verified_coverage_heads(
+        self, page_id: str
+    ) -> tuple[tuple[Mapping[str, str], str | None], ...]:
+        """Return the base evidence and every hash-chained retry head."""
+
+        base = dict(self.verify_page_artifacts(page_id))
+        heads: list[tuple[Mapping[str, str], str | None]] = [
+            (MappingProxyType(dict(sorted(base.items()))), None)
+        ]
+        retry_root = self._ensure_safe(self.page_dir(page_id) / "retries")
+        if not retry_root.exists():
+            return tuple(heads)
+        if retry_root.is_symlink() or not retry_root.is_dir():
+            raise PageEvidenceIntegrityError("retry evidence root is not a directory")
+        pending = []
+        for path in sorted(retry_root.iterdir(), key=lambda item: item.name):
+            if path.is_symlink() or not path.is_dir():
+                raise PageEvidenceIntegrityError("retry evidence contains an unsafe entry")
+            retry_id = path.name
+            record_path = self._retry_path(page_id, retry_id, "record.json")
+            if not record_path.exists():
+                # record.json is the retry commit marker.  A crash before it
+                # appears leaves harmless append-only fragments that are not
+                # eligible to become a coverage head.
+                continue
+            if record_path.is_symlink() or not record_path.is_file():
+                raise PageEvidenceIntegrityError(
+                    "retry evidence commit marker is not a plain file"
+                )
+            verified = dict(self.verify_retry_artifacts(page_id, retry_id))
+            record = _json_object(
+                record_path.read_bytes(),
+                "retry record.json",
+            )
+            parent = record.get("parent_artifact_hashes")
+            if not isinstance(parent, Mapping):
+                raise PageEvidenceIntegrityError(
+                    "retry parent artifact hashes are malformed"
+                )
+            pending.append((retry_id, verified, dict(parent)))
+        while pending:
+            advanced = False
+            for retry_id, verified, parent in tuple(pending):
+                parent_head = next(
+                    (
+                        dict(head)
+                        for head, _head_retry_id in heads
+                        if dict(head) == dict(sorted(parent.items()))
+                    ),
+                    None,
+                )
+                if parent_head is None:
+                    continue
+                combined = dict(parent_head)
+                combined.update({
+                    "verification.json": verified["verification.json"],
+                    "raw-response.json": verified["raw-response.json"],
+                    "page.tex": verified["page.tex"],
+                    "retry-record.json": verified["record.json"],
+                })
+                heads.append((
+                    MappingProxyType(dict(sorted(combined.items()))),
+                    retry_id,
+                ))
+                pending.remove((retry_id, verified, parent))
+                advanced = True
+            if not advanced:
+                raise PageEvidenceIntegrityError(
+                    "retry evidence parent hash chain is disconnected"
+                )
+        return tuple(heads)
+
+    def verify_coverage_artifact_hashes(
+        self,
+        page_id: str,
+        artifact_hashes: Mapping[str, str],
+    ) -> Mapping[str, str]:
+        """Verify that coverage points at the base bundle or a retry head."""
+
+        expected = dict(_normalized_artifact_hashes(artifact_hashes))
+        for head, _retry_id in self._verified_coverage_heads(page_id):
+            if dict(head) == expected:
+                return head
+        raise PageEvidenceIntegrityError(
+            "page coverage artifact hashes do not identify a verified evidence head"
+        )
+
+    def persist_retry_coverage_bundle(
+        self,
+        page_id: str,
+        retry_id: str,
+        *,
+        request: Mapping[str, object],
+        verification: Mapping[str, object],
+        raw_response: bytes | bytearray | memoryview | Mapping[str, object],
+        page_tex: str,
+        parent_artifact_hashes: Mapping[str, str],
+        expected_retry_intent_sha256: str = "",
+    ) -> Mapping[str, str]:
+        """Persist a retry and return the verified coverage-head hash map."""
+
+        parent = dict(
+            self.verify_coverage_artifact_hashes(
+                page_id, parent_artifact_hashes
+            )
+        )
+        retry = dict(self.persist_retry_bundle(
+            page_id,
+            retry_id,
+            request=request,
+            verification=verification,
+            raw_response=raw_response,
+            page_tex=page_tex,
+            parent_artifact_hashes=parent,
+            expected_retry_intent_sha256=expected_retry_intent_sha256,
+        ))
+        combined = dict(parent)
+        combined.update({
+            "verification.json": retry["verification.json"],
+            "raw-response.json": retry["raw-response.json"],
+            "page.tex": retry["page.tex"],
+            "retry-record.json": retry["record.json"],
+        })
+        return self.verify_coverage_artifact_hashes(page_id, combined)
+
+    def verify_terminal_page_artifacts(
+        self,
+        page_id: str,
+        *,
+        raw_response: Mapping[str, object],
+        page_tex: str,
+    ) -> Mapping[str, object]:
+        """Resolve the immutable evidence head matching one terminal record."""
+
+        expected_response = dict(raw_response)
+        expected_tex = str(page_tex)
+        for hashes, retry_id in reversed(self._verified_coverage_heads(page_id)):
+            if retry_id is None:
+                raw_path = self._artifact_path(page_id, "raw-response.json")
+                tex_path = self._artifact_path(page_id, "page.tex")
+                verification_path = self._artifact_path(
+                    page_id, "verification.json"
+                )
+            else:
+                raw_path = self._retry_path(page_id, retry_id, "raw-response.json")
+                tex_path = self._retry_path(page_id, retry_id, "page.tex")
+                verification_path = self._retry_path(
+                    page_id, retry_id, "verification.json"
+                )
+            raw_value = _json_object(raw_path.read_bytes(), "terminal raw-response.json")
+            if raw_value != expected_response or tex_path.read_text(
+                encoding="utf-8"
+            ) != expected_tex:
+                continue
+            verification_value = _json_object(
+                verification_path.read_bytes(), "terminal verification.json"
+            )
+            if retry_id is not None:
+                retry_record = _json_object(
+                    self._retry_path(page_id, retry_id, "record.json").read_bytes(),
+                    "retry record.json",
+                )
+                if (
+                    retry_record.get("schema_version")
+                    == LEGACY_PAGE_RETRY_RECORD_SCHEMA_VERSION
+                ):
+                    # Pre-intent retry artifacts stored the verified payload
+                    # directly.  Normalize only after the legacy record and
+                    # its full artifact hash set have passed strict checks.
+                    verification_value = {"verification": verification_value}
+            return MappingProxyType({
+                "artifact_hashes": hashes,
+                "verification": verification_value,
+                "retry_id": retry_id,
+            })
+        raise PageEvidenceIntegrityError(
+            "no immutable page evidence head matches the terminal runtime record"
+        )
 
     def persist_source(
         self,
@@ -1030,7 +2031,9 @@ class PageEvidenceStore:
             expected_source_pages=expected_source_pages,
         )
         for record in bundle.records:
-            actual = self.verify_page_artifacts(record.page_id)
+            actual = self.verify_coverage_artifact_hashes(
+                record.page_id, record.artifact_hashes
+            )
             if dict(actual) != dict(record.artifact_hashes):
                 raise PageEvidenceIntegrityError(
                     f"page record artifact hashes differ from stored bytes: {record.page_id}"
@@ -1067,7 +2070,9 @@ class PageEvidenceStore:
         ):
             raise PageEvidenceIntegrityError("page summaries are bound to another run/source")
         for record in bundle.records:
-            actual = self.verify_page_artifacts(record.page_id)
+            actual = self.verify_coverage_artifact_hashes(
+                record.page_id, record.artifact_hashes
+            )
             if dict(actual) != dict(record.artifact_hashes):
                 raise PageEvidenceIntegrityError(
                     f"persisted page artifact was modified: {record.page_id}"

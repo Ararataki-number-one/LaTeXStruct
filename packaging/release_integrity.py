@@ -24,20 +24,26 @@ if __package__ in {None, ""}:
 from latexstruct.pricing import estimate_call_cost
 
 
-RELEASE_ATTESTATION_SCHEMA = "latexstruct-release-acceptance/11"
+RELEASE_ATTESTATION_SCHEMA = "latexstruct-release-acceptance/13"
 RUN_ATTESTATION_SCHEMA = "latexstruct-v2-ocr-acceptance-attestation/2"
-ANALYSIS_ATTESTATION_SCHEMA = "latexstruct-v2-analysis-acceptance-attestation/10"
+ANALYSIS_ATTESTATION_SCHEMA = "latexstruct-v2-analysis-acceptance-attestation/11"
 ANALYSIS_PERFORMANCE_SCHEMA = "latexstruct-v2-analysis-performance/2"
 ANALYSIS_PERFORMANCE_CLAIM_SCHEMA = (
     "latexstruct-v2-analysis-performance-claim/1"
 )
 ANALYSIS_VALIDATION_SCHEMA = "latexstruct-v2-analysis-validation/1"
 ANALYSIS_MACHINE_VERIFICATION_SCHEMA = "latexstruct-v2-analysis-machine-verification/1"
+ANALYSIS_INVENTORY_RELEASE_CLOSURE_SCHEMA = (
+    "latexstruct-analysis-inventory-release-closure/1"
+)
 CANDIDATE_PAGE_MAPPING_SCHEMA = "latexstruct-v2-candidate-page-mapping/1"
 RENDER_COMPARE_CLOSED_LOOP_SCHEMA = "latexstruct-v2-render-compare-closed-loop/1"
 ANALYSIS_TRANSPORT_CLOSURE_SCHEMA = "latexstruct-v2-analysis-transport-closure/1"
 ANALYSIS_BUDGET_CLOSURE_SCHEMA = "latexstruct-v2-analysis-budget-closure/2"
 ANALYSIS_PAGE_RISK_CLOSURE_SCHEMA = "latexstruct-v2-analysis-page-risk-closure/2"
+ANALYSIS_PAGE_RISK_PUBLIC_PROJECTION_SCHEMA = (
+    "latexstruct-v2-analysis-page-risk-public-projection/1"
+)
 PAGE_RISK_ADMISSION_SCHEMA = "latexstruct-analysis-page-risk-admission-v2"
 PAGE_RISK_ADMISSION_STRATEGY = (
     "deterministic-preflight-and-fixed-low-risk-sampling-v2"
@@ -1743,6 +1749,7 @@ def analysis_attestation_json_schema() -> dict[str, Any]:
             "independent_final_reviews",
             "visual_verification",
             "page_layout",
+            "analysis_inventory",
             "machine_verification",
             "audit_submission",
             "reports",
@@ -2134,6 +2141,61 @@ def analysis_attestation_json_schema() -> dict[str, Any]:
                     "no_abnormal_page_inflation": {"const": True},
                     "active_tableofcontents_count": {"const": 1},
                     "template": {"const": "faithfulbook"},
+                },
+            },
+            "analysis_inventory": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "schema_version",
+                    "result",
+                    "analysis_configuration_sha256",
+                    "ocr_baseline_manifest_sha256",
+                    "baseline_tex_sha256",
+                    "final_candidate_tex_sha256",
+                    "page_map_digest",
+                    "native_source_blocks_digest",
+                    "inventory_authorizations_sha256",
+                    "baseline_inventory_digest",
+                    "baseline_inventory_json_sha256",
+                    "final_inventory_digest",
+                    "final_inventory_json_sha256",
+                    "inventory_gate_digest",
+                    "inventory_gate_json_sha256",
+                    "inventory_gate_status",
+                    "scanner_executed",
+                    "residual_total",
+                    "blocked_categories",
+                    "ocr_manifest_roles",
+                ],
+                "properties": {
+                    "schema_version": {
+                        "const": ANALYSIS_INVENTORY_RELEASE_CLOSURE_SCHEMA
+                    },
+                    "result": {"const": "PASS"},
+                    **{
+                        field: sha
+                        for field in (
+                            "analysis_configuration_sha256",
+                            "ocr_baseline_manifest_sha256",
+                            "baseline_tex_sha256",
+                            "final_candidate_tex_sha256",
+                            "page_map_digest",
+                            "native_source_blocks_digest",
+                            "inventory_authorizations_sha256",
+                            "baseline_inventory_digest",
+                            "baseline_inventory_json_sha256",
+                            "final_inventory_digest",
+                            "final_inventory_json_sha256",
+                            "inventory_gate_digest",
+                            "inventory_gate_json_sha256",
+                        )
+                    },
+                    "inventory_gate_status": {"const": "PASS"},
+                    "scanner_executed": {"const": True},
+                    "residual_total": {"const": 0},
+                    "blocked_categories": {"const": []},
+                    "ocr_manifest_roles": {"type": "object"},
                 },
             },
             "machine_verification": {
@@ -3612,6 +3674,15 @@ def _verify_analysis_configuration(
             "page_risk_admission",
             "page_risk_admission_hash",
             "page_risk_source_admission_hash",
+            "baseline_inventory_digest",
+            "baseline_inventory_json_sha256",
+            "native_source_blocks",
+            "native_source_blocks_supplied",
+            "inventory_authorizations",
+            "inventory_authorization_source",
+            "inventory_policy_schema",
+            "inventory_policy_ocr_manifest_sha256",
+            "native_heading_inventory_required",
             "compile_extra_files",
             "max_macro_rounds",
             "max_input_tokens",
@@ -3693,6 +3764,34 @@ def _verify_analysis_configuration(
         configuration.get("candidate_storage_name") == "candidate.tex"
         and configuration.get("raw_ocr_frozen") is True,
         "analysis configuration does not freeze the canonical candidate/raw OCR",
+    )
+    _require(
+        SHA256_RE.fullmatch(
+            str(configuration.get("baseline_inventory_digest") or "").lower()
+        )
+        is not None
+        and SHA256_RE.fullmatch(
+            str(
+                configuration.get("baseline_inventory_json_sha256") or ""
+            ).lower()
+        )
+        is not None
+        and isinstance(configuration.get("native_source_blocks"), list)
+        and configuration.get("native_source_blocks_supplied") is True
+        and isinstance(configuration.get("inventory_authorizations"), list)
+        and configuration.get("inventory_authorization_source")
+        == "HOST_REQUIRED_POLICY"
+        and configuration.get("inventory_policy_schema")
+        == "latexstruct-host-inventory-policy-v1"
+        and SHA256_RE.fullmatch(
+            str(
+                configuration.get("inventory_policy_ocr_manifest_sha256")
+                or ""
+            ).lower()
+        )
+        is not None
+        and configuration.get("native_heading_inventory_required") is True,
+        "analysis frozen configuration inventory authority is invalid",
     )
     try:
         from latexstruct.core.analysis_risk import coerce_page_risk_admission
@@ -4429,6 +4528,197 @@ def _verify_analysis_page_risk_closure(
     return dict(projected)
 
 
+def _public_release_source_projection(value: object) -> dict[str, Any]:
+    """Project a verified private source record without its local filename."""
+
+    source = _require_exact_fields(
+        value,
+        required={"filename", "sha256", "total_pages"},
+        label="private analysis source",
+    )
+    return {
+        "sha256": str(source.get("sha256") or "").lower(),
+        "total_pages": source.get("total_pages"),
+    }
+
+
+def _verify_public_release_source_projection(
+    value: object,
+    *,
+    expected_pages: int,
+) -> dict[str, Any]:
+    source = dict(_require_exact_fields(
+        value,
+        required={"sha256", "total_pages"},
+        label="public release source hash projection",
+    ))
+    digest = str(source.get("sha256") or "").lower()
+    _require(
+        digest == RAMSEY_37_SOURCE_SHA256
+        and type(source.get("total_pages")) is int
+        and source["total_pages"] == expected_pages,
+        "release source is not the fixed hash-only 37-page Ramsey projection",
+    )
+    source["sha256"] = digest
+    return source
+
+
+def _public_analysis_page_risk_projection(value: object) -> dict[str, Any]:
+    """Create a content-free digest projection of a verified private closure."""
+
+    private = _require_mapping(value, "private analysis page-risk closure")
+    admission = _require_mapping(
+        private.get("admission"), "private analysis page-risk admission"
+    )
+    route = _require_mapping(
+        private.get("route_closure"), "private analysis page-route closure"
+    )
+    sampling = _require_mapping(
+        private.get("low_risk_sampling"), "private low-risk sampling evidence"
+    )
+    return {
+        "schema_version": ANALYSIS_PAGE_RISK_PUBLIC_PROJECTION_SCHEMA,
+        "private_closure_sha256": _canonical_json_sha256(private),
+        "source_pdf_sha256": str(admission.get("source_pdf_sha256") or "").lower(),
+        "baseline_tex_sha256": str(admission.get("baseline_tex_sha256") or "").lower(),
+        "baseline_pdf_sha256": str(admission.get("baseline_pdf_sha256") or "").lower(),
+        "ocr_page_records_sha256": str(
+            admission.get("ocr_page_records_sha256") or ""
+        ).lower(),
+        "ocr_runtime_page_records_sha256": str(
+            admission.get("ocr_runtime_page_records_sha256") or ""
+        ).lower(),
+        "admission_sha256": str(private.get("admission_sha256") or "").lower(),
+        "preflight_sha256": str(private.get("preflight_sha256") or "").lower(),
+        "route_closure_sha256": str(
+            private.get("route_closure_sha256") or ""
+        ).lower(),
+        "final_candidate_tex_sha256": str(
+            route.get("final_candidate_hash") or ""
+        ).lower(),
+        "page_count": private.get("page_count"),
+        "page_ids_sha256": str(private.get("page_ids_sha256") or "").lower(),
+        "risk_counts": private.get("risk_counts"),
+        "low_risk_sampling_sha256": _canonical_json_sha256(sampling),
+        "low_risk_sample_count": sampling.get("target_count"),
+        "all_preflight_bindings_verified": private.get(
+            "all_preflight_bindings_verified"
+        ),
+        "all_route_bindings_verified": private.get(
+            "all_route_bindings_verified"
+        ),
+    }
+
+
+def _verify_public_analysis_page_risk_projection(
+    value: object,
+    *,
+    expected_pages: int,
+    source_sha256: str,
+    evidence_hashes: Mapping[str, Any],
+    final_candidate_sha256: str,
+) -> dict[str, Any]:
+    """Validate the exact hash-only page-risk schema used by public payloads."""
+
+    projection = dict(_require_exact_fields(
+        value,
+        required={
+            "schema_version",
+            "private_closure_sha256",
+            "source_pdf_sha256",
+            "baseline_tex_sha256",
+            "baseline_pdf_sha256",
+            "ocr_page_records_sha256",
+            "ocr_runtime_page_records_sha256",
+            "admission_sha256",
+            "preflight_sha256",
+            "route_closure_sha256",
+            "final_candidate_tex_sha256",
+            "page_count",
+            "page_ids_sha256",
+            "risk_counts",
+            "low_risk_sampling_sha256",
+            "low_risk_sample_count",
+            "all_preflight_bindings_verified",
+            "all_route_bindings_verified",
+        },
+        label="public analysis page-risk hash projection",
+    ))
+    digest_fields = (
+        "private_closure_sha256",
+        "source_pdf_sha256",
+        "baseline_tex_sha256",
+        "baseline_pdf_sha256",
+        "ocr_page_records_sha256",
+        "ocr_runtime_page_records_sha256",
+        "admission_sha256",
+        "preflight_sha256",
+        "route_closure_sha256",
+        "final_candidate_tex_sha256",
+        "page_ids_sha256",
+        "low_risk_sampling_sha256",
+    )
+    normalized_digests = {
+        field: str(projection.get(field) or "").lower()
+        for field in digest_fields
+    }
+    _require(
+        projection.get("schema_version")
+        == ANALYSIS_PAGE_RISK_PUBLIC_PROJECTION_SCHEMA
+        and all(
+            SHA256_RE.fullmatch(digest) is not None
+            for digest in normalized_digests.values()
+        )
+        and normalized_digests["source_pdf_sha256"] == source_sha256.lower()
+        and normalized_digests["ocr_page_records_sha256"]
+        == str(evidence_hashes.get("ocr_page_records_hash") or "").lower()
+        and normalized_digests["ocr_runtime_page_records_sha256"]
+        == str(
+            evidence_hashes.get("ocr_runtime_page_records_hash") or ""
+        ).lower()
+        and normalized_digests["admission_sha256"]
+        == str(evidence_hashes.get("page_risk_admission_hash") or "").lower()
+        and normalized_digests["final_candidate_tex_sha256"]
+        == final_candidate_sha256.lower()
+        and type(projection.get("page_count")) is int
+        and projection["page_count"] == expected_pages
+        and type(projection.get("low_risk_sample_count")) is int
+        and 0 <= projection["low_risk_sample_count"] <= expected_pages
+        and projection.get("all_preflight_bindings_verified") is True
+        and projection.get("all_route_bindings_verified") is True,
+        "public analysis page-risk hash projection is invalid or unbound",
+    )
+    counts = _require_exact_fields(
+        projection.get("risk_counts"),
+        required={"admitted", "effective"},
+        label="public analysis page-risk aggregate counts",
+    )
+    normalized_counts: dict[str, dict[str, int]] = {}
+    for category in ("admitted", "effective"):
+        row = _require_exact_fields(
+            counts.get(category),
+            required={"R0", "R1", "R2", "R3"},
+            label=f"public analysis {category} risk counts",
+        )
+        _require(
+            all(type(row.get(risk)) is int and row[risk] >= 0 for risk in row)
+            and sum(row.values()) == expected_pages,
+            f"public analysis {category} risk counts are invalid",
+        )
+        normalized_counts[category] = dict(row)
+    _require(
+        projection["low_risk_sample_count"]
+        <= (
+            normalized_counts["admitted"]["R0"]
+            + normalized_counts["admitted"]["R1"]
+        ),
+        "public low-risk sample count exceeds the admitted R0/R1 cohort",
+    )
+    projection.update(normalized_digests)
+    projection["risk_counts"] = normalized_counts
+    return projection
+
+
 def _verified_nested_ocr_artifact_bytes(
     ocr_dir: Path,
     baseline: Mapping[str, Any],
@@ -4485,6 +4775,642 @@ def _verified_nested_ocr_page_records_bytes(
     )
 
 
+def _verified_analysis_inventory_projection(
+    value: object,
+    *,
+    analysis_configuration_sha256: str,
+    ocr_baseline_manifest_sha256: str,
+    baseline_tex_sha256: str,
+    final_candidate_tex_sha256: str,
+    expected_pages: int,
+) -> dict[str, Any]:
+    closure = dict(_require_exact_fields(
+        value,
+        required={
+            "schema_version",
+            "result",
+            "analysis_configuration_sha256",
+            "ocr_baseline_manifest_sha256",
+            "baseline_tex_sha256",
+            "final_candidate_tex_sha256",
+            "page_map_digest",
+            "native_source_blocks_digest",
+            "inventory_authorizations_sha256",
+            "baseline_inventory_digest",
+            "baseline_inventory_json_sha256",
+            "final_inventory_digest",
+            "final_inventory_json_sha256",
+            "inventory_gate_digest",
+            "inventory_gate_json_sha256",
+            "inventory_gate_status",
+            "scanner_executed",
+            "residual_total",
+            "blocked_categories",
+            "ocr_manifest_roles",
+        },
+        label="analysis inventory release closure",
+    ))
+    _require(
+        closure.get("schema_version")
+        == ANALYSIS_INVENTORY_RELEASE_CLOSURE_SCHEMA
+        and closure.get("result") == "PASS"
+        and closure.get("inventory_gate_status") == "PASS"
+        and closure.get("scanner_executed") is True
+        and closure.get("residual_total") == 0
+        and closure.get("blocked_categories") == [],
+        "analysis inventory release closure is not a strict PASS",
+    )
+    _require(
+        closure.get("analysis_configuration_sha256")
+        == analysis_configuration_sha256
+        and closure.get("ocr_baseline_manifest_sha256")
+        == ocr_baseline_manifest_sha256
+        and closure.get("baseline_tex_sha256") == baseline_tex_sha256
+        and closure.get("final_candidate_tex_sha256")
+        == final_candidate_tex_sha256,
+        "analysis inventory release closure differs from bound artifacts",
+    )
+    digest_fields = (
+        "analysis_configuration_sha256",
+        "ocr_baseline_manifest_sha256",
+        "baseline_tex_sha256",
+        "final_candidate_tex_sha256",
+        "page_map_digest",
+        "native_source_blocks_digest",
+        "inventory_authorizations_sha256",
+        "baseline_inventory_digest",
+        "baseline_inventory_json_sha256",
+        "final_inventory_digest",
+        "final_inventory_json_sha256",
+        "inventory_gate_digest",
+        "inventory_gate_json_sha256",
+    )
+    _require(
+        all(
+            SHA256_RE.fullmatch(str(closure.get(field) or "").lower())
+            is not None
+            for field in digest_fields
+        ),
+        "analysis inventory release closure contains an invalid SHA-256",
+    )
+    roles = _require_exact_fields(
+        closure.get("ocr_manifest_roles"),
+        required={
+            "lane_routes",
+            "page_evidence_bindings",
+            "evidence_correction_report",
+            "block_inventory",
+        },
+        label="analysis inventory OCR manifest roles",
+    )
+    lane = _require_exact_fields(
+        roles.get("lane_routes"),
+        required={
+            "role",
+            "sha256",
+            "status",
+            "page_count",
+            "event_count",
+            "page_bindings_sha256",
+            "event_chain_sha256",
+        },
+        label="analysis inventory lane-routes role",
+    )
+    page_bindings = _require_exact_fields(
+        roles.get("page_evidence_bindings"),
+        required={
+            "role",
+            "sha256",
+            "status",
+            "page_count",
+            "cross_binding_sha256",
+        },
+        label="analysis inventory page-evidence-bindings role",
+    )
+    correction = _require_exact_fields(
+        roles.get("evidence_correction_report"),
+        required={"role", "sha256", "status"},
+        label="analysis inventory evidence-correction role",
+    )
+    blocks = _require_exact_fields(
+        roles.get("block_inventory"),
+        required={"role", "sha256", "status", "page_count", "block_count"},
+        label="analysis inventory block-inventory role",
+    )
+    _require(
+        lane.get("role") == "LANE_ROUTES"
+        and lane.get("status") == "PASS"
+        and type(lane.get("page_count")) is int
+        and lane.get("page_count") == expected_pages
+        and type(lane.get("event_count")) is int
+        and lane.get("event_count") >= expected_pages
+        and page_bindings.get("role") == "OCR_PAGE_EVIDENCE_BINDINGS"
+        and page_bindings.get("status") == "PASS"
+        and type(page_bindings.get("page_count")) is int
+        and page_bindings.get("page_count") == expected_pages
+        and page_bindings.get("cross_binding_sha256")
+        == lane.get("page_bindings_sha256")
+        and correction.get("role") == "EVIDENCE_CORRECTION_REPORT"
+        and correction.get("status") in {"PASS", "NOT_APPLICABLE"}
+        and blocks.get("role") == "OCR_BLOCK_INVENTORY"
+        and blocks.get("status") == "PASS"
+        and type(blocks.get("page_count")) is int
+        and blocks.get("page_count") == expected_pages
+        and type(blocks.get("block_count")) is int
+        and blocks.get("block_count") >= 0
+        and all(
+            SHA256_RE.fullmatch(str(item.get("sha256") or "").lower())
+            is not None
+            for item in (lane, page_bindings, correction, blocks)
+        ),
+        "analysis inventory OCR manifest role closure is invalid",
+    )
+    _require(
+        all(
+            SHA256_RE.fullmatch(str(value or "").lower()) is not None
+            for value in (
+                lane.get("page_bindings_sha256"),
+                lane.get("event_chain_sha256"),
+                page_bindings.get("cross_binding_sha256"),
+            )
+        ),
+        "analysis inventory OCR cross-binding digest is invalid",
+    )
+    closure["ocr_manifest_roles"] = {
+        "lane_routes": dict(lane),
+        "page_evidence_bindings": dict(page_bindings),
+        "evidence_correction_report": dict(correction),
+        "block_inventory": dict(blocks),
+    }
+    return closure
+
+
+def _read_private_analysis_audit_zip(
+    path: Path,
+) -> tuple[dict[str, bytes], dict[str, Any]]:
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            infos = archive.infolist()
+            names = [item.filename for item in infos]
+            _require(
+                len(names) == len(set(names))
+                and len(names) == len({name.casefold() for name in names}),
+                "private analysis audit ZIP contains duplicate members",
+            )
+            members: dict[str, bytes] = {}
+            for info in infos:
+                name = info.filename
+                pure = PurePosixPath(name)
+                _require(
+                    bool(name)
+                    and "\\" not in name
+                    and not name.startswith("/")
+                    and not pure.is_absolute()
+                    and ".." not in pure.parts
+                    and ":" not in name,
+                    "private analysis audit ZIP contains an unsafe member",
+                )
+                if not info.is_dir():
+                    members[name] = archive.read(info)
+    except zipfile.BadZipFile as exc:
+        raise ReleaseIntegrityError("private analysis audit ZIP is corrupt") from exc
+    required = {
+        "submission_manifest.json",
+        "audit/packaging-integrity.json",
+        "audit/SHA256SUMS",
+    }
+    _require(
+        required <= set(members),
+        "private analysis audit ZIP lacks control members",
+    )
+    manifest = _load_json_bytes(
+        members["submission_manifest.json"], label="submission_manifest.json"
+    )
+    integrity = _load_json_bytes(
+        members["audit/packaging-integrity.json"],
+        label="audit/packaging-integrity.json",
+    )
+    _require(
+        integrity.get("valid") is True
+        and integrity.get("packaging_status") == "SUCCESS"
+        and integrity.get("audit_package_status") == "VALID",
+        "private analysis audit package integrity is not VALID",
+    )
+    try:
+        sum_lines = members["audit/SHA256SUMS"].decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ReleaseIntegrityError("private audit SHA256SUMS is not UTF-8") from exc
+    sums: dict[str, str] = {}
+    for line in sum_lines:
+        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+        _require(match is not None, "private audit SHA256SUMS row is invalid")
+        filename = str(match.group(2))
+        _require(filename not in sums, "private audit SHA256SUMS repeats a member")
+        sums[filename] = str(match.group(1))
+    _require(
+        set(sums) == set(members) - {"audit/SHA256SUMS"},
+        "private audit SHA256SUMS coverage is incomplete",
+    )
+    _require(
+        all(_sha256_bytes(members[name]) == digest for name, digest in sums.items()),
+        "private audit member digest mismatch",
+    )
+    artifacts = manifest.get("artifacts")
+    _require(isinstance(artifacts, list), "private audit artifact inventory is missing")
+    for raw_record in artifacts:
+        record = _require_mapping(raw_record, "private audit artifact record")
+        if record.get("bytes_sha256") is None:
+            continue
+        member = str(record.get("path") or "")
+        _require(
+            member in members
+            and str(record.get("bytes_sha256") or "").lower()
+            == _sha256_bytes(members[member])
+            and type(record.get("byte_count")) is int
+            and record.get("byte_count") == len(members[member]),
+            f"private audit artifact binding is invalid: {member}",
+        )
+    return members, manifest
+
+
+def _private_audit_role_bytes(
+    members: Mapping[str, bytes],
+    manifest: Mapping[str, Any],
+    role: str,
+) -> bytes:
+    bindings: list[Mapping[str, Any]] = []
+    for raw_record in _require_list(
+        manifest.get("artifacts"), "private audit artifact inventory"
+    ):
+        record = _require_mapping(raw_record, "private audit artifact record")
+        if record.get("artifact_role") == role:
+            bindings.append(record)
+        aliases = record.get("aliases") or []
+        _require(isinstance(aliases, list), "private audit aliases are invalid")
+        for raw_alias in aliases:
+            alias = _require_mapping(raw_alias, "private audit artifact alias")
+            if alias.get("artifact_role") == role:
+                bindings.append(record)
+    _require(
+        len(bindings) == 1,
+        f"private audit must contain exactly one {role} binding",
+    )
+    member = str(bindings[0].get("path") or "")
+    _require(member in members, f"private audit lacks {role} bytes")
+    return members[member]
+
+
+def _verify_private_analysis_inventory_archive(
+    *,
+    audit_path: Path,
+    projection: Mapping[str, Any],
+    analysis_configuration: Mapping[str, Any],
+    analysis_configuration_sha256: str,
+    ocr_dir: Path,
+    verified_ocr_baseline: Mapping[str, Any],
+    baseline_tex_bytes: bytes,
+    final_candidate_tex_bytes: bytes,
+    expected_pages: int,
+    expected_source_sha256: str,
+) -> dict[str, Any]:
+    members, manifest = _read_private_analysis_audit_zip(audit_path)
+    try:
+        from latexstruct.core.analysis_input import (
+            OcrAnalysisInputError,
+            load_ocr_analysis_input_package,
+        )
+        from latexstruct.core.analysis_inventory import (
+            AnalysisInventoryError,
+            build_analysis_inventory_bundle,
+            build_host_inventory_authorizations,
+            evaluate_analysis_inventory_gate,
+        )
+        from latexstruct.core.analysis_schema import canonical_json_bytes
+    except ImportError as exc:
+        raise ReleaseIntegrityError(
+            "analysis inventory recomputation code is unavailable"
+        ) from exc
+
+    package_directory = str(
+        verified_ocr_baseline.get("package_directory") or ""
+    )
+    package_root = ocr_dir.joinpath(*PurePosixPath(package_directory).parts)
+    try:
+        native = load_ocr_analysis_input_package(
+            package_root,
+            expected_source_sha256=expected_source_sha256,
+            expected_manifest_sha256=str(
+                verified_ocr_baseline.get("manifest_sha256") or ""
+            ),
+            expected_run_id=str(verified_ocr_baseline.get("run_id") or ""),
+            expected_selected_pages=tuple(range(1, expected_pages + 1)),
+        )
+    except OcrAnalysisInputError as exc:
+        raise ReleaseIntegrityError(
+            f"private OCR inventory authority failed verification: {exc}"
+        ) from exc
+    try:
+        from latexstruct.core.ocr_lane_routes import parse_lane_routes_artifact
+        from latexstruct.core.ocr_manifest import (
+            ROLE_LANE_ROUTES,
+            ROLE_PAGE_EVIDENCE_BINDINGS,
+        )
+        from latexstruct.core.ocr_page_evidence_bindings import (
+            parse_ocr_page_evidence_bindings,
+        )
+
+        lane_artifact = native.artifacts_by_role[ROLE_LANE_ROUTES]
+        page_binding_artifact = native.artifacts_by_role[
+            ROLE_PAGE_EVIDENCE_BINDINGS
+        ]
+        routes = parse_lane_routes_artifact(
+            lane_artifact.data,
+            expected_run_id=native.run_id,
+            expected_selected_pages=native.snapshot.selected_pages,
+        )
+        page_bindings = parse_ocr_page_evidence_bindings(
+            page_binding_artifact.data,
+            expected_run_id=native.run_id,
+            expected_source_sha256=native.source_sha256,
+            expected_selected_pages=native.snapshot.selected_pages,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReleaseIntegrityError(
+            "private OCR manifest lacks exact page-evidence/lane bindings"
+        ) from exc
+    _require(
+        native.lane_routes_sha256 is not None
+        and native.evidence_correction_report_sha256 is not None
+        and native.evidence_correction_status in {"PASS", "NOT_APPLICABLE"}
+        and native.block_inventory_sha256
+        and len(native.block_inventory.pages) == expected_pages,
+        "private OCR manifest lacks required release inventory roles",
+    )
+    contract = native.snapshot.pipeline_contract
+    raw_snapshot_pages = (
+        contract.get("page_strategies")
+        if isinstance(contract, Mapping)
+        else None
+    )
+    _require(
+        isinstance(raw_snapshot_pages, (list, tuple))
+        and len(raw_snapshot_pages) == expected_pages,
+        "private OCR snapshot lacks complete classified-page bindings",
+    )
+    snapshot_pages = {
+        str(row.get("page_id") or ""): row
+        for row in raw_snapshot_pages
+        if isinstance(row, Mapping)
+    }
+    block_pages = native.block_inventory.pages_by_id
+    _require(
+        len(snapshot_pages)
+        == len(block_pages)
+        == len(routes)
+        == len(page_bindings)
+        == expected_pages,
+        "private OCR route/page/block authorities have different coverage",
+    )
+    cross_rows: list[dict[str, Any]] = []
+    event_rows: list[dict[str, Any]] = []
+    for route, binding in zip(routes, page_bindings, strict=True):
+        snapshot_page = snapshot_pages.get(route.page_id)
+        block_page = block_pages.get(route.page_id)
+        _require(
+            isinstance(snapshot_page, Mapping) and block_page is not None,
+            "private OCR route is absent from snapshot/block inventory",
+        )
+        candidate_sha = str(
+            snapshot_page.get("candidate_tex_sha256") or ""
+        ).lower()
+        _require(
+            SHA256_RE.fullmatch(candidate_sha) is not None
+            and route.candidate_sha256 == candidate_sha
+            and binding.initial_candidate_tex_sha256 == candidate_sha,
+            "private OCR lane candidate differs from classified source page",
+        )
+        _require(
+            snapshot_page.get("source_page") == block_page.source_page
+            and snapshot_page.get("source_page_object_hash")
+            == block_page.source_page_object_hash
+            and snapshot_page.get("source_text_layer_sha256")
+            == block_page.source_text_layer_sha256
+            and snapshot_page.get("block_count") == len(block_page.blocks),
+            "private OCR block inventory differs from classified source page",
+        )
+        cross_rows.append({
+            "page_id": route.page_id,
+            "source_page": route.source_page,
+            "initial_candidate_tex_sha256": candidate_sha,
+            "visual_verification_response_sha256": (
+                binding.visual_verification_response_sha256
+            ),
+            "terminal_cleaned_tex_sha256": (
+                binding.terminal_cleaned_tex_sha256
+            ),
+            "route_sha256": route.route_sha256,
+            "source_page_object_hash": block_page.source_page_object_hash,
+            "source_text_layer_sha256": block_page.source_text_layer_sha256,
+        })
+        event_rows.append({
+            "page_id": route.page_id,
+            "event_sha256s": [event.event_sha256 for event in route.history],
+        })
+    route_page_bindings_sha256 = _sha256_bytes(
+        canonical_json_bytes(cross_rows)
+    )
+    route_event_chain_sha256 = _sha256_bytes(
+        canonical_json_bytes(event_rows)
+    )
+    archived_baseline = _private_audit_role_bytes(
+        members, manifest, "BASELINE_TEX"
+    )
+    archived_current = _private_audit_role_bytes(
+        members, manifest, "CURRENT_TEX"
+    )
+    _require(
+        archived_baseline == baseline_tex_bytes
+        == native.baseline_tex.encode("utf-8")
+        and archived_current == final_candidate_tex_bytes,
+        "private inventory TeX roles differ from bound baseline/best candidate",
+    )
+    archived_configuration = _load_json_bytes(
+        _private_audit_role_bytes(members, manifest, "ANALYSIS_CONFIGURATION"),
+        label="audit/analysis_configuration.json",
+    )
+    _require(
+        archived_configuration == dict(analysis_configuration)
+        and _canonical_json_sha256(archived_configuration)
+        == analysis_configuration_sha256,
+        "private inventory configuration differs from snapshot authority",
+    )
+    native_blocks = [dict(item) for item in native.native_source_blocks]
+    source_page_map = {
+        int(page): tuple(pdf_pages)
+        for page, pdf_pages in native.source_page_map.items()
+    }
+    expected_map = [
+        [page, list(pdf_pages)] for page, pdf_pages in source_page_map.items()
+    ]
+    _require(
+        archived_configuration.get("candidate_page_map") == expected_map
+        and archived_configuration.get("native_source_blocks") == native_blocks
+        and archived_configuration.get("native_source_blocks_supplied") is True
+        and archived_configuration.get("native_heading_inventory_required")
+        is True
+        and archived_configuration.get("inventory_authorization_source")
+        == "HOST_REQUIRED_POLICY"
+        and archived_configuration.get("inventory_policy_schema")
+        == "latexstruct-host-inventory-policy-v1"
+        and archived_configuration.get("inventory_policy_ocr_manifest_sha256")
+        == native.manifest_sha256,
+        "private inventory native page/block policy is stale",
+    )
+    try:
+        authorizations = build_host_inventory_authorizations(
+            native_blocks,
+            ocr_manifest_sha256=native.manifest_sha256,
+            generated_toc_required=True,
+        )
+        authorization_payload = [item.as_dict() for item in authorizations]
+        _require(
+            archived_configuration.get("inventory_authorizations")
+            == authorization_payload,
+            "private inventory authorizations are not host-recomputable",
+        )
+        baseline_text = archived_baseline.decode("utf-8")
+        current_text = archived_current.decode("utf-8")
+        rebuilt_baseline = build_analysis_inventory_bundle(
+            baseline_text,
+            baseline_text,
+            source_page_map,
+            native_source_blocks=native_blocks,
+            authorizations=authorizations,
+            require_native_heading_inventory=True,
+        )
+        rebuilt_final = build_analysis_inventory_bundle(
+            baseline_text,
+            current_text,
+            source_page_map,
+            native_source_blocks=native_blocks,
+            authorizations=authorizations,
+            require_native_heading_inventory=True,
+        )
+    except (AnalysisInventoryError, UnicodeDecodeError, TypeError, ValueError) as exc:
+        raise ReleaseIntegrityError(
+            f"private analysis inventory cannot be rebuilt: {exc}"
+        ) from exc
+    rebuilt_gate = evaluate_analysis_inventory_gate(rebuilt_final)
+    baseline_json = canonical_json_bytes(rebuilt_baseline.as_dict())
+    final_json = canonical_json_bytes(rebuilt_final.as_dict())
+    gate_json = canonical_json_bytes(rebuilt_gate.as_dict())
+    _require(
+        _private_audit_role_bytes(
+            members, manifest, "ANALYSIS_INVENTORY_BASELINE"
+        )
+        == baseline_json
+        and _private_audit_role_bytes(
+            members, manifest, "ANALYSIS_INVENTORY_FINAL"
+        )
+        == final_json
+        and _private_audit_role_bytes(
+            members, manifest, "ANALYSIS_INVENTORY_GATE"
+        )
+        == gate_json,
+        "private inventory JSON differs from independent recomputation",
+    )
+    decision = _load_json_bytes(
+        _private_audit_role_bytes(members, manifest, "FINAL_DECISION"),
+        label="audit/final_decision.json",
+    )
+    _require(
+        decision.get("status") == "VERIFIED"
+        and decision.get("verified") is True
+        and decision.get("failures") == []
+        and bool(str(decision.get("best_candidate_id") or "").strip())
+        and decision.get("baseline_inventory_digest")
+        == rebuilt_baseline.digest
+        and decision.get("final_inventory_digest") == rebuilt_final.digest
+        and decision.get("inventory_gate_digest") == rebuilt_gate.digest
+        and decision.get("baseline_inventory_json_sha256")
+        == _sha256_bytes(baseline_json)
+        and decision.get("final_inventory_json_sha256")
+        == _sha256_bytes(final_json)
+        and decision.get("inventory_gate_json_sha256")
+        == _sha256_bytes(gate_json)
+        and decision.get("inventory_gate_status") == rebuilt_gate.status.value,
+        "private final decision is not inventory/hash bound",
+    )
+    _require(
+        rebuilt_gate.passed is True
+        and rebuilt_gate.status.value == "PASS"
+        and rebuilt_gate.scanner_executed is True
+        and rebuilt_gate.residual_total == 0
+        and rebuilt_gate.blocked_categories == (),
+        "private analysis inventory gate is not PASS",
+    )
+    expected_projection = {
+        "schema_version": ANALYSIS_INVENTORY_RELEASE_CLOSURE_SCHEMA,
+        "result": "PASS",
+        "analysis_configuration_sha256": analysis_configuration_sha256,
+        "ocr_baseline_manifest_sha256": native.manifest_sha256,
+        "baseline_tex_sha256": _sha256_bytes(archived_baseline),
+        "final_candidate_tex_sha256": _sha256_bytes(archived_current),
+        "page_map_digest": rebuilt_baseline.page_map_digest,
+        "native_source_blocks_digest": rebuilt_baseline.as_dict()[
+            "native_source_blocks_digest"
+        ],
+        "inventory_authorizations_sha256": _sha256_bytes(
+            canonical_json_bytes(authorization_payload)
+        ),
+        "baseline_inventory_digest": rebuilt_baseline.digest,
+        "baseline_inventory_json_sha256": _sha256_bytes(baseline_json),
+        "final_inventory_digest": rebuilt_final.digest,
+        "final_inventory_json_sha256": _sha256_bytes(final_json),
+        "inventory_gate_digest": rebuilt_gate.digest,
+        "inventory_gate_json_sha256": _sha256_bytes(gate_json),
+        "inventory_gate_status": "PASS",
+        "scanner_executed": True,
+        "residual_total": 0,
+        "blocked_categories": [],
+        "ocr_manifest_roles": {
+            "lane_routes": {
+                "role": "LANE_ROUTES",
+                "sha256": native.lane_routes_sha256,
+                "status": "PASS",
+                "page_count": len(routes),
+                "event_count": sum(len(route.history) for route in routes),
+                "page_bindings_sha256": route_page_bindings_sha256,
+                "event_chain_sha256": route_event_chain_sha256,
+            },
+            "page_evidence_bindings": {
+                "role": "OCR_PAGE_EVIDENCE_BINDINGS",
+                "sha256": page_binding_artifact.sha256,
+                "status": "PASS",
+                "page_count": len(page_bindings),
+                "cross_binding_sha256": route_page_bindings_sha256,
+            },
+            "evidence_correction_report": {
+                "role": "EVIDENCE_CORRECTION_REPORT",
+                "sha256": native.evidence_correction_report_sha256,
+                "status": native.evidence_correction_status,
+            },
+            "block_inventory": {
+                "role": "OCR_BLOCK_INVENTORY",
+                "sha256": native.block_inventory_sha256,
+                "status": "PASS",
+                "page_count": len(native.block_inventory.pages),
+                "block_count": len(native.native_source_blocks),
+            },
+        },
+    }
+    _require(
+        dict(projection) == expected_projection,
+        "analysis inventory attestation projection differs from private evidence",
+    )
+    return expected_projection
+
+
 def verify_analysis_attestation(
     run_dir: Path,
     *,
@@ -4532,6 +5458,7 @@ def verify_analysis_attestation(
             "independent_final_reviews",
             "visual_verification",
             "page_layout",
+            "analysis_inventory",
             "machine_verification",
             "audit_submission",
             "reports",
@@ -5287,6 +6214,33 @@ def verify_analysis_attestation(
         audit.get("published_to_github") is False,
         "private AI audit submission must not be marked for GitHub publication",
     )
+    analysis_inventory = _verified_analysis_inventory_projection(
+        root.get("analysis_inventory"),
+        analysis_configuration_sha256=str(
+            snapshot_binding.get("analysis_configuration_sha256") or ""
+        ).lower(),
+        ocr_baseline_manifest_sha256=str(
+            verified_ocr_baseline.get("manifest_sha256") or ""
+        ).lower(),
+        baseline_tex_sha256=_sha256_bytes(baseline_tex_bytes),
+        final_candidate_tex_sha256=candidate_sha,
+        expected_pages=expected_pages,
+    )
+    candidate_tex_path = run_dir / verified_artifacts["candidate_tex"]["filename"]
+    analysis_inventory = _verify_private_analysis_inventory_archive(
+        audit_path=audit_path,
+        projection=analysis_inventory,
+        analysis_configuration=analysis_configuration,
+        analysis_configuration_sha256=str(
+            snapshot_binding.get("analysis_configuration_sha256") or ""
+        ).lower(),
+        ocr_dir=ocr_path.parent,
+        verified_ocr_baseline=verified_ocr_baseline,
+        baseline_tex_bytes=baseline_tex_bytes,
+        final_candidate_tex_bytes=candidate_tex_path.read_bytes(),
+        expected_pages=expected_pages,
+        expected_source_sha256=str(source.get("sha256") or "").lower(),
+    )
 
     reports = _require_exact_fields(
         root.get("reports"),
@@ -5356,6 +6310,7 @@ def verify_analysis_attestation(
     # Return normalized artifact bindings so callers that assemble a release
     # cannot accidentally copy a producer-supplied, non-canonical path.
     attestation["artifacts"] = verified_artifacts
+    attestation["analysis_inventory"] = analysis_inventory
     return attestation
 
 
@@ -5381,6 +6336,25 @@ def assemble_release_attestation(
         commit=normalized_commit,
     )
     runtime = dict(verified["runtime_identity"])
+    private_snapshot = dict(verified["snapshot_binding"])
+    private_configuration = _require_mapping(
+        private_snapshot.get("analysis_configuration"),
+        "private analysis configuration",
+    )
+    public_snapshot = {
+        key: value
+        for key, value in private_snapshot.items()
+        if key != "analysis_configuration"
+    }
+    public_snapshot.update({
+        "analysis_configuration_private": True,
+        "native_source_blocks_published": False,
+        "transport_contracts": private_configuration.get("transport_contracts"),
+    })
+    public_source = _public_release_source_projection(verified["source"])
+    public_page_risk = _public_analysis_page_risk_projection(
+        verified["page_risk_admission"]
+    )
     projection = {
         "profile": "analysis-37",
         "analysis_attestation_sha256": _sha256_file(
@@ -5394,9 +6368,9 @@ def assemble_release_attestation(
         "execution": verified["execution"],
         "runtime_identity": runtime,
         "service_binding": verified["service_binding"],
-        "snapshot_binding": verified["snapshot_binding"],
-        "page_risk_admission": verified["page_risk_admission"],
-        "source": verified["source"],
+        "snapshot_binding": public_snapshot,
+        "page_risk_admission": public_page_risk,
+        "source": public_source,
         "selected_range": verified["selected_range"],
         "models": verified["models"],
         "compilation": verified["compilation"],
@@ -5405,6 +6379,7 @@ def assemble_release_attestation(
         "independent_final_reviews": verified["independent_final_reviews"],
         "visual_verification": verified["visual_verification"],
         "page_layout": verified["page_layout"],
+        "analysis_inventory": verified["analysis_inventory"],
         "machine_verification": verified["machine_verification"],
         "audit_submission": verified["audit_submission"],
         "reports": verified["reports"],
@@ -5416,7 +6391,7 @@ def assemble_release_attestation(
         "required_profiles": list(PROFILE_SPECS),
         "runtime_identity": runtime,
         "tested_executable_sha256": str(runtime["executable_sha256"]).lower(),
-        "source": dict(verified["source"]),
+        "source": public_source,
         "performance_claim": _analysis_37_performance_claim(
             verified["reports"]["performance"]
         ),
@@ -5428,6 +6403,7 @@ def assemble_release_attestation(
             "visual_pages_checked": 37,
             "independent_review_passes": 2,
             "audit_package_verified": True,
+            "analysis_inventory_gate_passed": True,
         },
         "evidence_publication": {
             "projection_only": True,
@@ -5435,6 +6411,7 @@ def assemble_release_attestation(
             "candidate_pdf_published": False,
             "page_images_published": False,
             "audit_zip_published": False,
+            "native_source_blocks_published": False,
         },
         "acceptance": projection,
     }
@@ -5492,16 +6469,9 @@ def verify_release_attestation(
         == str(runtime.get("executable_sha256") or "").lower(),
         "release tested-executable summary differs from the 37-page tested executable",
     )
-    source = _require_exact_fields(
+    source = _verify_public_release_source_projection(
         payload.get("source"),
-        required={"filename", "sha256", "total_pages"},
-        label="release source",
-    )
-    _require(
-        str(source.get("sha256") or "").lower() == RAMSEY_37_SOURCE_SHA256
-        and int(source.get("total_pages") or 0) == 37
-        and _safe_relative_member(source.get("filename")).suffix.lower() == ".pdf",
-        "release source is not the fixed 37-page Ramsey PDF",
+        expected_pages=37,
     )
     verification = _require_exact_fields(
         payload.get("verification"),
@@ -5513,6 +6483,7 @@ def verify_release_attestation(
             "visual_pages_checked",
             "independent_review_passes",
             "audit_package_verified",
+            "analysis_inventory_gate_passed",
         },
         label="release verification summary",
     )
@@ -5526,6 +6497,7 @@ def verify_release_attestation(
             "visual_pages_checked": 37,
             "independent_review_passes": 2,
             "audit_package_verified": True,
+            "analysis_inventory_gate_passed": True,
         },
         "release verification summary is not a strict analysis-37 VERIFIED PASS",
     )
@@ -5537,6 +6509,7 @@ def verify_release_attestation(
             "candidate_pdf_published",
             "page_images_published",
             "audit_zip_published",
+            "native_source_blocks_published",
         },
         label="release evidence-publication policy",
     )
@@ -5548,6 +6521,7 @@ def verify_release_attestation(
             "candidate_pdf_published": False,
             "page_images_published": False,
             "audit_zip_published": False,
+            "native_source_blocks_published": False,
         },
         "private 37-page evidence must remain local; only its hash projection may be committed",
     )
@@ -5575,6 +6549,7 @@ def verify_release_attestation(
             "independent_final_reviews",
             "visual_verification",
             "page_layout",
+            "analysis_inventory",
             "machine_verification",
             "audit_submission",
             "reports",
@@ -5622,8 +6597,10 @@ def verify_release_attestation(
             "model_bindings",
             "model_bindings_sha256",
             "transport_contracts_sha256",
-            "analysis_configuration",
             "analysis_configuration_sha256",
+            "analysis_configuration_private",
+            "native_source_blocks_published",
+            "transport_contracts",
             "release_model_policy",
             "transport_invocation_count",
             "transport_closure",
@@ -5663,6 +6640,17 @@ def verify_release_attestation(
         and projected_snapshot.get("all_transport_bindings_verified") is True,
         "projected analysis snapshot/transport binding is incomplete",
     )
+    _require(
+        projected_snapshot.get("analysis_configuration_private") is True
+        and projected_snapshot.get("native_source_blocks_published") is False
+        and SHA256_RE.fullmatch(
+            str(
+                projected_snapshot.get("analysis_configuration_sha256") or ""
+            ).lower()
+        )
+        is not None,
+        "public release projection exposes or loses private analysis configuration",
+    )
     _verify_analysis_transport_closure(
         projected_snapshot.get("transport_closure"),
         expected_invocations=int(projected_snapshot["transport_invocation_count"]),
@@ -5671,30 +6659,25 @@ def verify_release_attestation(
             projected_snapshot.get("transport_contracts_sha256") or ""
         ),
     )
-    projected_risk = _require_mapping(
-        projection.get("page_risk_admission"),
-        "projected analysis page-risk closure",
+    _require(
+        str(projected_snapshot.get("analysis_configuration_sha256") or "").lower()
+        == str(projected_snapshot_hashes.get("analysis_config_hash") or "").lower(),
+        "projected private analysis configuration hash differs from snapshot evidence",
     )
-    projected_configuration = _verify_analysis_configuration(
-        projected_snapshot.get("analysis_configuration"),
-        claimed_sha256=projected_snapshot.get("analysis_configuration_sha256"),
-        expected_pages=37,
-        admission=_require_mapping(
-            projected_risk.get("admission"),
-            "projected analysis page-risk admission",
-        ),
+    projected_contracts = _validated_analysis_transport_contracts(
+        projected_snapshot.get("transport_contracts"),
         model_bindings=projected_snapshot.get("model_bindings"),
-        expected_contracts_sha256=str(
-            projected_snapshot.get("transport_contracts_sha256") or ""
-        ),
-        snapshot_config_sha256=str(
-            projected_snapshot_hashes.get("analysis_config_hash") or ""
-        ),
+        require_stable_policy=True,
+    )
+    _require(
+        _canonical_json_sha256(projected_contracts)
+        == str(projected_snapshot.get("transport_contracts_sha256") or "").lower(),
+        "projected transport contracts differ from the private configuration hash projection",
     )
     projected_model_policy = _verify_analysis_release_model_policy(
         projected_snapshot.get("release_model_policy"),
         model_bindings=projected_snapshot.get("model_bindings"),
-        transport_contracts=projected_configuration.get("transport_contracts"),
+        transport_contracts=projected_contracts,
     )
     selected = _require_exact_fields(
         projection.get("selected_range"),
@@ -5705,12 +6688,11 @@ def verify_release_attestation(
         selected == {"start_page": 1, "end_page": 37, "expected_pages": 37},
         "analysis-37 projection does not cover pages 1-37",
     )
-    _verify_analysis_page_risk_closure(
+    projected_page_risk = _verify_public_analysis_page_risk_projection(
         projection.get("page_risk_admission"),
         expected_pages=37,
         source_sha256=str(source.get("sha256") or "").lower(),
         evidence_hashes=projected_snapshot_hashes,
-        analysis_configuration=projected_configuration,
         final_candidate_sha256=str(
             _require_mapping(
                 projection.get("compilation"),
@@ -5823,6 +6805,22 @@ def verify_release_attestation(
         ocr.get("runtime_identity") == runtime
         and ocr.get("selected_range") == selected,
         "projected OCR prerequisite is not bound to the exact runtime/range",
+    )
+    _verified_analysis_inventory_projection(
+        projection.get("analysis_inventory"),
+        analysis_configuration_sha256=str(
+            projected_snapshot.get("analysis_configuration_sha256") or ""
+        ).lower(),
+        ocr_baseline_manifest_sha256=str(
+            ocr.get("baseline_manifest_sha256") or ""
+        ).lower(),
+        baseline_tex_sha256=str(
+            projected_page_risk.get("baseline_tex_sha256") or ""
+        ).lower(),
+        final_candidate_tex_sha256=str(
+            compilation.get("candidate_tex_sha256") or ""
+        ).lower(),
+        expected_pages=37,
     )
     reviews = projection.get("independent_final_reviews")
     _require(isinstance(reviews, list) and len(reviews) == 2, "analysis-37 projection lacks two independent final reviews")
@@ -6482,6 +7480,20 @@ def assemble_github_acceptance_payload(
         == str(release["acceptance"].get("analysis_attestation_sha256") or "").lower(),
         "release projection differs from the private analysis attestation",
     )
+    expected_public_source = _public_release_source_projection(private["source"])
+    expected_public_page_risk = _public_analysis_page_risk_projection(
+        private["page_risk_admission"]
+    )
+    _require(
+        release.get("source") == expected_public_source
+        and release["acceptance"].get("source") == expected_public_source,
+        "public source hash projection differs from the verified private source",
+    )
+    _require(
+        release["acceptance"].get("page_risk_admission")
+        == expected_public_page_risk,
+        "public page-risk digests differ from the complete private closure",
+    )
     _require(
         str(release["runtime_identity"].get("build_id") or "")
         == normalized_candidate_run_id,
@@ -6559,6 +7571,7 @@ def assemble_github_acceptance_payload(
             "audit_package": audit_record,
             "artifacts": private["artifacts"],
             "reports": private["reports"],
+            "analysis_inventory": private["analysis_inventory"],
         },
         "public_payload": {
             "reference": _file_record(reference_path),
@@ -6567,6 +7580,7 @@ def assemble_github_acceptance_payload(
             "candidate_pdf_uploaded": False,
             "page_images_uploaded": False,
             "audit_zip_uploaded": False,
+            "native_source_blocks_uploaded": False,
         },
         "result": "PASS",
     }
@@ -6920,6 +7934,7 @@ def verify_github_acceptance_trust(
                 "candidate_pdf_uploaded",
                 "page_images_uploaded",
                 "audit_zip_uploaded",
+                "native_source_blocks_uploaded",
             },
             label="GitHub acceptance publication policy",
         )
@@ -6928,7 +7943,8 @@ def verify_github_acceptance_trust(
         public_payload.get("source_pdf_uploaded") is False
         and public_payload.get("candidate_pdf_uploaded") is False
         and public_payload.get("page_images_uploaded") is False
-        and public_payload.get("audit_zip_uploaded") is False,
+        and public_payload.get("audit_zip_uploaded") is False
+        and public_payload.get("native_source_blocks_uploaded") is False,
         "private acceptance evidence was marked for GitHub publication",
     )
     for key, filename in (
@@ -6998,6 +8014,7 @@ def verify_github_acceptance_trust(
                 "audit_package",
                 "artifacts",
                 "reports",
+                "analysis_inventory",
             },
             label="root analysis-37 acceptance closure",
         )
@@ -7010,7 +8027,9 @@ def verify_github_acceptance_trust(
         and str(acceptance_root.get("analysis_attestation_sha256") or "").lower()
         == str(projected.get("analysis_attestation_sha256") or "").lower()
         and acceptance_root.get("artifacts") == projected.get("artifacts")
-        and acceptance_root.get("reports") == projected.get("reports"),
+        and acceptance_root.get("reports") == projected.get("reports")
+        and acceptance_root.get("analysis_inventory")
+        == projected.get("analysis_inventory"),
         "trusted root does not close over the release analysis-37 projection",
     )
     audit = _validate_file_record(

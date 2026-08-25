@@ -228,6 +228,8 @@ def _bridge(tmp_path, snapshot, *, text_client=None, vision_client=None):
         source_page_numbers={PAGE_ID: 1},
         candidate_page_map={1: (1,)},
         candidate_page_mapper=None,
+        host_inventory_expectations_by_page={},
+        host_inventory_bundle_digest=sha256_text("empty-host-inventory"),
         baseline_pdf=pdf,
         text_clients={"AI-1": text, "AI-6": text},
         vision_clients={"AI-5": vision},

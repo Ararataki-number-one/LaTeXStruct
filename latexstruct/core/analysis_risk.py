@@ -31,11 +31,14 @@ from .analysis_schema import (
 
 
 SOURCE_TEXT_R2_MINIMUM_COVERAGE_PPM = 970_000
-MATH_DENSE_MINIMUM_SIGNAL_COUNT = 8
+MATH_DENSE_MINIMUM_REGION_COUNT = 8
+# Compatibility for callers of the v2 module constant.  The v3 extractor now
+# interprets this threshold as complete regions, never delimiter tokens.
+MATH_DENSE_MINIMUM_SIGNAL_COUNT = MATH_DENSE_MINIMUM_REGION_COUNT
 
 PAGE_RISK_CLASSIFIER_POLICY = {
-    "schema_version": "latexstruct-page-risk-classifier-policy-v2",
-    "feature_extractor_version": "latexstruct-page-risk-feature-extractor-v2",
+    "schema_version": "latexstruct-page-risk-classifier-policy-v4",
+    "feature_extractor_version": "latexstruct-page-risk-feature-extractor-v3",
     "visual_layout_algorithm_version": "latexstruct-visual-layout-preflight-v1",
     "machine_visual_algorithm_version": "latexstruct-machine-visual-preflight-v1",
     "compile_map_algorithm_version": "latexstruct-compile-map-preflight-v1",
@@ -43,7 +46,7 @@ PAGE_RISK_CLASSIFIER_POLICY = {
         "source_text_r2_minimum_coverage_ppm": (
             SOURCE_TEXT_R2_MINIMUM_COVERAGE_PPM
         ),
-        "math_dense_minimum_signal_count": MATH_DENSE_MINIMUM_SIGNAL_COUNT,
+        "math_dense_minimum_region_count": MATH_DENSE_MINIMUM_REGION_COUNT,
     },
     "required_preflight_inputs": [
         "compile_map_mismatch",
@@ -72,25 +75,32 @@ PAGE_RISK_CLASSIFIER_POLICY = {
     ],
     "r2": [
         "candidate_page_mapping_spans_multiple_pages",
-        "caption_present",
         "complex_layout_present",
         "double_column_present",
-        "equation_numbering_present",
-        "figure_or_table_present",
-        "footnote_present",
         "host_quality_flag_present",
         "machine_visual_anomaly_present",
-        "math_dense",
+        "math_dense_with_r2_anomaly",
         "ocr_quality_issue_present",
         "ocr_retry_present",
         "source_text_coverage_below_r2_threshold",
         "text_layer_unavailable",
+    ],
+    # These are inventory/features, not evidence that any content is missing.
+    # A corresponding source/candidate mismatch still enters R2 through the
+    # bound coverage, quality-issue, host-flag, or machine-visual evidence.
+    "presence_only_features": [
+        "caption_present",
+        "equation_numbering_present",
+        "figure_or_table_present",
+        "footnote_present",
+        "math_dense_present",
     ],
     "r1": [
         "cross_reference_present",
         "formal_candidate_present",
         "hard_page_break_present",
         "heading_or_section_boundary_present",
+        "math_dense_present",
         "sparse_math_present",
         "structural_boundary_present",
     ],
@@ -108,8 +118,8 @@ _FORMAL_RE = re.compile(
     r"\\begin\{(?:theorem|lemma|definition|proposition|corollary|proof|remark|example)\*?\}",
     re.IGNORECASE,
 )
-_MATH_RE = re.compile(
-    r"(?:\\begin\{(?:equation|align|gather|multline|displaymath|math)\*?\}|\\\[|\\\(|(?<!\\)\$)",
+_MATH_ENV_BEGIN_RE = re.compile(
+    r"\\begin\s*\{(?P<name>(?:equation|align|gather|multline|displaymath|math)\*?)\}",
     re.IGNORECASE,
 )
 _FIGURE_TABLE_RE = re.compile(
@@ -137,6 +147,167 @@ _BOUNDARY_RE = re.compile(
 _TEX_COMMAND_RE = re.compile(r"\\[A-Za-z@]+\*?")
 _TEX_COMMENT_RE = re.compile(r"(?m)(?<!\\)%.*$")
 _TEXT_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+_RISK_SEVERITIES = frozenset({"warning", "warn", "error", "critical", "high"})
+_BENIGN_SEVERITIES = frozenset({"", "debug", "info", "information", "notice"})
+_FAILURE_STATUS_TOKENS = (
+    "fail",
+    "error",
+    "invalid",
+    "mismatch",
+    "missing",
+    "unresolved",
+    "rejected",
+    "blocked",
+)
+_EVIDENCE_IDENTITY_FIELDS = ("type", "code", "issue_type", "reason")
+_BENIGN_STATUSES = frozenset({
+    "",
+    "ok",
+    "pass",
+    "passed",
+    "verified",
+    "matched",
+    "source_geometry_and_active_match",
+})
+
+
+def _is_unescaped_at(value: str, index: int, token: str) -> bool:
+    if not value.startswith(token, index):
+        return False
+    backslashes = 0
+    cursor = index - 1
+    while cursor >= 0 and value[cursor] == "\\":
+        backslashes += 1
+        cursor -= 1
+    return backslashes % 2 == 0
+
+
+def _find_unescaped(value: str, token: str, start: int) -> int:
+    cursor = max(0, int(start))
+    while True:
+        cursor = value.find(token, cursor)
+        if cursor < 0:
+            return -1
+        if _is_unescaped_at(value, cursor, token):
+            return cursor
+        cursor += len(token)
+
+
+def _find_inline_dollar_close(value: str, start: int, token: str) -> int:
+    cursor = max(0, int(start))
+    while cursor < len(value):
+        cursor = value.find("$", cursor)
+        if cursor < 0:
+            return -1
+        if not _is_unescaped_at(value, cursor, "$"):
+            cursor += 1
+            continue
+        if token == "$$":
+            if value.startswith("$$", cursor):
+                return cursor
+            cursor += 1
+            continue
+        # Do not use either half of a display-math delimiter to close inline
+        # math. Invalid mixed delimiters remain for the syntax gate.
+        if not value.startswith("$$", cursor):
+            return cursor
+        cursor += 2
+    return -1
+
+
+def _math_region_count(value: str) -> int:
+    """Count complete TeX math regions rather than opening/closing tokens."""
+
+    text = _TEX_COMMENT_RE.sub("", str(value or ""))
+    regions = 0
+    cursor = 0
+    while cursor < len(text):
+        if text[cursor] == "\\" and _is_unescaped_at(text, cursor, "\\"):
+            environment = _MATH_ENV_BEGIN_RE.match(text, cursor)
+            if environment is not None:
+                name = environment.group("name")
+                closing = re.compile(
+                    rf"\\end\s*\{{{re.escape(name)}\}}",
+                    re.IGNORECASE,
+                ).search(text, environment.end())
+                if closing is not None:
+                    regions += 1
+                    cursor = closing.end()
+                    continue
+                cursor = environment.end()
+                continue
+            delimiter = next(
+                (
+                    (opening, closing)
+                    for opening, closing in ((r"\[", r"\]"), (r"\(", r"\)"))
+                    if text.startswith(opening, cursor)
+                ),
+                None,
+            )
+            if delimiter is not None:
+                opening, closing = delimiter
+                end = _find_unescaped(text, closing, cursor + len(opening))
+                if end >= 0:
+                    regions += 1
+                    cursor = end + len(closing)
+                    continue
+                cursor += len(opening)
+                continue
+        if text[cursor] == "$" and _is_unescaped_at(text, cursor, "$"):
+            token = "$$" if text.startswith("$$", cursor) else "$"
+            end = _find_inline_dollar_close(text, cursor + len(token), token)
+            if end >= 0:
+                regions += 1
+                cursor = end + len(token)
+                continue
+            cursor += len(token)
+            continue
+        cursor += 1
+    return regions
+
+
+def _risk_relevant_evidence(value: object) -> bool:
+    """Return whether one issue/flag is affirmative anomaly evidence.
+
+    Unknown records remain conservative. Explicit informational records and
+    successful host checks do not turn an otherwise clean page into R2 merely
+    because an evidence row exists.
+    """
+
+    if not isinstance(value, Mapping):
+        return True
+    needs_review = value.get("needs_review")
+    retryable = value.get("retryable")
+    severity = str(value.get("severity") or "").strip().casefold()
+    status = str(value.get("status") or "").strip().casefold()
+    verdict = str(value.get("verdict") or "").strip().casefold()
+    if needs_review is True or retryable is True or severity in _RISK_SEVERITIES:
+        return True
+    anomaly_signals = (status, verdict, *(
+        str(value.get(field) or "").strip().casefold()
+        for field in _EVIDENCE_IDENTITY_FIELDS
+    ))
+    if any(
+        token in signal
+        for signal in anomaly_signals
+        for token in _FAILURE_STATUS_TOKENS
+    ):
+        return True
+    if verdict and verdict not in {"pass", "patch", "verified", "matched", "ok"}:
+        return True
+    if needs_review is False:
+        return False
+    if severity and severity in _BENIGN_SEVERITIES and (
+        status in _BENIGN_STATUSES
+        or verdict in {"", "pass", "patch", "verified", "matched", "ok"}
+    ):
+        return False
+    if status and status in _BENIGN_STATUSES and not verdict:
+        return False
+    if verdict in {"pass", "patch", "verified", "matched", "ok"}:
+        return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,17 +439,13 @@ def classify_page_risk(summary: PageRiskInputSummary) -> tuple[PageRisk, tuple[s
         r2.append("double_column_present")
     if summary.complex_layout:
         r2.append("complex_layout_present")
-    if summary.math_region_count >= MATH_DENSE_MINIMUM_SIGNAL_COUNT:
-        r2.append("math_dense")
-    if summary.equation_number_count:
-        r2.append("equation_numbering_present")
-    if summary.figure_table_count:
-        r2.append("figure_or_table_present")
-    if summary.caption_count:
-        r2.append("caption_present")
-    if summary.footnote_count:
-        r2.append("footnote_present")
+    math_dense = summary.math_region_count >= MATH_DENSE_MINIMUM_REGION_COUNT
     if r2:
+        if math_dense:
+            # Density is contextual evidence only: it explains why a page
+            # carrying an independently established anomaly is complex, but
+            # it can never create an R2 route by itself.
+            r2.append("math_dense_with_r2_anomaly")
         return PageRisk.R2, tuple(sorted(set(r2)))
     r1: list[str] = []
     if summary.formal_candidate_count:
@@ -291,7 +458,9 @@ def classify_page_risk(summary: PageRiskInputSummary) -> tuple[PageRisk, tuple[s
         r1.append("hard_page_break_present")
     if summary.boundary_count:
         r1.append("structural_boundary_present")
-    if summary.math_region_count:
+    if math_dense:
+        r1.append("math_dense_present")
+    elif summary.math_region_count:
         r1.append("sparse_math_present")
     if r1:
         return PageRisk.R1, tuple(sorted(set(r1)))
@@ -451,23 +620,34 @@ def build_page_risk_admission(
         def evidence_values(
             value: tuple[object, ...] | None,
             field_name: str,
-        ) -> tuple[str, ...]:
+            *,
+            filter_benign: bool = False,
+        ) -> tuple[tuple[str, ...], int]:
             if value is None:
                 missing.append(field_name)
-                return ()
-            return tuple(
-                sha256_bytes(canonical_json_bytes(entry)) for entry in value
+                return (), 0
+            entries = tuple(value)
+            hashes = tuple(
+                sha256_bytes(canonical_json_bytes(entry)) for entry in entries
             )
+            relevant = (
+                sum(_risk_relevant_evidence(entry) for entry in entries)
+                if filter_benign
+                else len(entries)
+            )
+            return hashes, relevant
 
-        quality_issues = evidence_values(
+        quality_issues, quality_issue_count = evidence_values(
             item.ocr_quality_issues,
             "ocr_quality_issues",
+            filter_benign=True,
         )
-        host_flags = evidence_values(
+        host_flags, host_flag_count = evidence_values(
             item.host_quality_flags,
             "host_quality_flags",
+            filter_benign=True,
         )
-        visual_anomalies = evidence_values(
+        visual_anomalies, visual_anomaly_count = evidence_values(
             item.machine_visual_anomalies,
             "machine_visual_anomalies",
         )
@@ -520,15 +700,15 @@ def build_page_risk_admission(
             ocr_coverage_all_pass=coverage_all_pass,
             ocr_final_success=final_status == "SUCCESS",
             ocr_retry_count=retry_count,
-            ocr_quality_issue_count=len(quality_issues),
+            ocr_quality_issue_count=quality_issue_count,
             ocr_quality_issues_hash=sha256_bytes(
                 canonical_json_bytes(list(quality_issues))
             ),
-            host_quality_flag_count=len(host_flags),
+            host_quality_flag_count=host_flag_count,
             host_quality_flags_hash=sha256_bytes(
                 canonical_json_bytes(list(host_flags))
             ),
-            machine_visual_anomaly_count=len(visual_anomalies),
+            machine_visual_anomaly_count=visual_anomaly_count,
             machine_visual_anomalies_hash=sha256_bytes(
                 canonical_json_bytes(list(visual_anomalies))
             ),
@@ -557,7 +737,7 @@ def build_page_risk_admission(
             unresolved_region_hashes_hash=sha256_bytes(canonical_json_bytes(
                 list(item.unresolved_region_hashes)
             )),
-            math_region_count=len(_MATH_RE.findall(item.baseline_tex_region)),
+            math_region_count=_math_region_count(item.baseline_tex_region),
             equation_number_count=len(
                 _EQUATION_NUMBER_RE.findall(item.baseline_tex_region)
             ),

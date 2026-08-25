@@ -25,9 +25,26 @@ from latexstruct.core.ocr_manifest import (
     OCR_PRODUCER_SCHEMA,
     OCR_RUNTIME_PAGE_RECORDS_SCHEMA,
     OcrBaselineManifestError,
+    ROLE_EVIDENCE_BASELINE_TEX,
+    ROLE_EVIDENCE_CORRECTION_REPORT,
+    ROLE_BLOCK_INVENTORY,
+    ROLE_PAGE_EVIDENCE_BINDINGS,
     build_ocr_baseline_manifest,
     canonical_json_bytes,
     verify_ocr_baseline_manifest,
+)
+from latexstruct.core.ocr_block_inventory import build_ocr_block_inventory
+from latexstruct.core.ocr_evidence_correction import (
+    EvidenceCorrectionOperation,
+    IndependentEvidenceVerification,
+    SourceEvidenceAuthorization,
+    produce_evidence_corrected_baseline,
+    sha256_text,
+)
+from latexstruct.core.ocr_lane_routes import (
+    OcrLaneOwner,
+    OcrLaneRoute,
+    build_lane_routes_artifact,
 )
 from latexstruct.core.ocr_metrics import (
     OcrMetricsCollector,
@@ -44,6 +61,11 @@ from latexstruct.core.ocr_page_evidence import (
     build_page_summaries,
 )
 from latexstruct.core.ocr_page_map import build_pdf_page_map, extract_page_anchors
+from latexstruct.core.ocr_page_evidence_bindings import (
+    OcrPageEvidenceBinding,
+    OcrPageTerminalMode,
+    build_ocr_page_evidence_bindings,
+)
 from latexstruct.core.ocr_runtime import (
     OcrPageRecord,
     OcrPageStatus,
@@ -145,6 +167,9 @@ def _record(index: int, status: OcrPageStatus = OcrPageStatus.SUCCESS) -> OcrPag
         "raw_response_sha256": "b" * 64 if status in {
             OcrPageStatus.SUCCESS, OcrPageStatus.NEEDS_REVIEW,
         } else "",
+        "source_evidence_sha256": _sha(f"source evidence {index}".encode())
+        if status in {OcrPageStatus.SUCCESS, OcrPageStatus.NEEDS_REVIEW}
+        else "",
         "raw_tex": latex if status in {
             OcrPageStatus.SUCCESS, OcrPageStatus.NEEDS_REVIEW,
         } else "",
@@ -427,6 +452,172 @@ def _rewrite_artifact(payload, old_artifacts, role, data, *, new_path=None):
     return artifacts
 
 
+def _lane_routes_input(*, full_ocr_indexes=frozenset()) -> ArtifactInput:
+    routes = []
+    for index in (1, 2):
+        route = OcrLaneRoute(
+            run_id=RUN_ID,
+            page_id=make_page_id(index),
+            source_page=index,
+            selected_index=index,
+            candidate_sha256=_sha(f"candidate {index}".encode()),
+            owner=OcrLaneOwner.VISUAL,
+        )
+        verifier_sha = _sha(f"verifier {index}".encode())
+        if index in full_ocr_indexes:
+            route = route.transition(
+                OcrLaneOwner.FULL_OCR_QUEUED,
+                verifier_response_sha256=verifier_sha,
+            ).transition(
+                OcrLaneOwner.FULL_OCR_IN_FLIGHT,
+            ).transition(
+                OcrLaneOwner.TERMINAL_FULL_OCR,
+            )
+        else:
+            route = route.transition(
+                OcrLaneOwner.TERMINAL_VISUAL,
+                verifier_response_sha256=verifier_sha,
+            )
+        routes.append(route)
+    return ArtifactInput(
+        "LANE_ROUTES",
+        "evidence/lane-routes.json",
+        build_lane_routes_artifact(
+            run_id=RUN_ID,
+            selected_pages=(1, 2),
+            routes=routes,
+        ),
+    )
+
+
+def _page_evidence_bindings_input(
+    values, *, full_ocr_indexes=frozenset()
+) -> ArtifactInput:
+    runtime_value = json.loads(values["runtime_page_records"].data)
+    coverage_value = json.loads(values["page_records"].data)
+    coverage_by_id = {
+        item["page_id"]: item for item in coverage_value["pages"]
+    }
+    rows = []
+    for raw_record in runtime_value["pages"]:
+        record = OcrPageRecord.from_dict(raw_record)
+        hashes = coverage_by_id[record.page_id]["artifact_hashes"]
+        index = record.task_index
+        rows.append(OcrPageEvidenceBinding(
+            page_id=record.page_id,
+            source_page=record.source_page,
+            selected_index=index,
+            terminal_mode=(
+                OcrPageTerminalMode.FULL_OCR
+                if index in full_ocr_indexes
+                else OcrPageTerminalMode.VISUAL
+            ),
+            terminal_status=record.status.value,
+            initial_candidate_tex_sha256=_sha(f"candidate {index}".encode()),
+            visual_verification_response_sha256=(
+                None
+                if index in full_ocr_indexes
+                else _sha(f"verifier {index}".encode())
+            ),
+            terminal_cleaned_tex_sha256=record.tex_sha256,
+            runtime_record_sha256=_sha(json.dumps(
+                record.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")),
+            runtime_source_evidence_sha256=record.source_evidence_sha256,
+            runtime_raw_response_sha256=record.raw_response_sha256,
+            page_evidence_source_sha256=hashes["source.json"],
+            page_evidence_candidate_sha256=hashes["candidate.json"],
+            page_evidence_verification_sha256=hashes["verification.json"],
+            page_evidence_raw_response_sha256=hashes["raw-response.json"],
+            page_evidence_tex_sha256=hashes["page.tex"],
+        ))
+    snapshot_value = json.loads(values["snapshot"].data)
+    return ArtifactInput(
+        ROLE_PAGE_EVIDENCE_BINDINGS,
+        "evidence/ocr-page-evidence-bindings.json",
+        build_ocr_page_evidence_bindings(
+            run_id=RUN_ID,
+            source_sha256=snapshot_value["source_sha256"],
+            selected_pages=(1, 2),
+            pages=rows,
+        ),
+    )
+
+
+def _evidence_correction_pass(values):
+    raw_tex = values["raw_ocr"].data.decode("utf-8")
+    syntax_tex = values["syntax_baseline"].data.decode("utf-8")
+    old_text = "Baseline"
+    new_text = "Corrected"
+    start = syntax_tex.index(old_text)
+    source_page_sha = sha256_text("immutable source page one")
+    source_evidence_sha = sha256_text("source evidence for page one")
+    operation = EvidenceCorrectionOperation(
+        operation_id="correct-baseline-word",
+        syntax_baseline_sha256=sha256_text(syntax_tex),
+        page_id=make_page_id(1),
+        source_page_number=1,
+        start_offset=start,
+        end_offset=start + len(old_text),
+        old_text=old_text,
+        new_text=new_text,
+        reason="source page evidence resolves the OCR word",
+        source_page_sha256=source_page_sha,
+        source_evidence_sha256=source_evidence_sha,
+        recognition_model="deterministic-source-evidence",
+    )
+    authorization = SourceEvidenceAuthorization(
+        syntax_baseline_sha256=sha256_text(syntax_tex),
+        page_id=make_page_id(1),
+        source_page_number=1,
+        syntax_start_offset=0,
+        syntax_end_offset=len(syntax_tex),
+        syntax_region_sha256=sha256_text(syntax_tex),
+        source_page_sha256=source_page_sha,
+        source_evidence_sha256=source_evidence_sha,
+        authorized_operation_sha256s=(operation.digest,),
+    )
+    verification = IndependentEvidenceVerification(
+        operation_sha256=operation.digest,
+        source_evidence_sha256=source_evidence_sha,
+        old_text_sha256=sha256_text(old_text),
+        new_text_sha256=sha256_text(new_text),
+        verification_evidence_sha256=sha256_text("independent verification"),
+        verifier="independent-host-verifier",
+        verdict="PASS",
+        independent=True,
+        math_unchanged=True,
+        structure_unchanged=True,
+    )
+    result = produce_evidence_corrected_baseline(
+        raw_ocr_tex=raw_tex,
+        syntax_baseline_tex=syntax_tex,
+        operations=(operation,),
+        source_authorizations=(authorization,),
+        independent_verifications=(verification,),
+    )
+    assert result.evidence_tex is not None
+    values["evidence_corrected_baseline"] = ArtifactInput(
+        ROLE_EVIDENCE_BASELINE_TEX,
+        "baseline/evidence-corrected-baseline.tex",
+        result.evidence_tex.encode("utf-8"),
+    )
+    values["evidence_correction_report"] = ArtifactInput(
+        ROLE_EVIDENCE_CORRECTION_REPORT,
+        "evidence/evidence-correction-report.json",
+        result.report.canonical_json_bytes(),
+    )
+    values["baseline_tex"] = ArtifactInput(
+        "BASELINE_TEX",
+        "baseline/baseline.tex",
+        result.evidence_tex.encode("utf-8"),
+    )
+    return result
+
+
 def test_manifest_is_canonical_and_fully_recomputable_from_exact_bytes():
     bundle = build_ocr_baseline_manifest(**_fixture())
     manifest = bundle.manifest.to_dict()
@@ -441,6 +632,7 @@ def test_manifest_is_canonical_and_fully_recomputable_from_exact_bytes():
     )["schema_version"]
     assert manifest["bindings"]["page_records"] == "PAGE_RECORDS"
     assert manifest["bindings"]["runtime_page_records"] == "RUNTIME_PAGE_RECORDS"
+    assert manifest["bindings"]["lane_routes"] is None
     assert manifest["coverage"] == {
         "schema_version": COVERAGE_SUMMARY_SCHEMA_VERSION,
         "run_id": RUN_ID,
@@ -480,6 +672,244 @@ def test_manifest_is_canonical_and_fully_recomputable_from_exact_bytes():
     assert set(bundle.files()) == set(bundle.artifact_bytes()) | {
         "baseline/ocr_baseline_manifest.json"
     }
+
+
+def test_manifest_binds_noop_correction_report_without_fabricating_evidence_tex():
+    values = _fixture()
+    result = produce_evidence_corrected_baseline(
+        raw_ocr_tex=values["raw_ocr"].data.decode("utf-8"),
+        syntax_baseline_tex=values["syntax_baseline"].data.decode("utf-8"),
+    )
+    values["evidence_correction_report"] = ArtifactInput(
+        ROLE_EVIDENCE_CORRECTION_REPORT,
+        "evidence/evidence-correction-report.json",
+        result.report.canonical_json_bytes(),
+    )
+
+    bundle = build_ocr_baseline_manifest(**values)
+    payload = bundle.manifest.to_dict()
+
+    assert payload["compile"]["selected_baseline"] == "SYNTAX_BASELINE_TEX"
+    assert payload["bindings"]["evidence_corrected_baseline"] is None
+    assert payload["bindings"]["evidence_correction_report"] == (
+        ROLE_EVIDENCE_CORRECTION_REPORT
+    )
+    assert all(
+        item["role"] != ROLE_EVIDENCE_BASELINE_TEX
+        for item in payload["artifacts"]
+    )
+
+
+def test_manifest_selects_only_pass_evidence_tex_and_rejects_semantic_report_tamper():
+    values = _fixture()
+    result = _evidence_correction_pass(values)
+    bundle = build_ocr_baseline_manifest(**values)
+    payload = bundle.manifest.to_dict()
+
+    assert payload["compile"]["selected_baseline"] == ROLE_EVIDENCE_BASELINE_TEX
+    assert payload["lineage"]["evidence_baseline_sha256"] == sha256_text(
+        result.evidence_tex or ""
+    )
+    assert bundle.artifact_bytes()["baseline/baseline.tex"] == (
+        result.evidence_tex or ""
+    ).encode("utf-8")
+
+    tampered_payload = copy.deepcopy(payload)
+    report_path = next(
+        item["path"]
+        for item in tampered_payload["artifacts"]
+        if item["role"] == ROLE_EVIDENCE_CORRECTION_REPORT
+    )
+    tampered_report = json.loads(bundle.artifact_bytes()[report_path])
+    tampered_report["operations"][0]["reason_codes"] = ["FABRICATED_PASS_REASON"]
+    report_body = {
+        key: value
+        for key, value in tampered_report.items()
+        if key != "report_sha256"
+    }
+    tampered_report["report_sha256"] = _sha(canonical_json_bytes(report_body))
+    tampered_report_bytes = canonical_json_bytes(tampered_report)
+    artifacts = _rewrite_artifact(
+        tampered_payload,
+        bundle.artifact_bytes(),
+        ROLE_EVIDENCE_CORRECTION_REPORT,
+        tampered_report_bytes,
+    )
+    tampered_payload["lineage"]["evidence_correction_report_sha256"] = _sha(
+        tampered_report_bytes
+    )
+
+    with pytest.raises(OcrBaselineManifestError, match="correction report"):
+        verify_ocr_baseline_manifest(
+            canonical_json_bytes(tampered_payload),
+            artifacts,
+        )
+
+
+def test_manifest_refuses_evidence_tex_without_its_correction_report():
+    values = _fixture()
+    _evidence_correction_pass(values)
+    del values["evidence_correction_report"]
+
+    with pytest.raises(OcrBaselineManifestError, match="requires its hash-bound"):
+        build_ocr_baseline_manifest(**values)
+
+
+def test_manifest_binds_and_recomputes_terminal_lane_route_evidence():
+    values = _fixture()
+    values["lane_routes"] = _lane_routes_input()
+    values["page_evidence_bindings"] = _page_evidence_bindings_input(values)
+    bundle = build_ocr_baseline_manifest(**values)
+    payload = bundle.manifest.to_dict()
+
+    assert payload["bindings"]["lane_routes"] == "LANE_ROUTES"
+    lane_descriptor = next(
+        item for item in payload["artifacts"] if item["role"] == "LANE_ROUTES"
+    )
+    assert lane_descriptor["sha256"] == _sha(
+        bundle.artifact_bytes()["evidence/lane-routes.json"]
+    )
+
+    tampered_payload = copy.deepcopy(payload)
+    artifacts = _rewrite_artifact(
+        tampered_payload,
+        bundle.artifact_bytes(),
+        "LANE_ROUTES",
+        bundle.artifact_bytes()["evidence/lane-routes.json"].replace(
+            b'"source_page":1', b'"source_page":9', 1
+        ),
+    )
+    with pytest.raises(OcrBaselineManifestError, match="lane routes"):
+        verify_ocr_baseline_manifest(
+            canonical_json_bytes(tampered_payload),
+            artifacts,
+        )
+
+
+def test_manifest_refuses_lane_routes_without_page_evidence_bindings():
+    values = _fixture()
+    values["lane_routes"] = _lane_routes_input()
+
+    with pytest.raises(OcrBaselineManifestError, match="supplied together"):
+        build_ocr_baseline_manifest(**values)
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    (
+        ("initial_candidate_tex_sha256", "initial candidate hash"),
+        ("visual_verification_response_sha256", "verifier response binding"),
+    ),
+)
+def test_manifest_recomputes_page_binding_cross_authorities(field, message):
+    values = _fixture()
+    values["lane_routes"] = _lane_routes_input()
+    values["page_evidence_bindings"] = _page_evidence_bindings_input(values)
+    bundle = build_ocr_baseline_manifest(**values)
+    payload = bundle.manifest.to_dict()
+    binding_bytes = bundle.artifact_bytes()[
+        "evidence/ocr-page-evidence-bindings.json"
+    ]
+    binding_value = json.loads(binding_bytes)
+    binding_value["pages"][0][field] = "f" * 64
+    artifacts = _rewrite_artifact(
+        payload,
+        bundle.artifact_bytes(),
+        ROLE_PAGE_EVIDENCE_BINDINGS,
+        canonical_json_bytes(binding_value),
+    )
+
+    with pytest.raises(OcrBaselineManifestError, match=message):
+        verify_ocr_baseline_manifest(canonical_json_bytes(payload), artifacts)
+
+
+def test_manifest_rejects_plaintext_in_page_binding_projection():
+    values = _fixture()
+    values["lane_routes"] = _lane_routes_input()
+    values["page_evidence_bindings"] = _page_evidence_bindings_input(values)
+    bundle = build_ocr_baseline_manifest(**values)
+    payload = bundle.manifest.to_dict()
+    binding_value = json.loads(
+        bundle.artifact_bytes()["evidence/ocr-page-evidence-bindings.json"]
+    )
+    binding_value["pages"][0]["candidate_tex"] = "private document text"
+    artifacts = _rewrite_artifact(
+        payload,
+        bundle.artifact_bytes(),
+        ROLE_PAGE_EVIDENCE_BINDINGS,
+        canonical_json_bytes(binding_value),
+    )
+
+    with pytest.raises(OcrBaselineManifestError, match="bindings artifact"):
+        verify_ocr_baseline_manifest(canonical_json_bytes(payload), artifacts)
+
+
+def test_manifest_keeps_full_ocr_terminal_distinct_from_visual_response():
+    values = _fixture()
+    page_records_value = json.loads(values["page_records"].data)
+    coverage_records = [
+        PageCoverageRecord.from_dict(item)
+        for item in page_records_value["pages"]
+    ]
+    coverage_records[1] = replace(
+        coverage_records[1], visual_mode=VisualMode.FULL_OCR
+    )
+    values["page_records"] = ArtifactInput(
+        "PAGE_RECORDS",
+        "baseline/page_records.json",
+        build_page_summaries(
+            coverage_records,
+            run_id=RUN_ID,
+            source_sha256=json.loads(values["snapshot"].data)["source_sha256"],
+            expected_source_pages=(1, 2),
+        ).page_records_bytes,
+    )
+    values["lane_routes"] = _lane_routes_input(full_ocr_indexes={2})
+    values["page_evidence_bindings"] = _page_evidence_bindings_input(
+        values, full_ocr_indexes={2}
+    )
+
+    bundle = build_ocr_baseline_manifest(**values)
+    binding_value = json.loads(
+        bundle.artifact_bytes()["evidence/ocr-page-evidence-bindings.json"]
+    )
+
+    assert binding_value["pages"][1]["terminal_mode"] == "FULL_OCR"
+    assert (
+        binding_value["pages"][1]["visual_verification_response_sha256"]
+        is None
+    )
+
+
+def test_manifest_binds_and_hash_checks_host_block_inventory():
+    from tests.test_ocr_block_inventory import source_classification
+
+    values = _fixture()
+    classification = source_classification(
+        source_sha256=_sha(values["source"].data),
+        selected_pages=(1, 2),
+    )
+    values["block_inventory"] = ArtifactInput(
+        ROLE_BLOCK_INVENTORY,
+        "evidence/ocr-block-inventory.json",
+        build_ocr_block_inventory(
+            run_id=RUN_ID,
+            source_classification=classification,
+            selected_pages=(1, 2),
+        ),
+    )
+    bundle = build_ocr_baseline_manifest(**values)
+    payload = bundle.manifest.to_dict()
+
+    assert payload["bindings"]["block_inventory"] == ROLE_BLOCK_INVENTORY
+    descriptor = next(
+        item for item in payload["artifacts"]
+        if item["role"] == ROLE_BLOCK_INVENTORY
+    )
+    tampered = dict(bundle.artifact_bytes())
+    tampered[descriptor["path"]] += b"tampered"
+    with pytest.raises(OcrBaselineManifestError, match="bytes/hash mismatch"):
+        verify_ocr_baseline_manifest(bundle.manifest.canonical_bytes, tampered)
 
 
 @pytest.mark.parametrize(

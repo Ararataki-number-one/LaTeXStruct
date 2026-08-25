@@ -61,11 +61,15 @@ ROLE_RAW_OCR_TEX = "RAW_OCR_TEX"
 ROLE_RAW_OCR_FREEZE = "RAW_OCR_FREEZE"
 ROLE_SYNTAX_BASELINE_TEX = "SYNTAX_BASELINE_TEX"
 ROLE_EVIDENCE_BASELINE_TEX = "EVIDENCE_CORRECTED_BASELINE_TEX"
+ROLE_EVIDENCE_CORRECTION_REPORT = "EVIDENCE_CORRECTION_REPORT"
 ROLE_BASELINE_TEX = "BASELINE_TEX"
 ROLE_BASELINE_PDF = "BASELINE_PDF"
 ROLE_PAGE_MAP = "PAGE_MAP"
 ROLE_PAGE_RECORDS = "PAGE_RECORDS"
 ROLE_RUNTIME_PAGE_RECORDS = "RUNTIME_PAGE_RECORDS"
+ROLE_LANE_ROUTES = "LANE_ROUTES"
+ROLE_PAGE_EVIDENCE_BINDINGS = "OCR_PAGE_EVIDENCE_BINDINGS"
+ROLE_BLOCK_INVENTORY = "OCR_BLOCK_INVENTORY"
 ROLE_PERFORMANCE = "PERFORMANCE_METRICS"
 ROLE_COST = "COST_METRICS"
 _COMPILE_INPUT_ROLE_PREFIX = "COMPILE_INPUT_PASS_"
@@ -1604,12 +1608,23 @@ def _verify_payload(
             _fail(f"{role} artifact bytes/hash mismatch")
 
     bindings = _object(payload["bindings"], "bindings")
-    _exact_keys(
-        bindings,
-        set(_FIXED_BINDING_ROLES)
-        | {"evidence_corrected_baseline", "baseline_pdf", "page_map", "compile_logs"},
-        "bindings",
-    )
+    legacy_binding_keys = set(_FIXED_BINDING_ROLES) | {
+        "evidence_corrected_baseline",
+        "baseline_pdf",
+        "page_map",
+        "compile_logs",
+    }
+    optional_binding_keys = {
+        "lane_routes",
+        "page_evidence_bindings",
+        "evidence_correction_report",
+        "block_inventory",
+    }
+    if (
+        not legacy_binding_keys.issubset(bindings)
+        or not set(bindings).issubset(legacy_binding_keys | optional_binding_keys)
+    ):
+        _fail("bindings keys mismatch")
     for key, expected_role in _FIXED_BINDING_ROLES.items():
         if bindings[key] != expected_role or expected_role not in descriptors:
             _fail(f"required binding {key} is absent or misbound")
@@ -1618,6 +1633,36 @@ def _verify_payload(
         _fail("evidence corrected baseline binding is invalid")
     if (evidence_role is None) != (ROLE_EVIDENCE_BASELINE_TEX not in descriptors):
         _fail("evidence corrected baseline descriptor/binding mismatch")
+    correction_report_role = bindings.get("evidence_correction_report")
+    if correction_report_role not in {None, ROLE_EVIDENCE_CORRECTION_REPORT}:
+        _fail("evidence correction report binding is invalid")
+    if (correction_report_role is None) != (
+        ROLE_EVIDENCE_CORRECTION_REPORT not in descriptors
+    ):
+        _fail("evidence correction report descriptor/binding mismatch")
+    lane_routes_role = bindings.get("lane_routes")
+    if lane_routes_role not in {None, ROLE_LANE_ROUTES}:
+        _fail("lane routes binding is invalid")
+    if (lane_routes_role is None) != (ROLE_LANE_ROUTES not in descriptors):
+        _fail("lane routes descriptor/binding mismatch")
+    page_evidence_bindings_role = bindings.get("page_evidence_bindings")
+    if page_evidence_bindings_role not in {None, ROLE_PAGE_EVIDENCE_BINDINGS}:
+        _fail("OCR page evidence bindings binding is invalid")
+    if (page_evidence_bindings_role is None) != (
+        ROLE_PAGE_EVIDENCE_BINDINGS not in descriptors
+    ):
+        _fail("OCR page evidence bindings descriptor/binding mismatch")
+    if (lane_routes_role is None) != (page_evidence_bindings_role is None):
+        _fail(
+            "exact lane routes and OCR page evidence bindings must be present together"
+        )
+    block_inventory_role = bindings.get("block_inventory")
+    if block_inventory_role not in {None, ROLE_BLOCK_INVENTORY}:
+        _fail("OCR block inventory binding is invalid")
+    if (block_inventory_role is None) != (
+        ROLE_BLOCK_INVENTORY not in descriptors
+    ):
+        _fail("OCR block inventory descriptor/binding mismatch")
     page_map_role = bindings["page_map"]
     if status["compile_status"] == "COMPILED":
         if page_map_role != ROLE_PAGE_MAP or ROLE_PAGE_MAP not in descriptors:
@@ -1642,6 +1687,60 @@ def _verify_payload(
         expected = str(expected_source_sha256).lower()
         if not _SHA256_RE.fullmatch(expected) or expected != snapshot.source_sha256:
             _fail("source artifact differs from the independently expected SHA-256")
+    if block_inventory_role is not None:
+        from .ocr_block_inventory import parse_ocr_block_inventory
+
+        contract = snapshot.pipeline_contract
+        snapshot_pages = (
+            contract.get("page_strategies")
+            if isinstance(contract, Mapping)
+            else None
+        )
+        try:
+            parse_ocr_block_inventory(
+                artifact_bytes[str(descriptors[ROLE_BLOCK_INVENTORY]["path"])],
+                expected_run_id=run_id,
+                expected_source_sha256=snapshot.source_sha256,
+                expected_selected_pages=snapshot.selected_pages,
+                expected_snapshot_pages=snapshot_pages or None,
+            )
+        except (TypeError, ValueError) as exc:
+            raise OcrBaselineManifestError(
+                "OCR block inventory artifact is invalid or stale"
+            ) from exc
+    lane_routes = ()
+    if lane_routes_role is not None:
+        from .ocr_lane_routes import parse_lane_routes_artifact
+
+        try:
+            lane_routes = parse_lane_routes_artifact(
+                artifact_bytes[str(descriptors[ROLE_LANE_ROUTES]["path"])],
+                expected_run_id=run_id,
+                expected_selected_pages=snapshot.selected_pages,
+            )
+        except (TypeError, ValueError) as exc:
+            raise OcrBaselineManifestError(
+                "lane routes artifact is invalid or stale"
+            ) from exc
+    page_evidence_bindings = ()
+    if page_evidence_bindings_role is not None:
+        from .ocr_page_evidence_bindings import (
+            parse_ocr_page_evidence_bindings,
+        )
+
+        try:
+            page_evidence_bindings = parse_ocr_page_evidence_bindings(
+                artifact_bytes[
+                    str(descriptors[ROLE_PAGE_EVIDENCE_BINDINGS]["path"])
+                ],
+                expected_run_id=run_id,
+                expected_source_sha256=snapshot.source_sha256,
+                expected_selected_pages=snapshot.selected_pages,
+            )
+        except (TypeError, ValueError) as exc:
+            raise OcrBaselineManifestError(
+                "OCR page evidence bindings artifact is invalid or stale"
+            ) from exc
     source = _object(payload["source"], "source")
     _exact_keys(source, {"sha256", "page_count", "selected_pages"}, "source")
     if source != {
@@ -1658,6 +1757,83 @@ def _verify_payload(
     ]
     runtime_records = _parse_runtime_page_records(runtime_records_data, snapshot)
     _bind_page_record_authorities(records, runtime_records)
+    if page_evidence_bindings:
+        from .ocr_lane_routes import OcrLaneOwner
+        from .ocr_page_evidence_bindings import OcrPageTerminalMode
+
+        if not (
+            len(records)
+            == len(runtime_records)
+            == len(lane_routes)
+            == len(page_evidence_bindings)
+        ):
+            _fail("page evidence bindings do not cover all page authorities")
+        for coverage_record, runtime_record, route, binding in zip(
+            records,
+            runtime_records,
+            lane_routes,
+            page_evidence_bindings,
+            strict=True,
+        ):
+            runtime_record_sha = _sha256(json.dumps(
+                runtime_record.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"))
+            if (
+                binding.page_id != runtime_record.page_id
+                or binding.source_page != runtime_record.source_page
+                or binding.selected_index != runtime_record.task_index
+                or binding.terminal_status != runtime_record.status.value
+                or binding.runtime_record_sha256 != runtime_record_sha
+                or binding.runtime_source_evidence_sha256
+                != runtime_record.source_evidence_sha256
+                or binding.runtime_raw_response_sha256
+                != runtime_record.raw_response_sha256
+                or binding.terminal_cleaned_tex_sha256
+                != runtime_record.tex_sha256
+            ):
+                _fail("OCR page evidence binding differs from runtime page records")
+            page_hashes = coverage_record.artifact_hashes
+            expected_page_hashes = {
+                "source.json": binding.page_evidence_source_sha256,
+                "candidate.json": binding.page_evidence_candidate_sha256,
+                "verification.json": binding.page_evidence_verification_sha256,
+                "raw-response.json": binding.page_evidence_raw_response_sha256,
+                "page.tex": binding.page_evidence_tex_sha256,
+            }
+            if dict(page_hashes) != expected_page_hashes:
+                _fail("OCR page evidence file hashes differ from page coverage")
+            expected_coverage_mode = (
+                "VERIFIER"
+                if binding.terminal_mode is OcrPageTerminalMode.VISUAL
+                else binding.terminal_mode.value
+            )
+            if coverage_record.visual_mode.value != expected_coverage_mode:
+                _fail("OCR page evidence terminal mode differs from page coverage")
+            if route.candidate_sha256 != binding.initial_candidate_tex_sha256:
+                _fail("lane route initial candidate hash is not independently bound")
+            if route.owner is OcrLaneOwner.TERMINAL_VISUAL:
+                if (
+                    binding.terminal_mode is not OcrPageTerminalMode.VISUAL
+                    or route.verifier_response_sha256
+                    != binding.visual_verification_response_sha256
+                ):
+                    _fail(
+                        "terminal visual lane lacks its exact verifier response binding"
+                    )
+            elif route.owner is OcrLaneOwner.TERMINAL_FULL_OCR:
+                if (
+                    binding.terminal_mode is OcrPageTerminalMode.VISUAL
+                    or binding.visual_verification_response_sha256 is not None
+                ):
+                    _fail("terminal full OCR is misbound as a visual response")
+            elif route.owner is OcrLaneOwner.TERMINAL_UNRESOLVED:
+                if binding.terminal_status != "NEEDS_REVIEW":
+                    _fail("unresolved lane must bind a NEEDS_REVIEW page record")
+            else:
+                _fail("page evidence binding cannot attest a non-terminal lane")
     coverage = _object(payload["coverage"], "coverage")
     _exact_keys(coverage, set(recomputed_coverage), "coverage")
     if coverage != recomputed_coverage:
@@ -1665,6 +1841,10 @@ def _verify_payload(
     run_status, ocr_status = _derived_status(coverage, str(status["compile_status"]))
     if status["run_status"] != run_status or status["ocr_status"] != ocr_status:
         _fail("terminal statuses contradict page coverage/compile status")
+    if run_status == "SUCCESS" and any(
+        route.owner.value == "TERMINAL_UNRESOLVED" for route in lane_routes
+    ):
+        _fail("successful OCR manifest cannot bind an unresolved lane route")
 
     raw_data = artifact_bytes[str(descriptors[ROLE_RAW_OCR_TEX]["path"])]
     raw = _object(payload["raw_ocr"], "raw_ocr")
@@ -1675,21 +1855,35 @@ def _verify_payload(
     _parse_raw_freeze(raw_freeze_data, snapshot, _sha256(raw_data), runtime_records)
 
     lineage = _object(payload["lineage"], "lineage")
-    _exact_keys(
-        lineage,
-        {"raw_ocr_sha256", "syntax_baseline_sha256", "evidence_baseline_sha256", "baseline_tex_sha256"},
-        "lineage",
-    )
+    legacy_lineage_keys = {
+        "raw_ocr_sha256",
+        "syntax_baseline_sha256",
+        "evidence_baseline_sha256",
+        "baseline_tex_sha256",
+    }
+    if set(lineage) not in {
+        frozenset(legacy_lineage_keys),
+        frozenset(legacy_lineage_keys | {"evidence_correction_report_sha256"}),
+    }:
+        _fail("lineage keys mismatch")
     syntax_sha = str(descriptors[ROLE_SYNTAX_BASELINE_TEX]["sha256"])
     evidence_sha = str(descriptors[ROLE_EVIDENCE_BASELINE_TEX]["sha256"]) if evidence_role else None
+    correction_report_sha = (
+        str(descriptors[ROLE_EVIDENCE_CORRECTION_REPORT]["sha256"])
+        if correction_report_role else None
+    )
     baseline_sha = str(descriptors[ROLE_BASELINE_TEX]["sha256"])
-    if lineage != {
+    expected_lineage = {
         "raw_ocr_sha256": _sha256(raw_data),
         "syntax_baseline_sha256": syntax_sha,
         "evidence_baseline_sha256": evidence_sha,
         "baseline_tex_sha256": baseline_sha,
-    }:
+    }
+    if correction_report_role:
+        expected_lineage["evidence_correction_report_sha256"] = correction_report_sha
+    if lineage != expected_lineage:
         _fail("raw/syntax/evidence/baseline lineage hashes are stale")
+    decoded_tex: dict[str, str] = {}
     for role in (ROLE_RAW_OCR_TEX, ROLE_SYNTAX_BASELINE_TEX, ROLE_BASELINE_TEX):
         data = artifact_bytes[str(descriptors[role]["path"])]
         try:
@@ -1698,6 +1892,8 @@ def _verify_payload(
             raise OcrBaselineManifestError(f"{role} must be UTF-8") from exc
         if not text.strip():
             _fail(f"{role} cannot be blank")
+        decoded_tex[role] = text
+    evidence_text: str | None = None
     if evidence_role:
         try:
             evidence_text = artifact_bytes[str(descriptors[evidence_role]["path"])].decode("utf-8")
@@ -1705,6 +1901,27 @@ def _verify_payload(
             raise OcrBaselineManifestError("evidence baseline must be UTF-8") from exc
         if not evidence_text.strip():
             _fail("evidence baseline cannot be blank")
+    if correction_report_role:
+        from .ocr_evidence_correction import (
+            EvidenceCorrectionStatus,
+            verify_evidence_correction_report_bytes,
+        )
+
+        try:
+            correction_report = verify_evidence_correction_report_bytes(
+                artifact_bytes[
+                    str(descriptors[ROLE_EVIDENCE_CORRECTION_REPORT]["path"])
+                ],
+                raw_ocr_tex=decoded_tex[ROLE_RAW_OCR_TEX],
+                syntax_baseline_tex=decoded_tex[ROLE_SYNTAX_BASELINE_TEX],
+                evidence_tex=evidence_text,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise OcrBaselineManifestError(
+                "evidence correction report is invalid or stale"
+            ) from exc
+        if correction_report["status"] == EvidenceCorrectionStatus.FAILED.value:
+            _fail("FAILED evidence correction report cannot select a baseline")
 
     compile_value = _object(payload["compile"], "compile")
     _validate_compile(
@@ -1806,6 +2023,10 @@ def build_ocr_baseline_manifest(
     created_at: str,
     baseline_pdf: ArtifactInput | None = None,
     evidence_corrected_baseline: ArtifactInput | None = None,
+    evidence_correction_report: ArtifactInput | None = None,
+    lane_routes: ArtifactInput | None = None,
+    page_evidence_bindings: ArtifactInput | None = None,
+    block_inventory: ArtifactInput | None = None,
     strategies: Mapping[str, int] | None = None,
     fatal_error: str = "",
     error_lines: Sequence[Mapping[str, object]] = (),
@@ -1837,6 +2058,34 @@ def build_ocr_baseline_manifest(
         if evidence_corrected_baseline.role != ROLE_EVIDENCE_BASELINE_TEX:
             _fail(f"evidence baseline must use role {ROLE_EVIDENCE_BASELINE_TEX}")
         artifacts.append(evidence_corrected_baseline)
+    if evidence_correction_report is not None:
+        if evidence_correction_report.role != ROLE_EVIDENCE_CORRECTION_REPORT:
+            _fail(
+                "evidence correction report must use role "
+                f"{ROLE_EVIDENCE_CORRECTION_REPORT}"
+            )
+        artifacts.append(evidence_correction_report)
+    if evidence_corrected_baseline is not None and evidence_correction_report is None:
+        _fail("evidence baseline requires its hash-bound correction report")
+    if lane_routes is not None:
+        if lane_routes.role != ROLE_LANE_ROUTES:
+            _fail(f"lane routes must use role {ROLE_LANE_ROUTES}")
+        artifacts.append(lane_routes)
+    if page_evidence_bindings is not None:
+        if page_evidence_bindings.role != ROLE_PAGE_EVIDENCE_BINDINGS:
+            _fail(
+                "OCR page evidence bindings must use role "
+                f"{ROLE_PAGE_EVIDENCE_BINDINGS}"
+            )
+        artifacts.append(page_evidence_bindings)
+    if (lane_routes is None) != (page_evidence_bindings is None):
+        _fail(
+            "exact lane routes and OCR page evidence bindings must be supplied together"
+        )
+    if block_inventory is not None:
+        if block_inventory.role != ROLE_BLOCK_INVENTORY:
+            _fail(f"OCR block inventory must use role {ROLE_BLOCK_INVENTORY}")
+        artifacts.append(block_inventory)
     if status == "COMPILED":
         if page_map is None or page_map.role != ROLE_PAGE_MAP:
             _fail(f"COMPILED requires role {ROLE_PAGE_MAP}")
@@ -1983,6 +2232,14 @@ def build_ocr_baseline_manifest(
     bindings: dict[str, object] = {
         **_FIXED_BINDING_ROLES,
         "evidence_corrected_baseline": evidence_role,
+        "evidence_correction_report": (
+            ROLE_EVIDENCE_CORRECTION_REPORT if evidence_correction_report else None
+        ),
+        "lane_routes": ROLE_LANE_ROUTES if lane_routes else None,
+        "page_evidence_bindings": (
+            ROLE_PAGE_EVIDENCE_BINDINGS if page_evidence_bindings else None
+        ),
+        "block_inventory": ROLE_BLOCK_INVENTORY if block_inventory else None,
         "baseline_pdf": ROLE_BASELINE_PDF if baseline_pdf else None,
         "page_map": ROLE_PAGE_MAP if page_map else None,
         "compile_logs": [item["log_role"] for item in compile_records],
@@ -2024,6 +2281,11 @@ def build_ocr_baseline_manifest(
                 if evidence_role else None
             ),
             "baseline_tex_sha256": baseline_sha,
+            **({
+                "evidence_correction_report_sha256": str(
+                    descriptor_by_role[ROLE_EVIDENCE_CORRECTION_REPORT]["sha256"]
+                ),
+            } if evidence_correction_report else {}),
         },
         "compile": {
             "engine": str(compile_engine or "").strip(),
@@ -2056,6 +2318,8 @@ __all__ = [
     "CompilePassInput",
     "DEFAULT_MANIFEST_PATH",
     "OCR_BASELINE_MANIFEST_SCHEMA",
+    "ROLE_BLOCK_INVENTORY",
+    "ROLE_PAGE_EVIDENCE_BINDINGS",
     "OCR_COST_SCHEMA",
     "OCR_PAGE_MAP_SCHEMA",
     "OCR_PAGE_RECORDS_SCHEMA",

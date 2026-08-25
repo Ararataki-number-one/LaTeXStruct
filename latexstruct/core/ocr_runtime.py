@@ -41,6 +41,7 @@ OCR_PAGE_RECORD_SCHEMA = "latexstruct-ocr-page-record-v1"
 OCR_RAW_FREEZE_SCHEMA = "latexstruct-raw-ocr-freeze-v1"
 OCR_BASELINE_SCHEMA = "latexstruct-ocr-baseline-v1"
 OCR_PAGE_SOURCE_EVIDENCE_SCHEMA = "latexstruct-ocr-page-source-evidence-v1"
+OCR_TERMINAL_EVIDENCE_FACTS_SCHEMA = "latexstruct-ocr-terminal-evidence-facts-v1"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RUN_ID_RE = re.compile(r"^[0-9a-f]{16,64}$")
@@ -347,6 +348,191 @@ class OcrPageStatus(str, Enum):
     FAILED = "FAILED"
     PAUSED = "PAUSED"
     CANCELLED = "CANCELLED"
+
+
+_TERMINAL_EVIDENCE_FACT_FIELDS = frozenset({
+    "schema_version",
+    "page_id",
+    "final_status",
+    "visual_mode",
+    "evidence_head",
+    "retry_id",
+    "retry_intent_sha256",
+    "full_ocr_performed",
+    "full_ocr_with_crops",
+    "reading_order_checked",
+    "text_coverage_checked",
+    "math_region_coverage_checked",
+    "syntax_checked",
+    "cleaned_tex_sha256",
+    "image_sha256",
+    "crop_input_sha256s",
+    "recovery_run_id",
+    "recovery_attempt_sha256",
+    "recovery_chain_sha256",
+    "unresolved_regions_sha256",
+})
+
+
+def build_ocr_terminal_evidence_facts(
+    *,
+    page_id: str,
+    final_status: OcrPageStatus | str,
+    visual_mode: str,
+    evidence_head: str,
+    retry_id: str = "",
+    retry_intent_sha256: str = "",
+    full_ocr_performed: bool,
+    full_ocr_with_crops: bool,
+    reading_order_checked: bool,
+    text_coverage_checked: bool,
+    math_region_coverage_checked: bool,
+    syntax_checked: bool,
+    cleaned_tex: str,
+    image_sha256: str,
+    crop_input_sha256s: Sequence[str] = (),
+    recovery_run_id: str = "",
+    recovery_attempt_sha256: str = "",
+    recovery_chain_sha256: str = "",
+    unresolved_regions: Sequence[Mapping[str, object]] = (),
+) -> dict[str, object]:
+    """Build the exact private facts needed to repair a terminal commit.
+
+    The returned object is embedded in the already-private, SHA-bound runtime
+    envelope.  It contains no source text beyond hashes and is deliberately
+    strict so restart recovery never has to infer whether crops or coverage
+    checks were used from mutable in-memory job state.
+    """
+
+    value = {
+        "schema_version": OCR_TERMINAL_EVIDENCE_FACTS_SCHEMA,
+        "page_id": str(page_id or ""),
+        "final_status": (
+            final_status.value
+            if isinstance(final_status, OcrPageStatus)
+            else str(final_status or "")
+        ),
+        "visual_mode": str(visual_mode or ""),
+        "evidence_head": str(evidence_head or ""),
+        "retry_id": str(retry_id or ""),
+        "retry_intent_sha256": str(retry_intent_sha256 or "").lower(),
+        "full_ocr_performed": full_ocr_performed,
+        "full_ocr_with_crops": full_ocr_with_crops,
+        "reading_order_checked": reading_order_checked,
+        "text_coverage_checked": text_coverage_checked,
+        "math_region_coverage_checked": math_region_coverage_checked,
+        "syntax_checked": syntax_checked,
+        "cleaned_tex_sha256": _sha256_bytes(str(cleaned_tex).encode("utf-8")),
+        "image_sha256": str(image_sha256 or "").lower(),
+        "crop_input_sha256s": [str(item or "").lower() for item in crop_input_sha256s],
+        "recovery_run_id": str(recovery_run_id or "").lower(),
+        "recovery_attempt_sha256": str(recovery_attempt_sha256 or "").lower(),
+        "recovery_chain_sha256": str(recovery_chain_sha256 or "").lower(),
+        "unresolved_regions_sha256": _sha256_bytes(
+            _canonical_json([thaw_json(item) for item in unresolved_regions])
+        ),
+    }
+    return validate_ocr_terminal_evidence_facts(value)
+
+
+def validate_ocr_terminal_evidence_facts(
+    value: object,
+) -> dict[str, object]:
+    """Validate and normalize one exact terminal-evidence fact object."""
+
+    if not isinstance(value, Mapping) or set(value) != _TERMINAL_EVIDENCE_FACT_FIELDS:
+        raise ValueError("terminal evidence facts fields are not exact")
+    facts = dict(value)
+    if facts.get("schema_version") != OCR_TERMINAL_EVIDENCE_FACTS_SCHEMA:
+        raise ValueError("unsupported terminal evidence facts schema")
+    page_id = str(facts.get("page_id") or "")
+    if _PAGE_ID_RE.fullmatch(page_id) is None:
+        raise ValueError("terminal evidence facts page_id is invalid")
+    status = str(facts.get("final_status") or "")
+    if status not in {OcrPageStatus.SUCCESS.value, OcrPageStatus.NEEDS_REVIEW.value}:
+        raise ValueError("terminal evidence facts status is not terminal")
+    visual_mode = str(facts.get("visual_mode") or "")
+    if visual_mode not in {"VERIFIER", "FULL_OCR", "FULL_OCR_WITH_CROPS"}:
+        raise ValueError("terminal evidence facts visual mode is invalid")
+    evidence_head = str(facts.get("evidence_head") or "")
+    retry_id = str(facts.get("retry_id") or "")
+    retry_intent_sha256 = str(facts.get("retry_intent_sha256") or "").lower()
+    if evidence_head == "BASE":
+        if retry_id or retry_intent_sha256:
+            raise ValueError("base terminal evidence cannot name a retry intent")
+    elif evidence_head == "RETRY":
+        if (
+            re.fullmatch(r"retry-[0-9]{4,8}(?:-[A-Za-z0-9_-]{1,40})?", retry_id)
+            is None
+            or _SHA256_RE.fullmatch(retry_intent_sha256) is None
+        ):
+            raise ValueError("retry terminal evidence intent binding is invalid")
+    else:
+        raise ValueError("terminal evidence facts head is invalid")
+    bool_fields = (
+        "full_ocr_performed",
+        "full_ocr_with_crops",
+        "reading_order_checked",
+        "text_coverage_checked",
+        "math_region_coverage_checked",
+        "syntax_checked",
+    )
+    if any(type(facts.get(field)) is not bool for field in bool_fields):
+        raise ValueError("terminal evidence fact checks must be strict booleans")
+    full_ocr = facts["full_ocr_performed"] is True
+    with_crops = facts["full_ocr_with_crops"] is True
+    if (
+        (visual_mode == "VERIFIER") != (not full_ocr)
+        or with_crops != (visual_mode == "FULL_OCR_WITH_CROPS")
+    ):
+        raise ValueError("terminal evidence facts OCR mode is contradictory")
+    digest_fields = (
+        "cleaned_tex_sha256",
+        "image_sha256",
+        "unresolved_regions_sha256",
+    )
+    normalized_digests = {
+        field: str(facts.get(field) or "").lower() for field in digest_fields
+    }
+    if any(_SHA256_RE.fullmatch(item) is None for item in normalized_digests.values()):
+        raise ValueError("terminal evidence facts contain an invalid digest")
+    crop_hashes = facts.get("crop_input_sha256s")
+    if (
+        not isinstance(crop_hashes, list)
+        or any(
+            not isinstance(item, str)
+            or _SHA256_RE.fullmatch(item.lower()) is None
+            for item in crop_hashes
+        )
+        or bool(crop_hashes) != with_crops
+    ):
+        raise ValueError("terminal evidence crop bindings are invalid")
+    recovery_run_id = str(facts.get("recovery_run_id") or "").lower()
+    recovery_attempt_sha256 = str(
+        facts.get("recovery_attempt_sha256") or ""
+    ).lower()
+    recovery_chain_sha256 = str(facts.get("recovery_chain_sha256") or "").lower()
+    if full_ocr:
+        if (
+            _RUN_ID_RE.fullmatch(recovery_run_id) is None
+            or _SHA256_RE.fullmatch(recovery_attempt_sha256) is None
+            or _SHA256_RE.fullmatch(recovery_chain_sha256) is None
+        ):
+            raise ValueError("full OCR terminal facts lack recovery evidence bindings")
+    elif recovery_run_id or recovery_attempt_sha256 or recovery_chain_sha256:
+        raise ValueError("visual terminal facts cannot name OCR recovery evidence")
+    facts.update(normalized_digests)
+    facts["page_id"] = page_id
+    facts["final_status"] = status
+    facts["visual_mode"] = visual_mode
+    facts["evidence_head"] = evidence_head
+    facts["retry_id"] = retry_id
+    facts["retry_intent_sha256"] = retry_intent_sha256
+    facts["crop_input_sha256s"] = [item.lower() for item in crop_hashes]
+    facts["recovery_run_id"] = recovery_run_id
+    facts["recovery_attempt_sha256"] = recovery_attempt_sha256
+    facts["recovery_chain_sha256"] = recovery_chain_sha256
+    return facts
 
 
 _TRANSIENT_PAGE_STATUSES = frozenset({
@@ -1481,6 +1667,7 @@ class OcrRunStore:
             payload = self.load_raw_response(run_id, record)
             transport = payload
             host_envelope = False
+            terminal_facts: dict[str, object] | None = None
             if (
                 isinstance(payload, Mapping)
                 and payload.get("schema_version")
@@ -1503,9 +1690,13 @@ class OcrRunStore:
                     "verification_page",
                     "visual_mode",
                     "patched_block_ids",
+                    "local_patch_block_ids",
+                    "needs_review",
                     "transport_response",
                     "host_quality_flags",
                 }
+                if "terminal_evidence_facts" in payload:
+                    expected_keys.add("terminal_evidence_facts")
                 if set(payload) != expected_keys or any(
                     payload.get(key) != expected
                     for key, expected in {
@@ -1560,6 +1751,28 @@ class OcrRunStore:
                     raise OcrStoreError(
                         f"saved visual verifier flags mismatch: {record.page_id}"
                     )
+                if "terminal_evidence_facts" in payload:
+                    try:
+                        terminal_facts = validate_ocr_terminal_evidence_facts(
+                            payload.get("terminal_evidence_facts")
+                        )
+                    except ValueError as exc:
+                        raise OcrStoreError(
+                            f"saved visual terminal facts are invalid: {record.page_id}"
+                        ) from exc
+                    if (
+                        terminal_facts["visual_mode"] != "VERIFIER"
+                        or terminal_facts["full_ocr_performed"] is not False
+                        or terminal_facts["reading_order_checked"]
+                        is not (verification_page.get("reading_order_ok") is True)
+                        or terminal_facts["text_coverage_checked"]
+                        is not (verification_page.get("coverage_ok") is True)
+                        or terminal_facts["math_region_coverage_checked"]
+                        is not (verification_page.get("coverage_ok") is True)
+                    ):
+                        raise OcrStoreError(
+                            f"saved visual terminal facts disagree with verifier evidence: {record.page_id}"
+                        )
                 transport = payload.get("transport_response")
             elif (
                 isinstance(payload, Mapping)
@@ -1582,6 +1795,8 @@ class OcrRunStore:
                     "formula_evidence",
                     "batch_parent",
                 }
+                if "terminal_evidence_facts" in payload:
+                    expected_keys.add("terminal_evidence_facts")
                 if set(payload) != expected_keys or any(
                     payload.get(key) != expected
                     for key, expected in {
@@ -1612,6 +1827,72 @@ class OcrRunStore:
                     raise OcrStoreError(
                         f"saved OCR host quality flags mismatch: {record.page_id}"
                     )
+                if "terminal_evidence_facts" in payload:
+                    try:
+                        terminal_facts = validate_ocr_terminal_evidence_facts(
+                            payload.get("terminal_evidence_facts")
+                        )
+                    except ValueError as exc:
+                        raise OcrStoreError(
+                            f"saved OCR terminal facts are invalid: {record.page_id}"
+                        ) from exc
+                    if (
+                        terminal_facts["visual_mode"]
+                        not in {"FULL_OCR", "FULL_OCR_WITH_CROPS"}
+                        or terminal_facts["full_ocr_performed"] is not True
+                    ):
+                        raise OcrStoreError(
+                            f"saved OCR terminal facts disagree with full OCR evidence: {record.page_id}"
+                        )
+                    try:
+                        from .ocr_recovery import (
+                            OcrRecoveryEvidenceStore,
+                            RecoveryEvidenceError,
+                            RecoveryImageRole,
+                        )
+
+                        recovery_store = OcrRecoveryEvidenceStore(
+                            self.run_dir(run_id) / "recovery-evidence"
+                        )
+                        attempts, recovery_state = recovery_store.recover_page(
+                            terminal_facts["recovery_run_id"],
+                            record.page_id,
+                            repair=False,
+                        )
+                        last_attempt = attempts[-1]
+                        full_page_hashes = [
+                            item.blob.sha256
+                            for item in last_attempt.images
+                            if item.role is RecoveryImageRole.FULL_PAGE
+                        ]
+                        crop_hashes = [
+                            item.blob.sha256
+                            for item in last_attempt.images
+                            if item.role is RecoveryImageRole.CROP
+                        ]
+                    except (
+                        IndexError,
+                        OSError,
+                        RecoveryEvidenceError,
+                        TypeError,
+                        ValueError,
+                    ) as exc:
+                        raise OcrStoreError(
+                            f"saved OCR recovery evidence is invalid: {record.page_id}"
+                        ) from exc
+                    if (
+                        last_attempt.record_sha256
+                        != terminal_facts["recovery_attempt_sha256"]
+                        or recovery_state.last_attempt_sha256
+                        != terminal_facts["recovery_attempt_sha256"]
+                        or recovery_state.evidence_chain_sha256
+                        != terminal_facts["recovery_chain_sha256"]
+                        or full_page_hashes != [record.image_sha256]
+                        or crop_hashes != terminal_facts["crop_input_sha256s"]
+                    ):
+                        raise OcrStoreError(
+                            f"saved OCR terminal facts are not bound to provider inputs: {record.page_id}"
+                        )
                 transport = payload.get("transport_response")
             elif (
                 snapshot.quality_tier == OcrQualityTier.HIGH
@@ -1620,6 +1901,22 @@ class OcrRunStore:
                 raise OcrStoreError(
                     f"high-quality OCR page lacks its host response envelope: {record.page_id}"
                 )
+
+            if terminal_facts is not None:
+                expected_unresolved_sha256 = _sha256_bytes(
+                    _canonical_json(thaw_json(record.unresolved_regions))
+                )
+                if (
+                    terminal_facts["page_id"] != record.page_id
+                    or terminal_facts["final_status"] != record.status.value
+                    or terminal_facts["cleaned_tex_sha256"] != record.tex_sha256
+                    or terminal_facts["image_sha256"] != record.image_sha256
+                    or terminal_facts["unresolved_regions_sha256"]
+                    != expected_unresolved_sha256
+                ):
+                    raise OcrStoreError(
+                        f"saved terminal facts do not bind the runtime record: {record.page_id}"
+                    )
 
             try:
                 validated = validate_ocr_batch_response(
@@ -1718,12 +2015,17 @@ class OcrRunStore:
                         "path": logical_path,
                         "page_id": record.page_id,
                         "source_page": record.source_page,
+                        "source": str(figure["source"]),
                         "source_image_sha256": record.image_sha256,
                         "bbox_normalized": thaw_json(figure["bbox_normalized"]),
                         "bbox_pixels": thaw_json(figure["bbox_pixels"]),
                         "crop_size_pixels": list(crop_size),
                         "bytes": len(crop_bytes),
                         "sha256": crop_sha,
+                        **(
+                            {"source_object_hash": str(figure["source_object_hash"])}
+                            if figure.get("source_object_hash") else {}
+                        ),
                     })
             body = {
                 "schema_version": "latexstruct-ocr-figures-v1",
@@ -2562,6 +2864,26 @@ def _validate_ocr_page_figures(
         index = raw.get("index")
         normalized = raw.get("bbox_normalized")
         pixels = raw.get("bbox_pixels")
+        raw_source = str(raw.get("source") or "").strip()
+        raw_object_hash = str(raw.get("source_object_hash") or "").strip()
+        if raw_source == "host_native_pdf_object":
+            if _SHA256_RE.fullmatch(raw_object_hash) is None:
+                raise OcrBatchValidationError(
+                    "INVALID_FIGURES",
+                    f"{page_id} native figure {position} lacks its source object hash",
+                )
+            figure_source = raw_source
+        elif raw_object_hash:
+            raise OcrBatchValidationError(
+                "INVALID_FIGURES",
+                f"{page_id} figure {position} supplies an unowned object hash",
+            )
+        else:
+            # Legacy structured-vision adapters may retain a descriptive
+            # provider source such as ``codex_vision``.  It is untrusted and
+            # deliberately discarded; only the exact native host marker plus
+            # object hash can survive validation as host ownership.
+            figure_source = "host_validated_structured_vision"
         if path != expected_path or index != position:
             raise OcrBatchValidationError(
                 "INVALID_FIGURES",
@@ -2642,7 +2964,11 @@ def _validate_ocr_page_figures(
             "bbox_normalized": [nx0, ny0, nx1, ny1],
             "bbox_pixels": [px0, py0, px1, py1],
             "image_size_pixels": [image_width, image_height],
-            "source": "host_validated_structured_vision",
+            "source": figure_source,
+            **(
+                {"source_object_hash": raw_object_hash}
+                if figure_source == "host_native_pdf_object" else {}
+            ),
         }))
     if references != expected_paths:
         raise OcrBatchValidationError(

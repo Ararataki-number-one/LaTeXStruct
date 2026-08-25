@@ -456,6 +456,8 @@ def test_store_materializes_hash_bound_figure_crop_for_compile(tmp_path):
             "index": 1,
             "bbox_normalized": [0.1, 0.125, 0.6, 0.625],
             "bbox_pixels": [10, 10, 60, 50],
+            "source": "host_native_pdf_object",
+            "source_object_hash": "f" * 64,
         }],
     )
     raw = json.dumps(
@@ -488,6 +490,8 @@ def test_store_materializes_hash_bound_figure_crop_for_compile(tmp_path):
     assert crop.startswith(b"\x89PNG\r\n\x1a\n")
     assert figure_manifest["figures"][0]["crop_size_pixels"] == [50, 40]
     assert figure_manifest["figures"][0]["sha256"] == hashlib.sha256(crop).hexdigest()
+    assert figure_manifest["figures"][0]["source"] == "host_native_pdf_object"
+    assert figure_manifest["figures"][0]["source_object_hash"] == "f" * 64
     frozen = store.freeze_raw_ocr(snapshot.run_id, figure_manifest=figure_manifest)
     assert frozen["figure_manifest_sha256"] == figure_manifest["manifest_sha256"]
 
@@ -555,6 +559,7 @@ def test_batch_validator_binds_figure_paths_and_coordinates_to_host_page():
             "index": 1,
             "bbox_normalized": [0.1, 0.2, 0.6, 0.7],
             "bbox_pixels": [100, 400, 600, 1400],
+            "source": "codex_vision",
         }],
     )
 
@@ -568,6 +573,7 @@ def test_batch_validator_binds_figure_paths_and_coordinates_to_host_page():
     )[0]
 
     assert page.figures[0]["path"] == "figures/page_0007_figure_01.png"
+    assert page.figures[0]["source"] == "host_validated_structured_vision"
     assert tuple(page.figures[0]["image_size_pixels"]) == (1000, 2000)
     assert page.figures[0]["display_width_ratio"] == 0.62
     assert (

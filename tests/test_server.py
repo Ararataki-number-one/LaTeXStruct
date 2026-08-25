@@ -2017,8 +2017,13 @@ def test_pdf_ocr_inspects_once_then_processes_only_selected_original_pages():
 
             with (
                 patch("latexstruct.ocr.iter_pdf_pages", fake_render),
+                patch("latexstruct.ocr.pdf_page_text_hint", return_value=""),
+                patch("latexstruct.ocr.pdf_page_italic_terms", return_value=[]),
+                patch("latexstruct.ocr.pdf_page_relation_regions", return_value=[]),
+                patch("latexstruct.ocr.pdf_page_divider_regions", return_value=[]),
                 patch("latexstruct.ocr.pdf_page_footnote_regions", return_value=[]),
                 patch("latexstruct.ocr.pdf_page_equation_tag_regions", return_value=[]),
+                patch("latexstruct.ocr.pdf_page_framed_insets", return_value=[]),
                 patch(
                     "latexstruct.server.app._prepare_page_formula_evidence",
                     return_value=[],
@@ -2045,7 +2050,10 @@ def test_pdf_ocr_inspects_once_then_processes_only_selected_original_pages():
             assert state["page"] == 90 and state["current_index"] == 3
             assert list(state["pages"]) == ["88", "89", "90"]
             assert [state["pages"][str(n)]["task_index"] for n in (88, 89, 90)] == [1, 2, 3]
-            assert render_calls == [[88], [89], [90]]
+            # Rendering is deliberately concurrent; only the selected page set is
+            # stable here.  Consumption and persisted task order are asserted above
+            # and below.
+            assert sorted(render_calls) == [[88], [89], [90]]
             assert calls == [88, 89, 90]
             assert state["usage"]["calls"] == 3
             assert state["usage"]["total_tokens"] == 360
@@ -2058,6 +2066,9 @@ def test_pdf_ocr_inspects_once_then_processes_only_selected_original_pages():
             assert replay.json()["status"] == "partial"
             assert calls == [88, 89, 90]
         finally:
+            job = srv._ocr_jobs.get(inspected, {}) if inspected else {}
+            if job:
+                assert srv._wait_for_ocr_worker(job, timeout=10)
             job = srv._ocr_jobs.pop(inspected, {}) if inspected else {}
             shutil.rmtree(job.get("dir", ""), ignore_errors=True)
 

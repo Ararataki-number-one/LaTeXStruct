@@ -292,8 +292,16 @@ def test_unreliable_or_missing_alignment_fails_before_any_model_call():
         )
 
 
-def test_server_stage_calls_production_runner_and_atomically_publishes_verified_result(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    ("decision_verified", "decision_status"),
+    (
+        (True, AnalysisFinalStatus.VERIFIED),
+        (False, AnalysisFinalStatus.COMPLETED_WITH_ISSUES),
+    ),
+    ids=("verified", "unverified-history-best-retained"),
+)
+def test_server_stage_calls_production_runner_and_binds_history_best_result(
+    tmp_path, monkeypatch, decision_verified, decision_status
 ):
     source, candidate, deterministic = _frozen_inputs()
     result = _pipeline_result(candidate, deterministic)
@@ -480,9 +488,13 @@ def test_server_stage_calls_production_runner_and_atomically_publishes_verified_
         assert facts.silent_page_omissions == 0
         orchestration = SimpleNamespace(
             decision=SimpleNamespace(
-                verified=True,
-                status=AnalysisFinalStatus.VERIFIED,
-                failures=(),
+                verified=decision_verified,
+                status=decision_status,
+                failures=(
+                    ()
+                    if decision_verified
+                    else ("independent visual review left one unresolved issue",)
+                ),
             ),
             evidence={"machine": "facts"},
             best_candidate={"candidate_id": "cand-r0000-test"},
@@ -657,10 +669,32 @@ def test_server_stage_calls_production_runner_and_atomically_publishes_verified_
     assert calls["runner"] == 1
     assert [item[2] for item in calls["compiler"]] == [True]
     assert [item[3] for item in calls["compiler"]] == [2]
+    if not decision_verified:
+        assert result.ok is False
+        assert result.result == _tex()
+        assert result.compiled_tex == _tex()
+        assert result.compiled_pdf == candidate
+        assert result.verification["analysis_v2"]["status"] == (
+            "COMPLETED_WITH_ISSUES"
+        )
+        assert result.verification["run_status"] == "COMPLETED"
+        assert result.verification["verification_status"] == "UNVERIFIED"
+        assert result.verification["result_status"] == "COMPLETED_WITH_ISSUES"
+        assert result.verification["packaging_status"] == "NOT_RUN"
+        assert result.verification["best_candidate_retained"] is True
+        assert result.verification["rolled_back"] is False
+        assert result.verification["safe_to_export"] is False
+        assert result.verification["compile_after"]["ok"] is True
+        assert result.verification["compile_after"]["passes_completed"] == 2
+        assert "历史最佳候选" in result.report_md
+        return
     assert result.ok is True
     assert result.result == _tex()
     assert result.compiled_pdf == candidate
     assert result.verification["analysis_v2"]["status"] == "VERIFIED"
+    assert result.verification["run_status"] == "COMPLETED"
+    assert result.verification["verification_status"] == "VERIFIED"
+    assert result.verification["result_status"] == "VERIFIED"
     assert result.verification["compile_after"]["log"] == (
         "v2 compile pass 1\nv2 compile pass 2"
     )
@@ -758,6 +792,71 @@ def test_runner_failure_keeps_legacy_candidate_and_marks_v2_unverified(
     assert result.verification["analysis_v2"]["status"] == "FAILED"
     assert "C:\\Users\\Private" not in result.verification["analysis_v2"]["reason"]
     assert result.verification["safe_to_export"] is False
+
+
+def test_native_production_stage_passes_frozen_source_blocks_to_runner(
+    tmp_path,
+    monkeypatch,
+):
+    from latexstruct.core.analysis_input import build_native_ocr_pipeline_seed
+    from latexstruct.core.analysis_inventory import (
+        coerce_analysis_native_source_blocks,
+    )
+    from tests.test_analysis_input import _load, _prepared_project
+
+    native = _load(_prepared_project(tmp_path / "native-package"))
+    result = build_native_ocr_pipeline_seed(native)
+    captured = {}
+
+    def fake_native_snapshot_evidence(_analysis_input, **kwargs):
+        admission_hash = "9" * 64
+        kwargs["page_risk_admission_capture"].update({
+            "payload": {"schema_version": "test-native-admission-v1"},
+            "sha256": admission_hash,
+        })
+        return {
+            "baseline_compile_inputs_hash": native.compile_input_sha256,
+            "page_risk_admission_hash": admission_hash,
+        }
+
+    monkeypatch.setattr(
+        server,
+        "_analysis_v2_native_snapshot_evidence",
+        fake_native_snapshot_evidence,
+    )
+    monkeypatch.setattr(
+        server,
+        "_analysis_v2_client_bindings",
+        lambda _cfg: ({}, {}, {}),
+    )
+
+    def fake_runner(**kwargs):
+        captured["native_source_blocks"] = kwargs["native_source_blocks"]
+        raise RuntimeError("stop after native block wiring assertion")
+
+    server._run_analysis_v2_production_stage(
+        result,
+        pid="native-block-project",
+        project={"kind": "ocr", "mode": "ai"},
+        project_dir=tmp_path / "native-package" / "project",
+        cfg=AppConfig(analysis_backend="api", review_enabled=True),
+        raw_ocr_tex=native.raw_ocr_tex,
+        source_pdf_bytes=native.source_pdf,
+        source_pdf_page_range=native.snapshot.selected_pages,
+        compile_extra_files=dict(native.compile_extra_files),
+        pack=None,
+        run_id="native-block-wiring-run",
+        analysis_runner=fake_runner,
+        analysis_input=native,
+    )
+
+    assert captured["native_source_blocks"] == native.native_source_blocks
+    typed = coerce_analysis_native_source_blocks(
+        captured["native_source_blocks"]
+    )
+    assert typed
+    assert typed[0].block_type == "LIST_ITEM"
+    assert result.verification["analysis_v2"]["status"] == "FAILED"
 
 
 def test_non_ocr_or_non_ai_workflow_is_explicitly_skipped(tmp_path):

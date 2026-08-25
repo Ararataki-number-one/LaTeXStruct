@@ -92,6 +92,43 @@ def _features(**overrides) -> PageFeatures:
     return PageFeatures(**values)
 
 
+def _raw_text_entry(
+    source_index: int,
+    bbox: tuple[float, float, float, float],
+    text: str,
+    *,
+    math_likelihood: float,
+    font_size: float = 12.0,
+    fonts: tuple[str, ...] = ("CMR12",),
+) -> dict[str, object]:
+    evidence = {
+        "kind": "text",
+        "source_block_number": source_index,
+        "bbox": list(bbox),
+        "text": text,
+        "fonts": list(fonts),
+        "font_sizes": [font_size],
+        "flags": [0],
+        "colors": [0],
+        "line_count": 1,
+    }
+    return {
+        "kind": "text",
+        "source_index": source_index,
+        "bbox": bbox,
+        "text": text,
+        "fonts": fonts,
+        "font_size": font_size,
+        "bold": False,
+        "italic": False,
+        "line_count": 1,
+        "span_count": 1,
+        "color": 0,
+        "math_likelihood": math_likelihood,
+        "evidence": evidence,
+    }
+
+
 def _canonical_pages(pages) -> bytes:
     return (
         json.dumps(
@@ -122,6 +159,347 @@ def test_born_digital_page_extracts_host_features_and_plain_candidate():
     assert page.candidate.blocks == page.blocks
     assert classify_page(page.candidate) == page
     assert all(len(block.source_object_hash) == 64 for block in page.blocks)
+
+
+def test_math_font_signal_is_weighted_by_covered_characters():
+    prose_prefix = "For every finite graph, the vertex "
+    prose_suffix = " belongs to the selected independent set."
+    prose = prose_prefix + "x" + prose_suffix
+    prose_spans = (
+        {"text": prose_prefix, "font": "CMR12"},
+        {"text": "x", "font": "CMMI12"},
+        {"text": prose_suffix, "font": "CMR12"},
+    )
+    formula = "x + y = z"
+    formula_spans = (
+        {"text": "x", "font": "CMMI12"},
+        {"text": " + ", "font": "CMSY10"},
+        {"text": "y", "font": "CMMI12"},
+        {"text": " = ", "font": "CMSY10"},
+        {"text": "z", "font": "CMMI12"},
+    )
+
+    assert ocr_extraction._math_likelihood(prose, prose_spans) < 0.16
+    assert ocr_extraction._math_likelihood(formula, formula_spans) >= 0.55
+
+
+def test_numbered_heading_is_not_misclassified_as_bibliography_or_list():
+    common = {
+        "kind": "text",
+        "bbox": (40.0, 40.0, 360.0, 70.0),
+        "font_size": 12.0,
+        "bold": False,
+        "fonts": ("CMR12", "CMCSC10"),
+        "math_likelihood": 0.0,
+    }
+    heading = {**common, "text": "1. Introduction"}
+    subsection = {
+        **common,
+        "text": "1.2. Ramsey numbers. This paragraph continues the section.",
+        "fonts": ("CMR12", "CMBX12"),
+    }
+    bibliography = {
+        **common,
+        "text": "[1] P. Erdős, Some remarks on Ramsey theory.",
+        "fonts": ("CMR12",),
+    }
+    dotted_bibliography = {
+        **common,
+        "text": "1. P. Erdős, Some remarks on Ramsey theory.",
+        "fonts": ("CMR12",),
+    }
+    numbered_list = {
+        **common,
+        "text": "1. Choose a vertex and remove its neighbourhood.",
+        "fonts": ("CMR12",),
+    }
+
+    assert ocr_extraction._block_type(
+        heading, page_height=600.0, median_font_size=12.0
+    ) is PageBlockType.HEADING_TEXT
+    assert ocr_extraction._block_type(
+        subsection, page_height=600.0, median_font_size=12.0
+    ) is PageBlockType.HEADING_TEXT
+    assert ocr_extraction._block_type(
+        bibliography, page_height=600.0, median_font_size=12.0
+    ) is PageBlockType.BIBLIOGRAPHY_ITEM
+    assert ocr_extraction._block_type(
+        dotted_bibliography, page_height=600.0, median_font_size=12.0
+    ) is PageBlockType.BIBLIOGRAPHY_ITEM
+    assert ocr_extraction._block_type(
+        numbered_list, page_height=600.0, median_font_size=12.0
+    ) is PageBlockType.LIST_ITEM
+
+
+def test_isolated_edge_folio_is_distinct_from_body_digits_and_footnotes():
+    body = _raw_text_entry(
+        1,
+        (40.0, 40.0, 360.0, 500.0),
+        "A body paragraph contains the number 17 without making it a folio.",
+        math_likelihood=0.0,
+        font_size=11.0,
+    )
+    folio = _raw_text_entry(
+        2,
+        (195.0, 552.0, 205.0, 560.0),
+        "17",
+        math_likelihood=0.0,
+        font_size=8.0,
+    )
+    assert ocr_extraction._is_isolated_printed_page_number(
+        folio,
+        (body, folio),
+        page_width=400.0,
+        page_height=600.0,
+        median_font_size=11.0,
+    ) is True
+    assert ocr_extraction._block_type(
+        folio,
+        page_height=600.0,
+        median_font_size=11.0,
+        printed_page_number=True,
+    ) is PageBlockType.PRINTED_PAGE_NUMBER
+
+    interior = dict(folio, bbox=(195.0, 300.0, 205.0, 308.0))
+    assert ocr_extraction._is_isolated_printed_page_number(
+        interior,
+        (body, interior),
+        page_width=400.0,
+        page_height=600.0,
+        median_font_size=11.0,
+    ) is False
+
+    marker = dict(folio, bbox=(42.0, 540.0, 47.0, 548.0), text="1")
+    footnote_text = _raw_text_entry(
+        3,
+        (50.0, 538.0, 330.0, 550.0),
+        "Publisher footnote text remains source content.",
+        math_likelihood=0.0,
+        font_size=8.0,
+    )
+    assert ocr_extraction._is_isolated_printed_page_number(
+        marker,
+        (body, marker, footnote_text),
+        page_width=400.0,
+        page_height=600.0,
+        median_font_size=11.0,
+    ) is False
+    assert ocr_extraction._block_type(
+        footnote_text,
+        page_height=600.0,
+        median_font_size=11.0,
+    ) is PageBlockType.FOOTNOTE
+
+
+def test_real_extraction_keeps_printed_folio_out_of_footnote_type():
+    def page_with_folio(page) -> None:
+        page.insert_textbox(
+            (40, 40, 360, 500),
+            "A sufficiently long searchable paragraph establishes the body font size.",
+            fontsize=11,
+        )
+        page.insert_text((195, 570), "17", fontsize=8)
+
+    extracted = extract_pdf_pages(_pdf(page_with_folio))[0]
+    folios = [
+        block for block in extracted.blocks
+        if block.block_type is PageBlockType.PRINTED_PAGE_NUMBER
+    ]
+    assert [block.plain_text for block in folios] == ["17"]
+    assert all(
+        block.block_type is not PageBlockType.FOOTNOTE
+        for block in folios
+    )
+
+
+def test_math_region_coalesces_superscript_fraction_and_binomial_source_objects():
+    source_entries = [
+        _raw_text_entry(
+            10,
+            (100.0, 100.0, 145.0, 115.0),
+            "( n )",
+            math_likelihood=0.70,
+            fonts=("CMEX10", "CMMI12"),
+        ),
+        _raw_text_entry(
+            11,
+            (118.0, 92.0, 126.0, 101.0),
+            "2",
+            math_likelihood=0.60,
+            font_size=8.0,
+            fonts=("CMR8",),
+        ),
+        _raw_text_entry(
+            12,
+            (112.0, 105.0, 133.0, 107.0),
+            "-",
+            math_likelihood=0.95,
+            fonts=("CMSY10",),
+        ),
+        _raw_text_entry(
+            13,
+            (116.0, 109.0, 130.0, 118.0),
+            "k+1",
+            math_likelihood=0.65,
+            font_size=8.0,
+            fonts=("CMMI8", "CMR8"),
+        ),
+        _raw_text_entry(
+            14,
+            (98.0, 90.0, 147.0, 120.0),
+            "()",
+            math_likelihood=0.55,
+            fonts=("CMEX10",),
+        ),
+    ]
+
+    first = ocr_extraction._coalesce_math_regions(
+        source_entries,
+        page_width=400.0,
+        median_font_size=12.0,
+        double_column_likelihood=0.0,
+    )
+    second = ocr_extraction._coalesce_math_regions(
+        tuple(reversed(source_entries)),
+        page_width=400.0,
+        median_font_size=12.0,
+        double_column_likelihood=0.0,
+    )
+
+    assert first == second
+    assert len(first) == 1
+    region = first[0]
+    assert region["bbox"] == (98.0, 90.0, 147.0, 120.0)
+    assert region["block_type_override"] is PageBlockType.DISPLAY_MATH
+    assert region["source_object_count"] == len(source_entries)
+    assert region["evidence"]["kind"] == "coalesced_math_region"
+    assert len(region["evidence"]["source_object_hashes"]) == len(source_entries)
+    assert len(region["evidence"]["source_objects"]) == len(source_entries)
+    assert ocr_extraction._hash_object(region["evidence"]) == ocr_extraction._hash_object(
+        second[0]["evidence"]
+    )
+
+
+def test_math_region_coalesces_overlapping_inline_math_with_its_paragraph():
+    entries = [
+        _raw_text_entry(
+            1,
+            (40.0, 100.0, 350.0, 118.0),
+            "For every graph the displayed value is visible.",
+            math_likelihood=0.04,
+        ),
+        _raw_text_entry(
+            2,
+            (236.0, 99.0, 252.0, 114.0),
+            "x",
+            math_likelihood=0.72,
+            fonts=("CMMI12",),
+        ),
+        _raw_text_entry(
+            3,
+            (250.0, 93.0, 257.0, 102.0),
+            "2",
+            math_likelihood=0.60,
+            font_size=8.0,
+            fonts=("CMR8",),
+        ),
+    ]
+
+    regions = ocr_extraction._coalesce_math_regions(
+        entries,
+        page_width=400.0,
+        median_font_size=12.0,
+        double_column_likelihood=0.0,
+    )
+
+    assert len(regions) == 1
+    assert regions[0]["bbox"] == (40.0, 93.0, 350.0, 118.0)
+    assert regions[0]["block_type_override"] is PageBlockType.MIXED_TEXT_MATH
+    assert regions[0]["source_object_count"] == 3
+
+
+def test_math_region_keeps_adjacent_independent_formulas_separate():
+    entries = [
+        _raw_text_entry(
+            1,
+            (60.0, 100.0, 120.0, 115.0),
+            "a=b",
+            math_likelihood=0.75,
+            fonts=("CMMI12", "CMSY10"),
+        ),
+        _raw_text_entry(
+            2,
+            (112.0, 93.0, 120.0, 102.0),
+            "2",
+            math_likelihood=0.60,
+            font_size=8.0,
+            fonts=("CMR8",),
+        ),
+        _raw_text_entry(
+            3,
+            (220.0, 100.0, 280.0, 115.0),
+            "c=d",
+            math_likelihood=0.75,
+            fonts=("CMMI12", "CMSY10"),
+        ),
+        _raw_text_entry(
+            4,
+            (100.0, 140.0, 170.0, 155.0),
+            "u=v",
+            math_likelihood=0.75,
+            fonts=("CMEX10", "CMMI12", "CMSY10"),
+        ),
+        _raw_text_entry(
+            5,
+            (100.0, 154.5, 170.0, 169.5),
+            "w=z",
+            math_likelihood=0.75,
+            fonts=("CMEX10", "CMMI12", "CMSY10"),
+        ),
+    ]
+
+    regions = ocr_extraction._coalesce_math_regions(
+        entries,
+        page_width=400.0,
+        median_font_size=12.0,
+        double_column_likelihood=0.0,
+    )
+
+    assert len(regions) == 4
+    assert sorted(int(region.get("source_object_count") or 1) for region in regions) == [
+        1,
+        1,
+        1,
+        2,
+    ]
+
+
+def test_math_region_never_coalesces_across_detected_physical_columns():
+    entries = [
+        _raw_text_entry(
+            1,
+            (250.0, 100.0, 300.0, 115.0),
+            "a=b",
+            math_likelihood=0.75,
+            fonts=("CMMI12", "CMSY10"),
+        ),
+        _raw_text_entry(
+            2,
+            (300.0, 100.0, 350.0, 115.0),
+            "c=d",
+            math_likelihood=0.75,
+            fonts=("CMMI12", "CMSY10"),
+        ),
+    ]
+
+    regions = ocr_extraction._coalesce_math_regions(
+        entries,
+        page_width=600.0,
+        median_font_size=12.0,
+        double_column_likelihood=0.80,
+    )
+
+    assert len(regions) == 2
 
 
 def test_scanned_and_hybrid_pages_take_visual_paths():

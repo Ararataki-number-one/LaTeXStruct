@@ -40,6 +40,16 @@ from .analysis_runtime import (
     decide_final_status,
 )
 from .analysis_orchestrator import PageAnalysisInput
+from .analysis_inventory import (
+    AnalysisInventoryBundle,
+    AnalysisInventoryGate,
+    InventoryStatus,
+    build_analysis_inventory_bundle,
+    build_host_inventory_authorizations,
+    coerce_analysis_inventory_authorizations,
+    coerce_analysis_native_source_blocks,
+    evaluate_analysis_inventory_gate,
+)
 from .analysis_risk import (
     PageRiskPreflightInput,
     build_page_risk_admission,
@@ -143,6 +153,9 @@ class ProductionAnalysisArchiveEvidence:
     analysis_configuration: Mapping[str, object]
     analysis_configuration_sha256: str
     risk_preflight: tuple[PageRiskPreflightInput, ...]
+    baseline_inventory: AnalysisInventoryBundle | None = None
+    final_inventory: AnalysisInventoryBundle | None = None
+    inventory_gate: AnalysisInventoryGate | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.snapshot, AnalysisRunSnapshot):
@@ -167,6 +180,26 @@ class ProductionAnalysisArchiveEvidence:
         digest = str(self.analysis_configuration_sha256 or "").lower()
         if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             raise ValueError("production analysis configuration hash is invalid")
+        inventories = (
+            self.baseline_inventory,
+            self.final_inventory,
+            self.inventory_gate,
+        )
+        if any(item is not None for item in inventories) and not all(
+            item is not None for item in inventories
+        ):
+            raise TypeError("production inventory evidence must be supplied as one closure")
+        if self.baseline_inventory is not None and (
+            not isinstance(self.baseline_inventory, AnalysisInventoryBundle)
+            or not isinstance(self.final_inventory, AnalysisInventoryBundle)
+            or not isinstance(self.inventory_gate, AnalysisInventoryGate)
+        ):
+            raise TypeError("production inventory evidence has an invalid type")
+        if self.final_inventory is not None and (
+            evaluate_analysis_inventory_gate(self.final_inventory).as_dict()
+            != self.inventory_gate.as_dict()
+        ):
+            raise ValueError("production inventory gate differs from its final bundle")
         object.__setattr__(self, "page_inputs", page_inputs)
         object.__setattr__(self, "risk_preflight", risk_preflight)
         object.__setattr__(self, "analysis_configuration_sha256", digest)
@@ -206,6 +239,9 @@ class _ArchiveBuilder:
 
     def add_json(self, path: str, value: object, *, role: str) -> None:
         self.add_bytes(path, _pretty_json_bytes(value), role=role)
+
+    def add_canonical_json(self, path: str, value: object, *, role: str) -> None:
+        self.add_bytes(path, canonical_json_bytes(value), role=role)
 
     def add_local_sums(self, directory: str) -> None:
         prefix = self._relative_path(directory).rstrip("/") + "/"
@@ -771,6 +807,231 @@ def stable_source_page_id(source_pdf_sha256: str, page_number: int) -> str:
     if not re.fullmatch(r"[0-9a-f]{64}", digest) or int(page_number) < 1:
         raise ValueError("stable page identity requires a PDF hash and positive page")
     return f"src-{digest[:12]}-p{int(page_number):06d}"
+
+
+def _inventory_source_page_map(
+    page_entries: Sequence[PageMapEntry],
+    production_evidence: ProductionAnalysisArchiveEvidence | None,
+) -> Mapping[int, tuple[int, ...]]:
+    if (
+        production_evidence is not None
+        and production_evidence.baseline_inventory is not None
+    ):
+        source_map = dict(production_evidence.baseline_inventory.source_page_map)
+        if tuple(source_map) != tuple(
+            item.source_page_number for item in page_entries
+        ):
+            raise AnalysisArchiveError(
+                "production inventory page map differs from the snapshot"
+            )
+        return source_map
+
+    parsed: dict[int, tuple[int, ...]] = {}
+    all_numeric = True
+    for entry in page_entries:
+        pages: list[int] = []
+        for page_id in entry.candidate_pdf_page_ids:
+            match = re.fullmatch(r"candidate-page-([1-9][0-9]*)", page_id)
+            if match is None:
+                all_numeric = False
+                break
+            pages.append(int(match.group(1)))
+        if not all_numeric:
+            break
+        parsed[entry.source_page_number] = tuple(pages)
+    if all_numeric:
+        return parsed
+
+    # Legacy PageMapEntry ids were opaque.  Preserve their multiplicity and
+    # ordering with a deterministic local numbering; they cannot claim to be
+    # the native production inventory because no typed closure was supplied.
+    fallback: dict[int, tuple[int, ...]] = {}
+    cursor = 1
+    for entry in page_entries:
+        count = len(entry.candidate_pdf_page_ids)
+        fallback[entry.source_page_number] = tuple(range(cursor, cursor + count))
+        cursor += count
+    return fallback
+
+
+def _inventory_closure(
+    *,
+    baseline_tex: str,
+    current_tex: str,
+    page_entries: Sequence[PageMapEntry],
+    production_evidence: ProductionAnalysisArchiveEvidence | None,
+) -> tuple[AnalysisInventoryBundle, AnalysisInventoryBundle, AnalysisInventoryGate]:
+    source_map = _inventory_source_page_map(page_entries, production_evidence)
+    configuration = (
+        production_evidence.analysis_configuration
+        if production_evidence is not None else {}
+    )
+    if (
+        production_evidence is not None
+        and production_evidence.baseline_inventory is not None
+    ):
+        native_blocks = production_evidence.baseline_inventory.native_source_blocks
+        native_blocks_supplied = (
+            production_evidence.baseline_inventory.native_source_blocks_supplied
+        )
+        authorizations = production_evidence.baseline_inventory.authorizations
+        require_native = (
+            production_evidence.baseline_inventory.native_heading_inventory_required
+        )
+    else:
+        raw_blocks = configuration.get("native_source_blocks", ())
+        raw_authorizations = configuration.get("inventory_authorizations", ())
+        if (
+            not isinstance(raw_blocks, (list, tuple))
+            or not isinstance(raw_authorizations, (list, tuple))
+        ):
+            raise AnalysisArchiveError(
+                "production inventory configuration is malformed"
+            )
+        try:
+            native_blocks = coerce_analysis_native_source_blocks(raw_blocks)
+            authorizations = coerce_analysis_inventory_authorizations(
+                raw_authorizations
+            )
+        except (TypeError, ValueError) as exc:
+            raise AnalysisArchiveError(
+                "production inventory configuration is invalid"
+            ) from exc
+        require_native = bool(
+            configuration.get("native_heading_inventory_required", False)
+        )
+        raw_supplied = configuration.get(
+            "native_source_blocks_supplied",
+            "native_source_blocks" in configuration,
+        )
+        if type(raw_supplied) is not bool:
+            raise AnalysisArchiveError(
+                "production native inventory supplied flag is malformed"
+            )
+        native_blocks_supplied = raw_supplied
+    authorization_source = configuration.get("inventory_authorization_source")
+    if authorization_source is not None:
+        if authorization_source not in {
+            "HOST_REQUIRED_POLICY", "CALLER_FROZEN_HOST_POLICY"
+        }:
+            raise AnalysisArchiveError(
+                "production inventory authorization source is invalid"
+            )
+        if authorization_source == "HOST_REQUIRED_POLICY":
+            if configuration.get("inventory_policy_schema") != (
+                "latexstruct-host-inventory-policy-v1"
+            ):
+                raise AnalysisArchiveError(
+                    "production host inventory policy schema is invalid"
+                )
+            try:
+                expected_authorizations = build_host_inventory_authorizations(
+                    native_blocks,
+                    ocr_manifest_sha256=str(configuration.get(
+                        "inventory_policy_ocr_manifest_sha256", ""
+                    )),
+                    generated_toc_required=True,
+                )
+            except (TypeError, ValueError) as exc:
+                raise AnalysisArchiveError(
+                    "production host inventory policy binding is invalid"
+                ) from exc
+            if expected_authorizations != authorizations:
+                raise AnalysisArchiveError(
+                    "production host inventory authorizations are forged"
+                )
+    try:
+        baseline = build_analysis_inventory_bundle(
+            baseline_tex,
+            baseline_tex,
+            source_map,
+            native_source_blocks=(native_blocks if native_blocks_supplied else None),
+            authorizations=authorizations,
+            require_native_heading_inventory=require_native,
+        )
+        final = build_analysis_inventory_bundle(
+            baseline_tex,
+            current_tex,
+            source_map,
+            native_source_blocks=(native_blocks if native_blocks_supplied else None),
+            authorizations=authorizations,
+            require_native_heading_inventory=require_native,
+        )
+    except (TypeError, ValueError) as exc:
+        raise AnalysisArchiveError(
+            f"analysis inventory cannot be rebuilt from archived artifacts: {exc}"
+        ) from exc
+    gate = evaluate_analysis_inventory_gate(final)
+    baseline_hash = sha256_text(baseline_tex)
+    current_hash = sha256_text(current_tex)
+    if (
+        baseline.baseline_tex_sha256 != baseline_hash
+        or baseline.current_tex_sha256 != baseline_hash
+        or final.baseline_tex_sha256 != baseline_hash
+        or final.current_tex_sha256 != current_hash
+    ):
+        raise AnalysisArchiveError("analysis inventory TeX artifact binding is stale")
+
+    if production_evidence is not None:
+        configuration = production_evidence.analysis_configuration
+        claimed_digest = configuration.get("baseline_inventory_digest")
+        claimed_json_hash = configuration.get("baseline_inventory_json_sha256")
+        baseline_json_hash = sha256_bytes(canonical_json_bytes(baseline.as_dict()))
+        if (claimed_digest is not None or claimed_json_hash is not None) and (
+            claimed_digest != baseline.digest
+            or claimed_json_hash != baseline_json_hash
+        ):
+            raise AnalysisArchiveError(
+                "production configuration inventory binding is forged"
+            )
+        if production_evidence.baseline_inventory is not None:
+            supplied = (
+                production_evidence.baseline_inventory,
+                production_evidence.final_inventory,
+                production_evidence.inventory_gate,
+            )
+            rebuilt = (baseline, final, gate)
+            if any(
+                canonical_json_bytes(left.as_dict())
+                != canonical_json_bytes(right.as_dict())
+                for left, right in zip(supplied, rebuilt)
+            ):
+                raise AnalysisArchiveError(
+                    "production inventory evidence differs from archived TeX"
+                )
+    return baseline, final, gate
+
+
+def _apply_inventory_decision_gate(
+    decision: VerificationDecision,
+    gate: AnalysisInventoryGate,
+    *,
+    processing_failed: bool,
+) -> VerificationDecision:
+    if gate.passed and gate.status is InventoryStatus.PASS:
+        return decision
+    scan_failed = gate.status is InventoryStatus.FAILED
+    status = (
+        AnalysisFinalStatus.FAILED_BEST_RETAINED
+        if scan_failed
+        or processing_failed
+        or decision.status is AnalysisFinalStatus.FAILED_BEST_RETAINED
+        else AnalysisFinalStatus.COMPLETED_WITH_ISSUES
+    )
+    reason = (
+        "analysis_inventory_scan_failed"
+        if scan_failed
+        else "analysis_inventory_residual"
+    )
+    blockers = tuple(
+        f"analysis_inventory_blocked:{category}"
+        for category in gate.blocked_categories
+    )
+    return VerificationDecision(
+        status=status,
+        verified=False,
+        failures=tuple(dict.fromkeys((*decision.failures, reason, *blockers))),
+    )
 
 
 def _coerce_models(values: Sequence[ModelBinding | Mapping[str, Any]]) -> tuple[ModelBinding, ...]:
@@ -2990,6 +3251,12 @@ def freeze_pipeline_analysis_run(
             _jsonable(item) for item in runtime.candidates.rollback_history
         ),
     )
+    baseline_inventory, final_inventory, inventory_gate = _inventory_closure(
+        baseline_tex=artifacts.baseline_tex,
+        current_tex=best_tex,
+        page_entries=page_entries,
+        production_evidence=production_evidence,
+    )
     decision, _derived_source = _derive_final_decision(
         evidence=evidence,
         page_map=page_entries,
@@ -3011,6 +3278,11 @@ def freeze_pipeline_analysis_run(
             decision,
             production_accounting,
         )
+    decision = _apply_inventory_decision_gate(
+        decision,
+        inventory_gate,
+        processing_failed=processing_failed,
+    )
     checked_page_ids = set(evidence.checked_page_ids)
     page_units = []
     for unit in runtime_page_units:
@@ -3142,6 +3414,19 @@ def freeze_pipeline_analysis_run(
         "best_candidate_id": best_record.candidate_id,
         "attempted_candidate_id": attempted_record.candidate_id,
         "rollback_count": len(runtime.candidates.rollback_history),
+        "baseline_inventory_digest": baseline_inventory.digest,
+        "final_inventory_digest": final_inventory.digest,
+        "inventory_gate_digest": inventory_gate.digest,
+        "baseline_inventory_json_sha256": sha256_bytes(
+            canonical_json_bytes(baseline_inventory.as_dict())
+        ),
+        "final_inventory_json_sha256": sha256_bytes(
+            canonical_json_bytes(final_inventory.as_dict())
+        ),
+        "inventory_gate_json_sha256": sha256_bytes(
+            canonical_json_bytes(inventory_gate.as_dict())
+        ),
+        "inventory_gate_status": inventory_gate.status.value,
     }
     performance_payload = _performance_payload(
         performance_metrics,
@@ -3185,6 +3470,21 @@ def freeze_pipeline_analysis_run(
             production_archive_payloads["risk_preflight"],
             role="PAGE_RISK_PREFLIGHT",
         )
+    builder.add_canonical_json(
+        "audit/analysis_inventory_baseline.json",
+        baseline_inventory.as_dict(),
+        role="ANALYSIS_INVENTORY_BASELINE",
+    )
+    builder.add_canonical_json(
+        "audit/analysis_inventory_final.json",
+        final_inventory.as_dict(),
+        role="ANALYSIS_INVENTORY_FINAL",
+    )
+    builder.add_canonical_json(
+        "audit/analysis_inventory_gate.json",
+        inventory_gate.as_dict(),
+        role="ANALYSIS_INVENTORY_GATE",
+    )
     builder.add_json("audit/page_units.json", page_units, role="PAGE_UNITS")
     builder.add_json("audit/issue_ledger.json", ledger_payload, role="ISSUE_LEDGER")
     builder.add_json("audit/formal_inventory.json", formal_inventory, role="FORMAL_INVENTORY")
@@ -3324,11 +3624,29 @@ def verify_frozen_analysis_run(run_directory: str | Path) -> bool:
         final_decision = json.loads(
             (root / "audit" / "final_decision.json").read_text(encoding="utf-8")
         )
+        baseline_inventory_payload = json.loads(
+            (root / "audit" / "analysis_inventory_baseline.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        final_inventory_payload = json.loads(
+            (root / "audit" / "analysis_inventory_final.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        inventory_gate_payload = json.loads(
+            (root / "audit" / "analysis_inventory_gate.json").read_text(
+                encoding="utf-8"
+            )
+        )
         if (
             not isinstance(snapshot, dict)
             or not isinstance(verification, dict)
             or not isinstance(performance, dict)
             or not isinstance(final_decision, dict)
+            or not isinstance(baseline_inventory_payload, dict)
+            or not isinstance(final_inventory_payload, dict)
+            or not isinstance(inventory_gate_payload, dict)
         ):
             return False
         stored_snapshot_hash = snapshot.get("snapshot_hash")
@@ -3354,6 +3672,216 @@ def verify_frozen_analysis_run(run_directory: str | Path) -> bool:
         ):
             return False
         has_production_authority = snapshot.get("evidence_hashes") is not None
+        configuration_archive = None
+        authoritative_configuration = None
+        if has_production_authority:
+            configuration_archive = json.loads(
+                (root / "audit" / "analysis_configuration.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            if not isinstance(configuration_archive, Mapping) or set(
+                configuration_archive
+            ) != {
+                "schema", "analysis_configuration",
+                "analysis_configuration_sha256",
+            }:
+                return False
+            authoritative_configuration = configuration_archive.get(
+                "analysis_configuration"
+            )
+            evidence_hashes = snapshot.get("evidence_hashes")
+            if (
+                configuration_archive.get("schema")
+                != _ANALYSIS_CONFIGURATION_SCHEMA
+                or not isinstance(authoritative_configuration, Mapping)
+                or not isinstance(evidence_hashes, Mapping)
+            ):
+                return False
+            configuration_sha256 = sha256_bytes(
+                canonical_json_bytes(authoritative_configuration)
+            )
+            if (
+                configuration_archive.get("analysis_configuration_sha256")
+                != configuration_sha256
+                or snapshot.get("config_hash") != configuration_sha256
+                or evidence_hashes.get("analysis_config_hash")
+                != configuration_sha256
+            ):
+                return False
+            raw_map_entries = authoritative_configuration.get(
+                "candidate_page_map"
+            )
+            if not isinstance(raw_map_entries, list):
+                return False
+            source_page_map: dict[int, tuple[int, ...]] = {}
+            for entry in raw_map_entries:
+                if (
+                    not isinstance(entry, list)
+                    or len(entry) != 2
+                    or type(entry[0]) is not int
+                    or not isinstance(entry[1], list)
+                ):
+                    return False
+                source_page_map[entry[0]] = tuple(entry[1])
+            if not source_page_map:
+                return False
+            raw_native_blocks = authoritative_configuration.get(
+                "native_source_blocks"
+            )
+            native_blocks_supplied = authoritative_configuration.get(
+                "native_source_blocks_supplied"
+            )
+            raw_authorizations = authoritative_configuration.get(
+                "inventory_authorizations"
+            )
+            require_native = authoritative_configuration.get(
+                "native_heading_inventory_required"
+            )
+        else:
+            raw_source_map = baseline_inventory_payload.get("source_page_map")
+            if not isinstance(raw_source_map, Mapping) or not raw_source_map:
+                return False
+            source_page_map = {}
+            for raw_page, raw_pdf_pages in raw_source_map.items():
+                if (
+                    not isinstance(raw_page, str)
+                    or not raw_page.isdigit()
+                    or not isinstance(raw_pdf_pages, list)
+                ):
+                    return False
+                source_page_map[int(raw_page)] = tuple(raw_pdf_pages)
+            raw_native_blocks = baseline_inventory_payload.get(
+                "native_source_blocks"
+            )
+            native_blocks_supplied = baseline_inventory_payload.get(
+                "native_source_blocks_supplied"
+            )
+            raw_authorizations = baseline_inventory_payload.get("authorizations")
+            require_native = baseline_inventory_payload.get(
+                "native_heading_inventory_required"
+            )
+        if (
+            not isinstance(raw_native_blocks, list)
+            or not isinstance(raw_authorizations, list)
+            or type(require_native) is not bool
+            or type(native_blocks_supplied) is not bool
+        ):
+            return False
+        native_blocks = coerce_analysis_native_source_blocks(raw_native_blocks)
+        authorizations = coerce_analysis_inventory_authorizations(
+            raw_authorizations
+        )
+        if has_production_authority:
+            expected_source_map = {
+                str(page): list(pdf_pages)
+                for page, pdf_pages in source_page_map.items()
+            }
+            if (
+                baseline_inventory_payload.get("source_page_map")
+                != expected_source_map
+                or baseline_inventory_payload.get("native_source_blocks")
+                != [item.as_dict() for item in native_blocks]
+                or baseline_inventory_payload.get("native_source_blocks_supplied")
+                is not native_blocks_supplied
+                or baseline_inventory_payload.get("authorizations")
+                != [item.as_dict() for item in authorizations]
+                or baseline_inventory_payload.get(
+                    "native_heading_inventory_required"
+                ) is not require_native
+            ):
+                return False
+            authorization_source = authoritative_configuration.get(
+                "inventory_authorization_source"
+            )
+            if authorization_source == "HOST_REQUIRED_POLICY":
+                manifest_hash = authoritative_configuration.get(
+                    "inventory_policy_ocr_manifest_sha256"
+                )
+                if (
+                    authoritative_configuration.get("inventory_policy_schema")
+                    != "latexstruct-host-inventory-policy-v1"
+                    or manifest_hash
+                    != snapshot["evidence_hashes"].get(
+                        "ocr_baseline_manifest_hash"
+                    )
+                    or build_host_inventory_authorizations(
+                        native_blocks,
+                        ocr_manifest_sha256=str(manifest_hash or ""),
+                        generated_toc_required=True,
+                    ) != authorizations
+                ):
+                    return False
+            elif authorization_source != "CALLER_FROZEN_HOST_POLICY":
+                return False
+        baseline_tex_value = (
+            root / "baseline" / "baseline.tex"
+        ).read_text(encoding="utf-8")
+        best_tex_value = (
+            root / "candidates" / "best" / "candidate.tex"
+        ).read_text(encoding="utf-8")
+        rebuilt_baseline = build_analysis_inventory_bundle(
+            baseline_tex_value,
+            baseline_tex_value,
+            source_page_map,
+            native_source_blocks=(native_blocks if native_blocks_supplied else None),
+            authorizations=authorizations,
+            require_native_heading_inventory=require_native,
+        )
+        rebuilt_final = build_analysis_inventory_bundle(
+            baseline_tex_value,
+            best_tex_value,
+            source_page_map,
+            native_source_blocks=(native_blocks if native_blocks_supplied else None),
+            authorizations=authorizations,
+            require_native_heading_inventory=require_native,
+        )
+        rebuilt_gate = evaluate_analysis_inventory_gate(rebuilt_final)
+        if has_production_authority and (
+            authoritative_configuration.get("baseline_inventory_digest")
+            != rebuilt_baseline.digest
+            or authoritative_configuration.get(
+                "baseline_inventory_json_sha256"
+            )
+            != sha256_bytes(canonical_json_bytes(rebuilt_baseline.as_dict()))
+        ):
+            return False
+        if (
+            canonical_json_bytes(baseline_inventory_payload)
+            != canonical_json_bytes(rebuilt_baseline.as_dict())
+            or canonical_json_bytes(final_inventory_payload)
+            != canonical_json_bytes(rebuilt_final.as_dict())
+            or canonical_json_bytes(inventory_gate_payload)
+            != canonical_json_bytes(rebuilt_gate.as_dict())
+        ):
+            return False
+        if (
+            final_decision.get("baseline_inventory_digest")
+            != rebuilt_baseline.digest
+            or final_decision.get("final_inventory_digest")
+            != rebuilt_final.digest
+            or final_decision.get("inventory_gate_digest") != rebuilt_gate.digest
+            or final_decision.get("inventory_gate_status")
+            != rebuilt_gate.status.value
+            or final_decision.get("baseline_inventory_json_sha256")
+            != sha256_bytes(canonical_json_bytes(rebuilt_baseline.as_dict()))
+            or final_decision.get("final_inventory_json_sha256")
+            != sha256_bytes(canonical_json_bytes(rebuilt_final.as_dict()))
+            or final_decision.get("inventory_gate_json_sha256")
+            != sha256_bytes(canonical_json_bytes(rebuilt_gate.as_dict()))
+        ):
+            return False
+        # A non-inventory failure may also revoke VERIFIED.  The unsafe
+        # direction is the converse: a blocked inventory can never be VERIFIED
+        # and must remain explicit in the decision failure ledger.
+        if not rebuilt_gate.passed and (
+            decision_verified
+            or not any(
+                str(item).startswith("analysis_inventory_")
+                for item in decision_failures
+            )
+        ):
+            return False
         if not has_production_authority and (
             decision_status == AnalysisFinalStatus.VERIFIED.value
             or decision_verified is True
@@ -3378,11 +3906,6 @@ def verify_frozen_analysis_run(run_directory: str | Path) -> bool:
                     encoding="utf-8"
                 )
             ))
-            configuration_archive = json.loads(
-                (root / "audit" / "analysis_configuration.json").read_text(
-                    encoding="utf-8"
-                )
-            )
             risk_preflight_archive = json.loads(
                 (root / "audit" / "risk_preflight.json").read_text(
                     encoding="utf-8"

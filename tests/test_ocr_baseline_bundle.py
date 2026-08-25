@@ -18,6 +18,15 @@ from latexstruct.core.ocr_baseline import (
     OcrCompileInvocationEvidence,
 )
 from latexstruct.core.ocr_artifacts import load_verified_ocr_baseline_bundle
+from latexstruct.core.ocr_evidence_correction import (
+    EvidenceCorrectionOperation,
+    EvidenceCorrectionProductionInput,
+    EvidenceCorrectionStatus,
+    IndependentEvidenceVerification,
+    SourceEvidenceAuthorization,
+    produce_evidence_corrected_baseline_from_input,
+    sha256_text,
+)
 from latexstruct.core.ocr_manifest import (
     ArtifactInput,
     DEFAULT_MANIFEST_PATH,
@@ -36,6 +45,7 @@ from latexstruct.core.ocr_runtime import (
 from latexstruct.server.app import (
     _analysis_v2_snapshot_evidence,
     _persist_recomputable_ocr_baseline,
+    _select_evidence_corrected_ocr_baseline,
     _verified_v2_baseline_for_analysis,
 )
 from tests.test_ocr_manifest import (
@@ -45,6 +55,7 @@ from tests.test_ocr_manifest import (
     _fixture,
     _with_measured_compile_evidence,
 )
+from tests.test_ocr_block_inventory import source_classification
 
 
 def _prepared_store(tmp_path: Path, *, compile_status: str = "COMPILED"):
@@ -54,6 +65,66 @@ def _prepared_store(tmp_path: Path, *, compile_status: str = "COMPILED"):
     store = OcrRunStore(tmp_path / "runs")
     store.initialize(snapshot, inputs["source"].data)
     return store, snapshot, bundle
+
+
+def _production_correction_input(
+    raw_tex: str,
+    syntax_tex: str,
+    *,
+    authorized: bool = True,
+) -> EvidenceCorrectionProductionInput:
+    old_text = "Baseline"
+    new_text = "Corrected"
+    start = syntax_tex.index(old_text)
+    source_page_sha = sha256_text("immutable source page one")
+    source_evidence_sha = sha256_text("source evidence page one")
+    operation = EvidenceCorrectionOperation(
+        operation_id="correct-baseline-word",
+        syntax_baseline_sha256=sha256_text(syntax_tex),
+        page_id=make_page_id(1),
+        source_page_number=1,
+        start_offset=start,
+        end_offset=start + len(old_text),
+        old_text=old_text,
+        new_text=new_text,
+        reason="source evidence resolves the OCR word",
+        source_page_sha256=source_page_sha,
+        source_evidence_sha256=source_evidence_sha,
+        recognition_model="deterministic-source-evidence",
+    )
+    if not authorized:
+        return EvidenceCorrectionProductionInput(operations=(operation,))
+    authorization = SourceEvidenceAuthorization(
+        syntax_baseline_sha256=sha256_text(syntax_tex),
+        page_id=make_page_id(1),
+        source_page_number=1,
+        syntax_start_offset=0,
+        syntax_end_offset=len(syntax_tex),
+        syntax_region_sha256=sha256_text(syntax_tex),
+        source_page_sha256=source_page_sha,
+        source_evidence_sha256=source_evidence_sha,
+        authorized_operation_sha256s=(operation.digest,),
+    )
+    verification = IndependentEvidenceVerification(
+        operation_sha256=operation.digest,
+        source_evidence_sha256=source_evidence_sha,
+        old_text_sha256=sha256_text(old_text),
+        new_text_sha256=sha256_text(new_text),
+        verification_evidence_sha256=sha256_text("independent correction verification"),
+        verifier="independent-host-verifier",
+        verdict="PASS",
+        independent=True,
+        math_unchanged=True,
+        structure_unchanged=True,
+    )
+    # Keep the raw argument explicit in this test helper: the production
+    # producer itself binds it in the report when the input is consumed.
+    assert raw_tex.strip()
+    return EvidenceCorrectionProductionInput(
+        operations=(operation,),
+        source_authorizations=(authorization,),
+        independent_verifications=(verification,),
+    )
 
 
 def _symlink_or_skip(
@@ -502,8 +573,68 @@ def test_loader_exposes_no_baseline_pdf_for_source_preview(tmp_path):
     assert loaded.baseline_pdf is None
 
 
+def test_evidence_correction_selector_covers_noop_pass_and_failed_paths(
+    monkeypatch,
+):
+    raw_tex = "% Page 1\nraw OCR\n"
+    syntax_tex = "\\documentclass{article}\n\\begin{document}\nBaseline\\end{document}\n"
+    syntax_baseline = SimpleNamespace(tex=syntax_tex)
+    compile_calls: list[str] = []
+
+    def fake_compile(tex, *, extra_files, selected_pages):
+        compile_calls.append(tex)
+        assert extra_files == {"figures/x.pdf": b"figure"}
+        assert selected_pages == (1,)
+        return SimpleNamespace(tex=tex)
+
+    monkeypatch.setattr(
+        "latexstruct.core.ocr_baseline.compile_ocr_baseline",
+        fake_compile,
+    )
+    selected, noop = _select_evidence_corrected_ocr_baseline(
+        raw_ocr_tex=raw_tex,
+        syntax_baseline=syntax_baseline,
+        production_input=EvidenceCorrectionProductionInput(),
+        extra_files={"figures/x.pdf": b"figure"},
+        selected_pages=(1,),
+    )
+    assert selected is syntax_baseline
+    assert noop.report.status is EvidenceCorrectionStatus.NOT_APPLICABLE
+    assert noop.evidence_tex is None
+    assert compile_calls == []
+
+    pass_input = _production_correction_input(raw_tex, syntax_tex)
+    selected, passed = _select_evidence_corrected_ocr_baseline(
+        raw_ocr_tex=raw_tex,
+        syntax_baseline=syntax_baseline,
+        production_input=pass_input,
+        extra_files={"figures/x.pdf": b"figure"},
+        selected_pages=(1,),
+    )
+    assert passed.report.status is EvidenceCorrectionStatus.PASS
+    assert selected.tex == passed.evidence_tex
+    assert compile_calls == [passed.evidence_tex]
+
+    failed_input = _production_correction_input(
+        raw_tex,
+        syntax_tex,
+        authorized=False,
+    )
+    with pytest.raises(OcrStoreError, match="failed closed"):
+        _select_evidence_corrected_ocr_baseline(
+            raw_ocr_tex=raw_tex,
+            syntax_baseline=syntax_baseline,
+            production_input=failed_input,
+            extra_files={"figures/x.pdf": b"figure"},
+            selected_pages=(1,),
+        )
+    assert compile_calls == [passed.evidence_tex]
+
+
+@pytest.mark.parametrize("with_correction", [False, True])
 def test_production_finalizer_persists_exact_bundle_and_analysis_reads_only_it(
     tmp_path,
+    with_correction,
 ):
     inputs = _fixture()
     source_bytes = inputs["source"].data
@@ -547,7 +678,28 @@ def test_production_finalizer_persists_exact_bundle_and_analysis_reads_only_it(
         store.persist_record(snapshot.run_id, terminal, raw_response=response)
     store.freeze_raw_ocr(snapshot.run_id, model_usage={"calls": 2})
 
-    baseline_tex_bytes = inputs["baseline_tex"].data
+    syntax_baseline_bytes = inputs["baseline_tex"].data
+    raw_ocr_tex = (store.run_dir(snapshot.run_id) / "artifacts" / "raw-ocr.tex").read_text(
+        encoding="utf-8"
+    )
+    correction_input = (
+        _production_correction_input(
+            raw_ocr_tex,
+            syntax_baseline_bytes.decode("utf-8"),
+        )
+        if with_correction
+        else EvidenceCorrectionProductionInput()
+    )
+    correction_result = produce_evidence_corrected_baseline_from_input(
+        raw_ocr_tex=raw_ocr_tex,
+        syntax_baseline_tex=syntax_baseline_bytes.decode("utf-8"),
+        production_input=correction_input,
+    )
+    baseline_tex_bytes = (
+        correction_result.evidence_tex.encode("utf-8")
+        if correction_result.evidence_tex is not None
+        else syntax_baseline_bytes
+    )
     baseline_pdf_bytes = inputs["baseline_pdf"].data
     compile_invocations = []
     for index in (1, 2):
@@ -612,10 +764,43 @@ def test_production_finalizer_persists_exact_bundle_and_analysis_reads_only_it(
         baseline,
         FrozenReports(),
         created_at=CREATED_AT,
+        source_classification=source_classification(
+            source_sha256=snapshot.source_sha256,
+            selected_pages=(1, 2),
+        ),
+        syntax_baseline_tex=syntax_baseline_bytes.decode("utf-8"),
+        evidence_correction_input=correction_input,
     )
+    verified_payload = verified.manifest.to_dict()
     assert all(
         item["command"] and item["input_inventory"]
-        for item in verified.manifest.to_dict()["compile"]["passes"]
+        for item in verified_payload["compile"]["passes"]
+    )
+    expected_role = (
+        "EVIDENCE_CORRECTED_BASELINE_TEX"
+        if with_correction
+        else "SYNTAX_BASELINE_TEX"
+    )
+    assert verified_payload["compile"]["selected_baseline"] == expected_role
+    assert verified_payload["bindings"]["evidence_correction_report"] == (
+        "EVIDENCE_CORRECTION_REPORT"
+    )
+    assert verified_payload["bindings"]["evidence_corrected_baseline"] == (
+        "EVIDENCE_CORRECTED_BASELINE_TEX" if with_correction else None
+    )
+    assert verified_payload["bindings"]["block_inventory"] == (
+        "OCR_BLOCK_INVENTORY"
+    )
+    correction_descriptor = next(
+        item
+        for item in verified_payload["artifacts"]
+        if item["role"] == "EVIDENCE_CORRECTION_REPORT"
+    )
+    persisted_correction = json.loads(
+        verified.artifact_bytes()[correction_descriptor["path"]]
+    )
+    assert persisted_correction["status"] == (
+        "PASS" if with_correction else "NOT_APPLICABLE"
     )
 
     analysis_tex, lineage = _verified_v2_baseline_for_analysis({

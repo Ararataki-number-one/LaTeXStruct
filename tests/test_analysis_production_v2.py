@@ -10,6 +10,7 @@ import pymupdf
 import pytest
 
 from latexstruct.core import analysis_production
+from latexstruct.core.analysis_inventory import AnalysisNativeSourceBlock
 from latexstruct.core.analysis_budget import BudgetLimits
 from latexstruct.core.analysis_orchestrator import (
     CallBinding,
@@ -34,11 +35,22 @@ from latexstruct.core.analysis_schema import (
 from latexstruct.core.compilecheck import build_compile_input_manifest
 
 
-TARGET = "Every graph has a vertex."
+TARGET = "Theorem 1. Every graph has a vertex."
 _DEFAULT_EVIDENCE = object()
 _DEFAULT_PAGE_RISKS = object()
+_DEFAULT_NATIVE_BLOCKS = object()
 BASELINE_TEX = (
     f"\\documentclass{{article}}\n\\begin{{document}}\n% Page 1\n{TARGET}\n\\end{{document}}\n"
+)
+NATIVE_FORMAL_BLOCKS = (
+    AnalysisNativeSourceBlock(
+        page_id="ocr-page-000001",
+        source_page=1,
+        block_id="formal-source-0001",
+        block_type="HEADING_TEXT",
+        plain_text=TARGET,
+        source_sha256=sha256_text(TARGET),
+    ),
 )
 
 
@@ -537,6 +549,8 @@ def _run(
     snapshot_evidence=_DEFAULT_EVIDENCE,
     budget_kwargs=None,
     model_ids=None,
+    native_source_blocks=_DEFAULT_NATIVE_BLOCKS,
+    inventory_authorizations=None,
 ):
     events = []
     pdf = _pdf()
@@ -550,6 +564,8 @@ def _run(
         else snapshot_evidence
     )
     default_admission = None
+    if native_source_blocks is _DEFAULT_NATIVE_BLOCKS:
+        native_source_blocks = NATIVE_FORMAL_BLOCKS
     if admitted_evidence is not None:
         admitted_evidence = dict(admitted_evidence)
         valid_pages = (
@@ -605,6 +621,8 @@ def _run(
         concurrency_limit=concurrency_limit,
         page_risks=None if page_risks is _DEFAULT_PAGE_RISKS else page_risks,
         page_risk_admission=default_admission,
+        native_source_blocks=native_source_blocks,
+        inventory_authorizations=inventory_authorizations,
         max_macro_rounds=1,
         model_ids=model_ids,
         **dict(budget_kwargs or {}),
@@ -701,10 +719,28 @@ def test_budget_limits_are_frozen_into_snapshot_and_both_config_hashes(tmp_path)
             "page_risk_admission": (
                 result.page_risk_admission.canonical_payload()
             ),
-            "page_risk_source_admission_hash": (
-                result.page_risk_admission.digest
-            ),
-            "compile_extra_files": [
+                "page_risk_source_admission_hash": (
+                    result.page_risk_admission.digest
+                ),
+                "baseline_inventory_digest": result.baseline_inventory.digest,
+                "baseline_inventory_json_sha256": (
+                    result.baseline_inventory_json_sha256
+                ),
+                "native_source_blocks": [
+                    item.as_dict() for item in NATIVE_FORMAL_BLOCKS
+                ],
+                "native_source_blocks_supplied": True,
+                "inventory_authorizations": [
+                    item.as_dict()
+                    for item in result.baseline_inventory.authorizations
+                ],
+                "inventory_authorization_source": "HOST_REQUIRED_POLICY",
+                "inventory_policy_schema": "latexstruct-host-inventory-policy-v1",
+                "inventory_policy_ocr_manifest_sha256": (
+                    result.snapshot.evidence_hashes.ocr_baseline_manifest_hash
+                ),
+                "native_heading_inventory_required": True,
+                "compile_extra_files": [
                 ("figures/a.png", sha256_bytes(b"trusted-extra"))
             ],
             "max_macro_rounds": 1,
@@ -1052,6 +1088,75 @@ def test_production_bridge_uses_one_atomic_two_pass_compile_per_candidate(
     ]
 
 
+def test_host_inventory_is_frozen_before_first_model_and_hash_bound(
+    tmp_path, monkeypatch
+):
+    inventory_calls = []
+    original_build = analysis_production.build_analysis_inventory_bundle
+    original_vision = FakeVisionClient.chat_vision_json_images_bytes
+
+    def tracked_build(*args, **kwargs):
+        inventory_calls.append((args[0], args[1]))
+        return original_build(*args, **kwargs)
+
+    def checked_vision(self, *args, **kwargs):
+        assert inventory_calls, "first model call preceded the baseline inventory freeze"
+        return original_vision(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        analysis_production, "build_analysis_inventory_bundle", tracked_build
+    )
+    monkeypatch.setattr(
+        FakeVisionClient, "chat_vision_json_images_bytes", checked_vision
+    )
+
+    result, _events, _compiler = _run(tmp_path)
+
+    assert len(inventory_calls) == 2
+    assert inventory_calls[0][0] == inventory_calls[0][1] == BASELINE_TEX
+    assert sha256_bytes(result.baseline_inventory_json) == (
+        result.baseline_inventory_json_sha256
+    )
+    assert sha256_bytes(result.final_inventory_json) == (
+        result.final_inventory_json_sha256
+    )
+    assert sha256_bytes(result.inventory_gate_json) == (
+        result.inventory_gate_json_sha256
+    )
+    assert result.inventory_gate.passed is True
+    assert result.orchestration.decision.status is AnalysisFinalStatus.VERIFIED
+
+
+def test_inventory_residual_revokes_verified_but_retains_best_candidate(tmp_path):
+    result, _events, _compiler = _run(
+        tmp_path,
+        inventory_authorizations=(),
+    )
+
+    assert result.inventory_gate.passed is False
+    assert "formal" in result.inventory_gate.blocked_categories
+    assert result.orchestration.decision.status is (
+        AnalysisFinalStatus.COMPLETED_WITH_ISSUES
+    )
+    assert result.orchestration.decision.verified is False
+    assert "analysis_inventory_residual" in result.orchestration.decision.failures
+    assert result.orchestration.current_tex != BASELINE_TEX
+
+
+def test_missing_native_inventory_can_never_be_verified(tmp_path):
+    result, _events, _compiler = _run(
+        tmp_path,
+        native_source_blocks=None,
+    )
+
+    assert result.inventory_gate.status.value == "FAILED"
+    assert result.orchestration.decision.status is (
+        AnalysisFinalStatus.FAILED_BEST_RETAINED
+    )
+    assert result.orchestration.decision.verified is False
+    assert "analysis_inventory_scan_failed" in result.orchestration.decision.failures
+
+
 def test_verified_is_revoked_when_successful_transport_lacks_attempt_evidence(
     tmp_path,
 ):
@@ -1105,6 +1210,42 @@ def test_every_strict_request_binds_snapshot_prompt_and_response_schema(tmp_path
         assert binding["response_schema_version"].startswith(
             "latexstruct-analysis-"
         )
+
+
+def test_discovery_receives_page_local_snapshot_bound_inventory_hints(tmp_path):
+    events = []
+    text = FakeTextClient(events)
+    result, _observed, _compiler = _run(tmp_path, text_client=text)
+
+    ai1_requests = [
+        request for request in text.user_requests
+        if request["binding"]["role"] == "AI-1"
+    ]
+    ai2_requests = [
+        request for request in text.user_requests
+        if request["binding"]["role"] == "AI-2"
+    ]
+    assert ai1_requests and ai2_requests
+    for request in ai1_requests + ai2_requests:
+        hints = request["host_inventory_expectations"]
+        assert hints["schema"] == "latexstruct-page-inventory-hints-v1"
+        assert hints["bundle_digest"] == result.baseline_inventory.digest
+        assert isinstance(hints["categories_for_this_role"], list)
+        assert isinstance(hints["items"], list)
+    formal = [
+        item
+        for request in ai1_requests
+        for item in request["host_inventory_expectations"]["items"]
+        if item["category"] == "formal"
+    ]
+    assert formal
+    assert formal[0]["source_plain_text"] == TARGET
+    assert formal[0]["source_block_id"] == "formal-source-0001"
+    assert all(
+        "host_inventory_expectations" not in request
+        for request in text.user_requests
+        if request["binding"]["role"] not in {"AI-1", "AI-2"}
+    )
 
 
 def test_host_rejects_tampered_snapshot_binding_echo(tmp_path):
@@ -1322,6 +1463,7 @@ def test_changed_candidate_uses_its_own_live_page_map_for_review(tmp_path):
         snapshot_evidence=evidence,
         raw_ocr_frozen=True,
         page_risk_admission=admission,
+        native_source_blocks=NATIVE_FORMAL_BLOCKS,
         max_macro_rounds=1,
     )
 
@@ -1361,6 +1503,7 @@ def test_changed_candidate_without_live_mapper_fails_closed(tmp_path):
         snapshot_evidence=evidence,
         raw_ocr_frozen=True,
         page_risk_admission=admission,
+        native_source_blocks=NATIVE_FORMAL_BLOCKS,
         max_macro_rounds=1,
     )
 
@@ -1708,6 +1851,7 @@ def test_reflow_mapping_skips_candidate_only_toc_and_preserves_two_candidate_pag
         snapshot_evidence=evidence,
         raw_ocr_frozen=True,
         page_risk_admission=admission,
+        native_source_blocks=(),
         max_macro_rounds=1,
     )
 

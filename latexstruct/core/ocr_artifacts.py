@@ -224,18 +224,43 @@ def load_verified_ocr_baseline_bundle(
     """
     snapshot = store.load_snapshot(run_id)
     store.verify_source(run_id)
-    manifest_relative = _strict_ocr_bundle_relative_path(
-        DEFAULT_MANIFEST_PATH,
-        "OCR baseline manifest path",
-    )
     artifacts_root = store.run_dir(run_id) / "artifacts"
     if not artifacts_root.is_dir() or _path_is_reparse_point(artifacts_root):
         raise OcrStoreError("OCR artifacts root is not a plain directory")
     package_root = artifacts_root / _OCR_BASELINE_PACKAGE_DIRECTORY
-    if not package_root.is_dir() or _path_is_reparse_point(package_root):
+    return load_verified_ocr_baseline_directory(
+        package_root,
+        expected_source_sha256=snapshot.source_sha256,
+    )
+
+
+def load_verified_ocr_baseline_directory(
+    package_root: str | Path,
+    *,
+    expected_source_sha256: str | None = None,
+) -> VerifiedOcrBaselineBundle:
+    """Freeze and verify one standalone OCR baseline package directory.
+
+    This is the filesystem-neutral counterpart of
+    :func:`load_verified_ocr_baseline_bundle`.  It is intended for the exact
+    package copied to ``evidence/ocr-baseline`` when an OCR project is imported
+    for analysis.  The manifest is read once, every described artifact is read
+    once, and all later parsing consumes those frozen bytes.  Missing or extra
+    entries, links/reparse points, non-canonical manifests, stale hashes, and
+    contradictory OCR evidence fail closed.
+
+    ``expected_source_sha256`` is an optional trust anchor owned by the caller;
+    it is never inferred from an unverified manifest claim.
+    """
+    root = Path(package_root)
+    if not root.is_dir() or _path_is_reparse_point(root):
         raise OcrStoreError("OCR baseline package is not available")
-    manifest_path = package_root.joinpath(*manifest_relative.split("/"))
-    manifest_parent = package_root
+    manifest_relative = _strict_ocr_bundle_relative_path(
+        DEFAULT_MANIFEST_PATH,
+        "OCR baseline manifest path",
+    )
+    manifest_path = root.joinpath(*manifest_relative.split("/"))
+    manifest_parent = root
     for part in manifest_relative.split("/")[:-1]:
         manifest_parent = manifest_parent / part
         if (
@@ -252,7 +277,7 @@ def load_verified_ocr_baseline_bundle(
     hints = _manifest_artifact_hints(manifest_bytes)
     expected_files = {manifest_relative, *(path for _, path in hints)}
     actual_files, _ = _scan_ocr_bundle_tree(
-        package_root,
+        root,
         expected_files=expected_files,
     )
     if actual_files != expected_files:
@@ -263,7 +288,7 @@ def load_verified_ocr_baseline_bundle(
 
     artifact_bytes: dict[str, bytes] = {}
     for _, logical_path in hints:
-        path = package_root.joinpath(*logical_path.split("/"))
+        path = root.joinpath(*logical_path.split("/"))
         if not path.is_file() or _path_is_reparse_point(path):
             raise OcrStoreError(
                 f"OCR baseline artifact is not a plain file: {logical_path}"
@@ -278,7 +303,7 @@ def load_verified_ocr_baseline_bundle(
         manifest = verify_ocr_baseline_manifest(
             manifest_bytes,
             artifact_bytes,
-            expected_source_sha256=snapshot.source_sha256,
+            expected_source_sha256=expected_source_sha256,
         )
     except OcrBaselineManifestError as exc:
         raise OcrStoreError("OCR baseline package failed verification") from exc
@@ -293,13 +318,13 @@ def load_verified_ocr_baseline_bundle(
         artifacts_by_role[role] = VerifiedOcrBaselineArtifact(
             role=role,
             logical_path=logical_path,
-            path=package_root.joinpath(*logical_path.split("/")),
+            path=root.joinpath(*logical_path.split("/")),
             data=data,
             sha256=str(descriptor["sha256"]),
             media_type=_ocr_baseline_media_type(role, logical_path),
         )
     return VerifiedOcrBaselineBundle(
-        root=package_root,
+        root=root,
         manifest_path=manifest_path,
         manifest=manifest,
         artifacts_by_role=MappingProxyType(artifacts_by_role),

@@ -56,6 +56,17 @@ except ModuleNotFoundError:  # Direct ``python tools/...`` execution.
     )
 
 from latexstruct.core.audit_sanitize import sanitize_log_text
+from latexstruct.core.analysis_input import (
+    OcrAnalysisInputError,
+    load_ocr_analysis_input_package,
+)
+from latexstruct.core.analysis_inventory import (
+    AnalysisInventoryError,
+    build_analysis_inventory_bundle,
+    build_host_inventory_authorizations,
+    evaluate_analysis_inventory_gate,
+)
+from latexstruct.core.analysis_schema import canonical_json_bytes
 from latexstruct.pricing import estimate_call_cost
 
 
@@ -75,6 +86,9 @@ COMMIT_RE = re.compile(r"[0-9a-f]{40,64}")
 BUILD_ID_RE = re.compile(r"[1-9][0-9]*")
 PRODUCER = "tools/v2_analysis_acceptance.py"
 AUDIT_ZIP_FILENAME = "analysis-audit-submission.zip"
+ANALYSIS_INVENTORY_RELEASE_CLOSURE_SCHEMA = (
+    "latexstruct-analysis-inventory-release-closure/1"
+)
 PAGE_RISK_ADMISSION_SCHEMA = "latexstruct-analysis-page-risk-admission-v2"
 PAGE_RISK_ADMISSION_STRATEGY = (
     "deterministic-preflight-and-fixed-low-risk-sampling-v2"
@@ -187,6 +201,7 @@ class VerifiedBundleFacts:
     closed_loop_evidence: dict[str, Any]
     page_layout: dict[str, Any]
     machine_report: dict[str, Any]
+    analysis_inventory: dict[str, Any]
     manifest: dict[str, Any]
 
 
@@ -204,6 +219,17 @@ def _sha256_file(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _sanitized_diagnostic_sha256(
+    value: object,
+    *,
+    known_paths: tuple[object, ...] = (),
+) -> str:
+    """Hash a sanitized diagnostic so console output never exposes raw details."""
+
+    sanitized = sanitize_log_text(str(value), known_paths=known_paths)
+    return hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
 
 
 def _json_bytes(value: Mapping[str, Any]) -> bytes:
@@ -1873,6 +1899,514 @@ def _verified_ocr_artifact(
     return payload
 
 
+def _verified_native_ocr_inventory_authority(
+    *,
+    config: AnalysisAcceptanceConfig,
+    expected_manifest_sha256: str,
+    expected_evidence_hashes: Mapping[str, Any],
+    expected_source_sha256: str,
+) -> dict[str, Any]:
+    """Reload the exact private native OCR package used by analysis.
+
+    The analysis audit archive intentionally does not duplicate the source PDF
+    or native OCR sidecars.  They remain in the nested private OCR prerequisite.
+    This loader therefore starts from the independently verified OCR
+    attestation/manifest and returns only the authority needed to recompute the
+    analysis inventory.  Missing modern lane, correction, or block-inventory
+    roles fail closed for a stable release.
+    """
+
+    manifest_sha256 = str(expected_manifest_sha256 or "").strip().lower()
+    _require(
+        SHA256_RE.fullmatch(manifest_sha256) is not None,
+        "analysis snapshot lacks an exact OCR baseline manifest digest",
+    )
+    ocr_dir = config.output_dir / "ocr-prerequisite"
+    try:
+        verified = RELEASE_INTEGRITY.verify_run_attestation(
+            ocr_dir,
+            expected_pages=config.expected_pages,
+            version=config.expected_version,
+            commit=config.expected_commit.lower(),
+            expected_source_sha256=expected_source_sha256,
+        )
+    except RELEASE_INTEGRITY.ReleaseIntegrityError as exc:
+        raise AcceptanceError(str(exc)) from exc
+    baseline = _mapping(verified.get("ocr_baseline"), "verified OCR baseline")
+    _require(
+        str(baseline.get("manifest_sha256") or "").lower()
+        == manifest_sha256,
+        "analysis snapshot is bound to a different OCR baseline manifest",
+    )
+    package_directory = str(baseline.get("package_directory") or "")
+    _require(
+        package_directory == RELEASE_INTEGRITY.OCR_BASELINE_PACKAGE_DIRECTORY,
+        "verified OCR baseline package directory is not canonical",
+    )
+    package_root = ocr_dir.joinpath(*PurePosixPath(package_directory).parts)
+    try:
+        native = load_ocr_analysis_input_package(
+            package_root,
+            expected_source_sha256=expected_source_sha256,
+            expected_manifest_sha256=manifest_sha256,
+            expected_run_id=str(baseline.get("run_id") or ""),
+            expected_selected_pages=tuple(range(1, config.expected_pages + 1)),
+        )
+    except OcrAnalysisInputError as exc:
+        raise AcceptanceError(
+            f"native OCR inventory authority failed verification: {exc}"
+        ) from exc
+
+    try:
+        from latexstruct.core.ocr_lane_routes import parse_lane_routes_artifact
+        from latexstruct.core.ocr_manifest import (
+            ROLE_LANE_ROUTES,
+            ROLE_PAGE_EVIDENCE_BINDINGS,
+        )
+        from latexstruct.core.ocr_page_evidence_bindings import (
+            parse_ocr_page_evidence_bindings,
+        )
+
+        lane_artifact = native.artifacts_by_role[ROLE_LANE_ROUTES]
+        page_binding_artifact = native.artifacts_by_role[
+            ROLE_PAGE_EVIDENCE_BINDINGS
+        ]
+        routes = parse_lane_routes_artifact(
+            lane_artifact.data,
+            expected_run_id=native.run_id,
+            expected_selected_pages=native.snapshot.selected_pages,
+        )
+        page_bindings = parse_ocr_page_evidence_bindings(
+            page_binding_artifact.data,
+            expected_run_id=native.run_id,
+            expected_source_sha256=native.source_sha256,
+            expected_selected_pages=native.snapshot.selected_pages,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AcceptanceError(
+            "stable OCR manifest lacks exact page-evidence/lane bindings"
+        ) from exc
+
+    contract = native.snapshot.pipeline_contract
+    raw_snapshot_pages = (
+        contract.get("page_strategies")
+        if isinstance(contract, Mapping)
+        else None
+    )
+    _require(
+        isinstance(raw_snapshot_pages, (list, tuple))
+        and len(raw_snapshot_pages) == config.expected_pages,
+        "OCR snapshot lacks complete classified-page bindings",
+    )
+    snapshot_pages = {
+        str(row.get("page_id") or ""): row
+        for row in raw_snapshot_pages
+        if isinstance(row, Mapping)
+    }
+    block_pages = native.block_inventory.pages_by_id
+    _require(
+        len(snapshot_pages)
+        == len(block_pages)
+        == len(routes)
+        == len(page_bindings)
+        == config.expected_pages,
+        "OCR route/page/block authorities do not cover the same pages",
+    )
+    cross_rows: list[dict[str, Any]] = []
+    event_rows: list[dict[str, Any]] = []
+    for route, binding in zip(routes, page_bindings, strict=True):
+        snapshot_page = snapshot_pages.get(route.page_id)
+        block_page = block_pages.get(route.page_id)
+        _require(
+            isinstance(snapshot_page, Mapping) and block_page is not None,
+            "OCR route is absent from snapshot/block inventory",
+        )
+        candidate_sha = str(
+            snapshot_page.get("candidate_tex_sha256") or ""
+        ).lower()
+        _require(
+            SHA256_RE.fullmatch(candidate_sha) is not None
+            and route.candidate_sha256 == candidate_sha
+            and binding.initial_candidate_tex_sha256 == candidate_sha,
+            "OCR lane initial candidate differs from classified source page",
+        )
+        _require(
+            snapshot_page.get("source_page") == block_page.source_page
+            and snapshot_page.get("source_page_object_hash")
+            == block_page.source_page_object_hash
+            and snapshot_page.get("source_text_layer_sha256")
+            == block_page.source_text_layer_sha256
+            and snapshot_page.get("block_count") == len(block_page.blocks),
+            "OCR block inventory differs from classified source-page evidence",
+        )
+        cross_rows.append({
+            "page_id": route.page_id,
+            "source_page": route.source_page,
+            "initial_candidate_tex_sha256": candidate_sha,
+            "visual_verification_response_sha256": (
+                binding.visual_verification_response_sha256
+            ),
+            "terminal_cleaned_tex_sha256": (
+                binding.terminal_cleaned_tex_sha256
+            ),
+            "route_sha256": route.route_sha256,
+            "source_page_object_hash": block_page.source_page_object_hash,
+            "source_text_layer_sha256": block_page.source_text_layer_sha256,
+        })
+        event_rows.append({
+            "page_id": route.page_id,
+            "event_sha256s": [event.event_sha256 for event in route.history],
+        })
+    route_page_bindings_sha256 = _sha256_bytes(
+        canonical_json_bytes(cross_rows)
+    )
+    route_event_chain_sha256 = _sha256_bytes(
+        canonical_json_bytes(event_rows)
+    )
+
+    expected_page_map_sha = str(
+        expected_evidence_hashes.get("ocr_page_map_hash") or ""
+    ).lower()
+    _require(
+        native.manifest_sha256 == manifest_sha256
+        and native.source_sha256 == expected_source_sha256
+        and native.page_map_sha256 == expected_page_map_sha,
+        "native OCR inventory authority differs from snapshot evidence",
+    )
+    _require(
+        SHA256_RE.fullmatch(str(native.lane_routes_sha256 or "")) is not None,
+        "stable OCR manifest lacks the LANE_ROUTES role",
+    )
+    _require(
+        SHA256_RE.fullmatch(
+            str(native.evidence_correction_report_sha256 or "")
+        )
+        is not None
+        and native.evidence_correction_status in {"PASS", "NOT_APPLICABLE"},
+        "stable OCR manifest lacks a successful evidence-correction report",
+    )
+    _require(
+        SHA256_RE.fullmatch(str(native.block_inventory_sha256 or ""))
+        is not None
+        and len(native.block_inventory.pages) == config.expected_pages,
+        "stable OCR manifest lacks a complete OCR_BLOCK_INVENTORY role",
+    )
+    _require(
+        native.selected_baseline_role
+        in {"SYNTAX_BASELINE_TEX", "EVIDENCE_CORRECTED_BASELINE_TEX"},
+        "OCR manifest selected baseline role is invalid",
+    )
+    return {
+        "manifest_sha256": manifest_sha256,
+        "run_id": native.run_id,
+        "baseline_tex": native.baseline_tex.encode("utf-8"),
+        "baseline_tex_sha256": native.baseline_tex_sha256,
+        "source_page_map": {
+            int(page): tuple(pdf_pages)
+            for page, pdf_pages in native.source_page_map.items()
+        },
+        "native_source_blocks": [
+            dict(item) for item in native.native_source_blocks
+        ],
+        "page_map_sha256": native.page_map_sha256,
+        "lane_routes_sha256": str(native.lane_routes_sha256),
+        "lane_route_page_bindings_sha256": route_page_bindings_sha256,
+        "lane_route_event_chain_sha256": route_event_chain_sha256,
+        "lane_route_event_count": sum(len(route.history) for route in routes),
+        "page_evidence_bindings_sha256": page_binding_artifact.sha256,
+        "page_evidence_binding_page_count": len(page_bindings),
+        "evidence_correction_report_sha256": str(
+            native.evidence_correction_report_sha256
+        ),
+        "evidence_correction_status": str(native.evidence_correction_status),
+        "block_inventory_sha256": native.block_inventory_sha256,
+        "block_inventory_page_count": len(native.block_inventory.pages),
+        "native_source_block_count": len(native.native_source_blocks),
+        "selected_baseline_role": native.selected_baseline_role,
+    }
+
+
+def _audit_json_role(
+    members: Mapping[str, bytes],
+    manifest: Mapping[str, Any],
+    role: str,
+    *,
+    canonical: bool = False,
+) -> tuple[dict[str, Any], bytes]:
+    payload, _record, _alias = _one_role(members, manifest, role)
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AcceptanceError(f"audit {role} is not valid UTF-8 JSON") from exc
+    value = _mapping(value, f"audit {role}")
+    if canonical:
+        _require(
+            payload == canonical_json_bytes(value),
+            f"audit {role} is not canonical JSON",
+        )
+    return value, payload
+
+
+def _verified_analysis_inventory_closure(
+    *,
+    members: Mapping[str, bytes],
+    manifest: Mapping[str, Any],
+    analysis_v2: Mapping[str, Any],
+    analysis_configuration: Mapping[str, Any],
+    analysis_configuration_sha256: str,
+    current_tex: bytes,
+    ocr_authority: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Independently rebuild the release inventory from private audit bytes."""
+
+    baseline_tex, _baseline_record, _baseline_alias = _one_role(
+        members, manifest, "BASELINE_TEX"
+    )
+    _require(
+        baseline_tex == ocr_authority.get("baseline_tex"),
+        "audit BASELINE_TEX differs from the selected native OCR baseline",
+    )
+    baseline_sha = _sha256_bytes(baseline_tex)
+    current_sha = _sha256_bytes(current_tex)
+    _require(
+        baseline_sha == ocr_authority.get("baseline_tex_sha256"),
+        "audit baseline TeX hash differs from native OCR authority",
+    )
+    archived_configuration, _configuration_bytes = _audit_json_role(
+        members, manifest, "ANALYSIS_CONFIGURATION"
+    )
+    _require(
+        archived_configuration == dict(analysis_configuration)
+        and RELEASE_INTEGRITY._canonical_json_sha256(archived_configuration)
+        == analysis_configuration_sha256,
+        "audit analysis configuration differs from snapshot-bound evidence",
+    )
+
+    source_page_map = {
+        int(page): tuple(pdf_pages)
+        for page, pdf_pages in _mapping(
+            ocr_authority.get("source_page_map"), "native OCR source page map"
+        ).items()
+    }
+    expected_candidate_map = [
+        [page, list(pdf_pages)] for page, pdf_pages in source_page_map.items()
+    ]
+    native_blocks = _sequence(
+        ocr_authority.get("native_source_blocks"), "native OCR source blocks"
+    )
+    _require(
+        analysis_configuration.get("candidate_page_map")
+        == expected_candidate_map,
+        "analysis inventory page map differs from native OCR PAGE_MAP",
+    )
+    _require(
+        analysis_configuration.get("native_source_blocks") == native_blocks
+        and analysis_configuration.get("native_source_blocks_supplied") is True
+        and analysis_configuration.get("native_heading_inventory_required")
+        is True,
+        "analysis inventory native block authority is missing or stale",
+    )
+    _require(
+        analysis_configuration.get("inventory_authorization_source")
+        == "HOST_REQUIRED_POLICY"
+        and analysis_configuration.get("inventory_policy_schema")
+        == "latexstruct-host-inventory-policy-v1"
+        and str(
+            analysis_configuration.get("inventory_policy_ocr_manifest_sha256")
+            or ""
+        ).lower()
+        == str(ocr_authority.get("manifest_sha256") or "").lower(),
+        "analysis inventory authorization policy is not host/manifest bound",
+    )
+    try:
+        authorizations = build_host_inventory_authorizations(
+            native_blocks,
+            ocr_manifest_sha256=str(ocr_authority["manifest_sha256"]),
+            generated_toc_required=True,
+        )
+        authorization_payload = [item.as_dict() for item in authorizations]
+        _require(
+            analysis_configuration.get("inventory_authorizations")
+            == authorization_payload,
+            "analysis inventory authorizations are not host-recomputable",
+        )
+        baseline_bundle = build_analysis_inventory_bundle(
+            baseline_tex.decode("utf-8"),
+            baseline_tex.decode("utf-8"),
+            source_page_map,
+            native_source_blocks=native_blocks,
+            authorizations=authorizations,
+            require_native_heading_inventory=True,
+        )
+        final_bundle = build_analysis_inventory_bundle(
+            baseline_tex.decode("utf-8"),
+            current_tex.decode("utf-8"),
+            source_page_map,
+            native_source_blocks=native_blocks,
+            authorizations=authorizations,
+            require_native_heading_inventory=True,
+        )
+    except (AnalysisInventoryError, UnicodeDecodeError, TypeError, ValueError) as exc:
+        raise AcceptanceError(
+            f"analysis inventory cannot be independently rebuilt: {exc}"
+        ) from exc
+    gate = evaluate_analysis_inventory_gate(final_bundle)
+    baseline_payload, baseline_payload_bytes = _audit_json_role(
+        members, manifest, "ANALYSIS_INVENTORY_BASELINE", canonical=True
+    )
+    final_payload, final_payload_bytes = _audit_json_role(
+        members, manifest, "ANALYSIS_INVENTORY_FINAL", canonical=True
+    )
+    gate_payload, gate_payload_bytes = _audit_json_role(
+        members, manifest, "ANALYSIS_INVENTORY_GATE", canonical=True
+    )
+    expected_baseline_bytes = canonical_json_bytes(baseline_bundle.as_dict())
+    expected_final_bytes = canonical_json_bytes(final_bundle.as_dict())
+    expected_gate_bytes = canonical_json_bytes(gate.as_dict())
+    _require(
+        baseline_payload_bytes == expected_baseline_bytes
+        and final_payload_bytes == expected_final_bytes
+        and gate_payload_bytes == expected_gate_bytes,
+        "archived analysis inventory differs from independent recomputation",
+    )
+    _require(
+        baseline_payload == baseline_bundle.as_dict()
+        and final_payload == final_bundle.as_dict()
+        and gate_payload == gate.as_dict(),
+        "archived analysis inventory JSON semantics are stale",
+    )
+    _require(
+        baseline_bundle.baseline_tex_sha256 == baseline_sha
+        and baseline_bundle.current_tex_sha256 == baseline_sha
+        and final_bundle.baseline_tex_sha256 == baseline_sha
+        and final_bundle.current_tex_sha256 == current_sha,
+        "analysis inventory is not bound to baseline/best candidate TeX bytes",
+    )
+
+    final_decision, _final_decision_bytes = _audit_json_role(
+        members, manifest, "FINAL_DECISION"
+    )
+    decision = _mapping(analysis_v2.get("decision"), "v2 verification decision")
+    _require(
+        final_decision.get("status") == "VERIFIED"
+        and final_decision.get("verified") is True
+        and final_decision.get("failures") == []
+        and bool(str(final_decision.get("best_candidate_id") or "").strip())
+        and decision.get("status") == final_decision.get("status")
+        and decision.get("verified") == final_decision.get("verified")
+        and decision.get("failures") == final_decision.get("failures"),
+        "final decision is not an exact VERIFIED inventory-bound decision",
+    )
+    _require(
+        final_decision.get("baseline_inventory_digest")
+        == baseline_bundle.digest
+        and final_decision.get("final_inventory_digest") == final_bundle.digest
+        and final_decision.get("inventory_gate_digest") == gate.digest
+        and final_decision.get("baseline_inventory_json_sha256")
+        == _sha256_bytes(expected_baseline_bytes)
+        and final_decision.get("final_inventory_json_sha256")
+        == _sha256_bytes(expected_final_bytes)
+        and final_decision.get("inventory_gate_json_sha256")
+        == _sha256_bytes(expected_gate_bytes)
+        and final_decision.get("inventory_gate_status") == gate.status.value,
+        "final decision inventory digests/status are stale",
+    )
+    _require(
+        gate.passed is True
+        and gate.status.value == "PASS"
+        and gate.scanner_executed is True
+        and gate.residual_total == 0
+        and gate.blocked_categories == ()
+        and gate.bundle_digest == final_bundle.digest,
+        "analysis inventory gate is not a strict PASS",
+    )
+    _require(
+        analysis_configuration.get("baseline_inventory_digest")
+        == baseline_bundle.digest
+        and analysis_configuration.get("baseline_inventory_json_sha256")
+        == _sha256_bytes(expected_baseline_bytes),
+        "analysis configuration does not bind the frozen baseline inventory",
+    )
+    authorizations_sha = _sha256_bytes(
+        canonical_json_bytes(authorization_payload)
+    )
+    return {
+        "schema_version": ANALYSIS_INVENTORY_RELEASE_CLOSURE_SCHEMA,
+        "result": "PASS",
+        "analysis_configuration_sha256": analysis_configuration_sha256,
+        "ocr_baseline_manifest_sha256": str(ocr_authority["manifest_sha256"]),
+        "baseline_tex_sha256": baseline_sha,
+        "final_candidate_tex_sha256": current_sha,
+        "page_map_digest": baseline_bundle.page_map_digest,
+        "native_source_blocks_digest": baseline_payload[
+            "native_source_blocks_digest"
+        ],
+        "inventory_authorizations_sha256": authorizations_sha,
+        "baseline_inventory_digest": baseline_bundle.digest,
+        "baseline_inventory_json_sha256": _sha256_bytes(
+            expected_baseline_bytes
+        ),
+        "final_inventory_digest": final_bundle.digest,
+        "final_inventory_json_sha256": _sha256_bytes(expected_final_bytes),
+        "inventory_gate_digest": gate.digest,
+        "inventory_gate_json_sha256": _sha256_bytes(expected_gate_bytes),
+        "inventory_gate_status": "PASS",
+        "scanner_executed": True,
+        "residual_total": 0,
+        "blocked_categories": [],
+        "ocr_manifest_roles": {
+            "lane_routes": {
+                "role": "LANE_ROUTES",
+                "sha256": str(ocr_authority["lane_routes_sha256"]),
+                "status": "PASS",
+                "page_count": int(
+                    ocr_authority["page_evidence_binding_page_count"]
+                ),
+                "event_count": int(
+                    ocr_authority["lane_route_event_count"]
+                ),
+                "page_bindings_sha256": str(
+                    ocr_authority["lane_route_page_bindings_sha256"]
+                ),
+                "event_chain_sha256": str(
+                    ocr_authority["lane_route_event_chain_sha256"]
+                ),
+            },
+            "page_evidence_bindings": {
+                "role": "OCR_PAGE_EVIDENCE_BINDINGS",
+                "sha256": str(
+                    ocr_authority["page_evidence_bindings_sha256"]
+                ),
+                "status": "PASS",
+                "page_count": int(
+                    ocr_authority["page_evidence_binding_page_count"]
+                ),
+                "cross_binding_sha256": str(
+                    ocr_authority["lane_route_page_bindings_sha256"]
+                ),
+            },
+            "evidence_correction_report": {
+                "role": "EVIDENCE_CORRECTION_REPORT",
+                "sha256": str(
+                    ocr_authority["evidence_correction_report_sha256"]
+                ),
+                "status": str(ocr_authority["evidence_correction_status"]),
+            },
+            "block_inventory": {
+                "role": "OCR_BLOCK_INVENTORY",
+                "sha256": str(ocr_authority["block_inventory_sha256"]),
+                "status": "PASS",
+                "page_count": int(
+                    ocr_authority["block_inventory_page_count"]
+                ),
+                "block_count": int(
+                    ocr_authority["native_source_block_count"]
+                ),
+            },
+        },
+    }
+
+
 def _verified_ocr_page_records(
     *,
     config: AnalysisAcceptanceConfig,
@@ -2522,6 +3056,26 @@ def _verified_bundle_facts(
     snapshot_binding["analysis_configuration_sha256"] = (
         analysis_configuration_sha256
     )
+    snapshot_evidence_hashes = _mapping(
+        snapshot.get("evidence_hashes"), "v2 snapshot evidence hashes"
+    )
+    ocr_inventory_authority = _verified_native_ocr_inventory_authority(
+        config=config,
+        expected_manifest_sha256=str(
+            snapshot_evidence_hashes.get("ocr_baseline_manifest_hash") or ""
+        ),
+        expected_evidence_hashes=snapshot_evidence_hashes,
+        expected_source_sha256=source_sha256,
+    )
+    analysis_inventory = _verified_analysis_inventory_closure(
+        members=members,
+        manifest=manifest,
+        analysis_v2=analysis_v2,
+        analysis_configuration=analysis_configuration,
+        analysis_configuration_sha256=analysis_configuration_sha256,
+        current_tex=current_tex,
+        ocr_authority=ocr_inventory_authority,
+    )
     call_counts = Counter(str(item.get("role") or "") for item in transport)
     _require(all(role in model_bindings for role in call_counts), "v2 transport invocation has no model binding")
     for required_role in ("AI-1", "AI-2", "AI-3", "AI-5"):
@@ -2741,6 +3295,7 @@ def _verified_bundle_facts(
         closed_loop_evidence=closed_loop_evidence,
         page_layout=page_layout,
         machine_report=machine_report,
+        analysis_inventory=analysis_inventory,
         manifest=dict(manifest),
     )
 
@@ -2948,6 +3503,13 @@ def _publish_pass(
         "runtime_identity": runtime,
         "selected_range": facts.selected_range,
     }
+    _require(
+        facts.analysis_inventory.get("result") == "PASS"
+        and facts.analysis_inventory.get("inventory_gate_status") == "PASS"
+        and facts.analysis_inventory.get("ocr_baseline_manifest_sha256")
+        == ocr_prerequisite["baseline_manifest_sha256"],
+        "analysis inventory closure differs from the OCR prerequisite",
+    )
     closed_loop_evidence = RELEASE_INTEGRITY.verify_render_compare_closed_loop(
         facts.closed_loop_evidence
     )
@@ -3073,6 +3635,7 @@ def _publish_pass(
             "independent_final_reviews": facts.independent_final_reviews,
             "visual_verification": visual_verification,
             "page_layout": facts.page_layout,
+            "analysis_inventory": facts.analysis_inventory,
             "machine_verification": machine,
             "audit_submission": audit_submission,
             "reports": {
@@ -3540,20 +4103,77 @@ def _config_from_args(args: argparse.Namespace) -> AnalysisAcceptanceConfig:
 
 
 def main(argv: list[str] | None = None) -> int:
-    config = _config_from_args(build_parser().parse_args(argv))
+    try:
+        config = _config_from_args(build_parser().parse_args(argv))
+    except Exception as exc:
+        diagnostic_sha256 = _sanitized_diagnostic_sha256(exc)
+        print(
+            "v2 analysis acceptance: status=CONFIG_FAILED "
+            f"diagnostic_sha256={diagnostic_sha256}",
+            file=sys.stderr,
+        )
+        return 2
+    diagnostic_paths = (config.output_dir, config.source, config.executable)
     try:
         validation = run_analysis_acceptance(config)
-    except (AcceptanceError, OSError, ValueError) as exc:
-        print(f"v2 analysis acceptance could not start: {exc}", file=sys.stderr)
+    except Exception as exc:
+        diagnostic_sha256 = _sanitized_diagnostic_sha256(
+            exc,
+            known_paths=diagnostic_paths,
+        )
+        print(
+            "v2 analysis acceptance: status=START_FAILED "
+            f"diagnostic_sha256={diagnostic_sha256}",
+            file=sys.stderr,
+        )
         return 2
-    result = str(validation.get("result") or "FAIL")
+    raw_result = str(validation.get("result") or "FAIL").upper()
+    result = raw_result if raw_result in {"PASS", "FAIL"} else "FAIL"
     print(f"v2 analysis acceptance ({config.profile}): {result}")
-    print(f"validation: {config.output_dir / 'analysis-validation-report.json'}")
-    print(f"performance: {config.output_dir / 'analysis-performance.json'}")
-    print(f"attestation: {config.output_dir / 'analysis-attestation.json'}")
-    for error in validation.get("errors") or ():
-        print(f"error: {error}", file=sys.stderr)
-    return 0 if validation.get("acceptance_passed") is True else 2
+    artifact_log_failed = False
+    for logical_name in (
+        "analysis-validation-report.json",
+        "analysis-performance.json",
+        "analysis-attestation.json",
+    ):
+        artifact = config.output_dir / logical_name
+        if artifact.is_file():
+            try:
+                artifact_sha256 = _sha256_file(artifact)
+            except OSError as exc:
+                diagnostic_sha256 = _sanitized_diagnostic_sha256(
+                    exc,
+                    known_paths=diagnostic_paths,
+                )
+                print(
+                    f"artifact: name={logical_name} status=READ_FAILED "
+                    f"diagnostic_sha256={diagnostic_sha256}"
+                )
+                artifact_log_failed = True
+            else:
+                print(
+                    f"artifact: name={logical_name} status=PRESENT "
+                    f"sha256={artifact_sha256}"
+                )
+        else:
+            print(f"artifact: name={logical_name} status=MISSING")
+            artifact_log_failed = True
+    for index, error in enumerate(validation.get("errors") or (), 1):
+        diagnostic_sha256 = _sanitized_diagnostic_sha256(
+            error,
+            known_paths=diagnostic_paths,
+        )
+        print(
+            f"error[{index}]: status=VALIDATION_ERROR "
+            f"diagnostic_sha256={diagnostic_sha256}",
+            file=sys.stderr,
+        )
+    return (
+        0
+        if validation.get("acceptance_passed") is True
+        and not artifact_log_failed
+        else 2
+    )
 
 
 if __name__ == "__main__":

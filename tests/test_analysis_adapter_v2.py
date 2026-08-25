@@ -25,6 +25,11 @@ from latexstruct.core.analysis_budget import (
     BudgetLimits,
     BudgetUsage,
 )
+from latexstruct.core.analysis_inventory import (
+    AnalysisNativeSourceBlock,
+    build_analysis_inventory_bundle,
+    build_host_inventory_authorizations,
+)
 from latexstruct.core.analysis_orchestrator import PageAnalysisInput
 from latexstruct.core.analysis_risk import (
     PageRiskPreflightInput,
@@ -56,11 +61,26 @@ from latexstruct.core.analysis_schema import (
 SOURCE_PDF = b"%PDF-1.7\nsource-pages\n%%EOF\n"
 BASELINE_PDF = b"%PDF-1.7\nbaseline\n%%EOF\n"
 CURRENT_PDF = b"%PDF-1.7\ncurrent\n%%EOF\n"
-RAW_TEX = "\\documentclass{article}\n\\begin{document}\nRaw OCR.\n\\end{document}\n"
+RAW_TEX = (
+    "\\documentclass{article}\n\\begin{document}\n"
+    "% Page 1\nTheorem 1. Raw OCR.\n"
+    "% Page 2\nSecond page.\n\\end{document}\n"
+)
 BASELINE_TEX = RAW_TEX
 CURRENT_TEX = (
-    "\\documentclass{article}\n\\begin{document}\n"
-    "\\begin{theorem}Raw OCR.\\end{theorem}\n\\end{document}\n"
+    "\\documentclass{article}\n\\begin{document}\n% Page 1\n"
+    "\\begin{theorem}Theorem 1. Raw OCR.\\end{theorem}\n"
+    "% Page 2\nSecond page.\n\\end{document}\n"
+)
+NATIVE_FORMAL_BLOCKS = (
+    AnalysisNativeSourceBlock(
+        page_id="ocr-page-000001",
+        source_page=1,
+        block_id="formal-source-0001",
+        block_type="HEADING_TEXT",
+        plain_text="Theorem 1. Raw OCR.",
+        source_sha256=sha256_text("Theorem 1. Raw OCR."),
+    ),
 )
 
 
@@ -192,11 +212,39 @@ def _verified_evidence() -> VerificationEvidence:
 
 
 def _analysis_configuration() -> dict:
+    authorizations = build_host_inventory_authorizations(
+        NATIVE_FORMAL_BLOCKS,
+        ocr_manifest_sha256=sha256_text("ocr-manifest"),
+    )
+    baseline_inventory = build_analysis_inventory_bundle(
+        BASELINE_TEX,
+        BASELINE_TEX,
+        {1: (1,), 2: (2,)},
+        native_source_blocks=NATIVE_FORMAL_BLOCKS,
+        authorizations=authorizations,
+        require_native_heading_inventory=True,
+    )
     return {
         "application_version": "2.0.0",
+        "baseline_inventory_digest": baseline_inventory.digest,
+        "baseline_inventory_json_sha256": sha256_bytes(
+            canonical_json_bytes(baseline_inventory.as_dict())
+        ),
+        "candidate_page_map": [[1, [1]], [2, [2]]],
         "concurrency_limit": 3,
+        "inventory_authorization_source": "HOST_REQUIRED_POLICY",
+        "inventory_authorizations": [
+            item.as_dict() for item in authorizations
+        ],
+        "inventory_policy_ocr_manifest_sha256": sha256_text("ocr-manifest"),
+        "inventory_policy_schema": "latexstruct-host-inventory-policy-v1",
         "latex_engine": "xelatex",
         "models": [asdict(item) for item in _models()],
+        "native_heading_inventory_required": True,
+        "native_source_blocks": [
+            item.as_dict() for item in NATIVE_FORMAL_BLOCKS
+        ],
+        "native_source_blocks_supplied": True,
         "prompt_version": "analysis-prompts-v2",
         "workflow_version": "analysis-loop-v2",
     }
@@ -252,7 +300,7 @@ def _authoritative_snapshot(run_id: str) -> AnalysisRunSnapshot:
         PageMapEntry(
             source_page_id=stable_source_page_id(source_hash, page),
             source_page_number=page,
-            tex_page_marker=f"% page:{page}",
+            tex_page_marker=f"% Page {page}",
             candidate_pdf_page_ids=(f"candidate-page-{page}",),
         )
         for page in (1, 2)
@@ -927,6 +975,75 @@ def test_frozen_verifier_rederives_every_production_archive_binding_after_rehash
         encoding="utf-8",
     )
     _rewrite_run_sums(result.run_directory)
+    assert verify_frozen_analysis_run(result.run_directory) is False
+
+
+def test_inventory_json_cannot_self_authorize_after_rehashing_all_local_digests(
+    tmp_path,
+):
+    run_id = "analysis-inventory-self-authorization-tamper"
+    snapshot = _authoritative_snapshot(run_id)
+    invocation, transport = _production_call_evidence(snapshot)
+    base = _artifacts()
+    verification = dict(base.verification)
+    verification["analysis_v2"] = {
+        "snapshot": snapshot.to_dict(),
+        "invocations": [invocation],
+        "transport_invocations": [transport],
+        "performance": _unknown_production_performance(),
+    }
+    result = _freeze(
+        tmp_path,
+        run_id,
+        artifacts=replace(base, verification=verification),
+        authoritative_snapshot=snapshot,
+        performance_metrics=_unknown_production_performance(),
+    )
+    assert verify_frozen_analysis_run(result.run_directory)
+
+    audit = result.run_directory / "audit"
+    baseline_path = audit / "analysis_inventory_baseline.json"
+    final_path = audit / "analysis_inventory_final.json"
+    gate_path = audit / "analysis_inventory_gate.json"
+    decision_path = audit / "final_decision.json"
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    final = json.loads(final_path.read_text(encoding="utf-8"))
+    forged_authorization = {
+        "authorization_id": "forged-host-wrapper:heading",
+        "category": "heading",
+        "action": "STRUCTURE_WRAPPER",
+        "evidence_id": "forged-local-evidence",
+    }
+    for payload in (baseline, final):
+        payload["authorizations"].append(forged_authorization)
+        payload["authorizations"].sort(key=lambda item: item["authorization_id"])
+        core = {key: value for key, value in payload.items() if key != "digest"}
+        payload["digest"] = sha256_bytes(canonical_json_bytes(core))
+    gate = json.loads(gate_path.read_text(encoding="utf-8"))
+    gate["bundle_digest"] = final["digest"]
+    gate_core = {key: value for key, value in gate.items() if key != "digest"}
+    gate["digest"] = sha256_bytes(canonical_json_bytes(gate_core))
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    decision.update({
+        "baseline_inventory_digest": baseline["digest"],
+        "final_inventory_digest": final["digest"],
+        "inventory_gate_digest": gate["digest"],
+        "baseline_inventory_json_sha256": sha256_bytes(
+            canonical_json_bytes(baseline)
+        ),
+        "final_inventory_json_sha256": sha256_bytes(
+            canonical_json_bytes(final)
+        ),
+        "inventory_gate_json_sha256": sha256_bytes(canonical_json_bytes(gate)),
+    })
+    baseline_path.write_bytes(canonical_json_bytes(baseline))
+    final_path.write_bytes(canonical_json_bytes(final))
+    gate_path.write_bytes(canonical_json_bytes(gate))
+    decision_path.write_bytes(canonical_json_bytes(decision))
+    _rewrite_run_sums(result.run_directory)
+
+    # The snapshot-bound configuration remains authoritative; internally
+    # consistent forged inventory JSON cannot grant itself new policy.
     assert verify_frozen_analysis_run(result.run_directory) is False
 
 

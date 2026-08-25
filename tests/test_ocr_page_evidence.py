@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
@@ -361,6 +362,333 @@ def test_retry_bundle_is_append_only_hash_bound_and_tamper_evident(tmp_path):
         store.verify_retry_artifacts(page_id, "retry-0001")
 
 
+def test_retry_coverage_head_preserves_base_and_drives_terminal_summaries(tmp_path):
+    source_sha = _sha(b"source")
+    candidate = _candidate()
+    store = _store(tmp_path, source_sha)
+    base = _persisted_success(store, candidate)
+    retry_tex = "x \\le y with a host-verified correction"
+    retry_response = {"page_id": candidate.page_id, "verdict": "PASS-RETRY"}
+
+    # An interrupted, uncommitted retry directory is not an evidence head.
+    store.write_retry_artifact(
+        candidate.page_id,
+        "retry-0001-interrupted",
+        "request.json",
+        {"page_id": candidate.page_id},
+    )
+    assert store.verify_coverage_artifact_hashes(
+        candidate.page_id, base.artifact_hashes
+    ) == base.artifact_hashes
+
+    head = store.persist_retry_coverage_bundle(
+        candidate.page_id,
+        "retry-0002-manual",
+        request={"page_id": candidate.page_id, "lane_owner": "VISUAL"},
+        verification={"page_id": candidate.page_id, "visual_mode": "VERIFIER"},
+        raw_response=retry_response,
+        page_tex=retry_tex,
+        parent_artifact_hashes=base.artifact_hashes,
+    )
+    retried = build_page_coverage_record(
+        candidate,
+        PageCoverageFacts(
+            source_sha256=source_sha,
+            source_page_object_hash=candidate.source_page_object_hash,
+            final_page_tex=retry_tex,
+            final_status=FinalPageStatus.SUCCESS,
+            verification=_verification(candidate),
+            syntax_checked=True,
+            persisted=True,
+            artifact_hashes=head,
+        ),
+        expected_source_sha256=source_sha,
+    )
+    terminal = store.verify_terminal_page_artifacts(
+        candidate.page_id,
+        raw_response=retry_response,
+        page_tex=retry_tex,
+    )
+
+    assert retried.checks.all_pass
+    assert terminal["retry_id"] == "retry-0002-manual"
+    assert dict(terminal["artifact_hashes"]) == dict(head)
+    assert head["source.json"] == base.artifact_hashes["source.json"]
+    assert head["candidate.json"] == base.artifact_hashes["candidate.json"]
+    assert "retry-record.json" in head
+    store.persist_summaries([retried], expected_source_pages=[7])
+    assert store.verify_summaries(expected_source_pages=[7]).records == (retried,)
+
+    retry_path = (
+        store.page_dir(candidate.page_id)
+        / "retries"
+        / "retry-0002-manual"
+        / "page.tex"
+    )
+    retry_path.write_text("tampered", encoding="utf-8")
+    with pytest.raises(PageEvidenceIntegrityError):
+        store.verify_summaries(expected_source_pages=[7])
+
+
+def test_durable_retry_intent_is_reused_by_terminal_record(tmp_path):
+    source_sha = _sha(b"source")
+    candidate = _candidate()
+    store = _store(tmp_path, source_sha)
+    base = _persisted_success(store, candidate)
+    retry_id = "retry-0003-manual-2"
+    request = {
+        "schema_version": "latexstruct-ocr-manual-retry-request-v2",
+        "page_id": candidate.page_id,
+        "retry_id": retry_id,
+        "intended_call_index": 2,
+        "lane_owner": "VISUAL",
+    }
+    intent = store.persist_retry_intent(
+        candidate.page_id,
+        retry_id,
+        intended_call_index=2,
+        request=request,
+        parent_artifact_hashes=base.artifact_hashes,
+    )
+    request_path = (
+        store.page_dir(candidate.page_id) / "retries" / retry_id / "request.json"
+    )
+    intent_bytes = request_path.read_bytes()
+
+    head = store.persist_retry_coverage_bundle(
+        candidate.page_id,
+        retry_id,
+        request=intent["intent"],
+        verification={"page_id": candidate.page_id, "visual_mode": "VERIFIER"},
+        raw_response={"page_id": candidate.page_id, "verdict": "PASS-RETRY"},
+        page_tex="x \\le y after retry",
+        parent_artifact_hashes=base.artifact_hashes,
+        expected_retry_intent_sha256=str(intent["intent_sha256"]),
+    )
+
+    assert request_path.read_bytes() == intent_bytes
+    assert head["retry-record.json"]
+    assert store.retry_commit_marker_exists(candidate.page_id, retry_id) is True
+    assert (
+        store.verify_retry_artifacts(candidate.page_id, retry_id)["request.json"]
+        == intent["intent_sha256"]
+    )
+    retry_dir = request_path.parent
+    verification_wrapper = json.loads(
+        (retry_dir / "verification.json").read_text(encoding="utf-8")
+    )
+    assert set(verification_wrapper) == {
+        "schema_version",
+        "run_id",
+        "page_id",
+        "source_sha256",
+        "candidate_artifact_sha256",
+        "raw_response_sha256",
+        "final_page_tex_sha256",
+        "verification",
+    }
+    assert (
+        verification_wrapper["schema_version"]
+        == "latexstruct-ocr-page-verification-v1"
+    )
+    assert verification_wrapper["candidate_artifact_sha256"] == (
+        base.artifact_hashes["candidate.json"]
+    )
+    assert verification_wrapper["raw_response_sha256"] == head[
+        "raw-response.json"
+    ]
+    assert verification_wrapper["final_page_tex_sha256"] == head["page.tex"]
+    assert verification_wrapper["verification"] == {
+        "page_id": candidate.page_id,
+        "visual_mode": "VERIFIER",
+    }
+    retry_record = json.loads(
+        (retry_dir / "record.json").read_text(encoding="utf-8")
+    )
+    assert retry_record["schema_version"] == "latexstruct-ocr-page-retry-record-v2"
+
+
+def test_abandoned_retry_intent_does_not_replace_base_or_block_later_retry(tmp_path):
+    source_sha = _sha(b"source")
+    candidate = _candidate()
+    store = _store(tmp_path, source_sha)
+    base = _persisted_success(store, candidate)
+    base_bytes = {
+        name: (store.page_dir(candidate.page_id) / name).read_bytes()
+        for name in base.artifact_hashes
+    }
+
+    first_retry = "retry-0004-manual-2"
+    store.persist_retry_intent(
+        candidate.page_id,
+        first_retry,
+        intended_call_index=2,
+        request={
+            "page_id": candidate.page_id,
+            "retry_id": first_retry,
+            "intended_call_index": 2,
+        },
+        parent_artifact_hashes=base.artifact_hashes,
+    )
+    assert store.retry_commit_marker_exists(candidate.page_id, first_retry) is False
+
+    second_retry = "retry-0005-manual-3"
+    intent = store.persist_retry_intent(
+        candidate.page_id,
+        second_retry,
+        intended_call_index=3,
+        request={
+            "page_id": candidate.page_id,
+            "retry_id": second_retry,
+            "intended_call_index": 3,
+        },
+        parent_artifact_hashes=base.artifact_hashes,
+    )
+    store.persist_retry_coverage_bundle(
+        candidate.page_id,
+        second_retry,
+        request=intent["intent"],
+        verification={"page_id": candidate.page_id, "visual_mode": "VERIFIER"},
+        raw_response={"page_id": candidate.page_id, "verdict": "PASS"},
+        page_tex="successful second retry",
+        parent_artifact_hashes=base.artifact_hashes,
+        expected_retry_intent_sha256=str(intent["intent_sha256"]),
+    )
+
+    assert {
+        name: (store.page_dir(candidate.page_id) / name).read_bytes()
+        for name in base.artifact_hashes
+    } == base_bytes
+    assert store.latest_committed_coverage_head(candidate.page_id)["retry_id"] == second_retry
+
+
+def test_retry_after_abandoned_intent_keeps_latest_committed_retry_parent(tmp_path):
+    source_sha = _sha(b"source")
+    candidate = _candidate()
+    store = _store(tmp_path, source_sha)
+    base = _persisted_success(store, candidate)
+
+    head1_id = "retry-0001-manual-2"
+    head1_intent = store.persist_retry_intent(
+        candidate.page_id,
+        head1_id,
+        intended_call_index=2,
+        request={
+            "page_id": candidate.page_id,
+            "retry_id": head1_id,
+            "intended_call_index": 2,
+        },
+        parent_artifact_hashes=base.artifact_hashes,
+    )
+    head1 = store.persist_retry_coverage_bundle(
+        candidate.page_id,
+        head1_id,
+        request=head1_intent["intent"],
+        verification={"page_id": candidate.page_id, "visual_mode": "VERIFIER"},
+        raw_response={"page_id": candidate.page_id, "verdict": "PASS-HEAD-1"},
+        page_tex="committed retry head one",
+        parent_artifact_hashes=base.artifact_hashes,
+        expected_retry_intent_sha256=str(head1_intent["intent_sha256"]),
+    )
+
+    abandoned_id = "retry-0002-manual-3"
+    store.persist_retry_intent(
+        candidate.page_id,
+        abandoned_id,
+        intended_call_index=3,
+        request={
+            "page_id": candidate.page_id,
+            "retry_id": abandoned_id,
+            "intended_call_index": 3,
+        },
+        parent_artifact_hashes=head1,
+    )
+    assert store.retry_commit_marker_exists(candidate.page_id, abandoned_id) is False
+
+    head3_id = "retry-0003-manual-4"
+    head3_intent = store.persist_retry_intent(
+        candidate.page_id,
+        head3_id,
+        intended_call_index=4,
+        request={
+            "page_id": candidate.page_id,
+            "retry_id": head3_id,
+            "intended_call_index": 4,
+        },
+        parent_artifact_hashes=head1,
+    )
+    head3 = store.persist_retry_coverage_bundle(
+        candidate.page_id,
+        head3_id,
+        request=head3_intent["intent"],
+        verification={"page_id": candidate.page_id, "visual_mode": "VERIFIER"},
+        raw_response={"page_id": candidate.page_id, "verdict": "PASS-HEAD-3"},
+        page_tex="successful retry head three",
+        parent_artifact_hashes=head1,
+        expected_retry_intent_sha256=str(head3_intent["intent_sha256"]),
+    )
+
+    retry3_record = json.loads(
+        (
+            store.page_dir(candidate.page_id)
+            / "retries"
+            / head3_id
+            / "record.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert retry3_record["parent_artifact_hashes"] == dict(head1)
+    assert retry3_record["parent_artifact_hashes"] != dict(base.artifact_hashes)
+    assert store.latest_committed_coverage_head(candidate.page_id) == {
+        "retry_id": head3_id,
+        "artifact_hashes": head3,
+    }
+
+
+def test_corrupt_existing_base_commit_marker_is_never_overwritten(tmp_path):
+    candidate = _candidate()
+    store = _store(tmp_path, _sha(b"source"))
+    _persisted_success(store, candidate)
+    marker = store.page_dir(candidate.page_id) / "verification.json"
+    marker.write_bytes(b"{corrupt-base-marker")
+    corrupt = marker.read_bytes()
+
+    assert store.base_commit_marker_exists(candidate.page_id) is True
+    with pytest.raises(PageEvidenceIntegrityError):
+        store.verify_page_artifacts(candidate.page_id)
+    with pytest.raises(PageEvidenceConflictError):
+        store.persist_page_bundle(
+            candidate,
+            verification=_verification(candidate),
+            raw_response={"page_id": candidate.page_id, "verdict": "PASS"},
+            page_tex=candidate.candidate_tex,
+        )
+    assert marker.read_bytes() == corrupt
+
+
+def test_corrupt_existing_retry_commit_marker_is_never_overwritten(tmp_path):
+    page_id = "ocr-page-000001"
+    store = _store(tmp_path, _sha(b"source"))
+    retry_id = "retry-0006"
+    kwargs = {
+        "request": {"page_id": page_id, "dpi": 300},
+        "verification": {"page_id": page_id, "status": "NEEDS_REVIEW"},
+        "raw_response": {"page_id": page_id, "latex": "x"},
+        "page_tex": "x",
+        "parent_artifact_hashes": {"candidate.json": _sha(b"parent")},
+    }
+    store.persist_retry_bundle(page_id, retry_id, **kwargs)
+    marker = store.page_dir(page_id) / "retries" / retry_id / "record.json"
+    marker.write_bytes(b"{corrupt-retry-marker")
+    corrupt = marker.read_bytes()
+
+    assert store.retry_commit_marker_exists(page_id, retry_id) is True
+    with pytest.raises(PageEvidenceIntegrityError):
+        store.verify_retry_artifacts(page_id, retry_id)
+    with pytest.raises(PageEvidenceConflictError):
+        store.persist_retry_bundle(page_id, retry_id, **kwargs)
+    assert marker.read_bytes() == corrupt
+
+
 def test_summary_rejects_duplicate_missing_and_reordered_pages(tmp_path):
     source_sha = _sha(b"source")
     store = _store(tmp_path, source_sha)
@@ -414,3 +742,77 @@ def test_summaries_are_canonical_hash_bound_and_append_only(tmp_path):
             [records[0], replace(records[1], final_status=FinalPageStatus.NEEDS_REVIEW)],
             expected_source_pages=[7, 9],
         )
+
+
+@pytest.mark.parametrize(
+    "tampered_artifact",
+    ["intent.json", "result.json", "consumed.json"],
+)
+def test_visual_call_chain_is_exact_append_only_and_tamper_evident(
+    tmp_path,
+    tampered_artifact: str,
+):
+    candidate = _candidate()
+    store = _store(tmp_path, _sha(b"visual-call-source"))
+    call_id = "visual-0001-" + "b" * 32
+    batch_id = "ocr-verify-batch-" + "c" * 24
+    intent = store.persist_visual_call_intent(
+        candidate.page_id,
+        call_id,
+        source_page=candidate.source_page_number,
+        task_index=candidate.selected_index,
+        call_kind="INITIAL",
+        runtime_call_index=1,
+        visual_call_sequence=1,
+        provider_batch_id=batch_id,
+        image_sha256=_sha(b"visual-page-image"),
+        candidate_tex_sha256=_sha(candidate.candidate_tex.encode()),
+    )
+    raw_response = {
+        "batch_id": batch_id,
+        "pages": [_verification(candidate).to_dict()],
+    }
+    response_sha256 = _sha(json.dumps(
+        raw_response,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode())
+    if tampered_artifact != "intent.json":
+        store.persist_visual_call_result(
+            candidate.page_id,
+            call_id,
+            expected_intent_sha256=str(intent["intent_sha256"]),
+            response_sha256=response_sha256,
+            raw_response=raw_response,
+            verification=_verification(candidate).to_dict(),
+        )
+    if tampered_artifact == "consumed.json":
+        store.persist_visual_call_consumed(
+            candidate.page_id,
+            call_id,
+            disposition="COMMITTED",
+            runtime_record_sha256=_sha(b"runtime-record"),
+            record_status="SUCCESS",
+            lane_owner="TERMINAL_VISUAL",
+            lane_route_sha256=_sha(b"lane-route"),
+        )
+        assert store.pending_visual_calls(candidate.page_id) == ()
+    else:
+        assert len(store.pending_visual_calls(candidate.page_id)) == 1
+
+    artifact = (
+        store.page_dir(candidate.page_id)
+        / "visual-calls"
+        / call_id
+        / tampered_artifact
+    )
+    value = json.loads(artifact.read_text(encoding="utf-8"))
+    value["page_id"] = "ocr-page-999999"
+    artifact.write_text(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(PageEvidenceIntegrityError):
+        store.pending_visual_calls(candidate.page_id)

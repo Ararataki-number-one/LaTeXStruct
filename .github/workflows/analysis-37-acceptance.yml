@@ -66,6 +66,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($sensitiveRoot in @(
+            $env:RUNNER_TEMP,
+            $env:GITHUB_WORKSPACE,
+            $env:RUNNER_TOOL_CACHE
+          )) {
+            if (-not [string]::IsNullOrWhiteSpace($sensitiveRoot)) {
+              Write-Output "::add-mask::$sensitiveRoot"
+            }
+          }
           $pythonCandidates = @(
             Get-Command python -CommandType Application -ErrorAction SilentlyContinue
           )
@@ -79,7 +88,7 @@ jobs:
           if (-not $pythonPath.StartsWith(
             $toolCache, [StringComparison]::OrdinalIgnoreCase
           )) {
-            Write-Error "Python 不在本次 runner 工具缓存中: $pythonPath"
+            Write-Error 'Python 不在本次 runner 工具缓存中'
             exit 1
           }
           & $pythonPath -c `
@@ -89,7 +98,7 @@ jobs:
             exit 1
           }
           $pythonHash = (Get-FileHash -LiteralPath $pythonPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          Write-Host "验收 Python: $pythonPath"
+          Write-Host '验收 Python: status=VERIFIED logical_name=python-toolcache'
           Write-Host "验收 Python SHA-256: $pythonHash"
       - name: 验证受信 run 与候选构建身份
         id: identity
@@ -167,7 +176,7 @@ jobs:
             "latexstruct-public-closure-$env:GITHUB_RUN_ID"
           foreach ($path in @($privateRoot, $payloadRoot, $closureRoot)) {
             if (Test-Path -LiteralPath $path) {
-              Write-Error "受信 run 的隔离目录已存在，拒绝复用: $path"; exit 1
+              Write-Error '受信 run 的隔离目录已存在，拒绝复用'; exit 1
             }
             New-Item -ItemType Directory -Path $path | Out-Null
           }
@@ -181,6 +190,7 @@ jobs:
           if (-not $profileHome -or -not (Test-Path -LiteralPath $profileHome -PathType Container)) {
             Write-Error '一次性验收 runner 没有可用的 Windows 用户目录'; exit 1
           }
+          Write-Output "::add-mask::$profileHome"
           $codexHome = Join-Path $profileHome '.codex'
           "APP_VERSION=$version" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "CANDIDATE_RUN_ID=$candidateRunId" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
@@ -217,6 +227,9 @@ jobs:
         shell: pwsh
         run: |
           $source = ([string]$env:RAMSEY_37_SOURCE_PATH).Trim()
+          if (-not [string]::IsNullOrWhiteSpace($source)) {
+            Write-Output "::add-mask::$source"
+          }
           if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
             Write-Error '受保护环境变量 RAMSEY_37_SOURCE_PATH 未指向本机 37 页源 PDF'
             exit 1
@@ -385,7 +398,7 @@ jobs:
             if ([string]::IsNullOrWhiteSpace($raw)) { continue }
             $target = [IO.Path]::GetFullPath($raw)
             if ((Split-Path -Parent $target).TrimEnd('\') -ne $runnerTemp) {
-              Write-Error "拒绝清理 RUNNER_TEMP 之外的路径: $target"; exit 1
+              Write-Error '拒绝清理 RUNNER_TEMP 之外的路径'; exit 1
             }
             if (Test-Path -LiteralPath $target) {
               Remove-Item -LiteralPath $target -Recurse -Force
@@ -403,6 +416,6 @@ jobs:
               -not [string]::IsNullOrWhiteSpace($privatePath) -and
               (Test-Path -LiteralPath $privatePath)
             ) {
-              Write-Error "本次验收私有目录清理后仍存在: $privatePath"; exit 1
+              Write-Error '本次验收私有目录清理后仍存在'; exit 1
             }
           }

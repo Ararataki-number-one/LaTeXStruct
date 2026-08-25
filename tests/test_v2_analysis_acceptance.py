@@ -65,6 +65,85 @@ def _config(tmp_path: Path) -> MODULE.AnalysisAcceptanceConfig:
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_private_native_ocr_inventory_authority(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Keep unit bundles local while exercising the full inventory closure.
+
+    Release-integrity integration tests build and verify a real nested OCR
+    package.  These runner-unit tests substitute only that already verified
+    native authority so their many unrelated mutation cases remain focused.
+    """
+
+    def authority(
+        *,
+        config: MODULE.AnalysisAcceptanceConfig,
+        expected_manifest_sha256: str,
+        expected_evidence_hashes: dict,
+        expected_source_sha256: str,
+    ) -> dict:
+        source = config.source.read_bytes()
+        assert MODULE._sha256_bytes(source) == expected_source_sha256
+        with pymupdf.open(stream=source, filetype="pdf") as document:
+            texts = [
+                str(document.load_page(page - 1).get_text("text") or "")
+                for page in range(1, config.expected_pages + 1)
+            ]
+        parts = [
+            "\\documentclass{article}",
+            "\\begin{document}",
+            "\\tableofcontents",
+        ]
+        for page, source_text in enumerate(texts, 1):
+            suffix = ""
+            if 17 <= page <= 31:
+                suffix = "\\(x\\)"
+            elif page >= 32:
+                suffix = " ".join("\\(x\\)" for _ in range(8))
+            parts.extend((f"% Page {page}", source_text.rstrip(), suffix))
+        parts.append("\\end{document}")
+        baseline = ("\n".join(parts).rstrip() + "\n").encode("utf-8")
+        return {
+            "manifest_sha256": expected_manifest_sha256,
+            "run_id": "native-ocr-fixture",
+            "baseline_tex": baseline,
+            "baseline_tex_sha256": MODULE._sha256_bytes(baseline),
+            "source_page_map": {
+                page: (page,)
+                for page in range(1, config.expected_pages + 1)
+            },
+            "native_source_blocks": [],
+            "page_map_sha256": expected_evidence_hashes["ocr_page_map_hash"],
+            "lane_routes_sha256": MODULE._sha256_bytes(b"fixture lane routes"),
+            "lane_route_page_bindings_sha256": MODULE._sha256_bytes(
+                b"fixture page bindings closure"
+            ),
+            "lane_route_event_chain_sha256": MODULE._sha256_bytes(
+                b"fixture lane event chain"
+            ),
+            "lane_route_event_count": config.expected_pages,
+            "page_evidence_bindings_sha256": MODULE._sha256_bytes(
+                b"fixture page evidence bindings"
+            ),
+            "page_evidence_binding_page_count": config.expected_pages,
+            "evidence_correction_report_sha256": MODULE._sha256_bytes(
+                b"fixture evidence correction"
+            ),
+            "evidence_correction_status": "NOT_APPLICABLE",
+            "block_inventory_sha256": MODULE._sha256_bytes(
+                b"fixture block inventory"
+            ),
+            "block_inventory_page_count": config.expected_pages,
+            "native_source_block_count": 0,
+            "selected_baseline_role": "SYNTAX_BASELINE_TEX",
+        }
+
+    monkeypatch.setattr(
+        MODULE, "_verified_native_ocr_inventory_authority", authority
+    )
+
+
 def _artifact(role: str, path: str, body: bytes, **extra):
     return {
         "artifact_role": role,
@@ -78,6 +157,11 @@ def _artifact(role: str, path: str, body: bytes, **extra):
 
 def _verified_bundle(config: MODULE.AnalysisAcceptanceConfig):
     from latexstruct.core.compilecheck import build_compile_input_manifest
+    from latexstruct.core.analysis_inventory import (
+        build_analysis_inventory_bundle,
+        build_host_inventory_authorizations,
+        evaluate_analysis_inventory_gate,
+    )
     from latexstruct.core.analysis_production import analysis_response_schema_hash
     from latexstruct.core.analysis_risk import (
         PAGE_RISK_CLASSIFIER_POLICY,
@@ -203,10 +287,7 @@ def _verified_bundle(config: MODULE.AnalysisAcceptanceConfig):
         baseline_tex.decode("utf-8"),
         range(1, config.expected_pages + 1),
     )
-    current_tex = (
-        b"\\documentclass{article}\n\\begin{document}\n"
-        b"\\tableofcontents\nx\n\\end{document}\n"
-    )
+    current_tex = baseline_tex
     current_pdf = _pdf_bytes(["Contents"] + _source_page_texts(config.expected_pages))
     compile_log = b"pass 1 ok\npass 2 ok\n"
     tex_sha = MODULE._sha256_bytes(current_tex)
@@ -402,6 +483,42 @@ def _verified_bundle(config: MODULE.AnalysisAcceptanceConfig):
         }
         for model in model_bindings
     ]
+    native_source_blocks: list[dict[str, object]] = []
+    inventory_manifest_sha256 = evidence_hashes[
+        "ocr_baseline_manifest_hash"
+    ]
+    inventory_authorizations = build_host_inventory_authorizations(
+        native_source_blocks,
+        ocr_manifest_sha256=inventory_manifest_sha256,
+        generated_toc_required=True,
+    )
+    inventory_authorization_payload = [
+        item.as_dict() for item in inventory_authorizations
+    ]
+    inventory_page_map = {
+        page: (page,) for page in range(1, config.expected_pages + 1)
+    }
+    baseline_inventory = build_analysis_inventory_bundle(
+        baseline_tex.decode("utf-8"),
+        baseline_tex.decode("utf-8"),
+        inventory_page_map,
+        native_source_blocks=native_source_blocks,
+        authorizations=inventory_authorizations,
+        require_native_heading_inventory=True,
+    )
+    final_inventory = build_analysis_inventory_bundle(
+        baseline_tex.decode("utf-8"),
+        current_tex.decode("utf-8"),
+        inventory_page_map,
+        native_source_blocks=native_source_blocks,
+        authorizations=inventory_authorizations,
+        require_native_heading_inventory=True,
+    )
+    inventory_gate = evaluate_analysis_inventory_gate(final_inventory)
+    assert inventory_gate.passed is True
+    baseline_inventory_bytes = canonical_json_bytes(baseline_inventory.as_dict())
+    final_inventory_bytes = canonical_json_bytes(final_inventory.as_dict())
+    inventory_gate_bytes = canonical_json_bytes(inventory_gate.as_dict())
     analysis_configuration = {
         "workflow_version": "analysis-loop-v2",
         "prompt_version": "analysis-prompts-v2",
@@ -427,6 +544,17 @@ def _verified_bundle(config: MODULE.AnalysisAcceptanceConfig):
         "page_risk_admission": admission.canonical_payload(),
         "page_risk_admission_hash": admission.digest,
         "page_risk_source_admission_hash": admission.digest,
+        "baseline_inventory_digest": baseline_inventory.digest,
+        "baseline_inventory_json_sha256": MODULE._sha256_bytes(
+            baseline_inventory_bytes
+        ),
+        "native_source_blocks": native_source_blocks,
+        "native_source_blocks_supplied": True,
+        "inventory_authorizations": inventory_authorization_payload,
+        "inventory_authorization_source": "HOST_REQUIRED_POLICY",
+        "inventory_policy_schema": "latexstruct-host-inventory-policy-v1",
+        "inventory_policy_ocr_manifest_sha256": inventory_manifest_sha256,
+        "native_heading_inventory_required": True,
         "compile_extra_files": [],
         "max_macro_rounds": 3,
         **budget_limits,
@@ -779,6 +907,26 @@ def _verified_bundle(config: MODULE.AnalysisAcceptanceConfig):
         },
     }
     verification_bytes = (json.dumps(verification) + "\n").encode()
+    analysis_configuration_bytes = canonical_json_bytes(analysis_configuration)
+    final_decision_bytes = canonical_json_bytes({
+        "status": "VERIFIED",
+        "verified": True,
+        "failures": [],
+        "best_candidate_id": "candidate-final-fixture",
+        "baseline_inventory_digest": baseline_inventory.digest,
+        "baseline_inventory_json_sha256": MODULE._sha256_bytes(
+            baseline_inventory_bytes
+        ),
+        "final_inventory_digest": final_inventory.digest,
+        "final_inventory_json_sha256": MODULE._sha256_bytes(
+            final_inventory_bytes
+        ),
+        "inventory_gate_digest": inventory_gate.digest,
+        "inventory_gate_json_sha256": MODULE._sha256_bytes(
+            inventory_gate_bytes
+        ),
+        "inventory_gate_status": inventory_gate.status.value,
+    })
     members = {
         "inputs/source.pdf": source,
         "stages/30_current.tex": current_tex,
@@ -789,6 +937,11 @@ def _verified_bundle(config: MODULE.AnalysisAcceptanceConfig):
         "evidence/runtime-page-records.json": runtime_page_records_bytes,
         "baseline/baseline.tex": baseline_tex,
         "baseline/baseline.pdf": baseline_pdf,
+        "audit/analysis_configuration.json": analysis_configuration_bytes,
+        "audit/analysis_inventory_baseline.json": baseline_inventory_bytes,
+        "audit/analysis_inventory_final.json": final_inventory_bytes,
+        "audit/analysis_inventory_gate.json": inventory_gate_bytes,
+        "audit/final_decision.json": final_decision_bytes,
     }
     manifest = {
         "workflow": "OCR_ANALYSIS_REVIEW",
@@ -845,6 +998,31 @@ def _verified_bundle(config: MODULE.AnalysisAcceptanceConfig):
             ),
             _artifact("BASELINE_TEX", "baseline/baseline.tex", baseline_tex),
             _artifact("BASELINE_PDF", "baseline/baseline.pdf", baseline_pdf),
+            _artifact(
+                "ANALYSIS_CONFIGURATION",
+                "audit/analysis_configuration.json",
+                analysis_configuration_bytes,
+            ),
+            _artifact(
+                "ANALYSIS_INVENTORY_BASELINE",
+                "audit/analysis_inventory_baseline.json",
+                baseline_inventory_bytes,
+            ),
+            _artifact(
+                "ANALYSIS_INVENTORY_FINAL",
+                "audit/analysis_inventory_final.json",
+                final_inventory_bytes,
+            ),
+            _artifact(
+                "ANALYSIS_INVENTORY_GATE",
+                "audit/analysis_inventory_gate.json",
+                inventory_gate_bytes,
+            ),
+            _artifact(
+                "FINAL_DECISION",
+                "audit/final_decision.json",
+                final_decision_bytes,
+            ),
         ],
     }
     return members, manifest
@@ -859,6 +1037,24 @@ def _mutate_verification(members, manifest, mutator) -> None:
     record = next(
         item for item in manifest["artifacts"] if item["artifact_role"] == "VERIFICATION"
     )
+    digest = MODULE._sha256_bytes(body)
+    record["bytes_sha256"] = digest
+    record["source_bytes_sha256"] = digest
+    record["byte_count"] = len(body)
+
+
+def _replace_audit_role(
+    members: dict[str, bytes],
+    manifest: dict,
+    role: str,
+    body: bytes,
+) -> None:
+    record = next(
+        item
+        for item in manifest["artifacts"]
+        if item["artifact_role"] == role
+    )
+    members[record["path"]] = body
     digest = MODULE._sha256_bytes(body)
     record["bytes_sha256"] = digest
     record["source_bytes_sha256"] = digest
@@ -1045,6 +1241,82 @@ def test_direct_cli_help_can_import_workspace_package():
     assert "analysis-37" in result.stdout
     assert "--exe-sha256" in result.stdout
     assert "--service-pid" in result.stdout
+
+
+class _MainParserStub:
+    def parse_args(self, _argv):
+        return object()
+
+
+def test_main_hashes_sanitized_start_failure_without_raw_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    secret_path = r"C:\Users\private-user\private-source.pdf"
+    secret_token = "sk-private-secret-token-123456789"
+    monkeypatch.setattr(MODULE, "build_parser", lambda: _MainParserStub())
+    monkeypatch.setattr(MODULE, "_config_from_args", lambda _args: config)
+
+    def fail(_config):
+        raise RuntimeError(
+            f"cannot read {secret_path}; Authorization: Bearer {secret_token}"
+        )
+
+    monkeypatch.setattr(MODULE, "run_analysis_acceptance", fail)
+    assert MODULE.main([]) == 2
+    captured = capsys.readouterr()
+    assert "status=START_FAILED" in captured.err
+    assert "diagnostic_sha256=" in captured.err
+    assert secret_path not in captured.err
+    assert secret_token not in captured.err
+    assert "Authorization" not in captured.err
+
+
+def test_main_logs_only_logical_artifacts_and_sanitized_error_digests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    config.output_dir.mkdir(parents=True)
+    for name in (
+        "analysis-validation-report.json",
+        "analysis-performance.json",
+        "analysis-attestation.json",
+    ):
+        (config.output_dir / name).write_text(name, encoding="utf-8")
+    secret_path = r"C:\Users\private-user\private-diagnostic.json"
+    secret_token = "sk-private-secret-token-987654321"
+    monkeypatch.setattr(MODULE, "build_parser", lambda: _MainParserStub())
+    monkeypatch.setattr(MODULE, "_config_from_args", lambda _args: config)
+    monkeypatch.setattr(
+        MODULE,
+        "run_analysis_acceptance",
+        lambda _config: {
+            "result": secret_path,
+            "acceptance_passed": False,
+            "errors": [f"{secret_path} Bearer {secret_token}"],
+        },
+    )
+
+    assert MODULE.main([]) == 2
+    captured = capsys.readouterr()
+    assert str(config.output_dir) not in captured.out
+    assert secret_path not in captured.out
+    assert "v2 analysis acceptance (analysis-37): FAIL" in captured.out
+    assert "status=PRESENT sha256=" in captured.out
+    for name in (
+        "analysis-validation-report.json",
+        "analysis-performance.json",
+        "analysis-attestation.json",
+    ):
+        assert f"name={name}" in captured.out
+    assert "status=VALIDATION_ERROR" in captured.err
+    assert "diagnostic_sha256=" in captured.err
+    assert secret_path not in captured.err
+    assert secret_token not in captured.err
 
 
 def test_analysis_37_config_rejects_non_high_and_wrong_template(
@@ -1244,7 +1516,9 @@ def test_verified_bundle_publishes_analysis_37_evidence_bindings(
     )
     ocr_dir = config.output_dir / "ocr-prerequisite"
     ocr_dir.mkdir()
-    baseline_sha256 = "7" * 64
+    baseline_sha256 = facts.analysis_inventory[
+        "ocr_baseline_manifest_sha256"
+    ]
     baseline_run_id = "8" * 32
     (ocr_dir / "acceptance-attestation.json").write_text(
         json.dumps({
@@ -1329,6 +1603,136 @@ def test_verified_bundle_publishes_analysis_37_evidence_bindings(
         assert path.read_bytes() == payload
         assert record["bytes"] == len(payload)
         assert record["sha256"] == MODULE._sha256_bytes(payload)
+
+
+def test_verified_bundle_rejects_missing_inventory_role(tmp_path: Path):
+    config = _config(tmp_path)
+    members, manifest = _verified_bundle(config)
+    record = next(
+        item
+        for item in manifest["artifacts"]
+        if item["artifact_role"] == "ANALYSIS_INVENTORY_GATE"
+    )
+    members.pop(record["path"])
+    manifest["artifacts"].remove(record)
+
+    with pytest.raises(
+        MODULE.AcceptanceError,
+        match="exactly one ANALYSIS_INVENTORY_GATE",
+    ):
+        MODULE._verified_bundle_facts(
+            config=config,
+            members=members,
+            manifest=manifest,
+            source_pages=37,
+            source_sha256=MODULE._sha256_file(config.source),
+            backend="api",
+            expected_project_id=PROJECT_ID,
+            expected_run_id=RUN_ID,
+        )
+
+
+def test_verified_bundle_rejects_inventory_status_forgery(tmp_path: Path):
+    config = _config(tmp_path)
+    members, manifest = _verified_bundle(config)
+    decision = json.loads(members["audit/final_decision.json"])
+    decision["inventory_gate_status"] = "FAILED"
+    _replace_audit_role(
+        members,
+        manifest,
+        "FINAL_DECISION",
+        MODULE._json_bytes(decision),
+    )
+
+    with pytest.raises(
+        MODULE.AcceptanceError,
+        match="final decision inventory digests/status are stale",
+    ):
+        MODULE._verified_bundle_facts(
+            config=config,
+            members=members,
+            manifest=manifest,
+            source_pages=37,
+            source_sha256=MODULE._sha256_file(config.source),
+            backend="api",
+            expected_project_id=PROJECT_ID,
+            expected_run_id=RUN_ID,
+        )
+
+
+def test_verified_bundle_rejects_hash_recomputed_inventory_tampering(
+    tmp_path: Path,
+):
+    config = _config(tmp_path)
+    members, manifest = _verified_bundle(config)
+    inventory = json.loads(members["audit/analysis_inventory_final.json"])
+    inventory["current_tex_sha256"] = "f" * 64
+    inventory["digest"] = MODULE._sha256_bytes(MODULE.canonical_json_bytes({
+        key: value for key, value in inventory.items() if key != "digest"
+    }))
+    inventory_bytes = MODULE.canonical_json_bytes(inventory)
+    _replace_audit_role(
+        members,
+        manifest,
+        "ANALYSIS_INVENTORY_FINAL",
+        inventory_bytes,
+    )
+    decision = json.loads(members["audit/final_decision.json"])
+    decision["final_inventory_digest"] = inventory["digest"]
+    decision["final_inventory_json_sha256"] = MODULE._sha256_bytes(
+        inventory_bytes
+    )
+    _replace_audit_role(
+        members,
+        manifest,
+        "FINAL_DECISION",
+        MODULE._json_bytes(decision),
+    )
+
+    with pytest.raises(
+        MODULE.AcceptanceError,
+        match="differs from independent recomputation",
+    ):
+        MODULE._verified_bundle_facts(
+            config=config,
+            members=members,
+            manifest=manifest,
+            source_pages=37,
+            source_sha256=MODULE._sha256_file(config.source),
+            backend="api",
+            expected_project_id=PROJECT_ID,
+            expected_run_id=RUN_ID,
+        )
+
+
+def test_verified_bundle_rejects_rebound_inventory_configuration_tampering(
+    tmp_path: Path,
+):
+    config = _config(tmp_path)
+    members, manifest = _verified_bundle(config)
+    configuration = json.loads(members["audit/analysis_configuration.json"])
+    configuration["inventory_authorizations"] = []
+    _replace_audit_role(
+        members,
+        manifest,
+        "ANALYSIS_CONFIGURATION",
+        MODULE._json_bytes(configuration),
+    )
+
+    with pytest.raises(
+        MODULE.AcceptanceError,
+        match="configuration differs from snapshot-bound evidence",
+    ):
+        MODULE._verified_bundle_facts(
+            config=config,
+            members=members,
+            manifest=manifest,
+            source_pages=37,
+            source_sha256=MODULE._sha256_file(config.source),
+            backend="api",
+            expected_project_id=PROJECT_ID,
+            expected_run_id=RUN_ID,
+        )
 
 
 def test_verified_bundle_rejects_current_tex_that_is_not_the_packaged_candidate(
