@@ -3253,7 +3253,12 @@ def test_trusted_analysis_37_workflow_keeps_private_bytes_local_and_closes_artif
         "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
     ) == 2
     assert "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" in workflow
-    assert "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065" in workflow
+    assert "actions/setup-python@" not in workflow
+    assert "RUNNER_TOOL_CACHE" in workflow
+    assert "$python = $pythonCandidates[0]" in workflow
+    assert "sys.version_info[:2] == (3, 13)" in workflow
+    assert "platform.machine() == 'AMD64'" in workflow
+    assert "验收 Python SHA-256" in workflow
     assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in workflow
     upload_section = workflow[workflow.index("上传只含哈希投影的受信 payload") :]
     assert "analysis-audit-submission.zip" not in upload_section

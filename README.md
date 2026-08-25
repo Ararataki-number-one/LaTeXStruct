@@ -116,6 +116,8 @@ gh workflow run build.yml --ref <candidate-branch> -f version=$version
 #    标签必须包含 latexstruct-acceptance-private；RAMSEY_37_SOURCE_PATH 只指向
 #    验收机本地、SHA-256 固定的 37 页 PDF。源 PDF、候选 PDF、逐页图和完整
 #    审计 ZIP 均不会上传。API/Codex 凭据也只保留在受保护环境或验收机中。
+#    runner 工具缓存必须预置 Python 3.13 x64 并将其置于 PATH；验收 workflow
+#    只校验其缓存路径、版本、架构与 SHA-256，不临时安装 Python 或修改注册表。
 #    runner 首次配置可预装以下驱动；浏览器二进制只进入本机 Playwright 缓存，
 #    不进入仓库、候选安装包或便携包：
 python -m pip install -e ".[server,acceptance]"
