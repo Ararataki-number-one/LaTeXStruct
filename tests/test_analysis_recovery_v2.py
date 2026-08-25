@@ -308,7 +308,10 @@ def test_freeze_inputs_is_atomic_write_once_and_path_safe(
     actual_root.mkdir()
     linked_root = tmp_path / "linked-root"
     _symlink_or_skip(linked_root, actual_root, target_is_directory=True)
-    with pytest.raises(RecoveryValidationError, match="symlink"):
+    with pytest.raises(
+        RecoveryValidationError,
+        match=r"(?:symlink|link or reparse point)",
+    ):
         AnalysisRunStore(linked_root)
 
     crash_store = AnalysisRunStore(tmp_path / "crash")
@@ -771,7 +774,10 @@ def test_frozen_inputs_reject_any_symlink_or_extra_file(tmp_path: Path) -> None:
     saved = store.root / "saved-source.pdf"
     source.rename(saved)
     _symlink_or_skip(source, saved)
-    with pytest.raises(RecoveryValidationError, match="symlink"):
+    with pytest.raises(
+        RecoveryValidationError,
+        match=r"(?:symlink|link or reparse point)",
+    ):
         store.verify_frozen_inputs()
 
 
@@ -1078,7 +1084,10 @@ def test_custom_candidate_storage_rejects_file_symlink_nested_and_outside(
     real_directory.mkdir()
     linked_directory = active_root / "linked-candidates"
     _symlink_or_skip(linked_directory, real_directory, target_is_directory=True)
-    with pytest.raises(RecoveryValidationError, match="symlink"):
+    with pytest.raises(
+        RecoveryValidationError,
+        match=r"(?:symlink|link or reparse point)",
+    ):
         AnalysisRunStore(active_root, candidates_directory=linked_directory)
 
     with pytest.raises(RecoveryValidationError, match="one direct child"):
