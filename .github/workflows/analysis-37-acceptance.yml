@@ -75,16 +75,32 @@ jobs:
               Write-Output "::add-mask::$sensitiveRoot"
             }
           }
+          $toolCacheRoot = [IO.Path]::GetFullPath(
+            $env:RUNNER_TOOL_CACHE
+          ).TrimEnd('\')
+          $pythonRoot = Join-Path $toolCacheRoot 'Python'
+          if (-not (Test-Path -LiteralPath $pythonRoot -PathType Container)) {
+            Write-Error '一次性验收 runner 缺少 Python 工具缓存目录'
+            exit 1
+          }
           $pythonCandidates = @(
-            Get-Command python -CommandType Application -ErrorAction SilentlyContinue
+            Get-ChildItem -LiteralPath $pythonRoot -Directory -ErrorAction Stop |
+              Where-Object { $_.Name -match '^3\.13\.\d+$' } |
+              ForEach-Object {
+                $candidate = Join-Path $_.FullName 'x64\python.exe'
+                if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                  Get-Item -LiteralPath $candidate
+                }
+              } |
+              Sort-Object { [version]$_.Directory.Parent.Name } -Descending
           )
           if ($pythonCandidates.Count -lt 1) {
             Write-Error '一次性验收 runner 必须在工具缓存中预置 Python 3.13 x64'
             exit 1
           }
           $python = $pythonCandidates[0]
-          $pythonPath = [IO.Path]::GetFullPath($python.Source)
-          $toolCache = [IO.Path]::GetFullPath($env:RUNNER_TOOL_CACHE).TrimEnd('\') + '\'
+          $pythonPath = [IO.Path]::GetFullPath($python.FullName)
+          $toolCache = $toolCacheRoot + '\'
           if (-not $pythonPath.StartsWith(
             $toolCache, [StringComparison]::OrdinalIgnoreCase
           )) {
@@ -97,6 +113,8 @@ jobs:
             Write-Error '一次性验收 runner 的 Python 必须精确为 3.13 x64'
             exit 1
           }
+          $pythonDir = Split-Path -Parent $pythonPath
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $pythonDir
           $pythonHash = (Get-FileHash -LiteralPath $pythonPath -Algorithm SHA256).Hash.ToLowerInvariant()
           Write-Host '验收 Python: status=VERIFIED logical_name=python-toolcache'
           Write-Host "验收 Python SHA-256: $pythonHash"

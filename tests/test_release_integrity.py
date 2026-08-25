@@ -4078,6 +4078,10 @@ def test_trusted_analysis_37_workflow_keeps_private_bytes_local_and_closes_artif
     assert 'Write-Output "::add-mask::$profileHome"' in workflow
     assert 'Write-Output "::add-mask::$source"' in workflow
     assert "$python = $pythonCandidates[0]" in workflow
+    assert "Get-ChildItem -LiteralPath $pythonRoot -Directory" in workflow
+    assert "Get-Command python" not in workflow
+    assert "$pythonPath = [IO.Path]::GetFullPath($python.FullName)" in workflow
+    assert "Add-Content -LiteralPath $env:GITHUB_PATH -Value $pythonDir" in workflow
     assert "sys.version_info[:2] == (3, 13)" in workflow
     assert "platform.machine() == 'AMD64'" in workflow
     assert "验收 Python SHA-256" in workflow
